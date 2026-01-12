@@ -1,0 +1,6 @@
+{
+  "name": "compound-learning",
+  "version": "0.1.0",
+  "description": "Learning compounding system with ChromaDB-backed knowledge extraction",
+  "keywords": ["learning", "knowledge-base", "ai-memory"]
+}

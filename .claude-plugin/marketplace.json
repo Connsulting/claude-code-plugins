@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "connsulting-plugins",
+  "description": "Claude Code plugins from Connsulting for learning compounding and AI-assisted development",
+  "owner": {
+    "name": "Connsulting"
+  },
+  "plugins": [
+    {
+      "name": "compound-learning",
+      "description": "Learning compounding system with ChromaDB-backed knowledge extraction and hierarchical scope search",
+      "source": "./plugins/compound-learning",
+      "category": "productivity"
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "chromadb": {
+    "host": "localhost",
+    "port": 8000,
+    "dataDir": "${HOME}/.claude/chroma-data"
+  },
+  "learnings": {
+    "globalDir": "${HOME}/.projects/learnings",
+    "repoSearchPath": "${HOME}",
+    "distanceThreshold": 0.5
+  }
+}
