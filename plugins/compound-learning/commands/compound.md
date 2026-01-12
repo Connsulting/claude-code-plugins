@@ -40,11 +40,10 @@ Quick typo fix, no issues
 
 ## How It Works
 
-The command orchestrates three specialized agents:
+The command orchestrates two specialized agents:
 
 1. **learning-extractor**: Analyzes conversation, commits, and your notes to extract typed learnings
-2. **learning-scoper**: Determines optimal storage location (repo/client/global)
-3. **learning-writer**: Generates/updates documentation, agents, hooks, and indexes
+2. **learning-writer**: Determines scope, generates/updates documentation, agents, hooks, and indexes
 
 ## What Gets Created
 
@@ -88,51 +87,31 @@ Extract typed learnings (patterns, gotchas, validations, protocols, security iss
 Return structured YAML with technical details.
 ```
 
-### Step 3: Determine Scope
+### Step 3: Scope and Generate Artifacts
 
-Invoke the **learning-scoper** agent:
+Invoke the **learning-writer** agent:
 ```markdown
-Determine optimal storage location for these learnings.
+Scope and generate documentation artifacts for these learnings.
 
-**Learnings:**
+**Learnings from extractor:**
 [paste YAML from learning-extractor]
 
 **Current context:**
 - Working directory: [path]
 - Directory structure: [show repo/client/global hierarchy]
 
-For each learning, determine:
-- Scope: repo/client/global
-- Storage location: exact file path
-- Action: create/update/validate
-- Accessibility strategy: how future agents will find this
-
-Return structured decisions with reasoning.
-```
-
-### Step 4: Generate Artifacts
-
-Invoke the **learning-writer** agent:
-```markdown
-Generate documentation artifacts for these learnings.
-
-**Scope decisions:**
-[paste decisions from learning-scoper]
-
-**Original learnings:**
-[paste YAML from learning-extractor]
-
-Create/update:
-- Reference documentation (use templates)
-- Agent improvements
-- CLAUDE.md updates (minimal, only if critical)
-- Hooks (if enforceable)
-- Learning index
+For each learning:
+1. Determine scope (repo/client/global)
+2. Choose storage location
+3. Create/update documentation using templates
+4. Update agents if needed
+5. Create hooks if security-related
+6. Index into ChromaDB
 
 Return summary of artifacts created/updated.
 ```
 
-### Step 5: Report to User
+### Step 4: Report to User
 
 Provide a concise summary:
 ```markdown
