@@ -101,8 +101,13 @@ def load_config() -> Dict[str, Any]:
     return result
 
 
-def find_all_learning_files(config: Dict[str, Any]) -> Tuple[List[Path], List[Path]]:
-    """Find all .projects/learnings directories in configured locations"""
+def find_all_learning_files(config: Dict[str, Any]) -> Tuple[List[Path], Dict[str, List[Path]]]:
+    """Find all .projects/learnings directories in configured locations
+
+    Returns:
+        Tuple of (global_files, repo_files_by_name)
+        where repo_files_by_name is a dict mapping repo name to list of files
+    """
     # Get paths from config
     global_dir = Path(config['learnings']['globalDir'])
     repo_search_path = Path(config['learnings']['repoSearchPath'])
@@ -114,7 +119,7 @@ def find_all_learning_files(config: Dict[str, Any]) -> Tuple[List[Path], List[Pa
     }
 
     global_files = []
-    repo_files = []
+    repo_files_by_name: Dict[str, List[Path]] = {}
 
     # Search global learnings directory
     if global_dir.exists():
@@ -128,13 +133,18 @@ def find_all_learning_files(config: Dict[str, Any]) -> Tuple[List[Path], List[Pa
             if any(excluded in learnings_dir.parts for excluded in exclude_dirs):
                 continue
 
+            # Extract repo name: learnings_dir is [repo]/.projects/learnings
+            repo_name = learnings_dir.parent.parent.name
+
             # Find all .md files in this directory
             md_files = list(learnings_dir.glob('**/*.md'))
 
-            # All learnings under repo search path are repo-scoped
-            repo_files.extend(md_files)
+            if md_files:
+                if repo_name not in repo_files_by_name:
+                    repo_files_by_name[repo_name] = []
+                repo_files_by_name[repo_name].extend(md_files)
 
-    return global_files, repo_files
+    return global_files, repo_files_by_name
 
 
 def extract_metadata_from_path(file_path: Path, config: Dict[str, Any]) -> Dict[str, str]:
@@ -256,14 +266,21 @@ def index_learning_files():
         sys.exit(1)
 
     print("\nDiscovering learning files...")
-    global_files, repo_files = find_all_learning_files(config)
+    global_files, repo_files_by_name = find_all_learning_files(config)
 
+    # Flatten repo files for processing
+    repo_files = [f for files in repo_files_by_name.values() for f in files]
     all_files = global_files + repo_files
     total = len(all_files)
 
     print(f"\nFound {total} learning files:")
-    print(f"  Global:  {len(global_files)}")
-    print(f"  Repo:    {len(repo_files)}")
+    print(f"  Global: {len(global_files)}")
+    if repo_files_by_name:
+        print(f"  Repos:")
+        for repo_name in sorted(repo_files_by_name.keys()):
+            print(f"    - {repo_name}: {len(repo_files_by_name[repo_name])}")
+    else:
+        print(f"  Repos: 0")
 
     if total == 0:
         print("\nNo learning files found. Run /compound to create some!")
