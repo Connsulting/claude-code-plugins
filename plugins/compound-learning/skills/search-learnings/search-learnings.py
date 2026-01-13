@@ -278,7 +278,9 @@ def hybrid_rerank(
 def search_learnings(
     query: str,
     working_dir: str | None = None,
-    max_results: int = 10
+    max_results: int = 10,
+    peek_mode: bool = False,
+    exclude_ids: str = ""
 ) -> None:
     """
     Search learnings with tiered relevance filtering.
@@ -288,6 +290,8 @@ def search_learnings(
         query: Search query text
         working_dir: The user's working directory (where Claude was invoked)
         max_results: Maximum number of results to fetch from ChromaDB
+        peek_mode: If True, return only high confidence results in simplified format
+        exclude_ids: Comma separated learning IDs to exclude from results
     """
     # Load configuration
     config = load_config()
@@ -326,11 +330,20 @@ def search_learnings(
         client = chromadb.HttpClient(host=host, port=port)
         collection = client.get_collection(name="learnings")
 
+        # Parse exclusion IDs upfront to determine query size
+        exclude_set: Set[str] = set()
+        if exclude_ids:
+            exclude_set = set(id.strip() for id in exclude_ids.split(',') if id.strip())
+
+        # Request extra results to compensate for client-side ID exclusion
+        # ChromaDB doesn't support ID exclusion at query time
+        query_size = max_results + len(exclude_set)
+
         # Query ChromaDB (returns sorted by distance)
         results = collection.query(
             query_texts=[search_query],
             where=combined_filter,
-            n_results=max_results,
+            n_results=query_size,
             include=["documents", "metadatas", "distances"]
         )
 
@@ -356,6 +369,10 @@ def search_learnings(
         # Apply hybrid re-ranking (keyword boost)
         reranked_results = hybrid_rerank(raw_results, query_keywords, keyword_weight)
 
+        # Filter out excluded IDs (parsed earlier to determine query size)
+        if exclude_set:
+            reranked_results = [r for r in reranked_results if r['id'] not in exclude_set]
+
         # Split results into tiers based on adjusted distance
         high_confidence: List[Dict[str, Any]] = []
         possibly_relevant: List[Dict[str, Any]] = []
@@ -365,6 +382,20 @@ def search_learnings(
                 high_confidence.append(result)
             elif result['distance'] < possible_threshold:
                 possibly_relevant.append(result)
+
+        # Peek mode: only high_confidence, simplified output
+        if peek_mode:
+            if high_confidence:
+                output = {
+                    'status': 'found',
+                    'count': len(high_confidence),
+                    'learnings': high_confidence
+                }
+            else:
+                output = {'status': 'empty'}
+
+            print(json.dumps(output, indent=2))
+            return
 
         # Build output
         total_found = len(high_confidence) + len(possibly_relevant)
@@ -407,13 +438,15 @@ def search_learnings(
 
 
 if __name__ == '__main__':
-    if len(sys.argv) < 2:
-        print(json.dumps({
-            'status': 'error',
-            'message': 'Usage: search-learnings.py "query text" [working_dir]'
-        }))
-        sys.exit(1)
+    import argparse
 
-    query_text = sys.argv[1]
-    work_dir = sys.argv[2] if len(sys.argv) > 2 else None
-    search_learnings(query_text, work_dir)
+    parser = argparse.ArgumentParser(description='Search learnings in ChromaDB')
+    parser.add_argument('query', help='Search query text')
+    parser.add_argument('working_dir', nargs='?', default=None, help='Working directory')
+    parser.add_argument('--peek', action='store_true',
+                        help='Peek mode: only high confidence, no possibly_relevant')
+    parser.add_argument('--exclude-ids', type=str, default='',
+                        help='Comma separated learning IDs to exclude from results')
+
+    args = parser.parse_args()
+    search_learnings(args.query, args.working_dir, peek_mode=args.peek, exclude_ids=args.exclude_ids)

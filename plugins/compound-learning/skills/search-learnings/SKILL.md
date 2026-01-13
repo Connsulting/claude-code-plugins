@@ -36,14 +36,26 @@ Queries the learning database (ChromaDB) for relevant patterns, gotchas, and bes
 
 ## Usage
 
-The script accepts: `search-learnings.py "query" [working_dir]`
+The script accepts: `search-learnings.py "query" [working_dir] [--peek] [--exclude-ids "id1,id2"]`
 
 **IMPORTANT**: Always pass the user's working directory (where Claude was invoked) as the second argument to ensure correct repo hierarchy detection.
 
-Example:
+### Standard Search (conversation start)
 ```bash
 python3 search-learnings.py "JWT authentication" /home/user/projects/my-repo
 ```
+
+### Peek Mode (mid-conversation)
+```bash
+python3 search-learnings.py "database connection errors" /home/user/projects/my-repo --peek --exclude-ids "abc123,def456"
+```
+
+**Peek mode** is designed for mid-conversation checks:
+- Returns only high_confidence results (distance < 0.5)
+- Skips possibly_relevant tier entirely
+- Excludes already-seen IDs via `--exclude-ids`
+- Returns minimal JSON: `{"status": "found", "count": N, "learnings": [...]}` or `{"status": "empty"}`
+- When empty, Claude should continue silently (no "no results" message)
 
 The skill:
 - Connects to ChromaDB at localhost:8000
@@ -101,6 +113,22 @@ The skill:
 }
 ```
 
+**Peek mode output (when learnings found):**
+```json
+{
+  "status": "found",
+  "count": 2,
+  "learnings": [...]
+}
+```
+
+**Peek mode output (when empty):**
+```json
+{
+  "status": "empty"
+}
+```
+
 ## Integration with Workflow
 
 ### At Conversation Start (Mandatory for Non-Trivial Work)
@@ -121,14 +149,23 @@ Agent:
    - Proceed with general knowledge
 ```
 
-### During Execution (High-Signal Triggers)
+### During Execution (Peek Mode)
+
+Use `--peek` mode when things aren't going smoothly:
+- **Errors or failures**: Command fails, test fails, unexpected error
+- **User cancels/interrupts**: User stops a command or says "stop", "wait"
+- **Stuck pattern**: 2+ attempts at same problem without progress
+- **User references past**: "we tried this before", "remember when"
+- **Domain shift**: Task moves to different area (frontend to database, API to auth)
 
 ```markdown
-Agent working on task, encounters security keyword "API key":
-1. Auto-triggers /search-learnings with query: "API key storage security"
-2. Receives security-related learnings (if any)
-3. Applies learnings before proceeding
+Agent encounters error while implementing feature:
+1. Run peek: search-learnings "specific error message" /workdir --peek --exclude-ids "ids,from,initial,search"
+2. If peek finds NEW learnings: "Found additional relevant learning about X" and apply
+3. If peek returns empty: Continue silently (no message needed)
 ```
+
+**Key principle:** Peek often, stay silent when empty. Cost of empty peek is near zero, but finding a relevant learning mid-problem saves significant time.
 
 ## Key Benefits
 

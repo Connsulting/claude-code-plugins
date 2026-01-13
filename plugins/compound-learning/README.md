@@ -153,6 +153,30 @@ When the user provides a task (not a greeting or typo fix), your FIRST action MU
 Skill(skill="compound-learning:search-learnings", args="[task description]")
 
 Do this BEFORE reading files, running commands, or planning implementation.
+
+**Mid-conversation peek (be smart about this):**
+
+Peek for additional learnings when things aren't going smoothly:
+- **Errors or failures**: Command fails, test fails, unexpected error message
+- **User cancels/interrupts**: User stops a command or says "stop", "wait", "hold on"
+- **Stuck pattern**: 2+ attempts at same problem without progress
+- **User references past**: "we tried this before", "remember when"
+- **Domain shift**: Task moves to notably different area (frontend to database, API to auth)
+
+**How to peek:**
+Skill(skill="compound-learning:search-learnings",
+      args="[specific error/topic] --peek --exclude-ids [comma-separated IDs from initial search]")
+
+**ID tracking:**
+- After initial search at conversation start, remember the returned learning IDs
+- Pass all seen IDs to peek searches via --exclude-ids
+- This prevents re-surfacing the same learnings (avoids context bloat)
+
+**Peek output handling:**
+- If peek finds NEW learnings: "Found additional relevant learning about X" and apply it
+- If peek returns {"status": "empty"}: Continue silently (don't mention the peek)
+
+**Key principle:** Peek often, stay silent when empty. Cost of empty peek is near zero.
 ```
 
 ## Troubleshooting
