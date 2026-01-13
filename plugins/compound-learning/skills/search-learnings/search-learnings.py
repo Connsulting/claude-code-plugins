@@ -8,8 +8,25 @@ import chromadb
 import sys
 import json
 import os
+import re
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple, Set
+
+
+# Common stopwords to filter from query keywords
+STOPWORDS = {
+    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+    'should', 'may', 'might', 'must', 'shall', 'can', 'need', 'dare',
+    'ought', 'used', 'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by',
+    'from', 'as', 'into', 'through', 'during', 'before', 'after', 'above',
+    'below', 'between', 'under', 'again', 'further', 'then', 'once',
+    'here', 'there', 'when', 'where', 'why', 'how', 'all', 'each', 'few',
+    'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only',
+    'own', 'same', 'so', 'than', 'too', 'very', 'just', 'and', 'but',
+    'if', 'or', 'because', 'until', 'while', 'about', 'against', 'this',
+    'that', 'these', 'those', 'what', 'which', 'who', 'whom', 'its', 'it'
+}
 
 
 def load_config() -> Dict[str, Any]:
@@ -27,7 +44,8 @@ def load_config() -> Dict[str, Any]:
             'globalDir': os.path.join(home, '.projects/learnings'),
             'repoSearchPath': home,
             'highConfidenceThreshold': 0.5,
-            'possiblyRelevantThreshold': 0.6
+            'possiblyRelevantThreshold': 0.6,
+            'keywordBoostWeight': 0.3
         }
     }
 
@@ -35,6 +53,7 @@ def load_config() -> Dict[str, Any]:
     env_port = os.environ.get('CHROMADB_PORT')
     env_high_threshold = os.environ.get('LEARNINGS_HIGH_CONFIDENCE_THRESHOLD')
     env_possible_threshold = os.environ.get('LEARNINGS_POSSIBLY_RELEVANT_THRESHOLD')
+    env_keyword_weight = os.environ.get('LEARNINGS_KEYWORD_BOOST_WEIGHT')
     env_data_dir = os.environ.get('CHROMADB_DATA_DIR', '')
     env_global_dir = os.environ.get('LEARNINGS_GLOBAL_DIR', '')
     env_repo_path = os.environ.get('LEARNINGS_REPO_SEARCH_PATH', '')
@@ -61,6 +80,13 @@ def load_config() -> Dict[str, Any]:
         except ValueError:
             pass
 
+    parsed_keyword_weight = None
+    if env_keyword_weight:
+        try:
+            parsed_keyword_weight = float(env_keyword_weight)
+        except ValueError:
+            pass
+
     env_config = {
         'chromadb': {
             'host': os.environ.get('CHROMADB_HOST'),
@@ -71,7 +97,8 @@ def load_config() -> Dict[str, Any]:
             'globalDir': os.path.expanduser(env_global_dir) if env_global_dir else None,
             'repoSearchPath': os.path.expanduser(env_repo_path) if env_repo_path else None,
             'highConfidenceThreshold': parsed_high_threshold,
-            'possiblyRelevantThreshold': parsed_possible_threshold
+            'possiblyRelevantThreshold': parsed_possible_threshold,
+            'keywordBoostWeight': parsed_keyword_weight
         }
     }
 
@@ -152,6 +179,102 @@ def build_scope_filter(repos: List[str]) -> Dict[str, Any]:
     return {"$or": conditions} if len(conditions) > 1 else conditions[0]
 
 
+def parse_tag_filters(query: str) -> Tuple[str, Dict[str, Any]]:
+    """Extract tag: and category: filters from query.
+
+    Returns (cleaned_query, filters_dict)
+    """
+    filters: Dict[str, Any] = {}
+    cleaned = query
+
+    # Extract tag:value patterns
+    tag_matches = re.findall(r'\btag:(\w+)', query, re.IGNORECASE)
+    if tag_matches:
+        filters['tags'] = [t.lower() for t in tag_matches]
+        cleaned = re.sub(r'\btag:\w+\s*', '', cleaned)
+
+    # Extract category:value patterns
+    cat_match = re.search(r'\bcategory:(\w+)', query, re.IGNORECASE)
+    if cat_match:
+        filters['category'] = cat_match.group(1).lower()
+        cleaned = re.sub(r'\bcategory:\w+\s*', '', cleaned)
+
+    return cleaned.strip(), filters
+
+
+def build_tag_filter(tag_filters: Dict[str, Any]) -> Dict[str, Any] | None:
+    """Build ChromaDB where clause for tag/category filters."""
+    if not tag_filters:
+        return None
+
+    conditions: List[Dict[str, Any]] = []
+
+    # Category filter (exact match)
+    if 'category' in tag_filters:
+        conditions.append({"category": {"$eq": tag_filters['category']}})
+
+    # Tag filter (tags field contains the tag, using $contains for comma-separated)
+    # ChromaDB doesn't support $contains on strings, so we use $like pattern matching
+    # Since tags are stored as comma-separated, we check if tag appears in the string
+    if 'tags' in tag_filters:
+        for tag in tag_filters['tags']:
+            # Match tag at start, end, or surrounded by commas
+            conditions.append({"tags": {"$contains": tag}})
+
+    if not conditions:
+        return None
+    if len(conditions) == 1:
+        return conditions[0]
+    return {"$and": conditions}
+
+
+def extract_query_keywords(query: str) -> Set[str]:
+    """Extract meaningful keywords from query, removing stopwords."""
+    # Tokenize on whitespace and punctuation
+    tokens = re.findall(r'\b\w+\b', query.lower())
+    # Remove stopwords, keep words >= 2 chars
+    return {t for t in tokens if t not in STOPWORDS and len(t) >= 2}
+
+
+def calculate_keyword_overlap(keywords: Set[str], document: str) -> float:
+    """Calculate ratio of query keywords found in document."""
+    if not keywords:
+        return 0.0
+    doc_lower = document.lower()
+    matches = sum(1 for kw in keywords if kw in doc_lower)
+    return matches / len(keywords)
+
+
+def hybrid_rerank(
+    results: List[Dict[str, Any]],
+    query_keywords: Set[str],
+    keyword_weight: float = 0.3
+) -> List[Dict[str, Any]]:
+    """Re-rank results by combining semantic distance with keyword overlap.
+
+    Args:
+        results: List of result dicts with 'document' and 'distance'
+        query_keywords: Set of keywords extracted from query
+        keyword_weight: How much to boost for keyword matches (0-1)
+
+    Returns:
+        Results re-sorted by adjusted distance (lower = better)
+    """
+    for result in results:
+        overlap = calculate_keyword_overlap(query_keywords, result['document'])
+        # Reduce distance (better score) when keywords match
+        # Boost factor: up to keyword_weight reduction
+        result['keyword_overlap'] = round(overlap, 4)
+        result['original_distance'] = result['distance']
+        result['distance'] = round(
+            result['distance'] * (1 - keyword_weight * overlap),
+            4
+        )
+
+    # Re-sort by adjusted distance
+    return sorted(results, key=lambda x: x['distance'])
+
+
 def search_learnings(
     query: str,
     working_dir: str | None = None,
@@ -172,6 +295,14 @@ def search_learnings(
     port = config['chromadb']['port']
     high_threshold = config['learnings']['highConfidenceThreshold']
     possible_threshold = config['learnings']['possiblyRelevantThreshold']
+    keyword_weight = config['learnings']['keywordBoostWeight']
+
+    # Parse tag/category filters from query
+    cleaned_query, tag_filters = parse_tag_filters(query)
+    search_query = cleaned_query if cleaned_query else query
+
+    # Extract keywords for hybrid re-ranking
+    query_keywords = extract_query_keywords(search_query)
 
     # Use provided working directory or fall back to cwd
     cwd = working_dir if working_dir else os.getcwd()
@@ -183,6 +314,13 @@ def search_learnings(
     # Build scope filter
     scope_filter = build_scope_filter(repos)
 
+    # Build combined filter (scope + optional tags)
+    tag_filter = build_tag_filter(tag_filters)
+    if tag_filter:
+        combined_filter = {"$and": [scope_filter, tag_filter]}
+    else:
+        combined_filter = scope_filter
+
     try:
         # Connect to ChromaDB
         client = chromadb.HttpClient(host=host, port=port)
@@ -190,15 +328,14 @@ def search_learnings(
 
         # Query ChromaDB (returns sorted by distance)
         results = collection.query(
-            query_texts=[query],
-            where=scope_filter,
+            query_texts=[search_query],
+            where=combined_filter,
             n_results=max_results,
             include=["documents", "metadatas", "distances"]
         )
 
-        # Split results into tiers
-        high_confidence: List[Dict[str, Any]] = []
-        possibly_relevant: List[Dict[str, Any]] = []
+        # Collect raw results
+        raw_results: List[Dict[str, Any]] = []
 
         ids = results.get('ids')
         if ids and ids[0] and len(ids[0]) > 0:
@@ -214,11 +351,20 @@ def search_learnings(
                     'metadata': metadatas[0][i] if metadatas and len(metadatas[0]) > i else {},
                     'distance': round(distance, 4)
                 }
+                raw_results.append(result_item)
 
-                if distance < high_threshold:
-                    high_confidence.append(result_item)
-                elif distance < possible_threshold:
-                    possibly_relevant.append(result_item)
+        # Apply hybrid re-ranking (keyword boost)
+        reranked_results = hybrid_rerank(raw_results, query_keywords, keyword_weight)
+
+        # Split results into tiers based on adjusted distance
+        high_confidence: List[Dict[str, Any]] = []
+        possibly_relevant: List[Dict[str, Any]] = []
+
+        for result in reranked_results:
+            if result['distance'] < high_threshold:
+                high_confidence.append(result)
+            elif result['distance'] < possible_threshold:
+                possibly_relevant.append(result)
 
         # Build output
         total_found = len(high_confidence) + len(possibly_relevant)
