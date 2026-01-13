@@ -27,7 +27,7 @@ def load_config() -> Dict[str, Any]:
             'globalDir': os.path.join(home, '.projects/learnings'),
             'repoSearchPath': home,
             'highConfidenceThreshold': 0.5,
-            'possiblyRelevantThreshold': 0.7
+            'possiblyRelevantThreshold': 0.6
         }
     }
 
