@@ -5,7 +5,9 @@ description: Search accumulated learnings with distance-based relevance filterin
 
 # Search Learnings
 
-Queries the learning database (ChromaDB) for relevant patterns, gotchas, and best practices. Filters results by relevance (distance < 0.5) **before** outputting to avoid polluting context with irrelevant results.
+Queries the learning database (ChromaDB) for relevant patterns, gotchas, and best practices. Returns **tiered results** to balance precision with recall:
+- **High confidence** (distance < 0.5): Strong semantic match, highly relevant
+- **Possibly relevant** (distance 0.5-0.7): May be useful, review before applying
 
 ## When to Use This Skill
 
@@ -29,8 +31,8 @@ Queries the learning database (ChromaDB) for relevant patterns, gotchas, and bes
 
 1. **Automatic hierarchy detection**: Walks from current directory up to home, finds all parent `.projects/learnings/` directories
 2. **Scoped search**: Queries current repo + all parent repos + global learnings
-3. **Distance filtering**: Only returns results with distance < 0.5 (done in script, not in conversation)
-4. **Clean output**: No context pollution from irrelevant results
+3. **Tiered filtering**: Splits results into high confidence (< 0.5) and possibly relevant (0.5-0.7)
+4. **Clean output**: Results beyond 0.7 distance are excluded to prevent noise
 
 ## Usage
 
@@ -47,31 +49,32 @@ The skill:
 - Connects to ChromaDB at localhost:8000
 - Detects repo hierarchy from the provided working directory
 - Queries with proper scope filter
-- **Filters by distance < 0.5 BEFORE outputting**
-- Returns JSON with relevant learnings or "No relevant learnings found"
+- **Returns tiered results**: high_confidence (< 0.5) and possibly_relevant (0.5-0.7)
+- Returns JSON with learnings or "No relevant learnings found"
 
 ## Output Format
 
-**When relevant learnings found:**
+**When learnings found (tiered):**
 ```json
 {
   "status": "success",
-  "message": "Found 3 relevant learning(s)",
+  "message": "Found 2 high confidence + 1 possibly relevant learning(s)",
   "query": "JWT authentication patterns",
   "repos_searched": ["claude-settings", "parent-org"],
-  "results": [
+  "high_confidence": [
     {
       "id": "abc123...",
       "document": "Full markdown content...",
-      "metadata": {
-        "scope": "global",
-        "repo": "",
-        "file_path": "~/.projects/learnings/auth-patterns.md",
-        "category": "security",
-        "tags": "jwt,auth,security",
-        "summary": "JWT tokens must use httpOnly cookies..."
-      },
+      "metadata": { "scope": "global", "repo": "", ... },
       "distance": 0.23
+    }
+  ],
+  "possibly_relevant": [
+    {
+      "id": "def456...",
+      "document": "Related content...",
+      "metadata": { "scope": "repo", "repo": "my-project", ... },
+      "distance": 0.58
     }
   ]
 }
@@ -81,10 +84,11 @@ The skill:
 ```json
 {
   "status": "no_results",
-  "message": "No relevant learnings found (searched 5 candidates, none met distance < 0.5 threshold)",
+  "message": "No relevant learnings found (searched 10 candidates, none met distance < 0.7 threshold)",
   "query": "JWT authentication patterns",
   "repos_searched": ["claude-settings"],
-  "results": []
+  "high_confidence": [],
+  "possibly_relevant": []
 }
 ```
 
@@ -106,14 +110,15 @@ User: "Implement JWT authentication for the API"
 
 Agent:
 1. Immediately invokes /search-learnings skill with query: "JWT authentication API implementation"
-2. Receives filtered results (only distance < 0.5)
-3. If relevant results found:
-   - Presents key learnings to user
-   - Incorporates into implementation approach
-   - Passes context to sub-agents if delegating
-4. If no results:
-   - Reports "No relevant learnings found"
-   - Proceeds with general knowledge
+2. Receives tiered results
+3. If high_confidence results found:
+   - Present these first, apply directly
+4. If only possibly_relevant results:
+   - Review before applying (may not be exact match)
+   - Mention to user: "Found possibly relevant learning about X"
+5. If no results:
+   - Report "No relevant learnings found"
+   - Proceed with general knowledge
 ```
 
 ### During Execution (High-Signal Triggers)
@@ -127,10 +132,10 @@ Agent working on task, encounters security keyword "API key":
 
 ## Key Benefits
 
-1. **No context pollution**: Filtering happens in Python script before results reach conversation
-2. **Efficient**: Only fetches top 5 results, filters by threshold
+1. **Balanced precision/recall**: Tiered results ensure you don't miss borderline-relevant learnings
+2. **Clear confidence levels**: Know which learnings to trust immediately vs. review first
 3. **Hierarchical scoping**: Searches current repo + all parent repos + global
-4. **Clean feedback**: Clear "no results" message vs polluting with irrelevant matches
+4. **No noise**: Results beyond 0.7 distance excluded entirely
 
 ## Error Handling
 
@@ -147,7 +152,7 @@ If no learnings exist yet:
 ## Critical Rules
 
 1. **Always search at conversation start** for non-trivial work
-2. **Trust the threshold**: If script returns no results, that's valid information
-3. **Don't over-filter**: Show all results that script returns (it already filtered)
+2. **High confidence = apply directly**: Trust results with distance < 0.5
+3. **Possibly relevant = review first**: Results 0.5-0.7 may need validation
 4. **Security keywords auto-trigger**: auth/token/password/encryption/api-key/secret
 5. **Empty results are OK**: Report and continue with general knowledge

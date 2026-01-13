@@ -26,13 +26,15 @@ def load_config() -> Dict[str, Any]:
         'learnings': {
             'globalDir': os.path.join(home, '.projects/learnings'),
             'repoSearchPath': home,
-            'distanceThreshold': 0.5
+            'highConfidenceThreshold': 0.5,
+            'possiblyRelevantThreshold': 0.7
         }
     }
 
     # Environment variables take highest priority (with validation)
     env_port = os.environ.get('CHROMADB_PORT')
-    env_threshold = os.environ.get('LEARNINGS_DISTANCE_THRESHOLD')
+    env_high_threshold = os.environ.get('LEARNINGS_HIGH_CONFIDENCE_THRESHOLD')
+    env_possible_threshold = os.environ.get('LEARNINGS_POSSIBLY_RELEVANT_THRESHOLD')
     env_data_dir = os.environ.get('CHROMADB_DATA_DIR', '')
     env_global_dir = os.environ.get('LEARNINGS_GLOBAL_DIR', '')
     env_repo_path = os.environ.get('LEARNINGS_REPO_SEARCH_PATH', '')
@@ -45,10 +47,17 @@ def load_config() -> Dict[str, Any]:
         except ValueError:
             pass
 
-    parsed_threshold = None
-    if env_threshold:
+    parsed_high_threshold = None
+    if env_high_threshold:
         try:
-            parsed_threshold = float(env_threshold)
+            parsed_high_threshold = float(env_high_threshold)
+        except ValueError:
+            pass
+
+    parsed_possible_threshold = None
+    if env_possible_threshold:
+        try:
+            parsed_possible_threshold = float(env_possible_threshold)
         except ValueError:
             pass
 
@@ -61,7 +70,8 @@ def load_config() -> Dict[str, Any]:
         'learnings': {
             'globalDir': os.path.expanduser(env_global_dir) if env_global_dir else None,
             'repoSearchPath': os.path.expanduser(env_repo_path) if env_repo_path else None,
-            'distanceThreshold': parsed_threshold
+            'highConfidenceThreshold': parsed_high_threshold,
+            'possiblyRelevantThreshold': parsed_possible_threshold
         }
     }
 
@@ -145,22 +155,23 @@ def build_scope_filter(repos: List[str]) -> Dict[str, Any]:
 def search_learnings(
     query: str,
     working_dir: str | None = None,
-    max_results: int = 5
+    max_results: int = 10
 ) -> None:
     """
-    Search learnings and filter by distance threshold
-    Only outputs relevant results (distance < threshold)
+    Search learnings with tiered relevance filtering.
+    Returns high confidence results (distance < 0.5) and possibly relevant (0.5-0.7).
 
     Args:
         query: Search query text
         working_dir: The user's working directory (where Claude was invoked)
-        max_results: Maximum number of results to return
+        max_results: Maximum number of results to fetch from ChromaDB
     """
     # Load configuration
     config = load_config()
     host = config['chromadb']['host']
     port = config['chromadb']['port']
-    distance_threshold = config['learnings']['distanceThreshold']
+    high_threshold = config['learnings']['highConfidenceThreshold']
+    possible_threshold = config['learnings']['possiblyRelevantThreshold']
 
     # Use provided working directory or fall back to cwd
     cwd = working_dir if working_dir else os.getcwd()
@@ -185,8 +196,10 @@ def search_learnings(
             include=["documents", "metadatas", "distances"]
         )
 
-        # Filter by distance threshold BEFORE outputting
-        filtered_results: List[Dict[str, Any]] = []
+        # Split results into tiers
+        high_confidence: List[Dict[str, Any]] = []
+        possibly_relevant: List[Dict[str, Any]] = []
+
         ids = results.get('ids')
         if ids and ids[0] and len(ids[0]) > 0:
             distances = results.get('distances', [[]])
@@ -195,30 +208,44 @@ def search_learnings(
 
             for i in range(len(ids[0])):
                 distance = distances[0][i] if distances and len(distances[0]) > i else 1.0
-                if distance < distance_threshold:
-                    filtered_results.append({
-                        'id': ids[0][i],
-                        'document': documents[0][i] if documents and len(documents[0]) > i else "",
-                        'metadata': metadatas[0][i] if metadatas and len(metadatas[0]) > i else {},
-                        'distance': distance
-                    })
+                result_item = {
+                    'id': ids[0][i],
+                    'document': documents[0][i] if documents and len(documents[0]) > i else "",
+                    'metadata': metadatas[0][i] if metadatas and len(metadatas[0]) > i else {},
+                    'distance': round(distance, 4)
+                }
 
-        # Output results
-        if not filtered_results:
+                if distance < high_threshold:
+                    high_confidence.append(result_item)
+                elif distance < possible_threshold:
+                    possibly_relevant.append(result_item)
+
+        # Build output
+        total_found = len(high_confidence) + len(possibly_relevant)
+        candidates_searched = len(results["ids"][0]) if results["ids"] else 0
+
+        if total_found == 0:
             output = {
                 'status': 'no_results',
-                'message': f'No relevant learnings found (searched {len(results["ids"][0]) if results["ids"] else 0} candidates, none met distance < {distance_threshold} threshold)',
+                'message': f'No relevant learnings found (searched {candidates_searched} candidates, none met distance < {possible_threshold} threshold)',
                 'query': query,
                 'repos_searched': repos,
-                'results': []
+                'high_confidence': [],
+                'possibly_relevant': []
             }
         else:
+            parts = []
+            if high_confidence:
+                parts.append(f'{len(high_confidence)} high confidence')
+            if possibly_relevant:
+                parts.append(f'{len(possibly_relevant)} possibly relevant')
             output = {
                 'status': 'success',
-                'message': f'Found {len(filtered_results)} relevant learning(s)',
+                'message': f'Found {" + ".join(parts)} learning(s)',
                 'query': query,
                 'repos_searched': repos,
-                'results': filtered_results
+                'high_confidence': high_confidence,
+                'possibly_relevant': possibly_relevant
             }
 
         print(json.dumps(output, indent=2))
