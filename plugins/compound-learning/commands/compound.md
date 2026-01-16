@@ -4,7 +4,7 @@ description: Extract and compound learnings from current session to benefit futu
 
 # Learning Compounding Command
 
-Extract learnings from this conversation and store them at the appropriate scope level (repo/client/global) for future agents to benefit from.
+Extract learnings from this conversation and store them for future agents to benefit from.
 
 ## Usage
 
@@ -17,19 +17,11 @@ Recommendations: [suggestions for improvement]
 
 ## Examples
 
-**After successful feature implementation:**
-```
-/compound
-Went well: TDD flow was smooth, test-impact-analyzer used proactively
-Went poorly: JWT library docs unclear, spent time on cookie config
-Recommendations: Document JWT cookie patterns
-```
-
 **After debugging struggle:**
 ```
 /compound
-Went poorly: Went in circles on Redux bug, sub-agent didn't bail out
-Recommendations: Strengthen bail-out protocol, add Redux debugging checklist
+Went poorly: JWT library docs unclear, spent time on cookie config
+Recommendations: Document JWT cookie patterns
 ```
 
 **After quick fix:**
@@ -38,105 +30,64 @@ Recommendations: Strengthen bail-out protocol, add Redux debugging checklist
 Quick typo fix, no issues
 ```
 
-## How It Works
-
-The command orchestrates two specialized agents:
-
-1. **learning-extractor**: Analyzes conversation, commits, and your notes to extract typed learnings
-2. **learning-writer**: Determines scope, generates/updates documentation, agents, hooks, and indexes
-
-## What Gets Created
-
-**Learnings are stored at the appropriate scope:**
-- **Repo-specific**: `.projects/learnings/` (library gotchas, repo patterns)
-- **Global**: `~/.projects/learnings/` (reusable patterns, best practices)
-- **Protocol improvements**: Agent updates, CLAUDE.md enhancements
-- **Security critical**: Global docs + pre-commit hooks
-
 ## Your Task
 
-You are the orchestrator for the learning compounding process.
+You are the orchestrator. Your job is simple:
 
-### Step 1: Gather Context
+### Step 1: Gather Minimal Context
 
-Collect information about the current session:
-- Full conversation history
-- Git commits made during session (if any)
-- Current branch name
+Collect:
 - Working directory path
-- User's notes (what went well/poorly/recommendations)
+- User's notes from the /compound input
 
-### Step 2: Extract Learnings
+Do NOT gather commits, branch names, or other metadata unless the user mentioned them.
 
-Invoke the **learning-extractor** agent:
+### Step 2: Invoke learning-writer
+
+Invoke the **learning-writer** agent with a minimal prompt:
+
 ```markdown
-Analyze this session and extract learnings.
+Extract learnings from this conversation and write them to appropriate locations.
 
-**Session context:**
-- Branch: [branch name]
-- Working directory: [path]
-- Commits: [list of commits with messages]
+**Working directory:** [path]
+**User notes:** [what user provided]
 
-**User notes:**
-[paste user's success/failure/recommendation notes]
-
-**Conversation:**
-[provide full conversation history]
-
-Extract typed learnings (patterns, gotchas, validations, protocols, security issues).
-Return structured YAML with technical details.
+You have access to the full conversation. Identify 0-3 meaningful learnings and write small .md files. Be selective.
 ```
 
-### Step 3: Scope and Generate Artifacts
+The learning-writer agent:
+- Already sees the full conversation (no need to pass it)
+- Extracts learnings directly (no YAML intermediate)
+- Writes files immediately (no duplicate checking)
+- Reports what was created
 
-Invoke the **learning-writer** agent:
-```markdown
-Scope and generate documentation artifacts for these learnings.
+### Step 3: Report to User
 
-**Learnings from extractor:**
-[paste YAML from learning-extractor]
+Pass through the learning-writer's report:
 
-**Current context:**
-- Working directory: [path]
-- Directory structure: [show repo/client/global hierarchy]
-
-For each learning:
-1. Determine scope (repo/client/global)
-2. Choose storage location
-3. Create/update documentation using templates
-4. Update agents if needed
-5. Create hooks if security-related
-6. Index into ChromaDB
-
-Return summary of artifacts created/updated.
 ```
-
-### Step 4: Report to User
-
-Provide a concise summary:
-```markdown
 Learning Compounded:
 
-[OK] [Scope]: [What was created/updated]
-[OK] [Scope]: [What was created/updated]
-[WARN] [Critical findings if any]
-
-Future agents will now:
-- [How they'll access/benefit from these learnings]
-
-[If no significant learnings:]
-[INFO] No significant learnings extracted (simple task)
-[OK] Workflow validated: [what worked correctly]
+[learning-writer output]
 ```
 
-## Important Guidelines
+Or if no learnings:
 
-1. **Be selective**: Not every session has meaningful learnings
-2. **Scope correctly**: Store learnings at the most specific applicable level
-3. **Keep CLAUDE.md minimal**: Only add critical rules, not detailed patterns
-4. **Security priority**: Security learnings are CRITICAL and should be global + enforced
-5. **No bloat**: Don't create docs for trivial validations
+```
+No significant learnings extracted from this session.
+```
+
+## What This Command Does NOT Do
+
+To keep token usage minimal:
+- Does NOT check for duplicate learnings
+- Does NOT update CLAUDE.md
+- Does NOT create hooks
+- Does NOT update agents
+- Does NOT re-index automatically
+
+If you need indexing, run `/index-learnings` separately.
 
 ## Philosophy
 
-Every conversation should make the next one easier. This command is your opportunity to capture what you learned so future agents don't repeat the same research, make the same mistakes, or miss the same patterns.
+Every conversation should make the next one easier. This command captures learnings quickly and cheaply. Quality over quantity. Small files over comprehensive docs.
