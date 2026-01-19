@@ -6,6 +6,7 @@ A learning compounding system for Claude Code that extracts and indexes knowledg
 
 The compound learning plugin enables Claude to learn from previous conversations by:
 - Extracting key learnings from sessions via the `/compound` command
+- Extracting learnings from GitHub PR reviews via the `/pr-learnings` command
 - Indexing learnings into ChromaDB with semantic embeddings
 - Automatically searching relevant past learnings when starting new tasks
 - Supporting hierarchical scoping (global and repository-specific learnings)
@@ -15,6 +16,7 @@ The compound learning plugin enables Claude to learn from previous conversations
 - Python 3.x
 - Docker (for ChromaDB container)
 - Python packages: `chromadb`
+- GitHub CLI (`gh`) - optional, required for `/pr-learnings` command
 
 ## Installation
 
@@ -107,6 +109,39 @@ This extracts learnings and commits them to the appropriate scope:
 - **Global learnings** (`~/.projects/learnings/`): Applicable across all projects
 - **Repo learnings** (`[repo]/.projects/learnings/`): Specific to a repository
 
+### Extracting Learnings from PRs
+
+Extract learnings from GitHub pull request reviews and feedback:
+
+```
+/pr-learnings <PR-URL-or-number> [<PR-URL-or-number> ...]
+```
+
+**Examples:**
+```bash
+# Single PR by URL
+/pr-learnings https://github.com/owner/repo/pull/123
+
+# Multiple PRs
+/pr-learnings 123 456 789
+
+# Mix of URLs and numbers
+/pr-learnings https://github.com/owner/repo/pull/123 456
+```
+
+This command:
+1. Fetches PR data including reviews, comments, and code changes using GitHub CLI
+2. Analyzes reviewer feedback for patterns and insights
+3. Extracts 1-3 meaningful learnings per PR
+4. Saves learnings in the same format as `/compound`
+
+**Use cases:**
+- **Individual developers**: Learn from feedback on your PRs
+- **Team leads**: Extract learnings from team PRs and share across the organization
+- **Code review insights**: Identify patterns in common mistakes
+
+After running `/pr-learnings`, remember to run `/index-learnings` to make the new learnings searchable.
+
 ### Searching Learnings
 
 Learnings are automatically searched at the start of tasks. To manually search:
@@ -127,6 +162,13 @@ To re-index all learning files:
 
 - **Commands:**
   - `/compound`: Extracts learnings from conversations and commits to appropriate scope
+  - `/pr-learnings`: Extracts learnings from GitHub PR reviews, comments, and code changes
+  - `/index-learnings`: Re-indexes all learning files into ChromaDB
+  - `/start-learning-db`: Starts ChromaDB Docker container
+
+- **Agents:**
+  - `learning-writer`: Analyzes conversations and extracts learnings
+  - `pr-learning-extractor`: Analyzes GitHub PRs and extracts learnings from reviews
 
 - **Skills:**
   - `search-learnings`: Queries ChromaDB for relevant learnings with hierarchical scoping
