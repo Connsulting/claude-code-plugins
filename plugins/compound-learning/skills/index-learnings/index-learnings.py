@@ -107,10 +107,13 @@ def find_all_learning_files(config: Dict[str, Any]) -> Tuple[List[Path], Dict[st
     Returns:
         Tuple of (global_files, repo_files_by_name)
         where repo_files_by_name is a dict mapping repo name to list of files
+
+    Note: Resolves symlinks to canonical paths to handle systems where
+    home directory contains symlinks to other locations (e.g., /home/ubuntu/git -> /workspace/git)
     """
-    # Get paths from config
-    global_dir = Path(config['learnings']['globalDir'])
-    repo_search_path = Path(config['learnings']['repoSearchPath'])
+    # Get paths from config and resolve to canonical form
+    global_dir = Path(config['learnings']['globalDir']).resolve()
+    repo_search_path = Path(config['learnings']['repoSearchPath']).resolve()
 
     # Exclude patterns
     exclude_dirs = {
@@ -120,15 +123,42 @@ def find_all_learning_files(config: Dict[str, Any]) -> Tuple[List[Path], Dict[st
 
     global_files = []
     repo_files_by_name: Dict[str, List[Path]] = {}
+    seen_canonical_paths: set = set()  # Track seen files to avoid duplicates
 
     # Search global learnings directory
     if global_dir.exists():
         md_files = list(global_dir.glob('**/*.md'))
-        global_files.extend(md_files)
+        for f in md_files:
+            canonical = f.resolve()
+            if canonical not in seen_canonical_paths:
+                seen_canonical_paths.add(canonical)
+                global_files.append(canonical)
 
-    # Search for .projects/learnings directories under repo search path
-    if repo_search_path.exists():
-        for learnings_dir in repo_search_path.rglob('.projects/learnings'):
+    # Build list of search paths - include both configured path and resolved path
+    # This handles cases where symlinks point to different locations
+    search_paths = {repo_search_path}
+
+    # If globalDir resolved to a different root, also search from there
+    # e.g., if /home/ubuntu/.projects -> /workspace/.projects, also search /workspace
+    if global_dir.parts[1:2] and global_dir.parts[1] != repo_search_path.parts[1]:
+        # Different root (e.g., /workspace vs /home)
+        alt_search = Path('/' + global_dir.parts[1])
+        if alt_search.exists():
+            search_paths.add(alt_search)
+
+    # Search for .projects/learnings directories under all search paths
+    for search_path in search_paths:
+        if not search_path.exists():
+            continue
+
+        for learnings_dir in search_path.rglob('.projects/learnings'):
+            # Resolve to canonical path
+            learnings_dir = learnings_dir.resolve()
+
+            # Skip if this is the global dir (already handled above)
+            if str(learnings_dir).startswith(str(global_dir)):
+                continue
+
             # Skip excluded directories
             if any(excluded in learnings_dir.parts for excluded in exclude_dirs):
                 continue
@@ -139,18 +169,29 @@ def find_all_learning_files(config: Dict[str, Any]) -> Tuple[List[Path], Dict[st
             # Find all .md files in this directory
             md_files = list(learnings_dir.glob('**/*.md'))
 
-            if md_files:
-                if repo_name not in repo_files_by_name:
-                    repo_files_by_name[repo_name] = []
-                repo_files_by_name[repo_name].extend(md_files)
+            for f in md_files:
+                canonical = f.resolve()
+                if canonical not in seen_canonical_paths:
+                    seen_canonical_paths.add(canonical)
+                    if repo_name not in repo_files_by_name:
+                        repo_files_by_name[repo_name] = []
+                    repo_files_by_name[repo_name].append(canonical)
 
     return global_files, repo_files_by_name
 
 
 def extract_metadata_from_path(file_path: Path, config: Dict[str, Any]) -> Dict[str, str]:
-    """Extract scope metadata from file path"""
-    path_str = str(file_path)
-    global_dir = config['learnings']['globalDir']
+    """Extract scope metadata from file path
+
+    Uses canonical (resolved) paths to handle symlinks correctly.
+    This ensures /home/ubuntu/git/... and /workspace/git/... are treated as the same file.
+    """
+    # Resolve symlinks to get canonical path
+    canonical_path = file_path.resolve()
+    path_str = str(canonical_path)
+
+    # Also resolve globalDir to handle symlinked config paths
+    global_dir = str(Path(config['learnings']['globalDir']).resolve())
 
     # Global learnings: configured globalDir
     if path_str.startswith(global_dir):
@@ -162,11 +203,11 @@ def extract_metadata_from_path(file_path: Path, config: Dict[str, Any]) -> Dict[
 
     # Repo learnings: extract repo name from directory containing .projects
     # Path structure: [repo]/.projects/learnings/file.md
-    # file_path.parent = learnings/
-    # file_path.parent.parent = .projects/
-    # file_path.parent.parent.parent = [repo]/
+    # canonical_path.parent = learnings/
+    # canonical_path.parent.parent = .projects/
+    # canonical_path.parent.parent.parent = [repo]/
     try:
-        repo_name = file_path.parent.parent.parent.name
+        repo_name = canonical_path.parent.parent.parent.name
         return {
             "scope": "repo",
             "repo": repo_name,
@@ -295,14 +336,16 @@ def index_learning_files():
             # Read file
             content = file_path.read_text(encoding='utf-8')
 
-            # Extract metadata
+            # Extract metadata (uses canonical path internally)
             metadata = extract_metadata_from_path(file_path, config)
             metadata['tags'] = ','.join(auto_extract_tags(content))
             metadata['category'] = detect_category(content)
             metadata['summary'] = extract_summary(content)
 
-            # Generate ID from file path
-            doc_id = hashlib.md5(str(file_path).encode()).hexdigest()
+            # Generate ID from canonical path to handle symlinks
+            # This ensures the same file via different paths gets the same ID
+            canonical_path = file_path.resolve()
+            doc_id = hashlib.md5(str(canonical_path).encode()).hexdigest()
 
             # Add to ChromaDB
             collection.upsert(
