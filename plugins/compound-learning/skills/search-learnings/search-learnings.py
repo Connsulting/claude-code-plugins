@@ -278,7 +278,7 @@ def hybrid_rerank(
 def search_learnings(
     query: str,
     working_dir: str | None = None,
-    max_results: int = 10,
+    max_results: int = 5,
     peek_mode: bool = False,
     exclude_ids: str = ""
 ) -> None:
