@@ -156,6 +156,23 @@ To re-index all learning files:
 /index-learnings
 ```
 
+### Auto-Extraction via Hooks
+
+The plugin automatically extracts learnings at key moments without manual intervention:
+
+- **PreCompact**: Before context compaction (when conversation gets long), learnings are extracted to preserve insights that might otherwise be lost
+- **Stop**: When Claude finishes responding, learnings are extracted from the session
+
+**How it works:**
+1. Hooks trigger `extract-learnings.sh` which invokes `claude -p` to analyze the transcript
+2. Claude reads the conversation transcript and identifies 0-3 meaningful learnings
+3. Learning files are written directly to the appropriate scope (global or repo)
+4. A session tracking file (`~/.claude/compound-processed-sessions`) prevents duplicate extraction
+
+**Debug log:** Check `~/.claude/compound-hook-debug.log` to see when hooks fire.
+
+**Note:** The extraction uses minimal permissions (`Read`, `Write`, `Bash(mkdir:*)`) and skips trivial sessions (<20 transcript lines).
+
 ## Architecture
 
 ### Components
@@ -165,15 +182,23 @@ To re-index all learning files:
   - `/pr-learnings`: Extracts learnings from GitHub PR reviews, comments, and code changes
   - `/index-learnings`: Re-indexes all learning files into ChromaDB
   - `/start-learning-db`: Starts ChromaDB Docker container
+  - `/consolidate-learnings`: Finds and merges duplicate or overlapping learnings
 
 - **Agents:**
   - `learning-writer`: Analyzes conversations and extracts learnings
   - `pr-learning-extractor`: Analyzes GitHub PRs and extracts learnings from reviews
+  - `consolidation-analyzer`: Analyzes learning overlap and recommends merge/keep actions
 
 - **Skills:**
   - `search-learnings`: Queries ChromaDB for relevant learnings with hierarchical scoping
   - `start-learning-db`: Starts ChromaDB container using Docker
   - `index-learnings`: Indexes all learning markdown files into ChromaDB
+  - `consolidate-discovery`: Finds consolidation candidates in ChromaDB
+  - `consolidate-actions`: Executes consolidation actions (merge, archive, delete)
+
+- **Hooks:**
+  - `PreCompact`: Auto-extracts learnings before context compaction
+  - `Stop`: Auto-extracts learnings when Claude finishes responding
 
 ### Learning Scopes
 
