@@ -12,12 +12,12 @@
         ]
       }
     ],
-    "Stop": [
+    "SessionEnd": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "HOOK_TYPE=Stop bash ${CLAUDE_PLUGIN_ROOT}/hooks/extract-learnings.sh",
+            "command": "HOOK_TYPE=SessionEnd bash ${CLAUDE_PLUGIN_ROOT}/hooks/extract-learnings.sh",
             "timeout": 180000
           }
         ]
