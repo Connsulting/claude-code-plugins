@@ -111,12 +111,49 @@ Or if no meaningful learnings:
 No significant learnings to extract from this session.
 ```
 
+## Mermaid Diagrams for Compression
+
+**Look for opportunities** to use Mermaid diagrams when the learning involves:
+- Multi-step workflows with branching (3+ steps)
+- State machines or decision trees
+- Data flow between components/services
+- Sequence of API calls or system interactions
+- Architectural relationships
+
+**Diagram types to consider:**
+- `flowchart TD` - Workflows, decision trees, branching logic
+- `sequenceDiagram` - API calls, request/response flows, component interactions
+- `stateDiagram-v2` - State machines, lifecycle events
+
+**Example - workflow compression:**
+```markdown
+## Solution
+
+```mermaid
+flowchart TD
+    A[Request arrives] --> B{Auth token?}
+    B -->|No| C[Return 401]
+    B -->|Yes| D{Token valid?}
+    D -->|No| C
+    D -->|Yes| E[Process request]
+```
+```
+
+**Skip diagrams when:**
+- Simple gotcha (just use bullets)
+- Single code snippet explains it
+- Configuration pattern
+- Error/fix pair
+
+Diagrams take more effort but compress complex flows into scannable format. Worth it for anything you'd naturally whiteboard.
+
 ## Critical Rules
 
 1. **Be selective** - 0-3 learnings per session, not 10
-2. **Keep files small** - Under 30 lines each
+2. **Keep files small** - Under 30 lines each (diagrams don't count heavily against this)
 3. **No duplicate checking** - Just write, deduplication handled separately
 4. **No CLAUDE.md updates** - That's a separate concern
 5. **No hook creation** - That's a separate concern
 6. **No indexing** - User runs /index-learnings when ready
 7. **Default to repo scope** - Only use global for truly universal patterns
+8. **Look for diagram opportunities** - Complex flows compress well into Mermaid
