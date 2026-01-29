@@ -5,6 +5,12 @@
 
 DEBUG_LOG="$HOME/.claude/compound-hook-debug.log"
 
+# Prevent recursive execution: when we spawn claude -p below, that session
+# ending would trigger this hook again. This env var breaks the cycle.
+if [ -n "$CLAUDE_HOOK_EXTRACTING" ]; then
+  exit 0
+fi
+
 # Read hook input from stdin
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id')
@@ -31,7 +37,8 @@ if [ "$LINES" -lt 20 ]; then
 fi
 
 # Let Claude do everything: read transcript, analyze, write files
-claude -p "Read the transcript at $TRANSCRIPT and extract 0-3 meaningful learnings.
+# CLAUDE_HOOK_EXTRACTING prevents the spawned session from triggering this hook again
+CLAUDE_HOOK_EXTRACTING=1 claude -p "Read the transcript at $TRANSCRIPT and extract 0-3 meaningful learnings.
 
 For each learning:
 1. Determine scope: 'global' (~/.projects/learnings/) or 'repo' ($CWD/.projects/learnings/)
