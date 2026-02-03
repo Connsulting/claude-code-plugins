@@ -9,12 +9,14 @@ Queries the learning database (ChromaDB) for relevant patterns, gotchas, and bes
 - **High confidence** (distance < 0.5): Strong semantic match, highly relevant
 - **Possibly relevant** (distance 0.5-0.7): May be useful, review before applying
 
-## When to Use This Skill
+## When to Use This Skill (Use Manifest to Decide)
 
-**MANDATORY at conversation start** for non-trivial work:
-- User provides implementation task (NOT simple typos/cosmetic changes)
-- User mentions specific technology/library/framework
-- Any non-trivial implementation or exploration task
+Check the learnings manifest (`~/.projects/learnings/MANIFEST.md`) to see what topics have available learnings. The manifest shows topic counts and sample keywords.
+
+**Search when (manifest shows relevant topic):**
+- Task start: Manifest shows topic matching your task (e.g., "authentication" when implementing login)
+- Error/stuck: Manifest has topic matching error domain (e.g., "error-handling" for retry logic)
+- Security: Manifest shows security topic when working on auth/credentials/validation
 
 **High-signal triggers during execution:**
 - Security-sensitive operations (auth/token/password/encryption/api-key/secret)
@@ -23,9 +25,15 @@ Queries the learning database (ChromaDB) for relevant patterns, gotchas, and bes
 - Architectural decision points (choosing libraries, patterns, approaches)
 
 **Skip for:**
+- Manifest shows no related topics (saves tokens)
 - Pure typo fixes
 - Trivial cosmetic changes
 - Pure research tasks with no implementation
+
+**How to search effectively:**
+- Use topic name + specific context: "authentication JWT refresh token"
+- Not just the task description verbatim: "implement the login feature"
+- Pattern-match keywords from manifest: if manifest shows "OAuth, refresh tokens" under authentication, use those terms
 
 ## How It Works
 
@@ -188,8 +196,37 @@ If no learnings exist yet:
 
 ## Critical Rules
 
-1. **Always search at conversation start** for non-trivial work
-2. **High confidence = apply directly**: Trust results with distance < 0.5
-3. **Possibly relevant = review first**: Results 0.5-0.7 may need validation
-4. **Security keywords auto-trigger**: auth/token/password/encryption/api-key/secret
-5. **Empty results are OK**: Report and continue with general knowledge
+1. **Check manifest first**: Use `@~/.projects/learnings/MANIFEST.md` to see what topics exist
+2. **Search if manifest shows relevant topic**: Don't search blindly - use manifest to decide
+3. **Use topic + context in queries**: "authentication JWT refresh" not "implement login"
+4. **High confidence = apply directly**: Trust results with distance < 0.5
+5. **Possibly relevant = review first**: Results 0.5-0.7 may need validation
+6. **Security keywords auto-trigger**: auth/token/password/encryption/api-key/secret
+7. **Empty results are OK**: Report and continue with general knowledge
+
+## Using the Manifest
+
+The manifest (`~/.projects/learnings/MANIFEST.md`) summarizes available learnings:
+
+```markdown
+## Global Learnings (47 total, 12 corrections)
+
+| Topic | Count | Sample Keywords |
+|-------|-------|-----------------|
+| authentication | 12 (3⚠️) | JWT, OAuth, refresh tokens |
+| error-handling | 8 | retries, timeouts |
+```
+
+**How to use it:**
+1. Before searching, check if manifest shows a relevant topic
+2. Use topic name and keywords from manifest in your search query
+3. If manifest shows corrections (⚠️), prioritize searching that topic - corrections are "don't do X" learnings
+4. If no relevant topic exists, skip the search (saves tokens)
+
+**Example workflow:**
+```
+Task: "Implement JWT authentication"
+1. Check manifest -> sees "authentication | 12 (3⚠️) | JWT, OAuth, refresh tokens"
+2. Search: "authentication JWT refresh token patterns"
+3. Apply high-confidence results, review corrections carefully
+```

@@ -156,6 +156,58 @@ To re-index all learning files:
 /index-learnings
 ```
 
+This also generates **manifest files** summarizing learnings by topic. To regenerate manifests without re-indexing:
+```bash
+python3 ~/.claude/plugins/compound-learning/skills/index-learnings/index-learnings.py --rebuild-manifest
+```
+
+### Learnings Manifest
+
+The manifest provides a summary of available learnings by topic, helping Claude make informed decisions about when to search.
+
+**Manifest locations:**
+- `~/.projects/learnings/MANIFEST.md` - Global manifest (all learnings)
+- `[repo]/.projects/learnings/MANIFEST.md` - Repo-specific manifests
+
+**Example manifest:**
+```markdown
+# Learnings Manifest
+Generated: 2026-02-03T14:30:00Z
+
+## Global Learnings (47 total, 12 corrections)
+
+| Topic | Count | Sample Keywords |
+|-------|-------|-----------------|
+| authentication | 12 (3⚠️) | JWT, OAuth, refresh tokens, session |
+| error-handling | 8 | retries, timeouts, graceful degradation |
+| testing | 7 | mocks, fixtures, integration, edge cases |
+| performance | 6 | caching, N+1, lazy loading |
+| security | 5 | CORS, XSS, input validation |
+| other | 2 | |
+
+## Repo Learnings: my-project (23 total)
+
+| Topic | Count | Sample Keywords |
+|-------|-------|-----------------|
+| api-integration | 9 | GitHub, Slack, webhook |
+| memory-system | 4 | ChromaDB, extraction, indexing |
+| other | 2 | |
+```
+
+**Correction flagging:** Learnings containing "don't", "never", "avoid", "gotcha", etc. are flagged with ⚠️ to indicate they should be prioritized.
+
+**Adding explicit topics:** You can add a `**Topic:**` field to your learning files:
+```markdown
+# JWT Cookie Storage Best Practice
+
+**Type:** pattern
+**Tags:** jwt, authentication, cookies
+**Topic:** authentication
+
+## Problem
+...
+```
+
 ### Auto-Extraction via Hooks
 
 The plugin automatically extracts learnings at key moments without manual intervention:
@@ -214,14 +266,30 @@ Add this to your global `~/.claude/CLAUDE.md` to ensure Claude searches learning
 ```markdown
 ## Learning Compounding
 
-**Query learnings FIRST before any non-trivial task.**
+### Available Learnings
 
-When the user provides a task (not a greeting or typo fix), your FIRST action MUST be:
-Skill(skill="compound-learning:search-learnings", args="[task description]")
+@~/.projects/learnings/MANIFEST.md
+
+The manifest above shows what topics have existing learnings. Use it to decide when to search.
+
+### When to Search (Use Manifest to Decide)
+
+1. **Task start**: Search if manifest shows relevant topic exists for your task
+2. **Error/stuck**: Search if manifest has topic matching the error domain
+3. **Don't search**: If manifest shows no related topics (saves tokens)
+
+### How to Search Effectively
+
+Use topic name + specific context, not just the task description verbatim:
+- Good: "authentication JWT refresh token expiry"
+- Bad: "implement the login feature for the app"
+
+**Your FIRST action for non-trivial tasks:**
+Skill(skill="compound-learning:search-learnings", args="[topic] [specific context]")
 
 Do this BEFORE reading files, running commands, or planning implementation.
 
-**Mid-conversation peek (be smart about this):**
+### Mid-Conversation Peek
 
 Peek for additional learnings when things aren't going smoothly:
 - **Errors or failures**: Command fails, test fails, unexpected error message
