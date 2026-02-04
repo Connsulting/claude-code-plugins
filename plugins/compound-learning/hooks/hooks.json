@@ -1,24 +1,38 @@
 {
-  "description": "Auto-extract learnings before compaction and session end",
+  "description": "Auto-extract learnings on stop/compaction, auto-peek on prompt submit",
   "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "HOOK_TYPE=Stop bash ${CLAUDE_PLUGIN_ROOT}/hooks/extract-learnings.sh",
+            "timeout": 180000,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/auto-peek.sh",
+            "timeout": 15000,
+            "statusMessage": "Checking learnings..."
+          }
+        ]
+      }
+    ],
     "PreCompact": [
       {
         "hooks": [
           {
             "type": "command",
             "command": "HOOK_TYPE=PreCompact bash ${CLAUDE_PLUGIN_ROOT}/hooks/extract-learnings.sh",
-            "timeout": 180000
-          }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "HOOK_TYPE=SessionEnd bash ${CLAUDE_PLUGIN_ROOT}/hooks/extract-learnings.sh",
-            "timeout": 180000
+            "timeout": 180000,
+            "async": true
           }
         ]
       }

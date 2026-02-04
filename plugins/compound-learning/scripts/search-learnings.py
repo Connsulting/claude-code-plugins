@@ -280,7 +280,8 @@ def search_learnings(
     working_dir: str | None = None,
     max_results: int = 5,
     peek_mode: bool = False,
-    exclude_ids: str = ""
+    exclude_ids: str = "",
+    threshold_override: float | None = None
 ) -> None:
     """
     Search learnings with tiered relevance filtering.
@@ -292,12 +293,13 @@ def search_learnings(
         max_results: Maximum number of results to fetch from ChromaDB
         peek_mode: If True, return only high confidence results in simplified format
         exclude_ids: Comma separated learning IDs to exclude from results
+        threshold_override: Override the high confidence threshold from config
     """
     # Load configuration
     config = load_config()
     host = config['chromadb']['host']
     port = config['chromadb']['port']
-    high_threshold = config['learnings']['highConfidenceThreshold']
+    high_threshold = threshold_override if threshold_override is not None else config['learnings']['highConfidenceThreshold']
     possible_threshold = config['learnings']['possiblyRelevantThreshold']
     keyword_weight = config['learnings']['keywordBoostWeight']
 
@@ -447,6 +449,17 @@ if __name__ == '__main__':
                         help='Peek mode: only high confidence, no possibly_relevant')
     parser.add_argument('--exclude-ids', type=str, default='',
                         help='Comma separated learning IDs to exclude from results')
+    parser.add_argument('--threshold', type=float, default=None,
+                        help='Override high confidence threshold (default from config)')
+    parser.add_argument('--max-results', type=int, default=5,
+                        help='Maximum results to return')
 
     args = parser.parse_args()
-    search_learnings(args.query, args.working_dir, peek_mode=args.peek, exclude_ids=args.exclude_ids)
+    search_learnings(
+        args.query,
+        args.working_dir,
+        max_results=args.max_results,
+        peek_mode=args.peek,
+        exclude_ids=args.exclude_ids,
+        threshold_override=args.threshold
+    )

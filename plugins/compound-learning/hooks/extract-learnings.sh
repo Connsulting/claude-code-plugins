@@ -3,7 +3,11 @@
 # Auto-extract learnings from Claude sessions via hooks
 # Triggered by PreCompact and Stop hooks
 
-DEBUG_LOG="$HOME/.claude/compound-hook-debug.log"
+# Bail if plugin root not set (though this script doesn't use it directly,
+# the plugin context should always be available)
+if [ -z "$CLAUDE_PLUGIN_ROOT" ]; then
+  exit 0
+fi
 
 # Prevent recursive execution: when we spawn claude -p below, that session
 # ending would trigger this hook again. This env var breaks the cycle.
@@ -16,9 +20,6 @@ INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id')
 TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path')
 CWD=$(echo "$INPUT" | jq -r '.cwd')
-HOOK_TYPE="${HOOK_TYPE:-unknown}"
-
-echo "$(date '+%Y-%m-%d %H:%M:%S'): Hook triggered type=$HOOK_TYPE session=$SESSION_ID cwd=$CWD" >> "$DEBUG_LOG"
 
 # Expand ~ in transcript path
 TRANSCRIPT="${TRANSCRIPT/#\~/$HOME}"
@@ -38,7 +39,7 @@ fi
 
 # Let Claude do everything: read transcript, analyze, write files
 # CLAUDE_HOOK_EXTRACTING prevents the spawned session from triggering this hook again
-CLAUDE_HOOK_EXTRACTING=1 claude -p "Read the transcript at $TRANSCRIPT and extract 0-3 meaningful learnings.
+CLAUDE_HOOK_EXTRACTING=1 claude -p --no-session-persistence "Read the transcript at $TRANSCRIPT and extract 0-3 meaningful learnings.
 
 For each learning:
 1. Determine scope: 'global' (~/.projects/learnings/) or 'repo' ($CWD/.projects/learnings/)
