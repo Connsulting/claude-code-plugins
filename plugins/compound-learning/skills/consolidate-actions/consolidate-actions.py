@@ -336,7 +336,26 @@ def action_merge(ids: List[str], name: str, config: Dict[str, Any],
             merged_path = os.path.join(merged_dir, f"{name}-{date_str}-{counter}.md")
             counter += 1
 
+        # Collect tags and topics from source documents
+        all_tags = set()
+        all_topics = set()
+        for m in metadatas:
+            tags_str = m.get('tags', '') or m.get('keywords', '')
+            if tags_str:
+                all_tags.update(t.strip() for t in tags_str.split(',') if t.strip())
+            topic = m.get('topic', '')
+            if topic and topic != 'other':
+                all_topics.add(topic)
+
+        # Use first topic found, or derive from name
+        merged_topic = list(all_topics)[0] if all_topics else name.split('-')[0]
+        merged_tags = ', '.join(sorted(all_tags)[:8]) if all_tags else name.replace('-', ', ')
+
+        # Build structured merged content
         merged_content = f"# {name.replace('-', ' ').title()}\n\n"
+        merged_content += f"**Type:** pattern\n"
+        merged_content += f"**Topic:** {merged_topic}\n"
+        merged_content += f"**Tags:** {merged_tags}\n\n"
         merged_content += f"*Merged from {len(contents)} learnings on {date_str}*\n\n"
         merged_content += "---\n\n"
 
@@ -377,7 +396,9 @@ def action_merge(ids: List[str], name: str, config: Dict[str, Any],
             'repo': metadatas[0].get('repo', '') if merged_scope == 'repo' else '',
             'file_path': merged_path,
             'category': metadatas[0].get('category', 'general'),
-            'tags': ','.join(set(','.join(m.get('tags', '') for m in metadatas).split(','))),
+            'topic': merged_topic,
+            'tags': merged_tags,
+            'keywords': merged_tags,
             'summary': f'Merged learning: {name}'
         }
 

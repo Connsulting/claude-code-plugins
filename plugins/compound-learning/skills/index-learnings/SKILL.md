@@ -1,11 +1,11 @@
 ---
 name: index-learnings
-description: Index all learning markdown files into ChromaDB
+description: Index learning files into ChromaDB and generate topic manifest
 ---
 
 # Index Learnings
 
-Discovers and indexes all learning markdown files into ChromaDB for search.
+Indexes all learning markdown files into ChromaDB and generates a manifest summarizing topics.
 
 ## Usage
 
@@ -13,32 +13,58 @@ Discovers and indexes all learning markdown files into ChromaDB for search.
 /index-learnings
 ```
 
-## How It Works
+## What It Does
 
-When invoked via `Skill(skill="compound-learning:index-learnings")`, the skill automatically executes and outputs indexing progress.
+1. Discovers `.md` files in `~/.projects/learnings/` (global) and `[repo]/.projects/learnings/` (repo)
+2. Extracts `**Topic:**` and `**Tags:**` from each file
+3. Indexes into ChromaDB
+4. Generates `~/.projects/learnings/MANIFEST.md`
 
-## Output Format
+## Manifest Format
 
-**Success:**
+```markdown
+# Learnings Manifest
+Generated: 2026-02-03T14:30:00Z
+
+## Global Learnings (47 total, 3 gotchas)
+
+| Topic | Count | Keywords |
+|-------|-------|----------|
+| authentication | 12 (2⚠️) | jwt, oauth, refresh, session |
+| error-handling | 8 | retry, timeout, fallback |
+| testing | 7 | mock, fixture, integration |
+| other | 2 | |
+
+## Repo: my-project (23 total)
+
+| Topic | Count | Keywords |
+|-------|-------|----------|
+| api-integration | 9 | github, slack, webhook |
+| other | 2 | |
 ```
-Learning files indexed successfully
 
-Found and indexed:
-- Global:  X files
-- Repo:    Y files
-Total:     N documents in ChromaDB
-```
+- Topics and keywords come from explicit `**Topic:**` and `**Tags:**` fields (written by Claude)
+- `**Type:** gotcha` learnings are flagged with ⚠️
+- Falls back to "other" if no Topic specified
 
-**ChromaDB not running:**
-```
-ChromaDB is not running
+## Learning File Format
 
-Start it first with: /start-learning-db
+```markdown
+# Title
+
+**Type:** pattern | gotcha | security
+**Topic:** authentication
+**Tags:** jwt, oauth, refresh tokens
+
+## Problem
+...
+
+## Solution
+...
 ```
 
 ## Notes
 
-- Requires ChromaDB to be running (use /start-learning-db first)
-- Discovers files from ~/.projects/learnings/ (global) and ~/**/.projects/learnings/ (repo)
-- Automatically extracts tags and categories from content
-- Safe to run multiple times (uses upsert)
+- Requires ChromaDB running (`/start-learning-db`)
+- Safe to run multiple times (upsert)
+- Skips MANIFEST.md files

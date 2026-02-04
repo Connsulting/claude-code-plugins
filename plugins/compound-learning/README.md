@@ -156,6 +156,34 @@ To re-index all learning files:
 /index-learnings
 ```
 
+This also generates a **manifest** at `~/.projects/learnings/MANIFEST.md` summarizing learnings by topic.
+
+### Learnings Manifest
+
+The manifest helps Claude decide when to search by showing what topics have learnings:
+
+```markdown
+# Learnings Manifest
+Generated: 2026-02-03T14:30:00Z
+
+## Global Learnings (47 total, 3 gotchas)
+
+| Topic | Count | Keywords |
+|-------|-------|----------|
+| authentication | 12 (2⚠️) | jwt, oauth, refresh, session |
+| error-handling | 8 | retry, timeout, fallback |
+| other | 2 | |
+
+## Repo: my-project (23 total)
+
+| Topic | Count | Keywords |
+|-------|-------|----------|
+| api-integration | 9 | github, slack, webhook |
+```
+
+- Topics and keywords come from `**Topic:**` and `**Tags:**` fields in learning files
+- `**Type:** gotcha` learnings are flagged with ⚠️
+
 ### Auto-Extraction via Hooks
 
 The plugin automatically extracts learnings at key moments without manual intervention:
@@ -209,41 +237,20 @@ The search skill automatically detects which repository you're working in and in
 
 ## Recommended CLAUDE.md Configuration
 
-Add this to your global `~/.claude/CLAUDE.md` to ensure Claude searches learnings automatically:
+Add this to your global `~/.claude/CLAUDE.md`:
 
 ```markdown
 ## Learning Compounding
 
-**Query learnings FIRST before any non-trivial task.**
+@~/.projects/learnings/MANIFEST.md
 
-When the user provides a task (not a greeting or typo fix), your FIRST action MUST be:
-Skill(skill="compound-learning:search-learnings", args="[task description]")
+**When to search:** If manifest shows a topic matching your task, search for it.
+**When to skip:** If no relevant topic in manifest, don't search.
 
-Do this BEFORE reading files, running commands, or planning implementation.
+**Search:** `Skill(skill="compound-learning:search-learnings", args="[topic] [context]")`
+**Peek:** Add `--peek --exclude-ids [seen-ids]` when shifting to a new manifest topic mid-conversation.
 
-**Mid-conversation peek (be smart about this):**
-
-Peek for additional learnings when things aren't going smoothly:
-- **Errors or failures**: Command fails, test fails, unexpected error message
-- **User cancels/interrupts**: User stops a command or says "stop", "wait", "hold on"
-- **Stuck pattern**: 2+ attempts at same problem without progress
-- **User references past**: "we tried this before", "remember when"
-- **Domain shift**: Task moves to notably different area (frontend to database, API to auth)
-
-**How to peek:**
-Skill(skill="compound-learning:search-learnings",
-      args="[specific error/topic] --peek --exclude-ids [comma-separated IDs from initial search]")
-
-**ID tracking:**
-- After initial search at conversation start, remember the returned learning IDs
-- Pass all seen IDs to peek searches via --exclude-ids
-- This prevents re-surfacing the same learnings (avoids context bloat)
-
-**Peek output handling:**
-- If peek finds NEW learnings: "Found additional relevant learning about X" and apply it
-- If peek returns {"status": "empty"}: Continue silently (don't mention the peek)
-
-**Key principle:** Peek often, stay silent when empty. Cost of empty peek is near zero.
+Use topic + context: "authentication JWT refresh" not "implement login feature"
 ```
 
 ## Troubleshooting

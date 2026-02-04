@@ -57,7 +57,8 @@ Examples:
 # [One-Line Summary]
 
 **Type:** pattern | gotcha | security
-**Tags:** tag1, tag2
+**Topic:** [single word or hyphenated: authentication, error-handling, testing, database, etc.]
+**Tags:** [searchable keywords that will appear in manifest, comma-separated]
 
 ## Problem
 
@@ -75,6 +76,10 @@ Examples:
 
 [1-2 sentences explaining the root cause or reasoning]
 ```
+
+**Topic guidance:** Pick a broad category that groups related learnings (authentication, security, testing, performance, database, deployment, api-integration, error-handling, etc.)
+
+**Tags guidance:** These appear in the manifest to help future searches. Include specific technologies, concepts, and terms someone would search for.
 
 ## Your Process
 
