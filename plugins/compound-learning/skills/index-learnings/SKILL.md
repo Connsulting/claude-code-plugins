@@ -58,10 +58,9 @@ Generated: 2026-02-03T14:30:00Z
 | other | 2 | |
 ```
 
-**Topic detection priority:**
-1. Explicit `**Topic:**` field in the learning file
-2. Automatic detection from content keywords
-3. Fallback to "other"
+**Topic detection:**
+- Uses explicit `**Topic:**` field from learning file (written by Claude during extraction)
+- Falls back to "other" if not specified
 
 **Correction flagging:**
 - Learnings containing "don't", "never", "avoid", "mistake", "gotcha", etc. are flagged
@@ -121,7 +120,7 @@ You can explicitly set a topic in your learning files:
 ...
 ```
 
-If no `**Topic:**` is specified, the indexer auto-detects based on content keywords.
+If no `**Topic:**` is specified, the learning is categorized as "other".
 
 ## Notes
 

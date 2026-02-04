@@ -280,7 +280,6 @@ def detect_category(content: str) -> str:
 
 def extract_explicit_topic(content: str) -> str | None:
     """Extract explicit **Topic:** field from learning content"""
-    # Match **Topic:** or **topic:** followed by the value
     match = re.search(r'\*\*[Tt]opic:\*\*\s*(.+?)(?:\n|$)', content)
     if match:
         return match.group(1).strip().lower().replace(' ', '-')
@@ -289,61 +288,12 @@ def extract_explicit_topic(content: str) -> str | None:
 
 def detect_topic(content: str) -> str:
     """
-    Detect topic from learning content.
-
-    Priority:
-    1. Explicit **Topic:** field in content
-    2. More granular topic detection based on keywords
-    3. Fallback to "other"
+    Extract topic from learning content.
+    Relies on Claude having written an explicit **Topic:** field.
+    Falls back to "other" if not present.
     """
-    # First check for explicit topic
     explicit = extract_explicit_topic(content)
-    if explicit:
-        return explicit
-
-    content_lower = content.lower()
-
-    # Topic detection with more granular categories than detect_category
-    # Order matters - more specific matches first
-    topic_patterns = [
-        # Authentication & Security
-        ('authentication', ['jwt', 'oauth', 'login', 'session', 'refresh token', 'auth flow']),
-        ('security', ['xss', 'cors', 'csrf', 'injection', 'sanitiz', 'vulnerability', 'credential']),
-
-        # Error handling
-        ('error-handling', ['retry', 'timeout', 'graceful', 'fallback', 'exception', 'error handling']),
-
-        # Testing
-        ('testing', ['mock', 'fixture', 'test case', 'integration test', 'unit test', 'e2e', 'assertion']),
-
-        # Performance
-        ('performance', ['caching', 'n+1', 'lazy load', 'optimize', 'bottleneck', 'profil']),
-
-        # Deployment & DevOps
-        ('deployment', ['docker', 'kubernetes', 'k8s', 'ci/cd', 'pipeline', 'deploy']),
-        ('configuration', ['env var', 'environment', 'config', '.env', 'settings']),
-
-        # Database
-        ('database', ['migration', 'index', 'transaction', 'query', 'sql', 'orm']),
-
-        # API
-        ('api-integration', ['rest', 'graphql', 'endpoint', 'webhook', 'api call']),
-
-        # Architecture
-        ('architecture', ['pattern', 'design', 'structure', 'refactor', 'abstraction']),
-
-        # Frontend
-        ('frontend', ['component', 'render', 'state', 'css', 'style', 'layout']),
-
-        # Memory/Storage
-        ('memory-system', ['chromadb', 'vector', 'embedding', 'index', 'storage']),
-    ]
-
-    for topic, keywords in topic_patterns:
-        if any(kw in content_lower for kw in keywords):
-            return topic
-
-    return 'other'
+    return explicit if explicit else 'other'
 
 
 def extract_keywords(content: str) -> List[str]:
