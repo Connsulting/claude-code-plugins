@@ -348,55 +348,17 @@ def detect_topic(content: str) -> str:
 
 def extract_keywords(content: str) -> List[str]:
     """
-    Extract significant keywords from learning content for manifest.
-    Returns top keywords that help identify the learning's focus.
+    Extract keywords from the explicit **Tags:** field in learning content.
+    Relies on Claude having written good tags during learning extraction.
     """
-    content_lower = content.lower()
-
-    # Remove markdown formatting
-    content_clean = re.sub(r'```.*?```', '', content_lower, flags=re.DOTALL)  # Remove code blocks
-    content_clean = re.sub(r'[#*`\[\]()]', ' ', content_clean)  # Remove markdown chars
-    content_clean = re.sub(r'https?://\S+', '', content_clean)  # Remove URLs
-
-    # Significant technical keywords to look for
-    significant_keywords = {
-        # Auth
-        'jwt', 'oauth', 'token', 'session', 'cookie', 'refresh', 'authentication', 'authorization',
-        # Security
-        'cors', 'xss', 'csrf', 'injection', 'sanitize', 'validate', 'credential', 'secret',
-        # Error handling
-        'retry', 'timeout', 'fallback', 'graceful', 'degradation', 'exception', 'error',
-        # Testing
-        'mock', 'fixture', 'stub', 'spy', 'assertion', 'integration', 'unit', 'e2e', 'coverage',
-        # Performance
-        'cache', 'caching', 'lazy', 'eager', 'optimization', 'bottleneck', 'profiling', 'n+1',
-        # Database
-        'migration', 'index', 'transaction', 'query', 'sql', 'orm', 'schema', 'foreign key',
-        # API
-        'rest', 'graphql', 'endpoint', 'webhook', 'request', 'response', 'payload',
-        # Deployment
-        'docker', 'kubernetes', 'container', 'ci/cd', 'pipeline', 'deploy', 'environment',
-        # Frontend
-        'component', 'render', 'state', 'hook', 'effect', 'props', 'context',
-        # Architecture
-        'pattern', 'singleton', 'factory', 'middleware', 'decorator', 'abstraction',
-        # Technologies
-        'react', 'vue', 'angular', 'express', 'fastapi', 'django', 'flask',
-        'postgres', 'mysql', 'mongodb', 'redis', 'elasticsearch',
-        'aws', 'gcp', 'azure', 'terraform', 'ansible',
-        # Types
-        'gotcha', 'workaround', 'pitfall', 'caveat', 'edge case',
-    }
-
-    # Find which significant keywords appear in content
-    found_keywords = []
-    for keyword in significant_keywords:
-        # Match whole word (with some flexibility for plurals)
-        pattern = r'\b' + re.escape(keyword) + r's?\b'
-        if re.search(pattern, content_clean):
-            found_keywords.append(keyword)
-
-    return found_keywords[:8]  # Return top 8 keywords
+    # Match **Tags:** field
+    match = re.search(r'\*\*[Tt]ags:\*\*\s*(.+?)(?:\n|$)', content)
+    if match:
+        tags_str = match.group(1).strip()
+        # Split on commas and clean up
+        tags = [t.strip().lower() for t in tags_str.split(',') if t.strip()]
+        return tags[:8]
+    return []
 
 
 def detect_learning_type(content: str) -> str | None:

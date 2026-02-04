@@ -127,7 +127,7 @@ If no `**Topic:**` is specified, the indexer auto-detects based on content keywo
 
 - Requires ChromaDB to be running (use /start-learning-db first)
 - Discovers files from ~/.projects/learnings/ (global) and ~/**/.projects/learnings/ (repo)
-- Automatically extracts: tags, category, topic, keywords
+- Keywords in manifest come from explicit `**Tags:**` field in each learning (written by Claude during extraction)
 - Detects correction-type learnings ("don't do X") for manifest flagging
 - Safe to run multiple times (uses upsert)
 - Use `--rebuild-manifest` to regenerate manifests without re-indexing files

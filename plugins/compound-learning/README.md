@@ -291,12 +291,11 @@ Do this BEFORE reading files, running commands, or planning implementation.
 
 ### Mid-Conversation Peek
 
-Peek for additional learnings when things aren't going smoothly:
-- **Errors or failures**: Command fails, test fails, unexpected error message
-- **User cancels/interrupts**: User stops a command or says "stop", "wait", "hold on"
-- **Stuck pattern**: 2+ attempts at same problem without progress
+Peek when you start dealing with a topic that exists in the manifest:
+- **Topic shift to manifest topic**: Moving to work on authentication, database, testing, etc. - if manifest shows it, peek for it
+- **Error in manifest topic area**: Error occurs in a domain the manifest covers
+- **Stuck on manifest topic**: 2+ attempts at a problem in an area the manifest shows
 - **User references past**: "we tried this before", "remember when"
-- **Domain shift**: Task moves to notably different area (frontend to database, API to auth)
 
 **How to peek:**
 Skill(skill="compound-learning:search-learnings",

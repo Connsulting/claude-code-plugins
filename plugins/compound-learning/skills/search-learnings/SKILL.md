@@ -159,21 +159,20 @@ Agent:
 
 ### During Execution (Peek Mode)
 
-Use `--peek` mode when things aren't going smoothly:
-- **Errors or failures**: Command fails, test fails, unexpected error
-- **User cancels/interrupts**: User stops a command or says "stop", "wait"
-- **Stuck pattern**: 2+ attempts at same problem without progress
+Use `--peek` mode when:
+- **Topic shift to manifest topic**: You start working on a topic that exists in the manifest (e.g., moving from UI work to authentication - peek for "authentication")
+- **Errors in manifest topic area**: Error occurs in a domain covered by manifest (e.g., database error when manifest shows "database" topic)
+- **Stuck on manifest topic**: 2+ attempts at a problem in an area the manifest covers
 - **User references past**: "we tried this before", "remember when"
-- **Domain shift**: Task moves to different area (frontend to database, API to auth)
 
 ```markdown
-Agent encounters error while implementing feature:
-1. Run peek: search-learnings "specific error message" /workdir --peek --exclude-ids "ids,from,initial,search"
+Agent starts implementing database queries (manifest shows "database" topic):
+1. Run peek: search-learnings "database queries" /workdir --peek --exclude-ids "ids,from,initial,search"
 2. If peek finds NEW learnings: "Found additional relevant learning about X" and apply
 3. If peek returns empty: Continue silently (no message needed)
 ```
 
-**Key principle:** Peek often, stay silent when empty. Cost of empty peek is near zero, but finding a relevant learning mid-problem saves significant time.
+**Key principle:** Peek when entering a topic area that the manifest shows has learnings. Cost of empty peek is near zero.
 
 ## Key Benefits
 
