@@ -156,57 +156,33 @@ To re-index all learning files:
 /index-learnings
 ```
 
-This also generates **manifest files** summarizing learnings by topic. To regenerate manifests without re-indexing:
-```bash
-python3 ~/.claude/plugins/compound-learning/skills/index-learnings/index-learnings.py --rebuild-manifest
-```
+This also generates a **manifest** at `~/.projects/learnings/MANIFEST.md` summarizing learnings by topic.
 
 ### Learnings Manifest
 
-The manifest provides a summary of available learnings by topic, helping Claude make informed decisions about when to search.
+The manifest helps Claude decide when to search by showing what topics have learnings:
 
-**Manifest locations:**
-- `~/.projects/learnings/MANIFEST.md` - Global manifest (all learnings)
-- `[repo]/.projects/learnings/MANIFEST.md` - Repo-specific manifests
-
-**Example manifest:**
 ```markdown
 # Learnings Manifest
 Generated: 2026-02-03T14:30:00Z
 
-## Global Learnings (47 total, 12 corrections)
+## Global Learnings (47 total, 3 gotchas)
 
-| Topic | Count | Sample Keywords |
-|-------|-------|-----------------|
-| authentication | 12 (3⚠️) | JWT, OAuth, refresh tokens, session |
-| error-handling | 8 | retries, timeouts, graceful degradation |
-| testing | 7 | mocks, fixtures, integration, edge cases |
-| performance | 6 | caching, N+1, lazy loading |
-| security | 5 | CORS, XSS, input validation |
+| Topic | Count | Keywords |
+|-------|-------|----------|
+| authentication | 12 (2⚠️) | jwt, oauth, refresh, session |
+| error-handling | 8 | retry, timeout, fallback |
 | other | 2 | |
 
-## Repo Learnings: my-project (23 total)
+## Repo: my-project (23 total)
 
-| Topic | Count | Sample Keywords |
-|-------|-------|-----------------|
-| api-integration | 9 | GitHub, Slack, webhook |
-| memory-system | 4 | ChromaDB, extraction, indexing |
-| other | 2 | |
+| Topic | Count | Keywords |
+|-------|-------|----------|
+| api-integration | 9 | github, slack, webhook |
 ```
 
-**Correction flagging:** Learnings containing "don't", "never", "avoid", "gotcha", etc. are flagged with ⚠️ to indicate they should be prioritized.
-
-**Adding explicit topics:** You can add a `**Topic:**` field to your learning files:
-```markdown
-# JWT Cookie Storage Best Practice
-
-**Type:** pattern
-**Tags:** jwt, authentication, cookies
-**Topic:** authentication
-
-## Problem
-...
-```
+- Topics and keywords come from `**Topic:**` and `**Tags:**` fields in learning files
+- `**Type:** gotcha` learnings are flagged with ⚠️
 
 ### Auto-Extraction via Hooks
 
@@ -261,56 +237,20 @@ The search skill automatically detects which repository you're working in and in
 
 ## Recommended CLAUDE.md Configuration
 
-Add this to your global `~/.claude/CLAUDE.md` to ensure Claude searches learnings automatically:
+Add this to your global `~/.claude/CLAUDE.md`:
 
 ```markdown
 ## Learning Compounding
 
-### Available Learnings
-
 @~/.projects/learnings/MANIFEST.md
 
-The manifest above shows what topics have existing learnings. Use it to decide when to search.
+**When to search:** If manifest shows a topic matching your task, search for it.
+**When to skip:** If no relevant topic in manifest, don't search.
 
-### When to Search (Use Manifest to Decide)
+**Search:** `Skill(skill="compound-learning:search-learnings", args="[topic] [context]")`
+**Peek:** Add `--peek --exclude-ids [seen-ids]` when shifting to a new manifest topic mid-conversation.
 
-1. **Task start**: Search if manifest shows relevant topic exists for your task
-2. **Error/stuck**: Search if manifest has topic matching the error domain
-3. **Don't search**: If manifest shows no related topics (saves tokens)
-
-### How to Search Effectively
-
-Use topic name + specific context, not just the task description verbatim:
-- Good: "authentication JWT refresh token expiry"
-- Bad: "implement the login feature for the app"
-
-**Your FIRST action for non-trivial tasks:**
-Skill(skill="compound-learning:search-learnings", args="[topic] [specific context]")
-
-Do this BEFORE reading files, running commands, or planning implementation.
-
-### Mid-Conversation Peek
-
-Peek when you start dealing with a topic that exists in the manifest:
-- **Topic shift to manifest topic**: Moving to work on authentication, database, testing, etc. - if manifest shows it, peek for it
-- **Error in manifest topic area**: Error occurs in a domain the manifest covers
-- **Stuck on manifest topic**: 2+ attempts at a problem in an area the manifest shows
-- **User references past**: "we tried this before", "remember when"
-
-**How to peek:**
-Skill(skill="compound-learning:search-learnings",
-      args="[specific error/topic] --peek --exclude-ids [comma-separated IDs from initial search]")
-
-**ID tracking:**
-- After initial search at conversation start, remember the returned learning IDs
-- Pass all seen IDs to peek searches via --exclude-ids
-- This prevents re-surfacing the same learnings (avoids context bloat)
-
-**Peek output handling:**
-- If peek finds NEW learnings: "Found additional relevant learning about X" and apply it
-- If peek returns {"status": "empty"}: Continue silently (don't mention the peek)
-
-**Key principle:** Peek often, stay silent when empty. Cost of empty peek is near zero.
+Use topic + context: "authentication JWT refresh" not "implement login feature"
 ```
 
 ## Troubleshooting
