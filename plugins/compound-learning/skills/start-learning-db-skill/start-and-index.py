@@ -219,8 +219,8 @@ def find_learning_files(config: Dict[str, Any]) -> Tuple[List[Path], Dict[str, L
 
 def extract_metadata(file_path: Path, content: str, config: Dict[str, Any]) -> Dict[str, str]:
     """Extract metadata from file."""
-    path_str = str(file_path)
-    global_dir = config['learnings']['globalDir']
+    path_str = str(file_path.resolve())
+    global_dir = str(Path(config['learnings']['globalDir']).resolve())
 
     # Scope
     if path_str.startswith(global_dir):
