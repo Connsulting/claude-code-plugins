@@ -1,17 +1,15 @@
 #!/bin/bash
 
 # Auto-extract learnings from Claude sessions via hooks
-# Triggered by PreCompact and Stop hooks
+# Triggered by PreCompact and SessionEnd hooks
 
-# Bail if plugin root not set (though this script doesn't use it directly,
-# the plugin context should always be available)
+# Bail if plugin root not set
 if [ -z "$CLAUDE_PLUGIN_ROOT" ]; then
   exit 0
 fi
 
-# Prevent recursive execution: when we spawn claude -p below, that session
-# ending would trigger this hook again. This env var breaks the cycle.
-if [ -n "$CLAUDE_HOOK_EXTRACTING" ]; then
+# Skip all hooks for subprocess calls (prevents recursion)
+if [ -n "$CLAUDE_SUBPROCESS" ]; then
   exit 0
 fi
 
@@ -24,35 +22,45 @@ CWD=$(echo "$INPUT" | jq -r '.cwd')
 # Expand ~ in transcript path
 TRANSCRIPT="${TRANSCRIPT/#\~/$HOME}"
 
-# Simple cycle prevention: track processed sessions
-STATE="$HOME/.claude/compound-processed-sessions"
-mkdir -p "$(dirname "$STATE")"
-if grep -qx "$SESSION_ID" "$STATE" 2>/dev/null; then
-  exit 0
-fi
-
-# Skip tiny transcripts (trivial sessions like the -p call itself)
+# Skip tiny transcripts (trivial sessions)
 LINES=$(wc -l < "$TRANSCRIPT" 2>/dev/null || echo "0")
 if [ "$LINES" -lt 20 ]; then
   exit 0
 fi
 
-# Let Claude do everything: read transcript, analyze, write files
-# CLAUDE_HOOK_EXTRACTING prevents the spawned session from triggering this hook again
-CLAUDE_HOOK_EXTRACTING=1 claude -p --no-session-persistence "Read the transcript at $TRANSCRIPT and extract 0-3 meaningful learnings.
+# Extract just user/assistant messages (skip tool calls, file snapshots, metadata)
+# Limit to ~80KB to fit context window with prompt overhead
+MAX_BYTES=80000
+TRANSCRIPT_CONTENT=$(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/extract-transcript-messages.py" "$TRANSCRIPT" "$MAX_BYTES" 2>/dev/null)
+if [ -z "$TRANSCRIPT_CONTENT" ]; then
+  exit 0
+fi
 
-For each learning:
-1. Determine scope: 'global' (~/.projects/learnings/) or 'repo' ($CWD/.projects/learnings/)
-2. Write a markdown file with format: [topic]-[YYYY-MM-DD].md
-3. Include: title, type (pattern/gotcha/security), tags, problem, solution, why
+TODAY=$(date +%Y-%m-%d)
+GLOBAL_DIR="$HOME/.projects/learnings"
+REPO_DIR="$CWD/.projects/learnings"
 
-Be selective. Only extract genuine insights that help future work.
-If nothing meaningful, write no files.
+# Use heredoc to pass prompt via stdin (avoids temp files and arg size limits)
+CLAUDE_SUBPROCESS=1 claude -p --no-session-persistence \
+  --permission-mode bypassPermissions \
+  --add-dir "$HOME/.projects" "$CWD/.projects" \
+  --allowedTools "Write,Bash(mkdir:*)" \
+  <<PROMPT_END >/dev/null 2>&1
+Analyze this conversation transcript and extract 0-3 meaningful learnings.
 
-Output only the list of files written (one per line), or 'none' if no learnings." \
-  --allowedTools "Read,Write,Bash(mkdir:*)" \
-  2>/dev/null
+IMPORTANT: You MUST use the Write tool to create files. Do not just describe what you would write.
 
-# Mark as processed (only after successful extraction attempt)
-echo "$SESSION_ID" >> "$STATE"
+For each learning you extract:
+1. Use the Write tool to create a markdown file
+2. Path: ${GLOBAL_DIR}/[topic]-${TODAY}.md for global, or ${REPO_DIR}/[topic]-${TODAY}.md for repo-specific
+3. Content must include: # Title, **Type:** (pattern/gotcha/security), **Tags:**, ## Problem, ## Solution, ## Why
+
+Be selective - only extract genuine reusable insights.
+If nothing worth extracting, just output 'none'.
+
+<transcript>
+${TRANSCRIPT_CONTENT}
+</transcript>
+PROMPT_END
+
 exit 0

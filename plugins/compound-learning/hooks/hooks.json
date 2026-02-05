@@ -1,12 +1,12 @@
 {
-  "description": "Auto-extract learnings on stop/compaction, auto-peek on prompt submit",
+  "description": "Auto-extract learnings on session end/compaction, auto-peek on prompt submit",
   "hooks": {
-    "Stop": [
+    "SessionEnd": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "HOOK_TYPE=Stop bash ${CLAUDE_PLUGIN_ROOT}/hooks/extract-learnings.sh",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/extract-learnings.sh",
             "timeout": 180000,
             "async": true
           }
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "HOOK_TYPE=PreCompact bash ${CLAUDE_PLUGIN_ROOT}/hooks/extract-learnings.sh",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/extract-learnings.sh",
             "timeout": 180000,
             "async": true
           }

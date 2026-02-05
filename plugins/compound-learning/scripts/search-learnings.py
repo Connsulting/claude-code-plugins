@@ -9,6 +9,7 @@ import sys
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Set
 
@@ -275,25 +276,78 @@ def hybrid_rerank(
     return sorted(results, key=lambda x: x['distance'])
 
 
+def query_single_keyword(
+    collection: Any,
+    keyword: str,
+    combined_filter: Dict[str, Any],
+    query_size: int
+) -> List[Dict[str, Any]]:
+    """Query ChromaDB for a single keyword. Returns list of result dicts."""
+    results = collection.query(
+        query_texts=[keyword],
+        where=combined_filter,
+        n_results=query_size,
+        include=["documents", "metadatas", "distances"]
+    )
+
+    raw_results: List[Dict[str, Any]] = []
+    ids = results.get('ids')
+    if ids and ids[0] and len(ids[0]) > 0:
+        distances = results.get('distances', [[]])
+        documents = results.get('documents', [[]])
+        metadatas = results.get('metadatas', [[]])
+
+        for i in range(len(ids[0])):
+            distance = distances[0][i] if distances and len(distances[0]) > i else 1.0
+            result_item = {
+                'id': ids[0][i],
+                'document': documents[0][i] if documents and len(documents[0]) > i else "",
+                'metadata': metadatas[0][i] if metadatas and len(metadatas[0]) > i else {},
+                'distance': round(distance, 4),
+                'matched_keyword': keyword
+            }
+            raw_results.append(result_item)
+
+    return raw_results
+
+
+def merge_parallel_results(
+    all_results: List[List[Dict[str, Any]]]
+) -> List[Dict[str, Any]]:
+    """Merge results from parallel keyword queries, keeping best distance per ID."""
+    best_by_id: Dict[str, Dict[str, Any]] = {}
+
+    for result_list in all_results:
+        for result in result_list:
+            doc_id = result['id']
+            if doc_id not in best_by_id or result['distance'] < best_by_id[doc_id]['distance']:
+                best_by_id[doc_id] = result
+
+    # Return sorted by distance
+    return sorted(best_by_id.values(), key=lambda x: x['distance'])
+
+
 def search_learnings(
     query: str,
     working_dir: str | None = None,
     max_results: int = 5,
     peek_mode: bool = False,
     exclude_ids: str = "",
-    threshold_override: float | None = None
+    threshold_override: float | None = None,
+    keywords_json: str | None = None
 ) -> None:
     """
     Search learnings with tiered relevance filtering.
     Returns high confidence results (distance < 0.5) and possibly relevant (0.5-0.7).
 
     Args:
-        query: Search query text
+        query: Search query text (used if keywords_json not provided)
         working_dir: The user's working directory (where Claude was invoked)
         max_results: Maximum number of results to fetch from ChromaDB
         peek_mode: If True, return only high confidence results in simplified format
         exclude_ids: Comma separated learning IDs to exclude from results
         threshold_override: Override the high confidence threshold from config
+        keywords_json: JSON array of keywords to search in parallel (e.g. '["prompt caching", "TTL"]')
     """
     # Load configuration
     config = load_config()
@@ -303,12 +357,30 @@ def search_learnings(
     possible_threshold = config['learnings']['possiblyRelevantThreshold']
     keyword_weight = config['learnings']['keywordBoostWeight']
 
-    # Parse tag/category filters from query
-    cleaned_query, tag_filters = parse_tag_filters(query)
-    search_query = cleaned_query if cleaned_query else query
+    # Parse keywords from JSON if provided, otherwise use query as single keyword
+    if keywords_json:
+        try:
+            keywords = json.loads(keywords_json)
+            if not isinstance(keywords, list) or not keywords:
+                keywords = [query] if query else []
+        except json.JSONDecodeError:
+            keywords = [query] if query else []
+    else:
+        keywords = [query] if query else []
 
-    # Extract keywords for hybrid re-ranking
-    query_keywords = extract_query_keywords(search_query)
+    if not keywords:
+        print(json.dumps({'status': 'empty', 'message': 'No keywords provided'}))
+        return
+
+    # Parse tag/category filters from first keyword (for compatibility)
+    cleaned_query, tag_filters = parse_tag_filters(keywords[0])
+    if cleaned_query != keywords[0]:
+        keywords[0] = cleaned_query
+
+    # Extract keywords for hybrid re-ranking (from all keywords)
+    query_keywords = set()
+    for kw in keywords:
+        query_keywords.update(extract_query_keywords(kw))
 
     # Use provided working directory or fall back to cwd
     cwd = working_dir if working_dir else os.getcwd()
@@ -341,32 +413,22 @@ def search_learnings(
         # ChromaDB doesn't support ID exclusion at query time
         query_size = max_results + len(exclude_set)
 
-        # Query ChromaDB (returns sorted by distance)
-        results = collection.query(
-            query_texts=[search_query],
-            where=combined_filter,
-            n_results=query_size,
-            include=["documents", "metadatas", "distances"]
-        )
+        # Run parallel queries for each keyword
+        all_results: List[List[Dict[str, Any]]] = []
+        with ThreadPoolExecutor(max_workers=len(keywords)) as executor:
+            futures = {
+                executor.submit(query_single_keyword, collection, kw, combined_filter, query_size): kw
+                for kw in keywords
+            }
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    all_results.append(result)
+                except Exception:
+                    pass  # Skip failed queries
 
-        # Collect raw results
-        raw_results: List[Dict[str, Any]] = []
-
-        ids = results.get('ids')
-        if ids and ids[0] and len(ids[0]) > 0:
-            distances = results.get('distances', [[]])
-            documents = results.get('documents', [[]])
-            metadatas = results.get('metadatas', [[]])
-
-            for i in range(len(ids[0])):
-                distance = distances[0][i] if distances and len(distances[0]) > i else 1.0
-                result_item = {
-                    'id': ids[0][i],
-                    'document': documents[0][i] if documents and len(documents[0]) > i else "",
-                    'metadata': metadatas[0][i] if metadatas and len(metadatas[0]) > i else {},
-                    'distance': round(distance, 4)
-                }
-                raw_results.append(result_item)
+        # Merge results from parallel queries
+        raw_results = merge_parallel_results(all_results)
 
         # Apply hybrid re-ranking (keyword boost)
         reranked_results = hybrid_rerank(raw_results, query_keywords, keyword_weight)
@@ -391,17 +453,18 @@ def search_learnings(
                 output = {
                     'status': 'found',
                     'count': len(high_confidence),
+                    'keywords_searched': keywords,
                     'learnings': high_confidence
                 }
             else:
-                output = {'status': 'empty'}
+                output = {'status': 'empty', 'keywords_searched': keywords}
 
             print(json.dumps(output, indent=2))
             return
 
         # Build output
         total_found = len(high_confidence) + len(possibly_relevant)
-        candidates_searched = len(results["ids"][0]) if results["ids"] else 0
+        candidates_searched = len(raw_results)
 
         if total_found == 0:
             output = {
@@ -443,7 +506,7 @@ if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser(description='Search learnings in ChromaDB')
-    parser.add_argument('query', help='Search query text')
+    parser.add_argument('query', nargs='?', default='', help='Search query text (ignored if --keywords-json provided)')
     parser.add_argument('working_dir', nargs='?', default=None, help='Working directory')
     parser.add_argument('--peek', action='store_true',
                         help='Peek mode: only high confidence, no possibly_relevant')
@@ -453,6 +516,8 @@ if __name__ == '__main__':
                         help='Override high confidence threshold (default from config)')
     parser.add_argument('--max-results', type=int, default=5,
                         help='Maximum results to return')
+    parser.add_argument('--keywords-json', type=str, default=None,
+                        help='JSON array of keywords to search in parallel (e.g. \'["prompt caching", "TTL"]\')')
 
     args = parser.parse_args()
     search_learnings(
@@ -461,5 +526,6 @@ if __name__ == '__main__':
         max_results=args.max_results,
         peek_mode=args.peek,
         exclude_ids=args.exclude_ids,
-        threshold_override=args.threshold
+        threshold_override=args.threshold,
+        keywords_json=args.keywords_json
     )

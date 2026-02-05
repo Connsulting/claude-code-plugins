@@ -9,8 +9,8 @@ if [ -z "$CLAUDE_PLUGIN_ROOT" ]; then
   exit 0
 fi
 
-# Prevent recursive execution from our own claude -p call
-if [ -n "$CLAUDE_HOOK_PEEKING" ]; then
+# Skip all hooks for subprocess calls (prevents recursion)
+if [ -n "$CLAUDE_SUBPROCESS" ]; then
   exit 0
 fi
 
@@ -50,26 +50,35 @@ trap "rm -f $EMPTY_MCP" EXIT
 
 # Build the Haiku prompt with optional context
 if [ -n "$CONTEXT" ]; then
-  HAIKU_PROMPT="Extract 1-3 technical keywords from this conversation for a developer knowledge base search. Topics: aws, kubernetes, security, database, debugging, deployment, nodejs, git, docker, python.
+  HAIKU_PROMPT="Extract 1-2 keywords for a knowledge base search. Use context to understand what user means, but extract keywords for what they're ASKING about.
 
-Recent context:
-$CONTEXT
+Rules:
+- Max 2 keywords, each 1-2 words only
+- Focus on the core technical topic
+- Examples: \"kubernetes\", \"prompt caching\", \"git rebase\", \"docker\"
 
-User message: $PROMPT
+Context: $CONTEXT
 
-Return JSON only: {\"keywords\": [\"word1\", \"word2\"]} or {\"keywords\": []}"
+User asks: $PROMPT
+
+JSON only: {\"keywords\": [\"keyword1\", \"keyword2\"]}"
 else
-  HAIKU_PROMPT="Extract 1-3 technical keywords from this prompt for a developer knowledge base search. Topics: aws, kubernetes, security, database, debugging, deployment, nodejs, git, docker, python.
+  HAIKU_PROMPT="Extract 1-2 technical keywords from this prompt.
+
+Rules:
+- Max 2 keywords, each 1-2 words only
+- Focus on the core technical topic
+- Examples: \"kubernetes\", \"prompt caching\", \"git rebase\", \"docker\"
 
 Prompt: $PROMPT
 
-Return JSON only: {\"keywords\": [\"word1\", \"word2\"]} or {\"keywords\": []}"
+JSON only: {\"keywords\": [\"keyword1\", \"keyword2\"]}"
 fi
 
 # Use Haiku to extract search keywords
 # This is fast because: no MCP, no tools, just prompt/response
 # Use timeout to prevent hook from hanging
-export CLAUDE_HOOK_PEEKING=1
+export CLAUDE_SUBPROCESS=1
 KEYWORDS_JSON=$(timeout 15 claude -p \
   --no-session-persistence \
   --model haiku \
@@ -81,21 +90,24 @@ KEYWORDS_JSON=$(timeout 15 claude -p \
 # Parse keywords from Haiku response (handles markdown-wrapped JSON)
 # Haiku may return: {"result": "```json\n{\"keywords\": [...]}\n```"}
 # Use pure jq to strip markdown fences and parse JSON
-KEYWORDS=$(echo "$KEYWORDS_JSON" | jq -r '.result // empty | gsub("```json"; "") | gsub("```"; "") | fromjson | .keywords // [] | join(" ")' 2>/dev/null)
+# Limit to first 2 keywords, keep as JSON array for parallel search
+RESULT_FIELD=$(echo "$KEYWORDS_JSON" | jq -r '.result // empty' 2>/dev/null)
+KEYWORDS_ARRAY=$(echo "$KEYWORDS_JSON" | jq -c '.result // empty | gsub("```json"; "") | gsub("```"; "") | fromjson | .keywords // [] | .[0:2]' 2>/dev/null)
+KEYWORDS_DISPLAY=$(echo "$KEYWORDS_ARRAY" | jq -r 'join(", ")' 2>/dev/null)
 
 # If no keywords extracted, skip search
-if [ -z "$KEYWORDS" ] || [ "$KEYWORDS" = "null" ]; then
+if [ -z "$KEYWORDS_ARRAY" ] || [ "$KEYWORDS_ARRAY" = "null" ] || [ "$KEYWORDS_ARRAY" = "[]" ]; then
   exit 0
 fi
 
-# Search with extracted keywords, exclude seen IDs
-# Threshold 0.5 is permissive since exclude-ids prevents duplicates
+# Search with extracted keywords in parallel, exclude seen IDs
+# Each keyword is searched independently and results are merged
 SEARCH_RESULT=$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/search-learnings.py" \
   --peek \
   --threshold 0.5 \
   --max-results 2 \
   --exclude-ids "$EXCLUDE_IDS" \
-  "$KEYWORDS" \
+  --keywords-json "$KEYWORDS_ARRAY" \
   "$CWD" 2>/dev/null)
 
 # Check if we got results
@@ -106,13 +118,13 @@ fi
 
 STATUS=$(echo "$SEARCH_RESULT" | jq -r '.status' 2>/dev/null)
 if [ "$STATUS" != "found" ]; then
-  echo "[auto-peek] no learnings for: $KEYWORDS"
+  echo "[auto-peek] no learnings for: $KEYWORDS_DISPLAY"
   exit 0
 fi
 
 # Format compact output for Claude's context
 COUNT=$(echo "$SEARCH_RESULT" | jq -r '.count' 2>/dev/null)
-echo "[auto-peek] $COUNT learning(s) found for: $KEYWORDS"
+echo "[auto-peek] $COUNT learning(s) found for: $KEYWORDS_DISPLAY"
 
 # Show compact summary: filename and first line of summary/title
 echo "$SEARCH_RESULT" | jq -r '.learnings[] | "  -> " + (.metadata.file_path | split("/") | .[-1]) + ": " + (.metadata.summary // .document | split("\n")[0] | .[0:80])' 2>/dev/null
