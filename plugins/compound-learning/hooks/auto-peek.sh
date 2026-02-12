@@ -9,6 +9,15 @@ if [ -z "$CLAUDE_PLUGIN_ROOT" ]; then
   exit 0
 fi
 
+# Setup logging
+LOG_DIR="$HOME/.claude/plugins/compound-learning"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/activity.log"
+
+log_activity() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
+}
+
 # Skip all hooks for subprocess calls (prevents recursion)
 if [ -n "$CLAUDE_SUBPROCESS" ]; then
   exit 0
@@ -125,6 +134,12 @@ fi
 # Format compact output for Claude's context
 COUNT=$(echo "$SEARCH_RESULT" | jq -r '.count' 2>/dev/null)
 echo "[auto-peek] $COUNT learning(s) found for: $KEYWORDS_DISPLAY"
+
+# Log search results with details
+log_activity "SEARCH: query='$KEYWORDS_DISPLAY' count=$COUNT"
+echo "$SEARCH_RESULT" | jq -r '.learnings[] | "  file: \(.metadata.file_path | split("/") | .[-1])  title: \(.metadata.summary // .document | split("\n")[0] | .[0:100])  id: \(.id)"' 2>/dev/null | while read -r line; do
+  log_activity "  RESULT: $line"
+done
 
 # Show compact summary: filename and first line of summary/title
 echo "$SEARCH_RESULT" | jq -r '.learnings[] | "  -> " + (.metadata.file_path | split("/") | .[-1]) + ": " + (.metadata.summary // .document | split("\n")[0] | .[0:80])' 2>/dev/null
