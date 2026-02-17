@@ -270,6 +270,10 @@ Use topic + context: "authentication JWT refresh" not "implement login feature"
 - Verify ChromaDB is running
 - Ensure learnings have been indexed
 
+**Hook activity log:**
+- Hook activity is logged to `~/.claude/plugins/compound-learning/activity.log`
+- Use this to verify hooks are running and debug extraction issues
+
 ## Development
 
 The plugin uses upsert operations for indexing, making it safe to re-run indexing without creating duplicates. ChromaDB data persists in the configured `dataDir` across container restarts.
