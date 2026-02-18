@@ -264,6 +264,19 @@ def index_learning_files():
         except Exception as e:
             print(f"  [ERROR] {file_path.name}: {e}")
 
+    # Prune orphaned entries whose files no longer exist on disk
+    all_docs = db.get_all_documents(conn, include_content=False)
+    pruned = 0
+    for doc_id, metadata in zip(all_docs['ids'], all_docs['metadatas']):
+        file_path_str = metadata.get('file_path', '')
+        if file_path_str and not os.path.exists(file_path_str):
+            db.delete_document(conn, doc_id)
+            pruned += 1
+    if pruned:
+        print(f"[OK] Pruned {pruned} orphaned entries")
+    else:
+        print("[OK] No orphaned entries found")
+
     conn.close()
     print(f"\n[OK] Indexed {indexed} files")
 
