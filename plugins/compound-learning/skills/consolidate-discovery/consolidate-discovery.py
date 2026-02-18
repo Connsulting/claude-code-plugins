@@ -98,7 +98,8 @@ def _search_all_scopes(conn, query_text: str, n_results: int) -> List[Dict[str, 
             [embedding_blob, n_results],
         ).fetchall()
 
-        return [{'id': row['id'], 'distance': float(row['distance'])} for row in rows]
+        # Normalize from [0, 2] to [0, 1] to match thresholds used elsewhere
+        return [{'id': row['id'], 'distance': float(row['distance']) / 2.0} for row in rows]
     except Exception:
         return []
 
