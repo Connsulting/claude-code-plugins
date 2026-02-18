@@ -1,6 +1,6 @@
 ---
 name: consolidate-discovery
-description: Find consolidation candidates in ChromaDB (compact output)
+description: Find consolidation candidates in SQLite (compact output)
 ---
 
 # Consolidate Discovery

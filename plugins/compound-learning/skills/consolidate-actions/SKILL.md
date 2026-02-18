@@ -38,7 +38,7 @@ python3 consolidate-actions.py merge --ids=id1,id2 --name=patterns --dry-run
 Fetch full document content for specified IDs. Use before merge/delete to review.
 
 ### delete
-Remove learnings from filesystem and ChromaDB. Creates backup in `~/.projects/archive/learnings/YYYY-MM-DD/`.
+Remove learnings from filesystem and SQLite. Creates backup in `~/.projects/archive/learnings/YYYY-MM-DD/`.
 
 ### archive
 Move learnings to archive directory (removes from active learnings but preserves content).
@@ -69,11 +69,10 @@ All actions return JSON:
 
 - All destructive ops create backups in `~/.projects/archive/learnings/YYYY-MM-DD/`
 - Backups include original file path info
-- ChromaDB entries are removed after successful file operations
+- SQLite entries are removed after successful file operations
 - Merge preserves source attribution in merged document
 
 ## Notes
 
-- Requires ChromaDB to be running
 - IDs come from consolidate-discovery output
 - Use `get` action to review full content before destructive actions

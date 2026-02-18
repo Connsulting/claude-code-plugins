@@ -263,8 +263,8 @@ def search(
 
     results = []
     for row in rows:
-        # sqlite-vec cosine distance is in [0, 2]; normalize to [0, 1] to match
-        # ChromaDB's cosine space so existing thresholds (0.5, 0.6, 0.25) work unchanged
+        # sqlite-vec cosine distance is in [0, 2]; normalize to [0, 1] so
+        # existing thresholds (0.5, 0.6, 0.25) work unchanged
         dist = float(row['distance']) / 2.0
         if dist > threshold:
             continue

@@ -1,11 +1,11 @@
 ---
 name: index-learnings
-description: Index learning files into ChromaDB and generate topic manifest
+description: Index learning files into SQLite and generate topic manifest
 ---
 
 # Index Learnings
 
-Indexes all learning markdown files into ChromaDB and generates a manifest summarizing topics.
+Indexes all learning markdown files into SQLite and generates a manifest summarizing topics.
 
 ## Usage
 
@@ -17,7 +17,7 @@ Indexes all learning markdown files into ChromaDB and generates a manifest summa
 
 1. Discovers `.md` files in `~/.projects/learnings/` (global) and `[repo]/.projects/learnings/` (repo)
 2. Extracts `**Topic:**` and `**Tags:**` from each file
-3. Indexes into ChromaDB
+3. Indexes into SQLite
 4. Generates `~/.projects/learnings/MANIFEST.md`
 
 ## Manifest Format

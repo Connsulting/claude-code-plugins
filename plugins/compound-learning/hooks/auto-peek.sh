@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Auto-peek learnings on UserPromptSubmit
-# Uses Haiku to extract keywords, then searches ChromaDB
+# Uses Haiku to extract keywords, then searches SQLite
 # Output is added as context Claude can see
 
 # Bail if plugin root not set
