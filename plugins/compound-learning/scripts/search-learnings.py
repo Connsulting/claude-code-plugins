@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """
-Search learnings in ChromaDB with distance threshold filtering
-Filters results before outputting to avoid context pollution
+Search learnings in SQLite with distance threshold filtering.
+Filters results before outputting to avoid context pollution.
 """
 
-import chromadb
 import sys
-import json
 import os
+
+# Locate plugin root so lib/ is importable regardless of cwd
+_PLUGIN_ROOT = os.environ.get('CLAUDE_PLUGIN_ROOT', os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, _PLUGIN_ROOT)
+
+import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Set
+
+import lib.db as db
 
 
 # Common stopwords to filter from query keywords
@@ -30,154 +36,25 @@ STOPWORDS = {
 }
 
 
-def load_config() -> Dict[str, Any]:
-    """Load configuration from environment variables, then config file, then defaults."""
-    home = os.path.expanduser('~')
-
-    # Default configuration
-    defaults = {
-        'chromadb': {
-            'host': 'localhost',
-            'port': 8000,
-            'dataDir': os.path.join(home, '.claude/chroma-data')
-        },
-        'learnings': {
-            'globalDir': os.path.join(home, '.projects/learnings'),
-            'repoSearchPath': home,
-            'highConfidenceThreshold': 0.5,
-            'possiblyRelevantThreshold': 0.6,
-            'keywordBoostWeight': 0.3
-        }
-    }
-
-    # Environment variables take highest priority (with validation)
-    env_port = os.environ.get('CHROMADB_PORT')
-    env_high_threshold = os.environ.get('LEARNINGS_HIGH_CONFIDENCE_THRESHOLD')
-    env_possible_threshold = os.environ.get('LEARNINGS_POSSIBLY_RELEVANT_THRESHOLD')
-    env_keyword_weight = os.environ.get('LEARNINGS_KEYWORD_BOOST_WEIGHT')
-    env_data_dir = os.environ.get('CHROMADB_DATA_DIR', '')
-    env_global_dir = os.environ.get('LEARNINGS_GLOBAL_DIR', '')
-    env_repo_path = os.environ.get('LEARNINGS_REPO_SEARCH_PATH', '')
-
-    # Validate numeric environment variables (silently use defaults on error)
-    parsed_port = None
-    if env_port:
-        try:
-            parsed_port = int(env_port)
-        except ValueError:
-            pass
-
-    parsed_high_threshold = None
-    if env_high_threshold:
-        try:
-            parsed_high_threshold = float(env_high_threshold)
-        except ValueError:
-            pass
-
-    parsed_possible_threshold = None
-    if env_possible_threshold:
-        try:
-            parsed_possible_threshold = float(env_possible_threshold)
-        except ValueError:
-            pass
-
-    parsed_keyword_weight = None
-    if env_keyword_weight:
-        try:
-            parsed_keyword_weight = float(env_keyword_weight)
-        except ValueError:
-            pass
-
-    env_config = {
-        'chromadb': {
-            'host': os.environ.get('CHROMADB_HOST'),
-            'port': parsed_port,
-            'dataDir': os.path.expanduser(env_data_dir) if env_data_dir else None
-        },
-        'learnings': {
-            'globalDir': os.path.expanduser(env_global_dir) if env_global_dir else None,
-            'repoSearchPath': os.path.expanduser(env_repo_path) if env_repo_path else None,
-            'highConfidenceThreshold': parsed_high_threshold,
-            'possiblyRelevantThreshold': parsed_possible_threshold,
-            'keywordBoostWeight': parsed_keyword_weight
-        }
-    }
-
-    # Try to load config file
-    plugin_root = os.environ.get('CLAUDE_PLUGIN_ROOT', os.path.join(home, '.claude'))
-    config_file = Path(plugin_root) / '.claude-plugin' / 'config.json'
-    file_config: Dict[str, Any] = {'chromadb': {}, 'learnings': {}}
-
-    if config_file.exists():
-        try:
-            with open(config_file, 'r') as f:
-                file_config = json.load(f)
-
-            # Expand ${HOME} in paths
-            for key in ['dataDir']:
-                if key in file_config.get('chromadb', {}):
-                    file_config['chromadb'][key] = file_config['chromadb'][key].replace('${HOME}', home)
-            for key in ['globalDir', 'repoSearchPath']:
-                if key in file_config.get('learnings', {}):
-                    file_config['learnings'][key] = file_config['learnings'][key].replace('${HOME}', home)
-        except Exception:
-            pass  # Silently fall back in skill context
-
-    # Merge: defaults <- file_config <- env_config (env wins)
-    result = defaults.copy()
-    for section in ['chromadb', 'learnings']:
-        if section in file_config:
-            for key, value in file_config[section].items():
-                if value is not None:
-                    result[section][key] = value
-        for key, value in env_config[section].items():
-            if value is not None:
-                result[section][key] = value
-
-    return result
-
-
 def detect_learning_hierarchy(cwd: str, home: str) -> List[str]:
     """Walk up from cwd to home, collect all dirs with .projects/learnings/"""
     repos = []
     current = Path(cwd)
     home_path = Path(home)
 
-    # Walk up from cwd, stopping at or before home
     while True:
-        # Check if this directory has .projects/learnings
         learning_dir = current / '.projects' / 'learnings'
         if learning_dir.exists() and current != home_path:
             repos.append(current.name)
 
-        # Stop when we reach home
         if current == home_path:
             break
-
-        # Stop when we reach root (parent == self)
         if current.parent == current:
             break
 
         current = current.parent
 
     return repos
-
-
-def build_scope_filter(repos: List[str]) -> Dict[str, Any]:
-    """Build ChromaDB where filter for hierarchical repo scoping"""
-    # Always include global
-    conditions: List[Dict[str, Any]] = [{"scope": {"$eq": "global"}}]
-
-    # Add all parent repos
-    for repo in repos:
-        conditions.append({
-            "$and": [
-                {"scope": {"$eq": "repo"}},
-                {"repo": {"$eq": repo}}
-            ]
-        })
-
-    return {"$or": conditions} if len(conditions) > 1 else conditions[0]
 
 
 def parse_tag_filters(query: str) -> Tuple[str, Dict[str, Any]]:
@@ -188,13 +65,11 @@ def parse_tag_filters(query: str) -> Tuple[str, Dict[str, Any]]:
     filters: Dict[str, Any] = {}
     cleaned = query
 
-    # Extract tag:value patterns
     tag_matches = re.findall(r'\btag:(\w+)', query, re.IGNORECASE)
     if tag_matches:
         filters['tags'] = [t.lower() for t in tag_matches]
         cleaned = re.sub(r'\btag:\w+\s*', '', cleaned)
 
-    # Extract category:value patterns
     cat_match = re.search(r'\bcategory:(\w+)', query, re.IGNORECASE)
     if cat_match:
         filters['category'] = cat_match.group(1).lower()
@@ -203,37 +78,9 @@ def parse_tag_filters(query: str) -> Tuple[str, Dict[str, Any]]:
     return cleaned.strip(), filters
 
 
-def build_tag_filter(tag_filters: Dict[str, Any]) -> Dict[str, Any] | None:
-    """Build ChromaDB where clause for tag/category filters."""
-    if not tag_filters:
-        return None
-
-    conditions: List[Dict[str, Any]] = []
-
-    # Category filter (exact match)
-    if 'category' in tag_filters:
-        conditions.append({"category": {"$eq": tag_filters['category']}})
-
-    # Tag filter (tags field contains the tag, using $contains for comma-separated)
-    # ChromaDB doesn't support $contains on strings, so we use $like pattern matching
-    # Since tags are stored as comma-separated, we check if tag appears in the string
-    if 'tags' in tag_filters:
-        for tag in tag_filters['tags']:
-            # Match tag at start, end, or surrounded by commas
-            conditions.append({"tags": {"$contains": tag}})
-
-    if not conditions:
-        return None
-    if len(conditions) == 1:
-        return conditions[0]
-    return {"$and": conditions}
-
-
 def extract_query_keywords(query: str) -> Set[str]:
     """Extract meaningful keywords from query, removing stopwords."""
-    # Tokenize on whitespace and punctuation
     tokens = re.findall(r'\b\w+\b', query.lower())
-    # Remove stopwords, keep words >= 2 chars
     return {t for t in tokens if t not in STOPWORDS and len(t) >= 2}
 
 
@@ -263,8 +110,6 @@ def hybrid_rerank(
     """
     for result in results:
         overlap = calculate_keyword_overlap(query_keywords, result['document'])
-        # Reduce distance (better score) when keywords match
-        # Boost factor: up to keyword_weight reduction
         result['keyword_overlap'] = round(overlap, 4)
         result['original_distance'] = result['distance']
         result['distance'] = round(
@@ -272,43 +117,23 @@ def hybrid_rerank(
             4
         )
 
-    # Re-sort by adjusted distance
     return sorted(results, key=lambda x: x['distance'])
 
 
 def query_single_keyword(
-    collection: Any,
+    conn: Any,
     keyword: str,
-    combined_filter: Dict[str, Any],
-    query_size: int
+    scope_repos: List[str],
+    query_size: int,
 ) -> List[Dict[str, Any]]:
-    """Query ChromaDB for a single keyword. Returns list of result dicts."""
-    results = collection.query(
-        query_texts=[keyword],
-        where=combined_filter,
-        n_results=query_size,
-        include=["documents", "metadatas", "distances"]
-    )
-
-    raw_results: List[Dict[str, Any]] = []
-    ids = results.get('ids')
-    if ids and ids[0] and len(ids[0]) > 0:
-        distances = results.get('distances', [[]])
-        documents = results.get('documents', [[]])
-        metadatas = results.get('metadatas', [[]])
-
-        for i in range(len(ids[0])):
-            distance = distances[0][i] if distances and len(distances[0]) > i else 1.0
-            result_item = {
-                'id': ids[0][i],
-                'document': documents[0][i] if documents and len(documents[0]) > i else "",
-                'metadata': metadatas[0][i] if metadatas and len(metadatas[0]) > i else {},
-                'distance': round(distance, 4),
-                'matched_keyword': keyword
-            }
-            raw_results.append(result_item)
-
-    return raw_results
+    """Query SQLite for a single keyword. Returns list of result dicts."""
+    try:
+        results = db.search(conn, keyword, scope_repos, n_results=query_size, threshold=1.0)
+        for r in results:
+            r['matched_keyword'] = keyword
+        return results
+    except Exception:
+        return []
 
 
 def merge_parallel_results(
@@ -323,7 +148,6 @@ def merge_parallel_results(
             if doc_id not in best_by_id or result['distance'] < best_by_id[doc_id]['distance']:
                 best_by_id[doc_id] = result
 
-    # Return sorted by distance
     return sorted(best_by_id.values(), key=lambda x: x['distance'])
 
 
@@ -339,20 +163,8 @@ def search_learnings(
     """
     Search learnings with tiered relevance filtering.
     Returns high confidence results (distance < 0.5) and possibly relevant (0.5-0.7).
-
-    Args:
-        query: Search query text (used if keywords_json not provided)
-        working_dir: The user's working directory (where Claude was invoked)
-        max_results: Maximum number of results to fetch from ChromaDB
-        peek_mode: If True, return only high confidence results in simplified format
-        exclude_ids: Comma separated learning IDs to exclude from results
-        threshold_override: Override the high confidence threshold from config
-        keywords_json: JSON array of keywords to search in parallel (e.g. '["prompt caching", "TTL"]')
     """
-    # Load configuration
-    config = load_config()
-    host = config['chromadb']['host']
-    port = config['chromadb']['port']
+    config = db.load_config()
     high_threshold = threshold_override if threshold_override is not None else config['learnings']['highConfidenceThreshold']
     possible_threshold = config['learnings']['possiblyRelevantThreshold']
     keyword_weight = config['learnings']['keywordBoostWeight']
@@ -378,46 +190,31 @@ def search_learnings(
         keywords[0] = cleaned_query
 
     # Extract keywords for hybrid re-ranking (from all keywords)
-    query_keywords = set()
+    query_keywords: Set[str] = set()
     for kw in keywords:
         query_keywords.update(extract_query_keywords(kw))
 
-    # Use provided working directory or fall back to cwd
     cwd = working_dir if working_dir else os.getcwd()
     home = os.path.expanduser('~')
 
     # Detect repo hierarchy
     repos = detect_learning_hierarchy(cwd, home)
 
-    # Build scope filter
-    scope_filter = build_scope_filter(repos)
-
-    # Build combined filter (scope + optional tags)
-    tag_filter = build_tag_filter(tag_filters)
-    if tag_filter:
-        combined_filter = {"$and": [scope_filter, tag_filter]}
-    else:
-        combined_filter = scope_filter
-
     try:
-        # Connect to ChromaDB
-        client = chromadb.HttpClient(host=host, port=port)
-        collection = client.get_collection(name="learnings")
+        conn = db.get_connection(config)
 
         # Parse exclusion IDs upfront to determine query size
         exclude_set: Set[str] = set()
         if exclude_ids:
             exclude_set = set(id.strip() for id in exclude_ids.split(',') if id.strip())
 
-        # Request extra results to compensate for client-side ID exclusion
-        # ChromaDB doesn't support ID exclusion at query time
         query_size = max_results + len(exclude_set)
 
-        # Run parallel queries for each keyword
+        # Run parallel queries for each keyword (SQLite is thread-safe for reads)
         all_results: List[List[Dict[str, Any]]] = []
         with ThreadPoolExecutor(max_workers=len(keywords)) as executor:
             futures = {
-                executor.submit(query_single_keyword, collection, kw, combined_filter, query_size): kw
+                executor.submit(query_single_keyword, conn, kw, repos, query_size): kw
                 for kw in keywords
             }
             for future in as_completed(futures):
@@ -425,7 +222,9 @@ def search_learnings(
                     result = future.result()
                     all_results.append(result)
                 except Exception:
-                    pass  # Skip failed queries
+                    pass
+
+        conn.close()
 
         # Merge results from parallel queries
         raw_results = merge_parallel_results(all_results)
@@ -433,7 +232,7 @@ def search_learnings(
         # Apply hybrid re-ranking (keyword boost)
         reranked_results = hybrid_rerank(raw_results, query_keywords, keyword_weight)
 
-        # Filter out excluded IDs (parsed earlier to determine query size)
+        # Filter out excluded IDs
         if exclude_set:
             reranked_results = [r for r in reranked_results if r['id'] not in exclude_set]
 
@@ -505,7 +304,7 @@ def search_learnings(
 if __name__ == '__main__':
     import argparse
 
-    parser = argparse.ArgumentParser(description='Search learnings in ChromaDB')
+    parser = argparse.ArgumentParser(description='Search learnings in SQLite')
     parser.add_argument('query', nargs='?', default='', help='Search query text (ignored if --keywords-json provided)')
     parser.add_argument('working_dir', nargs='?', default=None, help='Working directory')
     parser.add_argument('--peek', action='store_true',

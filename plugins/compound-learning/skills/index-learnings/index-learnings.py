@@ -1,87 +1,24 @@
 #!/usr/bin/env python3
 """
-Index all learning markdown files into ChromaDB.
+Index all learning markdown files into SQLite + sqlite-vec.
 Generates a manifest summarizing learnings by topic for CLAUDE.md integration.
 """
 
-import chromadb
-from pathlib import Path
+import sys
+import os
+
+# Locate plugin root so lib/ is importable regardless of cwd
+_PLUGIN_ROOT = os.environ.get('CLAUDE_PLUGIN_ROOT', os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, _PLUGIN_ROOT)
+
 import hashlib
 import re
-import sys
-import json
-import os
+from pathlib import Path
 from datetime import datetime, timezone
 from collections import defaultdict
 from typing import Dict, List, Tuple, Any
 
-
-def load_config() -> Dict[str, Any]:
-    """Load configuration from environment variables, then config file, then defaults."""
-    home = os.path.expanduser('~')
-
-    defaults = {
-        'chromadb': {
-            'host': 'localhost',
-            'port': 8000,
-        },
-        'learnings': {
-            'globalDir': os.path.join(home, '.projects/learnings'),
-            'repoSearchPath': home,
-        }
-    }
-
-    env_port = os.environ.get('CHROMADB_PORT')
-    parsed_port = None
-    if env_port:
-        try:
-            parsed_port = int(env_port)
-        except ValueError:
-            print(f"Warning: Invalid CHROMADB_PORT '{env_port}', using default")
-
-    env_config = {
-        'chromadb': {
-            'host': os.environ.get('CHROMADB_HOST'),
-            'port': parsed_port,
-        },
-        'learnings': {
-            'globalDir': os.environ.get('LEARNINGS_GLOBAL_DIR'),
-            'repoSearchPath': os.environ.get('LEARNINGS_REPO_SEARCH_PATH'),
-        }
-    }
-
-    # Expand paths
-    for key in ['globalDir', 'repoSearchPath']:
-        if env_config['learnings'][key]:
-            env_config['learnings'][key] = os.path.expanduser(env_config['learnings'][key])
-
-    # Try to load config file
-    plugin_root = os.environ.get('CLAUDE_PLUGIN_ROOT', os.path.join(home, '.claude'))
-    config_file = Path(plugin_root) / '.claude-plugin' / 'config.json'
-    file_config: Dict[str, Any] = {'chromadb': {}, 'learnings': {}}
-
-    if config_file.exists():
-        try:
-            with open(config_file, 'r') as f:
-                file_config = json.load(f)
-            for key in ['globalDir', 'repoSearchPath']:
-                if key in file_config.get('learnings', {}):
-                    file_config['learnings'][key] = file_config['learnings'][key].replace('${HOME}', home)
-        except Exception as e:
-            print(f"Warning: Failed to load config from {config_file}: {e}")
-
-    # Merge: defaults <- file_config <- env_config
-    result = defaults.copy()
-    for section in ['chromadb', 'learnings']:
-        if section in file_config:
-            for key, value in file_config[section].items():
-                if value is not None:
-                    result[section][key] = value
-        for key, value in env_config[section].items():
-            if value is not None:
-                result[section][key] = value
-
-    return result
+import lib.db as db
 
 
 def find_all_learning_files(config: Dict[str, Any]) -> Tuple[List[Path], Dict[str, List[Path]]]:
@@ -240,19 +177,12 @@ def _format_section(title: str, learnings: List[Dict[str, Any]]) -> List[str]:
     return lines
 
 
-def connect_chromadb(config: Dict[str, Any]):
-    """Connect to ChromaDB and return the learnings collection."""
-    client = chromadb.HttpClient(host=config['chromadb']['host'], port=config['chromadb']['port'])
-    collection = client.get_or_create_collection(name="learnings", metadata={"hnsw:space": "cosine"})
-    return collection
-
-
 def index_single_file(file_path: Path, config: Dict[str, Any]) -> bool:
-    """Index a single learning file into ChromaDB. Returns True on success."""
+    """Index a single learning file into SQLite. Returns True on success."""
     try:
-        collection = connect_chromadb(config)
+        conn = db.get_connection(config)
     except Exception as e:
-        print(f"[WARN] ChromaDB not available, skipping index: {e}")
+        print(f"[WARN] Failed to open database, skipping index: {e}")
         return False
 
     try:
@@ -266,26 +196,27 @@ def index_single_file(file_path: Path, config: Dict[str, Any]) -> bool:
         metadata['keywords'] = ','.join(keywords)
 
         doc_id = hashlib.md5(str(file_path.resolve()).encode()).hexdigest()
-        collection.upsert(ids=[doc_id], documents=[content], metadatas=[metadata])
+        db.upsert_document(conn, doc_id, content, metadata)
         print(f"[OK] Indexed: {file_path.name}")
         return True
     except Exception as e:
         print(f"[ERROR] Failed to index {file_path.name}: {e}")
         return False
+    finally:
+        conn.close()
 
 
 def index_learning_files():
     """Main indexing function."""
     print("Loading configuration...")
-    config = load_config()
+    config = db.load_config()
 
-    print("Connecting to ChromaDB...")
+    print("Opening database...")
     try:
-        collection = connect_chromadb(config)
-        print(f"[OK] Connected to ChromaDB")
+        conn = db.get_connection(config)
+        print(f"[OK] Database ready")
     except Exception as e:
-        print(f"[ERROR] Failed to connect to ChromaDB: {e}")
-        print("  Run /start-learning-db first")
+        print(f"[ERROR] Failed to open database: {e}")
         sys.exit(1)
 
     print("\nDiscovering learning files...")
@@ -297,6 +228,7 @@ def index_learning_files():
 
     if not all_files:
         print("\nNo learning files found. Run /compound to create some!")
+        conn.close()
         return
 
     print("\nIndexing...")
@@ -316,7 +248,7 @@ def index_learning_files():
             metadata['keywords'] = ','.join(keywords)
 
             doc_id = hashlib.md5(str(file_path.resolve()).encode()).hexdigest()
-            collection.upsert(ids=[doc_id], documents=[content], metadatas=[metadata])
+            db.upsert_document(conn, doc_id, content, metadata)
 
             scope_key = metadata['repo'] if metadata['scope'] == 'repo' else 'global'
             manifest_data[scope_key].append({
@@ -332,6 +264,7 @@ def index_learning_files():
         except Exception as e:
             print(f"  [ERROR] {file_path.name}: {e}")
 
+    conn.close()
     print(f"\n[OK] Indexed {indexed} files")
 
     if manifest_data:
@@ -340,12 +273,12 @@ def index_learning_files():
 
 if __name__ == '__main__':
     import argparse
-    parser = argparse.ArgumentParser(description='Index learning files into ChromaDB')
+    parser = argparse.ArgumentParser(description='Index learning files into SQLite')
     parser.add_argument('--file', metavar='PATH', help='Index a single file instead of all learnings')
     args = parser.parse_args()
 
     if args.file:
-        config = load_config()
+        config = db.load_config()
         file_path = Path(args.file).expanduser().resolve()
         if not file_path.exists():
             print(f"[ERROR] File not found: {file_path}")

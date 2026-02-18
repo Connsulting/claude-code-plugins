@@ -1,82 +1,31 @@
 #!/usr/bin/env python3
 """
-Discover consolidation candidates in ChromaDB.
+Discover consolidation candidates in SQLite.
 Returns compact output to avoid token bloat.
 """
 
-import chromadb
 import sys
-import json
 import os
+
+# Locate plugin root so lib/ is importable regardless of cwd
+_PLUGIN_ROOT = os.environ.get('CLAUDE_PLUGIN_ROOT', os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, _PLUGIN_ROOT)
+
+import json
 import argparse
-from pathlib import Path
 from typing import Dict, List, Any, Set
 
-
-def load_config() -> Dict[str, Any]:
-    """Load configuration from environment variables, then config file, then defaults."""
-    home = os.path.expanduser('~')
-
-    defaults = {
-        'chromadb': {
-            'host': 'localhost',
-            'port': 8000,
-        },
-        'consolidation': {
-            'duplicateThreshold': 0.25,  # Tighter threshold for true duplicates
-            'scopeKeywords': ['security', 'authentication', 'jwt', 'oauth', 'encryption',
-                             'password', 'token', 'api-key', 'secret', 'xss', 'sql-injection'],
-            'outdatedKeywords': ['temporary', 'workaround', 'deprecated', 'todo', 'fixme',
-                                'hack', 'remove later', 'obsolete']
-        }
-    }
-
-    env_port = os.environ.get('CHROMADB_PORT')
-    parsed_port = None
-    if env_port:
-        try:
-            parsed_port = int(env_port)
-        except ValueError:
-            pass
-
-    env_config = {
-        'chromadb': {
-            'host': os.environ.get('CHROMADB_HOST'),
-            'port': parsed_port,
-        }
-    }
-
-    plugin_root = os.environ.get('CLAUDE_PLUGIN_ROOT', os.path.join(home, '.claude'))
-    config_file = Path(plugin_root) / '.claude-plugin' / 'config.json'
-    file_config: Dict[str, Any] = {'chromadb': {}}
-
-    if config_file.exists():
-        try:
-            with open(config_file, 'r') as f:
-                file_config = json.load(f)
-        except Exception:
-            pass
-
-    result = defaults.copy()
-    for section in ['chromadb']:
-        if section in file_config:
-            for key, value in file_config[section].items():
-                if value is not None:
-                    result[section][key] = value
-        if section in env_config:
-            for key, value in env_config[section].items():
-                if value is not None:
-                    result[section][key] = value
-
-    return result
+import lib.db as db
 
 
-def find_duplicate_clusters(collection, threshold: float, limit: int = 20) -> List[Dict[str, Any]]:
+def find_duplicate_clusters(conn, config: Dict[str, Any], limit: int = 20) -> List[Dict[str, Any]]:
     """Find clusters of similar documents. Returns compact format."""
+    threshold = config['consolidation']['duplicateThreshold']
+
     seen_ids: Set[str] = set()
     clusters: List[Dict[str, Any]] = []
 
-    all_docs = collection.get(include=["metadatas", "documents"])
+    all_docs = db.get_all_documents(conn, include_content=True)
     if not all_docs or not all_docs.get('ids'):
         return clusters
 
@@ -92,23 +41,23 @@ def find_duplicate_clusters(collection, threshold: float, limit: int = 20) -> Li
         if not doc_content:
             continue
 
-        similar = collection.query(
-            query_texts=[doc_content],
-            n_results=min(5, len(all_ids)),
-            include=["distances"]
-        )
+        # Search for similar documents using this doc's content as query
+        # All repos in scope since we're comparing across the entire collection
+        similar = db.search(conn, doc_content, scope_repos=[], n_results=min(5, len(all_ids)), threshold=1.0)
 
-        if not similar.get('ids') or not similar['ids'][0]:
-            continue
+        # Override scope filtering: search returns global-only by default; here we want all docs
+        # We re-query using raw vector lookup to avoid scope restriction
+        similar = _search_all_scopes(conn, doc_content, n_results=min(5, len(all_ids)))
 
         cluster_ids = []
-        for other_id, distance in zip(similar['ids'][0], similar['distances'][0]):
+        for result in similar:
+            other_id = result['id']
+            distance = result['distance']
             if distance <= threshold and other_id not in seen_ids:
                 cluster_ids.append(other_id)
                 seen_ids.add(other_id)
 
         if len(cluster_ids) >= 2:
-            # Compact format: just file basenames and IDs
             files = []
             for cid in cluster_ids:
                 meta = id_to_meta.get(cid, {})
@@ -129,11 +78,37 @@ def find_duplicate_clusters(collection, threshold: float, limit: int = 20) -> Li
     return clusters
 
 
-def find_outdated_candidates(collection, outdated_keywords: List[str], limit: int = 20) -> List[Dict[str, Any]]:
+def _search_all_scopes(conn, query_text: str, n_results: int) -> List[Dict[str, Any]]:
+    """Search across all scopes (no scope filter) for duplicate detection."""
+    import struct
+
+    query_emb = db.get_embedding(query_text)
+    embedding_blob = struct.pack(f'{len(query_emb)}f', *query_emb)
+
+    try:
+        rows = conn.execute(
+            """
+            SELECT l.id, v.distance
+            FROM vec_learnings v
+            JOIN learnings l ON l.id = v.id
+            WHERE v.embedding MATCH ?
+              AND k = ?
+            ORDER BY v.distance
+            """,
+            [embedding_blob, n_results],
+        ).fetchall()
+
+        return [{'id': row['id'], 'distance': float(row['distance'])} for row in rows]
+    except Exception:
+        return []
+
+
+def find_outdated_candidates(conn, config: Dict[str, Any], limit: int = 20) -> List[Dict[str, Any]]:
     """Find learnings with outdated markers. Returns compact format."""
+    outdated_keywords = config['consolidation']['outdatedKeywords']
     candidates: List[Dict[str, Any]] = []
 
-    all_docs = collection.get(include=["documents", "metadatas"])
+    all_docs = db.get_all_documents(conn, include_content=True)
     if not all_docs or not all_docs.get('ids'):
         return candidates
 
@@ -150,7 +125,7 @@ def find_outdated_candidates(collection, outdated_keywords: List[str], limit: in
                 'id': doc_id,
                 'file': os.path.basename(fp) if fp else doc_id[:8],
                 'path': fp,
-                'markers': matching[:2]  # Limit markers shown
+                'markers': matching[:2]
             })
 
             if len(candidates) >= limit:
@@ -161,35 +136,32 @@ def find_outdated_candidates(collection, outdated_keywords: List[str], limit: in
 
 def run_discovery(mode: str = 'all', limit: int = 20) -> None:
     """Run consolidation discovery and output compact results."""
-    config = load_config()
-    host = config['chromadb']['host']
-    port = config['chromadb']['port']
+    config = db.load_config()
 
     try:
-        client = chromadb.HttpClient(host=host, port=port)
-        collection = client.get_collection(name="learnings")
+        conn = db.get_connection(config)
     except Exception as e:
         print(json.dumps({
             'status': 'error',
-            'message': f'Failed to connect to ChromaDB: {e}',
-            'hint': 'Run /start-learning-db first'
+            'message': f'Failed to open database: {e}',
+            'hint': 'Run /index-learnings first'
         }, indent=2))
         sys.exit(1)
 
     results: Dict[str, Any] = {
         'status': 'success',
-        'total_documents': collection.count(),
+        'total_documents': db.count_documents(conn),
         'duplicates': [],
         'outdated': []
     }
 
     if mode in ['all', 'duplicates']:
-        threshold = config['consolidation']['duplicateThreshold']
-        results['duplicates'] = find_duplicate_clusters(collection, threshold, limit)
+        results['duplicates'] = find_duplicate_clusters(conn, config, limit)
 
     if mode in ['all', 'outdated']:
-        keywords = config['consolidation']['outdatedKeywords']
-        results['outdated'] = find_outdated_candidates(collection, keywords, limit)
+        results['outdated'] = find_outdated_candidates(conn, config, limit)
+
+    conn.close()
 
     results['summary'] = {
         'duplicate_clusters': len(results['duplicates']),

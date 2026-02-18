@@ -65,6 +65,6 @@ Generated: 2026-02-03T14:30:00Z
 
 ## Notes
 
-- Requires ChromaDB running (`/start-learning-db`)
+- SQLite database auto-initialized on first run
 - Safe to run multiple times (upsert)
 - Skips MANIFEST.md files

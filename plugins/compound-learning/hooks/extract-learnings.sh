@@ -110,11 +110,11 @@ if [ -n "$CREATED_FILES" ]; then
         TITLE=$(grep -m1 "^# " "$FULL_PATH" 2>/dev/null | sed 's/^# //')
         [ -z "$TITLE" ] && TITLE="$FILENAME"
 
-        # Index the newly created file into ChromaDB (non-fatal if unavailable)
+        # Index the newly created file into SQLite (non-fatal if unavailable)
         if [ -f "$INDEX_SCRIPT" ]; then
           CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" python3 "$INDEX_SCRIPT" --file "$FULL_PATH" >> "$LOG_FILE" 2>&1 \
             && log_activity "  INDEXED: $FILENAME" \
-            || log_activity "  INDEX_SKIP: ChromaDB unavailable for $FILENAME"
+            || log_activity "  INDEX_SKIP: indexing failed for $FILENAME"
         fi
       fi
 

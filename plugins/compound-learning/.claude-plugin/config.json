@@ -1,8 +1,6 @@
 {
-  "chromadb": {
-    "host": "localhost",
-    "port": 8000,
-    "dataDir": "${HOME}/.claude/chroma-data"
+  "sqlite": {
+    "dbPath": "${HOME}/.claude/compound-learning.db"
   },
   "learnings": {
     "globalDir": "${HOME}/.projects/learnings",
