@@ -121,17 +121,21 @@ def hybrid_rerank(
 
 
 def query_single_keyword(
-    conn: Any,
+    config: Any,
     keyword: str,
     scope_repos: List[str],
     query_size: int,
 ) -> List[Dict[str, Any]]:
-    """Query SQLite for a single keyword. Returns list of result dicts."""
+    """Query SQLite for a single keyword. Opens its own connection (thread-safe)."""
     try:
-        results = db.search(conn, keyword, scope_repos, n_results=query_size, threshold=1.0)
-        for r in results:
-            r['matched_keyword'] = keyword
-        return results
+        conn = db.get_connection(config)
+        try:
+            results = db.search(conn, keyword, scope_repos, n_results=query_size, threshold=1.0)
+            for r in results:
+                r['matched_keyword'] = keyword
+            return results
+        finally:
+            conn.close()
     except Exception:
         return []
 
@@ -185,7 +189,7 @@ def search_learnings(
         return
 
     # Parse tag/category filters from first keyword (for compatibility)
-    cleaned_query, tag_filters = parse_tag_filters(keywords[0])
+    cleaned_query, _ = parse_tag_filters(keywords[0])
     if cleaned_query != keywords[0]:
         keywords[0] = cleaned_query
 
@@ -201,8 +205,6 @@ def search_learnings(
     repos = detect_learning_hierarchy(cwd, home)
 
     try:
-        conn = db.get_connection(config)
-
         # Parse exclusion IDs upfront to determine query size
         exclude_set: Set[str] = set()
         if exclude_ids:
@@ -210,11 +212,11 @@ def search_learnings(
 
         query_size = max_results + len(exclude_set)
 
-        # Run parallel queries for each keyword (SQLite is thread-safe for reads)
+        # Run parallel queries for each keyword; each call opens its own connection
         all_results: List[List[Dict[str, Any]]] = []
         with ThreadPoolExecutor(max_workers=len(keywords)) as executor:
             futures = {
-                executor.submit(query_single_keyword, conn, kw, repos, query_size): kw
+                executor.submit(query_single_keyword, config, kw, repos, query_size): kw
                 for kw in keywords
             }
             for future in as_completed(futures):
@@ -223,8 +225,6 @@ def search_learnings(
                     all_results.append(result)
                 except Exception:
                     pass
-
-        conn.close()
 
         # Merge results from parallel queries
         raw_results = merge_parallel_results(all_results)

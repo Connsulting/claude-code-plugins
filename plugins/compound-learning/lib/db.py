@@ -6,9 +6,23 @@ All four Python scripts import from here instead of duplicating database boilerp
 
 import json
 import os
-import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List
+
+try:
+    import sqlite3
+    _test_conn = sqlite3.connect(':memory:')
+    if not hasattr(_test_conn, 'enable_load_extension'):
+        raise AttributeError('no enable_load_extension')
+    _test_conn.close()
+except AttributeError:
+    try:
+        import pysqlite3 as sqlite3  # type: ignore[no-redef]
+    except ImportError:
+        raise ImportError(
+            'sqlite3 extension loading is not available. '
+            'Install pysqlite3-binary: pip install pysqlite3-binary'
+        )
 
 _model = None
 
