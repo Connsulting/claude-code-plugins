@@ -240,6 +240,40 @@ def _format_section(title: str, learnings: List[Dict[str, Any]]) -> List[str]:
     return lines
 
 
+def connect_chromadb(config: Dict[str, Any]):
+    """Connect to ChromaDB and return the learnings collection."""
+    client = chromadb.HttpClient(host=config['chromadb']['host'], port=config['chromadb']['port'])
+    collection = client.get_or_create_collection(name="learnings", metadata={"hnsw:space": "cosine"})
+    return collection
+
+
+def index_single_file(file_path: Path, config: Dict[str, Any]) -> bool:
+    """Index a single learning file into ChromaDB. Returns True on success."""
+    try:
+        collection = connect_chromadb(config)
+    except Exception as e:
+        print(f"[WARN] ChromaDB not available, skipping index: {e}")
+        return False
+
+    try:
+        content = file_path.read_text(encoding='utf-8')
+        metadata = extract_metadata_from_path(file_path, config)
+
+        topic = extract_topic(content)
+        keywords = extract_tags(content)
+
+        metadata['topic'] = topic
+        metadata['keywords'] = ','.join(keywords)
+
+        doc_id = hashlib.md5(str(file_path.resolve()).encode()).hexdigest()
+        collection.upsert(ids=[doc_id], documents=[content], metadatas=[metadata])
+        print(f"[OK] Indexed: {file_path.name}")
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to index {file_path.name}: {e}")
+        return False
+
+
 def index_learning_files():
     """Main indexing function."""
     print("Loading configuration...")
@@ -247,8 +281,7 @@ def index_learning_files():
 
     print("Connecting to ChromaDB...")
     try:
-        client = chromadb.HttpClient(host=config['chromadb']['host'], port=config['chromadb']['port'])
-        collection = client.get_or_create_collection(name="learnings", metadata={"hnsw:space": "cosine"})
+        collection = connect_chromadb(config)
         print(f"[OK] Connected to ChromaDB")
     except Exception as e:
         print(f"[ERROR] Failed to connect to ChromaDB: {e}")
@@ -306,4 +339,18 @@ def index_learning_files():
 
 
 if __name__ == '__main__':
-    index_learning_files()
+    import argparse
+    parser = argparse.ArgumentParser(description='Index learning files into ChromaDB')
+    parser.add_argument('--file', metavar='PATH', help='Index a single file instead of all learnings')
+    args = parser.parse_args()
+
+    if args.file:
+        config = load_config()
+        file_path = Path(args.file).expanduser().resolve()
+        if not file_path.exists():
+            print(f"[ERROR] File not found: {file_path}")
+            sys.exit(1)
+        success = index_single_file(file_path, config)
+        sys.exit(0 if success else 1)
+    else:
+        index_learning_files()

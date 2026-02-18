@@ -83,6 +83,8 @@ PROMPT_END
 CREATED_FILES=$(grep -E "\.projects/learnings/.*\.md" "$OUTPUT_FILE" 2>/dev/null | grep -v "file_path" | head -10)
 FILE_COUNT=0
 
+INDEX_SCRIPT="${CLAUDE_PLUGIN_ROOT}/skills/index-learnings/index-learnings.py"
+
 if [ -n "$CREATED_FILES" ]; then
   while IFS= read -r file_path; do
     # Clean up file path (remove ANSI codes, quotes, etc)
@@ -107,6 +109,13 @@ if [ -n "$CREATED_FILES" ]; then
         # Extract first # heading as title
         TITLE=$(grep -m1 "^# " "$FULL_PATH" 2>/dev/null | sed 's/^# //')
         [ -z "$TITLE" ] && TITLE="$FILENAME"
+
+        # Index the newly created file into ChromaDB (non-fatal if unavailable)
+        if [ -f "$INDEX_SCRIPT" ]; then
+          CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" python3 "$INDEX_SCRIPT" --file "$FULL_PATH" >> "$LOG_FILE" 2>&1 \
+            && log_activity "  INDEXED: $FILENAME" \
+            || log_activity "  INDEX_SKIP: ChromaDB unavailable for $FILENAME"
+        fi
       fi
 
       log_activity "  GENERATED: file=$FILENAME title=\"$TITLE\""
