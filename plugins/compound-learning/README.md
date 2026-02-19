@@ -154,6 +154,77 @@ How it works:
 
 **Note:** Extraction uses minimal permissions (`Read`, `Write`, `Bash(mkdir:*)`) and skips trivial sessions (<20 transcript lines).
 
+## MCP Server (Codex CLI / Cross-Tool)
+
+The plugin includes an MCP server that exposes search and index functionality to any MCP-compatible client. This is the recommended way to use compound-learning with **OpenAI Codex CLI** or other tools that support MCP but lack Claude Code's native hooks.
+
+### Setup
+
+1. Install dependencies:
+```bash
+pip install mcp sentence-transformers sqlite-vec
+```
+
+2. Configure your client:
+
+**Codex CLI** (`~/.codex/config.toml`):
+```toml
+[mcp_servers.compound-learning]
+type = "stdio"
+command = "python3"
+args = ["/path/to/plugins/compound-learning/mcp-server/server.py"]
+```
+
+**Claude Code** (`~/.claude/settings.json`) — if you prefer MCP over native hooks:
+```json
+{
+  "mcpServers": {
+    "compound-learning": {
+      "command": "python3",
+      "args": ["/path/to/plugins/compound-learning/mcp-server/server.py"]
+    }
+  }
+}
+```
+
+### Available MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `search_learnings` | Semantic search across all learnings. Supports parallel multi-keyword search, hybrid re-ranking, peek mode, and ID exclusion. |
+| `index_learnings` | Re-index all learning markdown files. Discovers global and repo-scoped files, generates embeddings, prunes orphans, and regenerates the manifest. |
+| `index_file` | Index a single `.md` file into the database. |
+| `get_stats` | Get knowledge base statistics: total count, topic breakdown, scope distribution. |
+
+### Codex + Claude Code Side-by-Side
+
+The MCP server and native Claude Code hooks share the same SQLite database. You can use both simultaneously — learnings extracted by Claude Code hooks are immediately searchable via the MCP server in Codex, and vice versa.
+
+### Limitations vs Native Hooks
+
+| Feature | Native Hooks (Claude Code) | MCP Server (Codex) |
+|---------|---------------------------|---------------------|
+| Auto-extract on session end | Yes | No — use `index_learnings` tool manually |
+| Auto-peek on every prompt | Yes | No — agent must call `search_learnings` explicitly |
+| Pre-compaction extraction | Yes | No |
+| Search learnings | Yes (auto + manual) | Yes (manual via tool call) |
+| Index learnings | Yes (auto + `/index-learnings`) | Yes (`index_learnings` tool) |
+
+### Recommended Codex Instructions
+
+Add to your Codex instructions file (or `AGENTS.md`):
+
+```
+## Knowledge Base
+
+You have access to a compound-learning MCP server with a searchable knowledge base.
+
+Before starting a task, call search_learnings with 1-2 keywords related to the task.
+After finishing work, remind the user to run index_learnings if new learning files were created.
+
+Use topic + context: "authentication JWT refresh" not "implement login feature".
+```
+
 ## Architecture
 
 ### Components
@@ -177,6 +248,9 @@ How it works:
 - **Hooks:**
   - `PreCompact`: Auto-extracts learnings before context compaction
   - `Stop`: Auto-extracts learnings when Claude finishes responding
+
+- **MCP Server:**
+  - `mcp-server/server.py`: Exposes search/index as MCP tools for Codex CLI and other clients
 
 ### Learning Scopes
 
