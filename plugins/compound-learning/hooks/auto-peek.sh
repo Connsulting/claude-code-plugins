@@ -27,6 +27,9 @@ fi
 INPUT=$(cat)
 PROMPT=$(echo "$INPUT" | jq -r '.prompt')
 TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path')
+if [ -z "$TRANSCRIPT" ] || [ "$TRANSCRIPT" = "null" ]; then
+  exit 0
+fi
 CWD=$(echo "$INPUT" | jq -r '.cwd')
 
 # Skip empty or very short prompts
@@ -37,12 +40,21 @@ fi
 # Expand ~ in transcript path
 TRANSCRIPT="${TRANSCRIPT/#\~/$HOME}"
 
-# Extract learning IDs already shown in this session from transcript
-# Learning IDs appear as "id": "scope/topic-name" in search results
+# Session-scoped deduplication via a plain-text state file.
+SESSIONS_DIR="$HOME/.claude/plugins/compound-learning/sessions"
+mkdir -p "$SESSIONS_DIR"
+
+# Prune session files older than 24 hours
+find "$SESSIONS_DIR" -name "*.seen" -mmin +1440 -delete 2>/dev/null
+
+# Derive session ID from the transcript filename UUID
+SESSION_ID=$(basename "$TRANSCRIPT" .jsonl)
+SESSION_FILE="$SESSIONS_DIR/${SESSION_ID}.seen"
+
+# Read already-seen IDs from the session file
 EXCLUDE_IDS=""
-if [ -f "$TRANSCRIPT" ]; then
-  EXCLUDE_IDS=$(grep -oE '"id":\s*"[^"]+"' "$TRANSCRIPT" 2>/dev/null | \
-    grep -oE '"[^"]+/[^"]+"' | tr -d '"' | sort -u | tr '\n' ',' | sed 's/,$//')
+if [ -f "$SESSION_FILE" ]; then
+  EXCLUDE_IDS=$(sort -u "$SESSION_FILE" | tr '\n' ',' | sed 's/,$//')
 fi
 
 # Extract recent conversation context from transcript
@@ -130,6 +142,8 @@ if [ "$STATUS" != "found" ]; then
   echo "[auto-peek] no learnings for: $KEYWORDS_DISPLAY"
   exit 0
 fi
+
+echo "$SEARCH_RESULT" | jq -r '.learnings[].id' 2>/dev/null >> "$SESSION_FILE"
 
 # Format compact output for Claude's context
 COUNT=$(echo "$SEARCH_RESULT" | jq -r '.count' 2>/dev/null)
