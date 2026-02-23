@@ -21,6 +21,20 @@ from typing import Dict, List, Tuple, Any
 import lib.db as db
 
 
+def _rglob_follow_symlinks(root: Path, target: str) -> List[Path]:
+    """Like Path.rglob but follows symlinks (Path.rglob doesn't until Python 3.13)."""
+    results = []
+    target_parts = target.split('/')
+    for dirpath, dirnames, _ in os.walk(str(root), followlinks=True):
+        dirnames[:] = [d for d in dirnames if d not in
+                       {'node_modules', '.git', '.venv', 'venv', '__pycache__', 'build', 'dist'}]
+        p = Path(dirpath)
+        if len(p.parts) >= len(target_parts):
+            if list(p.parts[-len(target_parts):]) == target_parts:
+                results.append(p)
+    return results
+
+
 def find_all_learning_files(config: Dict[str, Any]) -> Tuple[List[Path], Dict[str, List[Path]]]:
     """Find all learning files in global and repo locations."""
     global_dir = Path(config['learnings']['globalDir']).resolve()
@@ -50,7 +64,7 @@ def find_all_learning_files(config: Dict[str, Any]) -> Tuple[List[Path], Dict[st
     for search_path in search_paths:
         if not search_path.exists():
             continue
-        for learnings_dir in search_path.rglob('.projects/learnings'):
+        for learnings_dir in _rglob_follow_symlinks(search_path, '.projects/learnings'):
             learnings_dir = learnings_dir.resolve()
             if str(learnings_dir).startswith(str(global_dir)):
                 continue
