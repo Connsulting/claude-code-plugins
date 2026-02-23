@@ -246,14 +246,19 @@ def search_learnings(
             elif result['distance'] < possible_threshold:
                 possibly_relevant.append(result)
 
-        # Peek mode: only high_confidence, simplified output
+        # Peek mode: high_confidence first, backfill from possibly_relevant up to max_results
         if peek_mode:
-            if high_confidence:
+            peek_results = list(high_confidence[:max_results])
+            if len(peek_results) < max_results and possibly_relevant:
+                remaining = max_results - len(peek_results)
+                peek_results.extend(possibly_relevant[:remaining])
+
+            if peek_results:
                 output = {
                     'status': 'found',
-                    'count': len(high_confidence),
+                    'count': len(peek_results),
                     'keywords_searched': keywords,
-                    'learnings': high_confidence
+                    'learnings': peek_results
                 }
             else:
                 output = {'status': 'empty', 'keywords_searched': keywords}

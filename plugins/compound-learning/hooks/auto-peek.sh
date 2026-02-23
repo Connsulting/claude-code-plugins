@@ -125,7 +125,6 @@ fi
 # Each keyword is searched independently and results are merged
 SEARCH_RESULT=$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/search-learnings.py" \
   --peek \
-  --threshold 0.5 \
   --max-results 2 \
   --exclude-ids "$EXCLUDE_IDS" \
   --keywords-json "$KEYWORDS_ARRAY" \

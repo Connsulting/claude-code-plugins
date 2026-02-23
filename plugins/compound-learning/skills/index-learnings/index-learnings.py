@@ -19,6 +19,7 @@ from collections import defaultdict
 from typing import Dict, List, Tuple, Any
 
 import lib.db as db
+from lib.topic_mapping import infer_topic_from_tags
 
 
 def _rglob_follow_symlinks(root: Path, target: str) -> List[Path]:
@@ -106,9 +107,11 @@ def extract_field(content: str, field: str) -> str | None:
 
 
 def extract_topic(content: str) -> str:
-    """Extract topic from **Topic:** field, fallback to 'other'."""
+    """Extract topic from **Topic:** field, fallback to tag-based inference."""
     topic = extract_field(content, 'Topic')
-    return topic.lower().replace(' ', '-') if topic else 'other'
+    if topic:
+        return topic.lower().replace(' ', '-')
+    return infer_topic_from_tags(extract_tags(content))
 
 
 def extract_tags(content: str) -> List[str]:

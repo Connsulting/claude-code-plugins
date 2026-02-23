@@ -39,9 +39,9 @@ def load_config() -> Dict[str, Any]:
             'globalDir': os.path.join(home, '.projects/learnings'),
             'repoSearchPath': home,
             'archiveDir': os.path.join(home, '.projects/archive/learnings'),
-            'highConfidenceThreshold': 0.5,
-            'possiblyRelevantThreshold': 0.6,
-            'keywordBoostWeight': 0.3,
+            'highConfidenceThreshold': 0.55,
+            'possiblyRelevantThreshold': 0.70,
+            'keywordBoostWeight': 0.4,
         },
         'consolidation': {
             'duplicateThreshold': 0.25,

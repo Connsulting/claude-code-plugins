@@ -68,7 +68,7 @@ IMPORTANT: You MUST use the Write tool to create files. Do not just describe wha
 For each learning you extract:
 1. Use the Write tool to create a markdown file
 2. Path: ${GLOBAL_DIR}/[topic]-${TODAY}.md for global, or ${REPO_DIR}/[topic]-${TODAY}.md for repo-specific
-3. Content must include: # Title, **Type:** (pattern/gotcha/security), **Tags:**, ## Problem, ## Solution, ## Why
+3. Content must include: # Title, **Type:** (pattern/gotcha/security), **Topic:** (broad category), **Tags:**, ## Problem, ## Solution, ## Why
 
 Be selective - only extract genuine reusable insights.
 If nothing worth extracting, just output 'none'.
