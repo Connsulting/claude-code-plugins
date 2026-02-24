@@ -7,6 +7,7 @@ All four Python scripts import from here instead of duplicating database boilerp
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -26,6 +27,7 @@ except AttributeError:
         )
 
 _model = None
+_model_lock = threading.Lock()
 
 
 def load_config() -> Dict[str, Any]:
@@ -156,14 +158,15 @@ def _create_schema(conn: sqlite3.Connection) -> None:
 def get_embedding(text: str):
     """Lazy-load sentence-transformers model and return embedding as list."""
     global _model
-    if _model is None:
-        model_cache = os.path.expanduser(
-            '~/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2'
-        )
-        if not os.path.exists(model_cache):
-            print("Downloading embedding model (one-time, ~80MB)...", file=sys.stderr)
-        from sentence_transformers import SentenceTransformer
-        _model = SentenceTransformer('all-MiniLM-L6-v2')
+    with _model_lock:
+        if _model is None:
+            model_cache = os.path.expanduser(
+                '~/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2'
+            )
+            if not os.path.exists(model_cache):
+                print("Downloading embedding model (one-time, ~80MB)...", file=sys.stderr)
+            from sentence_transformers import SentenceTransformer
+            _model = SentenceTransformer('all-MiniLM-L6-v2')
     return _model.encode(text, normalize_embeddings=True).tolist()
 
 

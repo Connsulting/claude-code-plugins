@@ -107,7 +107,7 @@ while IFS= read -r file; do
   FILENAME=$(basename "$file")
 
   # Extract first # heading as title
-  TITLE=$(grep -m1 "^# " "$file" 2>/dev/null | sed 's/^# //')
+  TITLE=$(grep -m1 "^# " "$file" 2>/dev/null | sed 's/^# //' | tr -d '\n\r')
   [ -z "$TITLE" ] && TITLE="$FILENAME"
 
   log_activity "  GENERATED: file=$FILENAME title=\"$TITLE\""

@@ -212,7 +212,6 @@ def index_single_file(file_path: Path, config: Dict[str, Any]) -> bool:
 
         doc_id = hashlib.md5(str(file_path.resolve()).encode()).hexdigest()
         db.upsert_document(conn, doc_id, content, metadata)
-        print(f"[OK] Indexed: {file_path.name}")
         return True
     except Exception as e:
         print(f"[ERROR] Failed to index {file_path.name}: {e}")
