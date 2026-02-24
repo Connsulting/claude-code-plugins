@@ -111,10 +111,29 @@ def calculate_keyword_overlap(keywords: Set[str], document: str) -> float:
     return matches / len(keywords)
 
 
+def fts5_search(conn, query_text: str, limit: int = 50) -> Set[str]:
+    """Return IDs of documents matching FTS5 full-text search."""
+    try:
+        tokens = re.findall(r'\b\w+\b', query_text.lower())
+        meaningful = [t for t in tokens if t not in STOPWORDS and len(t) >= 2]
+        if not meaningful:
+            return set()
+        fts_query = ' OR '.join(dict.fromkeys(meaningful))
+        rows = conn.execute(
+            "SELECT id FROM fts_learnings WHERE content MATCH ? LIMIT ?",
+            (fts_query, limit)
+        ).fetchall()
+        return {row[0] for row in rows}
+    except Exception as e:
+        print(f"FTS5 search error: {e}", file=sys.stderr)
+        return set()
+
+
 def hybrid_rerank(
     results: List[Dict[str, Any]],
     query_keywords: Set[str],
-    keyword_weight: float = 0.3
+    keyword_weight: float = 0.3,
+    fts_ids: Set[str] | None = None
 ) -> List[Dict[str, Any]]:
     """Re-rank results by combining semantic distance with keyword overlap.
 
@@ -122,16 +141,20 @@ def hybrid_rerank(
         results: List of result dicts with 'document' and 'distance'
         query_keywords: Set of keywords extracted from query
         keyword_weight: How much to boost for keyword matches (0-1)
+        fts_ids: Optional set of document IDs that matched FTS5 search
 
     Returns:
         Results re-sorted by adjusted distance (lower = better)
     """
+    fts_boost = 0.05
     for result in results:
         overlap = calculate_keyword_overlap(query_keywords, result['document'])
         result['keyword_overlap'] = round(overlap, 4)
         result['original_distance'] = result['distance']
+        fts_reduction = fts_boost if (fts_ids and result['id'] in fts_ids) else 0
+        result['fts_match'] = bool(fts_ids and result['id'] in fts_ids)
         result['distance'] = round(
-            result['distance'] * (1 - keyword_weight * overlap),
+            max(0.0, result['distance'] * (1 - keyword_weight * overlap) - fts_reduction),
             4
         )
 
@@ -233,7 +256,7 @@ def search_learnings(
 
         # Run parallel queries for each keyword; each call opens its own connection
         all_results: List[List[Dict[str, Any]]] = []
-        with ThreadPoolExecutor(max_workers=len(keywords)) as executor:
+        with ThreadPoolExecutor(max_workers=min(len(keywords), 8)) as executor:
             futures = {
                 executor.submit(query_single_keyword, config, kw, repos, query_size): kw
                 for kw in keywords
@@ -248,8 +271,22 @@ def search_learnings(
         # Merge results from parallel queries
         raw_results = merge_parallel_results(all_results)
 
-        # Apply hybrid re-ranking (keyword boost)
-        reranked_results = hybrid_rerank(raw_results, query_keywords, keyword_weight)
+        # Get FTS5 matches for additional signal
+        conn_fts = db.get_connection(config)
+        try:
+            fts_matches = fts5_search(conn_fts, ' '.join(keywords))
+        finally:
+            conn_fts.close()
+
+        # Apply hybrid re-ranking (keyword boost + FTS5 signal)
+        reranked_results = hybrid_rerank(raw_results, query_keywords, keyword_weight, fts_ids=fts_matches)
+
+        # Discard results with zero keyword overlap (unless they have very high
+        # semantic similarity, i.e., distance < 0.25 before keyword adjustment)
+        reranked_results = [
+            r for r in reranked_results
+            if r.get('keyword_overlap', 0) > 0 or r.get('original_distance', 1.0) < 0.25
+        ]
 
         # Filter out excluded IDs
         if exclude_set:
