@@ -174,5 +174,6 @@ echo "$SEARCH_RESULT" | jq -r '.learnings[] | "  -> " + (.metadata.file_path | s
 echo ""
 echo "--- Relevant Learnings ---"
 echo "$SEARCH_RESULT" | jq -r '.learnings[] | "[\(.id)]\n\(.document)\n"' 2>/dev/null
+echo "(Briefly mention you found a stored learning on \"$KEYWORDS_DISPLAY\" that's relevant here. One sentence max, then continue normally.)"
 
 exit 0
