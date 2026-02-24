@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import List, Dict, Any, Tuple, Set
 
 import lib.db as db
+import lib.git_utils as git_utils
 
 
 # Common stopwords to filter from query keywords
@@ -37,15 +38,32 @@ STOPWORDS = {
 
 
 def detect_learning_hierarchy(cwd: str, home: str) -> List[str]:
-    """Walk up from cwd to home, collect all dirs with .projects/learnings/"""
-    repos = []
-    current = Path(cwd)
+    """Walk up from cwd to home, collect all dirs with .projects/learnings/.
+
+    Uses worktree-aware repo root resolution so that a worktree CWD produces
+    the same repo name as the main checkout.
+    """
+    repos: List[str] = []
+    seen: Set[str] = set()
     home_path = Path(home)
 
+    # Resolve the real repo root first (handles worktrees)
+    real_root = Path(git_utils.resolve_repo_root(cwd))
+    real_root_learning_dir = real_root / '.projects' / 'learnings'
+    if real_root_learning_dir.exists() and real_root != home_path:
+        repo_name = real_root.name
+        repos.append(repo_name)
+        seen.add(repo_name)
+
+    # Walk up from cwd itself for any additional .projects/learnings/ dirs
+    current = Path(cwd).resolve()
     while True:
         learning_dir = current / '.projects' / 'learnings'
         if learning_dir.exists() and current != home_path:
-            repos.append(current.name)
+            repo_name = current.name
+            if repo_name not in seen:
+                repos.append(repo_name)
+                seen.add(repo_name)
 
         if current == home_path:
             break

@@ -19,6 +19,7 @@ from collections import defaultdict
 from typing import Dict, List, Tuple, Any
 
 import lib.db as db
+import lib.git_utils as git_utils
 from lib.topic_mapping import infer_topic_from_tags
 
 
@@ -72,7 +73,7 @@ def find_all_learning_files(config: Dict[str, Any]) -> Tuple[List[Path], Dict[st
             if any(excluded in learnings_dir.parts for excluded in exclude_dirs):
                 continue
 
-            repo_name = learnings_dir.parent.parent.name
+            repo_name = git_utils.resolve_repo_name(str(learnings_dir))
             for f in learnings_dir.glob('**/*.md'):
                 canonical = f.resolve()
                 if canonical not in seen_paths and canonical.name != 'MANIFEST.md':
@@ -93,11 +94,8 @@ def extract_metadata_from_path(file_path: Path, config: Dict[str, Any]) -> Dict[
     if path_str.startswith(global_dir):
         return {"scope": "global", "repo": "", "file_path": path_str}
 
-    try:
-        repo_name = canonical_path.parent.parent.parent.name
-        return {"scope": "repo", "repo": repo_name, "file_path": path_str}
-    except Exception:
-        return {"scope": "repo", "repo": "unknown", "file_path": path_str}
+    repo_name = git_utils.resolve_repo_name(str(canonical_path.parent))
+    return {"scope": "repo", "repo": repo_name, "file_path": path_str}
 
 
 def extract_field(content: str, field: str) -> str | None:

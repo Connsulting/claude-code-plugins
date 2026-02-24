@@ -22,11 +22,18 @@ if [ -n "$CLAUDE_SUBPROCESS" ]; then
   exit 0
 fi
 
+# Source worktree-aware repo root resolution
+source "${CLAUDE_PLUGIN_ROOT}/lib/git-worktree.sh" || { log_activity "[extract-learnings] WARN: could not source git-worktree.sh, using CWD as REPO_ROOT"; }
+
 # Read hook input from stdin
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id')
 TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path')
 CWD=$(echo "$INPUT" | jq -r '.cwd')
+
+# Resolve real repo root (handles worktrees)
+REPO_ROOT=$(resolve_repo_root "$CWD")
+REPO_ROOT="${REPO_ROOT:-$CWD}"
 
 # Expand ~ in transcript path
 TRANSCRIPT="${TRANSCRIPT/#\~/$HOME}"
@@ -50,7 +57,7 @@ fi
 
 TODAY=$(date +%Y-%m-%d)
 GLOBAL_DIR="$HOME/.projects/learnings"
-REPO_DIR="$CWD/.projects/learnings"
+REPO_DIR="$REPO_ROOT/.projects/learnings"
 
 # Capture output to log file generation
 OUTPUT_FILE=$(mktemp)
@@ -67,7 +74,7 @@ log_activity "EXTRACT_START: session=$SESSION_ID lines=$LINES"
 # Use heredoc to pass prompt via stdin (avoids temp files and arg size limits)
 CLAUDE_SUBPROCESS=1 claude -p --no-session-persistence \
   --permission-mode bypassPermissions \
-  --add-dir "$HOME/.projects" "$CWD/.projects" \
+  --add-dir "$HOME/.projects" "$REPO_ROOT/.projects" \
   --allowedTools "Write,Bash(mkdir:*)" \
   <<PROMPT_END >"$OUTPUT_FILE" 2>&1
 Analyze this conversation transcript and extract 0-3 meaningful learnings.
