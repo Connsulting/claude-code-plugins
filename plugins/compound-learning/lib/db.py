@@ -6,6 +6,7 @@ All four Python scripts import from here instead of duplicating database boilerp
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -68,7 +69,7 @@ def load_config() -> Dict[str, Any]:
             # Expand ${HOME} in all string values recursively
             file_config = _expand_home(file_config, home)
         except Exception as e:
-            print(f"Warning: Failed to load config from {config_file}: {e}")
+            print(f"Warning: Failed to load config from {config_file}: {e}", file=sys.stderr)
 
     # Env var overrides
     env_db_path = os.environ.get('SQLITE_DB_PATH')
@@ -157,10 +158,10 @@ def get_embedding(text: str):
     global _model
     if _model is None:
         model_cache = os.path.expanduser(
-            '~/.cache/torch/sentence_transformers/sentence-transformers_all-MiniLM-L6-v2'
+            '~/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2'
         )
         if not os.path.exists(model_cache):
-            print("Downloading embedding model (one-time, ~80MB)...")
+            print("Downloading embedding model (one-time, ~80MB)...", file=sys.stderr)
         from sentence_transformers import SentenceTransformer
         _model = SentenceTransformer('all-MiniLM-L6-v2')
     return _model.encode(text, normalize_embeddings=True).tolist()

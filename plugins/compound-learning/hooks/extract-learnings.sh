@@ -40,7 +40,10 @@ fi
 # Extract just user/assistant messages (skip tool calls, file snapshots, metadata)
 # Limit to ~80KB to fit context window with prompt overhead
 MAX_BYTES=80000
-TRANSCRIPT_CONTENT=$(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/extract-transcript-messages.py" "$TRANSCRIPT" "$MAX_BYTES" 2>/dev/null)
+ERR_FILE=$(mktemp)
+TRANSCRIPT_CONTENT=$(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/extract-transcript-messages.py" "$TRANSCRIPT" "$MAX_BYTES" 2>"$ERR_FILE")
+[ -s "$ERR_FILE" ] && log_activity "[extract-learnings] parse error: $(cat "$ERR_FILE")"
+rm -f "$ERR_FILE"
 if [ -z "$TRANSCRIPT_CONTENT" ]; then
   exit 0
 fi
@@ -51,7 +54,13 @@ REPO_DIR="$CWD/.projects/learnings"
 
 # Capture output to log file generation
 OUTPUT_FILE=$(mktemp)
-trap "rm -f $OUTPUT_FILE" EXIT
+
+# Snapshot learnings directories before claude call for filesystem diff
+BEFORE_FILES=$(mktemp)
+AFTER_FILES=$(mktemp)
+find "$GLOBAL_DIR" "$REPO_DIR" -type f -name "*.md" 2>/dev/null | sort > "$BEFORE_FILES"
+
+trap "rm -f $OUTPUT_FILE $BEFORE_FILES $AFTER_FILES" EXIT
 
 log_activity "EXTRACT_START: session=$SESSION_ID lines=$LINES"
 
@@ -78,51 +87,31 @@ ${TRANSCRIPT_CONTENT}
 </transcript>
 PROMPT_END
 
-# Parse output for generated learning files
-# Look for file paths created in learnings directories
-CREATED_FILES=$(grep -E "\.projects/learnings/.*\.md" "$OUTPUT_FILE" 2>/dev/null | grep -v "file_path" | head -10)
-FILE_COUNT=0
+# Detect new files via filesystem diff
+find "$GLOBAL_DIR" "$REPO_DIR" -type f -name "*.md" 2>/dev/null | sort > "$AFTER_FILES"
+NEW_FILES=$(comm -13 "$BEFORE_FILES" "$AFTER_FILES")
 
 INDEX_SCRIPT="${CLAUDE_PLUGIN_ROOT}/skills/index-learnings/index-learnings.py"
+FILE_COUNT=0
 
-if [ -n "$CREATED_FILES" ]; then
-  while IFS= read -r file_path; do
-    # Clean up file path (remove ANSI codes, quotes, etc)
-    CLEAN_PATH=$(echo "$file_path" | sed 's/\x1b\[[0-9;]*m//g' | grep -oE '\.projects/learnings/[^[:space:]"]+\.md' | head -1)
+while IFS= read -r file; do
+  [ -z "$file" ] && continue
+  FILE_COUNT=$((FILE_COUNT + 1))
+  FILENAME=$(basename "$file")
 
-    if [ -n "$CLEAN_PATH" ]; then
-      # Extract filename
-      FILENAME=$(basename "$CLEAN_PATH")
+  # Extract first # heading as title
+  TITLE=$(grep -m1 "^# " "$file" 2>/dev/null | sed 's/^# //')
+  [ -z "$TITLE" ] && TITLE="$FILENAME"
 
-      # Try to extract title from the file if it exists
-      FULL_PATH=""
-      if [[ "$CLEAN_PATH" == *"$HOME/.projects"* ]] || [[ "$CLEAN_PATH" == "$HOME"* ]]; then
-        FULL_PATH="$HOME/$CLEAN_PATH"
-      elif [ -f "$GLOBAL_DIR/$FILENAME" ]; then
-        FULL_PATH="$GLOBAL_DIR/$FILENAME"
-      elif [ -f "$REPO_DIR/$FILENAME" ]; then
-        FULL_PATH="$REPO_DIR/$FILENAME"
-      fi
+  log_activity "  GENERATED: file=$FILENAME title=\"$TITLE\""
 
-      TITLE="$FILENAME"
-      if [ -f "$FULL_PATH" ]; then
-        # Extract first # heading as title
-        TITLE=$(grep -m1 "^# " "$FULL_PATH" 2>/dev/null | sed 's/^# //')
-        [ -z "$TITLE" ] && TITLE="$FILENAME"
-
-        # Index the newly created file into SQLite (non-fatal if unavailable)
-        if [ -f "$INDEX_SCRIPT" ]; then
-          CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" python3 "$INDEX_SCRIPT" --file "$FULL_PATH" >> "$LOG_FILE" 2>&1 \
-            && log_activity "  INDEXED: $FILENAME" \
-            || log_activity "  INDEX_SKIP: indexing failed for $FILENAME"
-        fi
-      fi
-
-      log_activity "  GENERATED: file=$FILENAME title=\"$TITLE\""
-      FILE_COUNT=$((FILE_COUNT + 1))
-    fi
-  done <<< "$CREATED_FILES"
-fi
+  # Index the newly created file into SQLite (non-fatal if unavailable)
+  if [ -f "$INDEX_SCRIPT" ]; then
+    CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" python3 "$INDEX_SCRIPT" --file "$file" >> "$LOG_FILE" 2>&1 \
+      && log_activity "  INDEXED: $FILENAME" \
+      || log_activity "  INDEX_SKIP: indexing failed for $FILENAME"
+  fi
+done <<< "$NEW_FILES"
 
 log_activity "EXTRACT_END: session=$SESSION_ID generated=$FILE_COUNT"
 

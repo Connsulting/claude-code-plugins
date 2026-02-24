@@ -136,7 +136,8 @@ def query_single_keyword(
             return results
         finally:
             conn.close()
-    except Exception:
+    except Exception as e:
+        print(f"Error in query_single_keyword: {e}", file=sys.stderr)
         return []
 
 
@@ -223,8 +224,8 @@ def search_learnings(
                 try:
                     result = future.result()
                     all_results.append(result)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"Error in search_learnings: {e}", file=sys.stderr)
 
         # Merge results from parallel queries
         raw_results = merge_parallel_results(all_results)
@@ -313,7 +314,7 @@ if __name__ == '__main__':
     parser.add_argument('query', nargs='?', default='', help='Search query text (ignored if --keywords-json provided)')
     parser.add_argument('working_dir', nargs='?', default=None, help='Working directory')
     parser.add_argument('--peek', action='store_true',
-                        help='Peek mode: only high confidence, no possibly_relevant')
+                        help='Peek mode: prefers high confidence results, backfills from possibly_relevant if needed')
     parser.add_argument('--exclude-ids', type=str, default='',
                         help='Comma separated learning IDs to exclude from results')
     parser.add_argument('--threshold', type=float, default=None,

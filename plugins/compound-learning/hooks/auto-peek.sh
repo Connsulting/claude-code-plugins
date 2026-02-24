@@ -61,7 +61,10 @@ fi
 # This provides Haiku with context about what Claude was working on
 CONTEXT=""
 if [ -f "$TRANSCRIPT" ]; then
-  CONTEXT=$(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/extract-transcript-context.py" "$TRANSCRIPT" 3000 2>/dev/null)
+  ERR_FILE=$(mktemp)
+  CONTEXT=$(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/extract-transcript-context.py" "$TRANSCRIPT" 3000 2>"$ERR_FILE")
+  [ -s "$ERR_FILE" ] && log_activity "[auto-peek] context extraction error: $(cat "$ERR_FILE")"
+  rm -f "$ERR_FILE"
 fi
 
 # Create empty MCP config to prevent LSP/MCP overhead
@@ -100,13 +103,16 @@ fi
 # This is fast because: no MCP, no tools, just prompt/response
 # Use timeout to prevent hook from hanging
 export CLAUDE_SUBPROCESS=1
+ERR_FILE=$(mktemp)
 KEYWORDS_JSON=$(timeout 15 claude -p \
   --no-session-persistence \
   --model haiku \
   --output-format json \
   --mcp-config "$EMPTY_MCP" \
   --strict-mcp-config \
-  "$HAIKU_PROMPT" 2>/dev/null)
+  "$HAIKU_PROMPT" 2>"$ERR_FILE")
+[ -s "$ERR_FILE" ] && log_activity "[auto-peek] keyword extraction error: $(cat "$ERR_FILE")"
+rm -f "$ERR_FILE"
 
 # Parse keywords from Haiku response (handles markdown-wrapped JSON)
 # Haiku may return: {"result": "```json\n{\"keywords\": [...]}\n```"}
@@ -121,23 +127,30 @@ if [ -z "$KEYWORDS_ARRAY" ] || [ "$KEYWORDS_ARRAY" = "null" ] || [ "$KEYWORDS_AR
   exit 0
 fi
 
+log_activity "[auto-peek] keywords extracted: $KEYWORDS_DISPLAY"
+
 # Search with extracted keywords in parallel, exclude seen IDs
 # Each keyword is searched independently and results are merged
+ERR_FILE=$(mktemp)
 SEARCH_RESULT=$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/search-learnings.py" \
   --peek \
   --max-results 2 \
   --exclude-ids "$EXCLUDE_IDS" \
   --keywords-json "$KEYWORDS_ARRAY" \
-  "$CWD" 2>/dev/null)
+  "$CWD" 2>"$ERR_FILE")
+SEARCH_EXIT=$?
+[ -s "$ERR_FILE" ] && log_activity "[auto-peek] search error: $(cat "$ERR_FILE")"
+rm -f "$ERR_FILE"
 
 # Check if we got results
-if [ $? -ne 0 ]; then
+if [ $SEARCH_EXIT -ne 0 ]; then
   echo "[auto-peek] search failed"
   exit 0
 fi
 
 STATUS=$(echo "$SEARCH_RESULT" | jq -r '.status' 2>/dev/null)
 if [ "$STATUS" != "found" ]; then
+  log_activity "[auto-peek] no results for: $KEYWORDS_DISPLAY"
   echo "[auto-peek] no learnings for: $KEYWORDS_DISPLAY"
   exit 0
 fi
