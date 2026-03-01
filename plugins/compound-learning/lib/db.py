@@ -21,10 +21,13 @@ except AttributeError:
     try:
         import pysqlite3 as sqlite3  # type: ignore[no-redef]
     except ImportError:
-        raise ImportError(
-            'sqlite3 extension loading is not available. '
-            'Install pysqlite3-binary: pip install pysqlite3-binary'
+        print(
+            '[ERROR] sqlite3 extension loading is not available.\n'
+            'Install the required dependency:\n'
+            '  pip install pysqlite3-binary\n'
+            'On macOS arm64, use: pip install pysqlite3'
         )
+        raise
 
 _model = None
 _model_lock = threading.Lock()
@@ -112,7 +115,15 @@ def _deep_merge(base: Dict, override: Dict) -> Dict:
 
 def get_connection(config: Dict[str, Any]) -> sqlite3.Connection:
     """Open SQLite DB, load sqlite-vec extension, create schema if missing."""
-    import sqlite_vec
+    try:
+        import sqlite_vec
+    except ImportError:
+        print(
+            '[ERROR] sqlite-vec is not installed.\n'
+            'Install the required dependency:\n'
+            '  pip install sqlite-vec'
+        )
+        raise
 
     db_path = config['sqlite']['dbPath']
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -165,7 +176,15 @@ def get_embedding(text: str):
             )
             if not os.path.exists(model_cache):
                 print("Downloading embedding model (one-time, ~80MB)...", file=sys.stderr)
-            from sentence_transformers import SentenceTransformer
+            try:
+                from sentence_transformers import SentenceTransformer
+            except ImportError:
+                print(
+                    '[ERROR] sentence-transformers is not installed.\n'
+                    'Install the required dependency:\n'
+                    '  pip install sentence-transformers'
+                )
+                raise
             _model = SentenceTransformer('all-MiniLM-L6-v2')
     return _model.encode(text, normalize_embeddings=True).tolist()
 
