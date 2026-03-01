@@ -4,9 +4,10 @@ A learning compounding system for Claude Code that extracts and indexes knowledg
 
 ## Prerequisites
 
-- Python 3.x
-- `sentence-transformers` and `sqlite-vec` Python packages
+- Python 3.x with pip
 - GitHub CLI (`gh`) - optional, required for `/pr-learnings`
+
+Python dependencies (`pysqlite3-binary`, `sqlite-vec`, `sentence-transformers`) are auto-installed on session start via the `SessionStart` hook.
 
 ## Installation
 
@@ -20,9 +21,9 @@ A learning compounding system for Claude Code that extracts and indexes knowledg
 ### Manual Installation
 
 1. Clone or download this plugin to your Claude plugins directory
-2. Install Python dependencies:
+2. Python dependencies install automatically on first session start, or install manually:
 ```bash
-pip install sentence-transformers sqlite-vec
+pip install pysqlite3-binary sqlite-vec sentence-transformers
 ```
 
 ### Post-Installation

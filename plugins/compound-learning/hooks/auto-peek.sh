@@ -144,7 +144,7 @@ rm -f "$ERR_FILE"
 
 # Check if we got results
 if [ $SEARCH_EXIT -ne 0 ]; then
-  echo "[auto-peek] search failed"
+  echo "[auto-peek] search failed (check ~/.claude/plugins/compound-learning/activity.log)"
   exit 0
 fi
 
