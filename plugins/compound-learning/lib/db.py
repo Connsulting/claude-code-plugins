@@ -21,11 +21,13 @@ except AttributeError:
     try:
         import pysqlite3 as sqlite3  # type: ignore[no-redef]
     except ImportError:
+        import platform
+        is_arm = platform.machine().startswith('arm') or platform.machine() == 'aarch64'
+        pkg = 'pysqlite3' if is_arm else 'pysqlite3-binary'
         print(
             '[ERROR] sqlite3 extension loading is not available.\n'
             'Install the required dependency:\n'
-            '  pip install pysqlite3-binary\n'
-            'On macOS arm64, use: pip install pysqlite3'
+            f'  pip install {pkg}'
         )
         raise
 
