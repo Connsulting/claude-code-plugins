@@ -34,4 +34,13 @@ The command prints JSON with:
 - `workload`: search iteration/query settings used
 - `metrics`: observed `p50`/`p95` for `total_search_ms`, `vector_search_ms`, `fts_ms`, `rerank_ms`
 - `regressions`: failed checks with threshold details
-- `warnings`: baseline fallback warnings (for missing metric fields)
+- `warnings`: compatibility/fallback warnings (legacy schema, missing fields, and defaults applied)
+
+## Baseline Compatibility
+
+Older baseline JSON files are accepted and normalized with warnings:
+- Top-level metric blocks (without a `metrics` wrapper)
+- Metric aliases (`p50_ms`, `p95_ms`, `max_regression_percent`, `max_ms`)
+- Top-level workload keys (`iterations`, `warmup_runs`, `queries`)
+
+Missing fields fall back to safe defaults instead of failing fast.

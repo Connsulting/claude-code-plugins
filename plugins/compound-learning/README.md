@@ -38,7 +38,10 @@ Run `/index-learnings` to build the index. The SQLite database is created automa
 |----------|-------------|---------|
 | `LEARNINGS_GLOBAL_DIR` | Global learnings directory | `~/.projects/learnings` |
 | `LEARNINGS_REPO_SEARCH_PATH` | Base path to search for repo learnings | `~` |
-| `LEARNINGS_DISTANCE_THRESHOLD` | Similarity threshold (0-1, lower = more similar) | `0.5` |
+| `LEARNINGS_HIGH_CONFIDENCE_THRESHOLD` | Distance cutoff for `high_confidence` bucket (0-1, lower = more similar) | `0.40` |
+| `LEARNINGS_POSSIBLY_RELEVANT_THRESHOLD` | Distance cutoff for `possibly_relevant` bucket (0-1) | `0.55` |
+| `LEARNINGS_KEYWORD_BOOST_WEIGHT` | Keyword overlap rerank weight (0-1) | `0.65` |
+| `LEARNINGS_DISTANCE_THRESHOLD` | Legacy single-threshold fallback (used only when new threshold keys are unset) | _(legacy)_ |
 
 **Example in `.claude/settings.json`:**
 ```json
@@ -62,12 +65,19 @@ Create `.claude-plugin/config.json` in the plugin directory:
   "learnings": {
     "globalDir": "${HOME}/.projects/learnings",
     "repoSearchPath": "${HOME}",
-    "distanceThreshold": 0.5
+    "highConfidenceThreshold": 0.4,
+    "possiblyRelevantThreshold": 0.55,
+    "keywordBoostWeight": 0.65
   }
 }
 ```
 
 `${HOME}` expands to your home directory.
+
+Backward compatibility:
+- Legacy `learnings.distanceThreshold` and `LEARNINGS_DISTANCE_THRESHOLD` are still supported.
+- New keys take precedence when set (`highConfidenceThreshold`, `possiblyRelevantThreshold`, and their env vars).
+- Use legacy threshold only as a migration fallback; migrate to the new tiered keys when possible.
 
 ## Usage
 
@@ -143,6 +153,11 @@ Exit codes:
 - `2` runtime/config error
 
 Baseline file: `plugins/compound-learning/.claude-plugin/perf-baseline.json`
+
+Baseline backward compatibility:
+- Legacy top-level metric/workload schemas are accepted and normalized.
+- Legacy metric field aliases (`p50_ms`, `p95_ms`, `max_regression_percent`, `max_ms`) are accepted.
+- Missing fields are filled from defaults and reported in `warnings` instead of failing.
 
 Safe baseline update process:
 1. Run spotter after a clean performance improvement and confirm no regressions.
@@ -249,7 +264,7 @@ Use topic + context: "authentication JWT refresh" not "implement login feature"
 - Check config paths in `.claude-plugin/config.json`
 
 **Search returns no results:**
-- Check `distanceThreshold` setting (try increasing to 0.7)
+- Check `highConfidenceThreshold` / `possiblyRelevantThreshold` settings (legacy `distanceThreshold` still works as fallback)
 - Run `/index-learnings` to ensure learnings are indexed
 
 **Hook activity log:**

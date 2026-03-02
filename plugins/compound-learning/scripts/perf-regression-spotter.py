@@ -104,6 +104,13 @@ DEFAULT_METRIC_THRESHOLDS: Dict[str, Dict[str, float]] = {
     },
 }
 
+METRIC_FIELD_ALIASES: Dict[str, Tuple[str, ...]] = {
+    'p50_baseline_ms': ('p50_ms', 'baseline_p50_ms'),
+    'p95_baseline_ms': ('p95_ms', 'baseline_p95_ms'),
+    'max_regression_pct': ('max_regression_percent',),
+    'absolute_cap_ms': ('absolute_max_ms', 'max_ms'),
+}
+
 
 def _coerce_number(value: Any) -> float | None:
     if isinstance(value, (int, float)):
@@ -118,11 +125,43 @@ def _default_baseline() -> Dict[str, Dict[str, float]]:
     }
 
 
-def _load_workload_settings(raw: Dict[str, Any]) -> Dict[str, Any]:
+def _metric_field_names(field: str) -> Tuple[str, ...]:
+    aliases = METRIC_FIELD_ALIASES.get(field, ())
+    return (field, *aliases)
+
+
+def _extract_metric_field(
+    metric: str,
+    metric_cfg: Dict[str, Any],
+    field: str,
+    warnings: List[str],
+) -> float | None:
+    for name in _metric_field_names(field):
+        value = _coerce_number(metric_cfg.get(name))
+        if value is None:
+            continue
+        if name != field:
+            warnings.append(
+                f"Metric '{metric}' uses legacy field '{name}'; prefer '{field}'."
+            )
+        return value
+    return None
+
+
+def _load_workload_settings(raw: Dict[str, Any], warnings: List[str]) -> Dict[str, Any]:
     workload = dict(DEFAULT_WORKLOAD)
     section = raw.get('workload')
     if not isinstance(section, dict):
-        return workload
+        legacy_section: Dict[str, Any] = {}
+        for key in ('iterations', 'warmup_runs', 'queries'):
+            if key in raw:
+                legacy_section[key] = raw.get(key)
+        if not legacy_section:
+            return workload
+        warnings.append(
+            "Baseline uses legacy top-level workload fields; prefer the 'workload' object."
+        )
+        section = legacy_section
 
     iterations = section.get('iterations')
     if isinstance(iterations, int) and iterations > 0:
@@ -164,18 +203,42 @@ def load_baseline(path: Path) -> Tuple[Dict[str, Any], List[str]]:
         raise ValueError(f'Baseline file {path} must be a JSON object.')
 
     raw_metrics = raw.get('metrics')
+    if not isinstance(raw_metrics, dict):
+        legacy_metrics = {metric: raw.get(metric) for metric in REQUIRED_METRICS if metric in raw}
+        if legacy_metrics:
+            raw_metrics = legacy_metrics
+            warnings.append(
+                "Baseline uses legacy top-level metric fields; prefer nesting under 'metrics'."
+            )
+
     normalized_metrics = _default_baseline()
     if not isinstance(raw_metrics, dict):
         warnings.append('Baseline metrics block missing or invalid; using default thresholds.')
     else:
         for metric in REQUIRED_METRICS:
             metric_cfg = raw_metrics.get(metric)
-            if not isinstance(metric_cfg, dict):
+            if metric_cfg is None:
                 warnings.append(f"Metric '{metric}' missing; using defaults for this metric.")
+                continue
+            if isinstance(metric_cfg, (int, float)):
+                scalar = float(metric_cfg)
+                warnings.append(
+                    (
+                        f"Metric '{metric}' uses legacy scalar value; applying {scalar} ms "
+                        "to both p50/p95 baselines."
+                    )
+                )
+                normalized_metrics[metric]['p50_baseline_ms'] = scalar
+                normalized_metrics[metric]['p95_baseline_ms'] = scalar
+                continue
+            if not isinstance(metric_cfg, dict):
+                warnings.append(
+                    f"Metric '{metric}' is not an object; using defaults for this metric."
+                )
                 continue
 
             for field in ('p50_baseline_ms', 'p95_baseline_ms', 'max_regression_pct', 'absolute_cap_ms'):
-                value = _coerce_number(metric_cfg.get(field))
+                value = _extract_metric_field(metric, metric_cfg, field, warnings)
                 if value is None:
                     warnings.append(
                         f"Metric '{metric}' missing '{field}'; using default value "
@@ -187,7 +250,7 @@ def load_baseline(path: Path) -> Tuple[Dict[str, Any], List[str]]:
     return {
         'source': str(path),
         'metrics': normalized_metrics,
-        'workload': _load_workload_settings(raw),
+        'workload': _load_workload_settings(raw, warnings),
     }, warnings
 
 
