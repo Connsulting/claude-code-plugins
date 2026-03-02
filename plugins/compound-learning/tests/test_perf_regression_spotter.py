@@ -2,7 +2,7 @@ import importlib.util
 import json
 import sys
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List
 
 
 PLUGIN_ROOT = Path(__file__).parent.parent
@@ -192,3 +192,118 @@ def test_search_execute_collects_timing_metrics(monkeypatch):
     assert result['exit_code'] == 0
     for metric in search_mod.TIMING_KEYS:
         assert metric in result['timings']
+
+
+def test_load_baseline_supports_legacy_top_level_schema(tmp_path):
+    baseline_path = tmp_path / 'legacy-baseline.json'
+    baseline_path.write_text(
+        json.dumps(
+            {
+                'iterations': 3,
+                'warmup_runs': 0,
+                'queries': ['jwt refresh token'],
+                'total_search_ms': {
+                    'p50_ms': 111.0,
+                    'p95_ms': 222.0,
+                    'max_regression_percent': 40.0,
+                    'max_ms': 900.0,
+                },
+                'vector_search_ms': 175.0,
+            }
+        ),
+        encoding='utf-8',
+    )
+
+    baseline, warnings = spotter.load_baseline(baseline_path)
+
+    total_cfg = baseline['metrics']['total_search_ms']
+    assert total_cfg['p50_baseline_ms'] == 111.0
+    assert total_cfg['p95_baseline_ms'] == 222.0
+    assert total_cfg['max_regression_pct'] == 40.0
+    assert total_cfg['absolute_cap_ms'] == 900.0
+
+    vector_cfg = baseline['metrics']['vector_search_ms']
+    assert vector_cfg['p50_baseline_ms'] == 175.0
+    assert vector_cfg['p95_baseline_ms'] == 175.0
+    assert vector_cfg['max_regression_pct'] == spotter.DEFAULT_METRIC_THRESHOLDS['vector_search_ms']['max_regression_pct']
+    assert vector_cfg['absolute_cap_ms'] == spotter.DEFAULT_METRIC_THRESHOLDS['vector_search_ms']['absolute_cap_ms']
+
+    assert baseline['workload']['iterations'] == 3
+    assert baseline['workload']['warmup_runs'] == 0
+    assert baseline['workload']['queries'] == ['jwt refresh token']
+    assert warnings
+
+
+def test_search_execute_no_results_output_contract_stable(monkeypatch):
+    config = {
+        'learnings': {
+            'highConfidenceThreshold': 0.4,
+            'possiblyRelevantThreshold': 0.55,
+            'keywordBoostWeight': 0.65,
+        }
+    }
+
+    class DummyConn:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(search_mod.db, 'load_config', lambda: config)
+    monkeypatch.setattr(search_mod, 'detect_learning_hierarchy', lambda cwd, home: ['example-repo'])
+    monkeypatch.setattr(search_mod, 'query_single_keyword', lambda *args, **kwargs: [])
+    monkeypatch.setattr(search_mod.db, 'get_connection', lambda cfg: DummyConn())
+    monkeypatch.setattr(search_mod, 'fts5_search', lambda conn, query_text: set())
+
+    result = search_mod.execute_search(query='jwt refresh token')
+    output = result['output']
+
+    assert result['exit_code'] == 0
+    assert output['status'] == 'no_results'
+    assert output['query'] == 'jwt refresh token'
+    assert output['repos_searched'] == ['example-repo']
+    assert output['high_confidence'] == []
+    assert output['possibly_relevant'] == []
+
+
+def test_search_execute_invalid_keywords_json_falls_back_to_query(monkeypatch):
+    config = {
+        'learnings': {
+            'highConfidenceThreshold': 0.4,
+            'possiblyRelevantThreshold': 0.55,
+            'keywordBoostWeight': 0.65,
+        }
+    }
+    seen_keywords: List[str] = []
+
+    class DummyConn:
+        def close(self):
+            return None
+
+    def _query_single_keyword(config, keyword, scope_repos, query_size):  # noqa: ANN001
+        seen_keywords.append(keyword)
+        return [
+            {
+                'id': 'doc-1',
+                'document': 'JWT refresh token rotation',
+                'metadata': {},
+                'distance': 0.2,
+            }
+        ]
+
+    monkeypatch.setattr(search_mod.db, 'load_config', lambda: config)
+    monkeypatch.setattr(search_mod, 'detect_learning_hierarchy', lambda cwd, home: [])
+    monkeypatch.setattr(search_mod, 'query_single_keyword', _query_single_keyword)
+    monkeypatch.setattr(search_mod.db, 'get_connection', lambda cfg: DummyConn())
+    monkeypatch.setattr(search_mod, 'fts5_search', lambda conn, query_text: {'doc-1'})
+
+    result = search_mod.execute_search(
+        query='jwt refresh token',
+        keywords_json='not-valid-json',
+        peek_mode=True,
+    )
+    output = result['output']
+
+    assert result['exit_code'] == 0
+    assert seen_keywords == ['jwt refresh token']
+    assert output['status'] == 'found'
+    assert output['keywords_searched'] == ['jwt refresh token']
+    assert {'status', 'count', 'keywords_searched', 'learnings'}.issubset(output.keys())

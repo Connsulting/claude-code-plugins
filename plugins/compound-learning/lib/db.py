@@ -30,6 +30,61 @@ _model = None
 _model_lock = threading.Lock()
 
 
+def _coerce_number(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _parse_env_float(name: str) -> float | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        print(f"Warning: Ignoring invalid {name}={raw!r}; expected a numeric value.", file=sys.stderr)
+        return None
+
+
+def _apply_legacy_threshold_compat(
+    result: Dict[str, Any],
+    learnings_file_config: Dict[str, Any],
+    env_legacy_threshold: float | None,
+    env_high_threshold: float | None,
+    env_possible_threshold: float | None,
+) -> None:
+    has_file_high = 'highConfidenceThreshold' in learnings_file_config
+    has_file_possible = 'possiblyRelevantThreshold' in learnings_file_config
+
+    legacy_file_threshold = _coerce_number(learnings_file_config.get('distanceThreshold'))
+    if 'distanceThreshold' in learnings_file_config and legacy_file_threshold is None:
+        print(
+            "Warning: Ignoring non-numeric learnings.distanceThreshold in config file.",
+            file=sys.stderr,
+        )
+
+    # Legacy config fallback: honor learnings.distanceThreshold when newer keys are missing.
+    if legacy_file_threshold is not None:
+        if not has_file_high:
+            result['learnings']['highConfidenceThreshold'] = legacy_file_threshold
+        if not has_file_possible:
+            result['learnings']['possiblyRelevantThreshold'] = max(
+                float(result['learnings']['possiblyRelevantThreshold']),
+                legacy_file_threshold,
+            )
+
+    # Legacy env fallback follows same rule, but never overrides explicit new env vars.
+    if env_legacy_threshold is not None:
+        if env_high_threshold is None and not has_file_high:
+            result['learnings']['highConfidenceThreshold'] = env_legacy_threshold
+        if env_possible_threshold is None and not has_file_possible:
+            result['learnings']['possiblyRelevantThreshold'] = max(
+                float(result['learnings']['possiblyRelevantThreshold']),
+                env_legacy_threshold,
+            )
+
+
 def load_config() -> Dict[str, Any]:
     """Load configuration from environment variables, then config file, then defaults."""
     home = os.path.expanduser('~')
@@ -73,12 +128,27 @@ def load_config() -> Dict[str, Any]:
         except Exception as e:
             print(f"Warning: Failed to load config from {config_file}: {e}", file=sys.stderr)
 
+    learnings_file_config: Dict[str, Any] = {}
+    if isinstance(file_config.get('learnings'), dict):
+        learnings_file_config = file_config['learnings']
+
     # Env var overrides
     env_db_path = os.environ.get('SQLITE_DB_PATH')
     env_global_dir = os.environ.get('LEARNINGS_GLOBAL_DIR')
     env_repo_path = os.environ.get('LEARNINGS_REPO_SEARCH_PATH')
+    env_legacy_threshold = _parse_env_float('LEARNINGS_DISTANCE_THRESHOLD')
+    env_high_threshold = _parse_env_float('LEARNINGS_HIGH_CONFIDENCE_THRESHOLD')
+    env_possible_threshold = _parse_env_float('LEARNINGS_POSSIBLY_RELEVANT_THRESHOLD')
+    env_keyword_boost_weight = _parse_env_float('LEARNINGS_KEYWORD_BOOST_WEIGHT')
 
     result = _deep_merge(defaults, file_config)
+    _apply_legacy_threshold_compat(
+        result=result,
+        learnings_file_config=learnings_file_config,
+        env_legacy_threshold=env_legacy_threshold,
+        env_high_threshold=env_high_threshold,
+        env_possible_threshold=env_possible_threshold,
+    )
 
     if env_db_path:
         result['sqlite']['dbPath'] = os.path.expanduser(env_db_path)
@@ -86,6 +156,24 @@ def load_config() -> Dict[str, Any]:
         result['learnings']['globalDir'] = os.path.expanduser(env_global_dir)
     if env_repo_path:
         result['learnings']['repoSearchPath'] = os.path.expanduser(env_repo_path)
+    if env_high_threshold is not None:
+        result['learnings']['highConfidenceThreshold'] = env_high_threshold
+    if env_possible_threshold is not None:
+        result['learnings']['possiblyRelevantThreshold'] = env_possible_threshold
+    if env_keyword_boost_weight is not None:
+        result['learnings']['keywordBoostWeight'] = env_keyword_boost_weight
+
+    high = result['learnings']['highConfidenceThreshold']
+    possible = result['learnings']['possiblyRelevantThreshold']
+    if isinstance(high, (int, float)) and isinstance(possible, (int, float)) and possible < high:
+        print(
+            (
+                "Warning: learnings.possiblyRelevantThreshold is lower than "
+                "learnings.highConfidenceThreshold; aligning it to match high confidence threshold."
+            ),
+            file=sys.stderr,
+        )
+        result['learnings']['possiblyRelevantThreshold'] = float(high)
 
     return result
 
