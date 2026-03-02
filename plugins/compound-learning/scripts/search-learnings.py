@@ -13,12 +13,21 @@ sys.path.insert(0, _PLUGIN_ROOT)
 
 import json
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Set
 
 import lib.db as db
 import lib.git_utils as git_utils
+
+
+TIMING_KEYS = (
+    'total_search_ms',
+    'vector_search_ms',
+    'fts_ms',
+    'rerank_ms',
+)
 
 
 # Common stopwords to filter from query keywords
@@ -197,20 +206,33 @@ def merge_parallel_results(
     return sorted(best_by_id.values(), key=lambda x: x['distance'])
 
 
-def search_learnings(
+def _empty_timings() -> Dict[str, float]:
+    return {key: 0.0 for key in TIMING_KEYS}
+
+
+def _elapsed_ms(start: float) -> float:
+    return round((time.perf_counter() - start) * 1000, 3)
+
+
+def execute_search(
     query: str,
     working_dir: str | None = None,
     max_results: int = 5,
     peek_mode: bool = False,
     exclude_ids: str = "",
     threshold_override: float | None = None,
-    keywords_json: str | None = None
-) -> None:
+    keywords_json: str | None = None,
+    collect_timings: bool = False,
+    config_override: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     """
-    Search learnings with tiered relevance filtering.
-    Returns high confidence results (distance < 0.5) and possibly relevant (0.5-0.7).
+    Execute learnings search and return structured output.
+    When collect_timings=True, includes phase timings in milliseconds.
     """
-    config = db.load_config()
+    timings = _empty_timings()
+    total_start = time.perf_counter()
+
+    config = config_override if config_override is not None else db.load_config()
     high_threshold = threshold_override if threshold_override is not None else config['learnings']['highConfidenceThreshold']
     possible_threshold = config['learnings']['possiblyRelevantThreshold']
     keyword_weight = config['learnings']['keywordBoostWeight']
@@ -227,8 +249,14 @@ def search_learnings(
         keywords = [query] if query else []
 
     if not keywords:
-        print(json.dumps({'status': 'empty', 'message': 'No keywords provided'}))
-        return
+        output = {'status': 'empty', 'message': 'No keywords provided'}
+        if collect_timings:
+            timings['total_search_ms'] = _elapsed_ms(total_start)
+        return {
+            'output': output,
+            'timings': timings if collect_timings else {},
+            'exit_code': 0,
+        }
 
     # Parse tag/category filters from first keyword (for compatibility)
     cleaned_query, _ = parse_tag_filters(keywords[0])
@@ -255,6 +283,7 @@ def search_learnings(
         query_size = max_results + len(exclude_set)
 
         # Run parallel queries for each keyword; each call opens its own connection
+        vector_start = time.perf_counter()
         all_results: List[List[Dict[str, Any]]] = []
         with ThreadPoolExecutor(max_workers=min(len(keywords), 8)) as executor:
             futures = {
@@ -270,15 +299,21 @@ def search_learnings(
 
         # Merge results from parallel queries
         raw_results = merge_parallel_results(all_results)
+        if collect_timings:
+            timings['vector_search_ms'] = _elapsed_ms(vector_start)
 
         # Get FTS5 matches for additional signal
+        fts_start = time.perf_counter()
         conn_fts = db.get_connection(config)
         try:
             fts_matches = fts5_search(conn_fts, ' '.join(keywords))
         finally:
             conn_fts.close()
+        if collect_timings:
+            timings['fts_ms'] = _elapsed_ms(fts_start)
 
         # Apply hybrid re-ranking (keyword boost + FTS5 signal)
+        rerank_start = time.perf_counter()
         reranked_results = hybrid_rerank(raw_results, query_keywords, keyword_weight, fts_ids=fts_matches)
 
         # Discard results with zero keyword overlap (unless they have very high
@@ -301,6 +336,8 @@ def search_learnings(
                 high_confidence.append(result)
             elif result['distance'] < possible_threshold:
                 possibly_relevant.append(result)
+        if collect_timings:
+            timings['rerank_ms'] = _elapsed_ms(rerank_start)
 
         # Peek mode: high_confidence first, backfill from possibly_relevant up to max_results
         if peek_mode:
@@ -319,8 +356,13 @@ def search_learnings(
             else:
                 output = {'status': 'empty', 'keywords_searched': keywords}
 
-            print(json.dumps(output, indent=2))
-            return
+            if collect_timings:
+                timings['total_search_ms'] = _elapsed_ms(total_start)
+            return {
+                'output': output,
+                'timings': timings if collect_timings else {},
+                'exit_code': 0,
+            }
 
         # Build output
         total_found = len(high_confidence) + len(possibly_relevant)
@@ -350,16 +392,65 @@ def search_learnings(
                 'possibly_relevant': possibly_relevant
             }
 
-        print(json.dumps(output, indent=2))
+        if collect_timings:
+            timings['total_search_ms'] = _elapsed_ms(total_start)
+        return {
+            'output': output,
+            'timings': timings if collect_timings else {},
+            'exit_code': 0,
+        }
 
     except Exception as e:
-        error_output = {
+        output = {
             'status': 'error',
             'message': str(e),
             'query': query
         }
-        print(json.dumps(error_output, indent=2))
-        sys.exit(1)
+        if collect_timings:
+            timings['total_search_ms'] = _elapsed_ms(total_start)
+        return {
+            'output': output,
+            'timings': timings if collect_timings else {},
+            'exit_code': 1,
+        }
+
+
+def search_learnings(
+    query: str,
+    working_dir: str | None = None,
+    max_results: int = 5,
+    peek_mode: bool = False,
+    exclude_ids: str = "",
+    threshold_override: float | None = None,
+    keywords_json: str | None = None,
+    collect_timings: bool = False,
+    config_override: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    """
+    Search learnings with tiered relevance filtering.
+    CLI-compatible output/exit behavior is preserved.
+    """
+    result = execute_search(
+        query=query,
+        working_dir=working_dir,
+        max_results=max_results,
+        peek_mode=peek_mode,
+        exclude_ids=exclude_ids,
+        threshold_override=threshold_override,
+        keywords_json=keywords_json,
+        collect_timings=collect_timings,
+        config_override=config_override,
+    )
+
+    output = result['output']
+    if output.get('status') == 'empty' and output.get('message') == 'No keywords provided':
+        print(json.dumps(output))
+    else:
+        print(json.dumps(output, indent=2))
+
+    if result.get('exit_code', 0) != 0:
+        sys.exit(result['exit_code'])
+    return result
 
 
 if __name__ == '__main__':

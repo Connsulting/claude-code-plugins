@@ -114,6 +114,42 @@ Skill(skill="search-learnings", args="JWT authentication patterns")
 
 Also generates a manifest at `~/.projects/learnings/MANIFEST.md` summarizing learnings by topic.
 
+### Performance Regression Check
+
+Run the focused regression spotter for the search hot path (auto-peek pipeline):
+
+```bash
+python3 "$CLAUDE_PLUGIN_ROOT/scripts/perf-regression-spotter.py"
+```
+
+Optional overrides:
+
+```bash
+python3 "$CLAUDE_PLUGIN_ROOT/scripts/perf-regression-spotter.py" \
+  --baseline "$CLAUDE_PLUGIN_ROOT/.claude-plugin/perf-baseline.json" \
+  --iterations 8 \
+  --queries-json '["jwt refresh token", "python asyncio gather"]'
+```
+
+Expected JSON output includes:
+- `status` (`pass`, `fail`, `error`)
+- `metrics` for `total_search_ms`, `vector_search_ms`, `fts_ms`, `rerank_ms` with p50/p95
+- `regressions` array with failed threshold details
+- `workload` settings used for the run
+
+Exit codes:
+- `0` pass
+- `1` regression detected
+- `2` runtime/config error
+
+Baseline file: `plugins/compound-learning/.claude-plugin/perf-baseline.json`
+
+Safe baseline update process:
+1. Run spotter after a clean performance improvement and confirm no regressions.
+2. Capture multiple runs (same machine profile) and use stable p50/p95 values.
+3. Update only baseline numbers you can justify, and keep `max_regression_pct`/`absolute_cap_ms` conservative.
+4. Re-run spotter and tests before committing baseline changes.
+
 ### Learnings Manifest
 
 The manifest helps Claude decide when to search by showing what topics have learnings:
@@ -164,6 +200,7 @@ How it works:
   - `/pr-learnings`: Extracts learnings from GitHub PR reviews, comments, and code changes
   - `/index-learnings`: Re-indexes all learning files into SQLite-vec
   - `/consolidate-learnings`: Finds and merges duplicate or overlapping learnings
+  - `/perf-regression`: Runs a focused performance regression check for search timing
 
 - **Agents:**
   - `learning-writer`: Analyzes conversations and extracts learnings

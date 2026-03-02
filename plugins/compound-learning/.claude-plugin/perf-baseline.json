@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "workload": {
+    "iterations": 6,
+    "warmup_runs": 1,
+    "queries": [
+      "jwt refresh token rotation",
+      "python asyncio gather",
+      "grafana alert duplicate notifications",
+      "sqlite migration rollback strategy"
+    ]
+  },
+  "metrics": {
+    "total_search_ms": {
+      "p50_baseline_ms": 300.0,
+      "p95_baseline_ms": 520.0,
+      "max_regression_pct": 50.0,
+      "absolute_cap_ms": 1200.0
+    },
+    "vector_search_ms": {
+      "p50_baseline_ms": 220.0,
+      "p95_baseline_ms": 420.0,
+      "max_regression_pct": 50.0,
+      "absolute_cap_ms": 1000.0
+    },
+    "fts_ms": {
+      "p50_baseline_ms": 20.0,
+      "p95_baseline_ms": 45.0,
+      "max_regression_pct": 75.0,
+      "absolute_cap_ms": 180.0
+    },
+    "rerank_ms": {
+      "p50_baseline_ms": 25.0,
+      "p95_baseline_ms": 60.0,
+      "max_regression_pct": 75.0,
+      "absolute_cap_ms": 200.0
+    }
+  }
+}
