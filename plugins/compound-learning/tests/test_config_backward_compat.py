@@ -109,3 +109,22 @@ def test_legacy_env_threshold_applies_when_new_keys_are_not_set(tmp_path, monkey
 
     assert config['learnings']['highConfidenceThreshold'] == 0.62
     assert config['learnings']['possiblyRelevantThreshold'] == 0.62
+
+
+def test_legacy_env_threshold_takes_precedence_over_legacy_file_threshold(tmp_path, monkeypatch):
+    plugin_root = tmp_path / 'plugin'
+    _write_config(
+        plugin_root,
+        {
+            'learnings': {
+                'distanceThreshold': 0.9,
+            }
+        },
+    )
+    _reset_env(monkeypatch, plugin_root)
+    monkeypatch.setenv('LEARNINGS_DISTANCE_THRESHOLD', '0.45')
+
+    config = db.load_config()
+
+    assert config['learnings']['highConfidenceThreshold'] == 0.45
+    assert config['learnings']['possiblyRelevantThreshold'] == 0.55

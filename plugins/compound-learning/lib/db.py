@@ -64,25 +64,23 @@ def _apply_legacy_threshold_compat(
             file=sys.stderr,
         )
 
-    # Legacy config fallback: honor learnings.distanceThreshold when newer keys are missing.
-    if legacy_file_threshold is not None:
-        if not has_file_high:
-            result['learnings']['highConfidenceThreshold'] = legacy_file_threshold
-        if not has_file_possible:
-            result['learnings']['possiblyRelevantThreshold'] = max(
-                float(result['learnings']['possiblyRelevantThreshold']),
-                legacy_file_threshold,
-            )
+    # Legacy fallback precedence: env legacy threshold overrides file legacy threshold.
+    # Explicit new keys (file/env) still take precedence over legacy fallback.
+    effective_legacy_threshold = env_legacy_threshold
+    if effective_legacy_threshold is None:
+        effective_legacy_threshold = legacy_file_threshold
 
-    # Legacy env fallback follows same rule, but never overrides explicit new env vars.
-    if env_legacy_threshold is not None:
-        if env_high_threshold is None and not has_file_high:
-            result['learnings']['highConfidenceThreshold'] = env_legacy_threshold
-        if env_possible_threshold is None and not has_file_possible:
-            result['learnings']['possiblyRelevantThreshold'] = max(
-                float(result['learnings']['possiblyRelevantThreshold']),
-                env_legacy_threshold,
-            )
+    if effective_legacy_threshold is None:
+        return
+
+    if env_high_threshold is None and not has_file_high:
+        result['learnings']['highConfidenceThreshold'] = effective_legacy_threshold
+
+    if env_possible_threshold is None and not has_file_possible:
+        result['learnings']['possiblyRelevantThreshold'] = max(
+            float(result['learnings']['possiblyRelevantThreshold']),
+            effective_legacy_threshold,
+        )
 
 
 def load_config() -> Dict[str, Any]:
