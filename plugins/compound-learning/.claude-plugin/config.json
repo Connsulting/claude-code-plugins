@@ -6,5 +6,10 @@
     "globalDir": "${HOME}/.projects/learnings",
     "repoSearchPath": "${HOME}",
     "distanceThreshold": 0.5
+  },
+  "observability": {
+    "enabled": false,
+    "level": "info",
+    "logPath": "${HOME}/.claude/plugins/compound-learning/observability.jsonl"
   }
 }

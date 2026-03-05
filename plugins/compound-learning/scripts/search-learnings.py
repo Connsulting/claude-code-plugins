@@ -13,12 +13,14 @@ sys.path.insert(0, _PLUGIN_ROOT)
 
 import json
 import re
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Set
 
 import lib.db as db
 import lib.git_utils as git_utils
+import lib.observability as observability
 
 
 # Common stopwords to filter from query keywords
@@ -111,8 +113,14 @@ def calculate_keyword_overlap(keywords: Set[str], document: str) -> float:
     return matches / len(keywords)
 
 
-def fts5_search(conn, query_text: str, limit: int = 50) -> Set[str]:
+def fts5_search(
+    conn,
+    query_text: str,
+    limit: int = 50,
+    logger: observability.StructuredLogger | None = None,
+) -> Set[str]:
     """Return IDs of documents matching FTS5 full-text search."""
+    started = observability.now_perf()
     try:
         tokens = re.findall(r'\b\w+\b', query_text.lower())
         meaningful = [t for t in tokens if t not in STOPWORDS and len(t) >= 2]
@@ -123,8 +131,25 @@ def fts5_search(conn, query_text: str, limit: int = 50) -> Set[str]:
             "SELECT id FROM fts_learnings WHERE content MATCH ? LIMIT ?",
             (fts_query, limit)
         ).fetchall()
-        return {row[0] for row in rows}
+        matches = {row[0] for row in rows}
+        if logger:
+            logger.emit(
+                'fts_query',
+                'success',
+                level='debug',
+                duration_ms=observability.elapsed_ms(started),
+                counts={'matches': len(matches)},
+            )
+        return matches
     except Exception as e:
+        if logger:
+            logger.emit(
+                'fts_query',
+                'error',
+                level='error',
+                duration_ms=observability.elapsed_ms(started),
+                error=e,
+            )
         print(f"FTS5 search error: {e}", file=sys.stderr)
         return set()
 
@@ -166,18 +191,45 @@ def query_single_keyword(
     keyword: str,
     scope_repos: List[str],
     query_size: int,
+    logger: observability.StructuredLogger | None = None,
 ) -> List[Dict[str, Any]]:
     """Query SQLite for a single keyword. Opens its own connection (thread-safe)."""
+    started = observability.now_perf()
     try:
         conn = db.get_connection(config)
         try:
-            results = db.search(conn, keyword, scope_repos, n_results=query_size, threshold=1.0)
+            results = db.search(
+                conn,
+                keyword,
+                scope_repos,
+                n_results=query_size,
+                threshold=1.0,
+                config=config,
+            )
             for r in results:
                 r['matched_keyword'] = keyword
+            if logger:
+                logger.emit(
+                    'keyword_query',
+                    'success',
+                    level='debug',
+                    duration_ms=observability.elapsed_ms(started),
+                    counts={'result_count': len(results)},
+                    keyword=keyword,
+                )
             return results
         finally:
             conn.close()
     except Exception as e:
+        if logger:
+            logger.emit(
+                'keyword_query',
+                'error',
+                level='error',
+                duration_ms=observability.elapsed_ms(started),
+                error=e,
+                keyword=keyword,
+            )
         print(f"Error in query_single_keyword: {e}", file=sys.stderr)
         return []
 
@@ -211,6 +263,35 @@ def search_learnings(
     Returns high confidence results (distance < 0.5) and possibly relevant (0.5-0.7).
     """
     config = db.load_config()
+    obs_cfg = config.setdefault('observability', {})
+    if not isinstance(obs_cfg, dict):
+        obs_cfg = {}
+        config['observability'] = obs_cfg
+    obs_context = obs_cfg.get('context')
+    if not isinstance(obs_context, dict):
+        obs_context = {}
+    obs_context.setdefault(
+        'correlation_id',
+        os.environ.get('LEARNINGS_OBS_CORRELATION_ID') or uuid.uuid4().hex,
+    )
+    session_id = os.environ.get('CLAUDE_SESSION_ID') or os.environ.get('CLAUDE_SESSION')
+    if session_id:
+        obs_context.setdefault('session_id', session_id)
+    obs_cfg['context'] = obs_context
+    logger = observability.get_logger(
+        'search',
+        config,
+        operation_name='search_learnings',
+    )
+    started = observability.now_perf()
+    logger.emit(
+        'search_request',
+        'start',
+        level='info',
+        counts={'max_results': max_results},
+        query_preview=query[:120],
+    )
+
     high_threshold = threshold_override if threshold_override is not None else config['learnings']['highConfidenceThreshold']
     possible_threshold = config['learnings']['possiblyRelevantThreshold']
     keyword_weight = config['learnings']['keywordBoostWeight']
@@ -227,6 +308,13 @@ def search_learnings(
         keywords = [query] if query else []
 
     if not keywords:
+        logger.emit(
+            'search_request',
+            'empty',
+            level='info',
+            duration_ms=observability.elapsed_ms(started),
+            message='No keywords provided',
+        )
         print(json.dumps({'status': 'empty', 'message': 'No keywords provided'}))
         return
 
@@ -239,12 +327,28 @@ def search_learnings(
     query_keywords: Set[str] = set()
     for kw in keywords:
         query_keywords.update(extract_query_keywords(kw))
+    logger.emit(
+        'keyword_parse',
+        'success',
+        level='debug',
+        counts={
+            'keywords_requested': len(keywords),
+            'query_keywords': len(query_keywords),
+        },
+    )
 
     cwd = working_dir if working_dir else os.getcwd()
     home = os.path.expanduser('~')
 
     # Detect repo hierarchy
     repos = detect_learning_hierarchy(cwd, home)
+    logger.emit(
+        'scope_detection',
+        'success',
+        level='info',
+        counts={'repos_in_scope': len(repos)},
+        working_dir=cwd,
+    )
 
     try:
         # Parse exclusion IDs upfront to determine query size
@@ -256,9 +360,10 @@ def search_learnings(
 
         # Run parallel queries for each keyword; each call opens its own connection
         all_results: List[List[Dict[str, Any]]] = []
+        fanout_started = observability.now_perf()
         with ThreadPoolExecutor(max_workers=min(len(keywords), 8)) as executor:
             futures = {
-                executor.submit(query_single_keyword, config, kw, repos, query_size): kw
+                executor.submit(query_single_keyword, config, kw, repos, query_size, logger): kw
                 for kw in keywords
             }
             for future in as_completed(futures):
@@ -267,19 +372,47 @@ def search_learnings(
                     all_results.append(result)
                 except Exception as e:
                     print(f"Error in search_learnings: {e}", file=sys.stderr)
+                    logger.emit(
+                        'parallel_fanout',
+                        'error',
+                        level='error',
+                        error=e,
+                    )
+        logger.emit(
+            'parallel_fanout',
+            'success',
+            duration_ms=observability.elapsed_ms(fanout_started),
+            counts={'keywords_searched': len(keywords), 'result_sets': len(all_results)},
+        )
 
         # Merge results from parallel queries
         raw_results = merge_parallel_results(all_results)
+        logger.emit(
+            'merge_results',
+            'success',
+            level='debug',
+            counts={'raw_candidates': len(raw_results)},
+        )
 
         # Get FTS5 matches for additional signal
+        fts_started = observability.now_perf()
         conn_fts = db.get_connection(config)
         try:
-            fts_matches = fts5_search(conn_fts, ' '.join(keywords))
+            fts_matches = fts5_search(conn_fts, ' '.join(keywords), logger=logger)
         finally:
             conn_fts.close()
+        logger.emit(
+            'fts_lookup',
+            'success',
+            level='debug',
+            duration_ms=observability.elapsed_ms(fts_started),
+            counts={'fts_matches': len(fts_matches)},
+        )
 
         # Apply hybrid re-ranking (keyword boost + FTS5 signal)
+        rerank_started = observability.now_perf()
         reranked_results = hybrid_rerank(raw_results, query_keywords, keyword_weight, fts_ids=fts_matches)
+        reranked_initial = len(reranked_results)
 
         # Discard results with zero keyword overlap (unless they have very high
         # semantic similarity, i.e., distance < 0.25 before keyword adjustment)
@@ -287,10 +420,23 @@ def search_learnings(
             r for r in reranked_results
             if r.get('keyword_overlap', 0) > 0 or r.get('original_distance', 1.0) < 0.25
         ]
+        after_overlap_filter = len(reranked_results)
 
         # Filter out excluded IDs
         if exclude_set:
             reranked_results = [r for r in reranked_results if r['id'] not in exclude_set]
+        after_exclusion = len(reranked_results)
+        logger.emit(
+            'rerank_filter',
+            'success',
+            duration_ms=observability.elapsed_ms(rerank_started),
+            counts={
+                'reranked_candidates': reranked_initial,
+                'after_overlap_filter': after_overlap_filter,
+                'after_exclusion': after_exclusion,
+                'excluded_ids': len(exclude_set),
+            },
+        )
 
         # Split results into tiers based on adjusted distance
         high_confidence: List[Dict[str, Any]] = []
@@ -301,6 +447,16 @@ def search_learnings(
                 high_confidence.append(result)
             elif result['distance'] < possible_threshold:
                 possibly_relevant.append(result)
+        logger.emit(
+            'threshold_bucketing',
+            'success',
+            counts={
+                'high_confidence': len(high_confidence),
+                'possibly_relevant': len(possibly_relevant),
+                'possible_threshold': possible_threshold,
+                'high_threshold': high_threshold,
+            },
+        )
 
         # Peek mode: high_confidence first, backfill from possibly_relevant up to max_results
         if peek_mode:
@@ -319,6 +475,14 @@ def search_learnings(
             else:
                 output = {'status': 'empty', 'keywords_searched': keywords}
 
+            logger.emit(
+                'search_complete',
+                output['status'],
+                level='info',
+                duration_ms=observability.elapsed_ms(started),
+                counts={'results_returned': output.get('count', 0)},
+                peek_mode=True,
+            )
             print(json.dumps(output, indent=2))
             return
 
@@ -350,9 +514,28 @@ def search_learnings(
                 'possibly_relevant': possibly_relevant
             }
 
+        logger.emit(
+            'search_complete',
+            output['status'],
+            level='info',
+            duration_ms=observability.elapsed_ms(started),
+            counts={
+                'high_confidence': len(high_confidence),
+                'possibly_relevant': len(possibly_relevant),
+                'raw_candidates': len(raw_results),
+            },
+            peek_mode=False,
+        )
         print(json.dumps(output, indent=2))
 
     except Exception as e:
+        logger.emit(
+            'search_complete',
+            'error',
+            level='error',
+            duration_ms=observability.elapsed_ms(started),
+            error=e,
+        )
         error_output = {
             'status': 'error',
             'message': str(e),
