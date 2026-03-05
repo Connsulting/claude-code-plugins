@@ -8,6 +8,7 @@ source "$HOOK_DIR/observability.sh" || exit 0
 
 hook_log_init "extract-learnings"
 SESSION_ID="${CLAUDE_SESSION_ID:-}"
+hook_set_session_context "$SESSION_ID"
 HOOK_OUTCOME="success"
 HOOK_OUTCOME_MESSAGE=""
 FILE_COUNT=0
@@ -70,6 +71,7 @@ INPUT=$(cat)
 SESSION_FROM_INPUT=$(echo "$INPUT" | jq -r '.session_id // empty')
 if [ -n "$SESSION_FROM_INPUT" ] && [ "$SESSION_FROM_INPUT" != "null" ]; then
   SESSION_ID="$SESSION_FROM_INPUT"
+  hook_set_session_context "$SESSION_ID"
 fi
 TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path // empty')
 CWD=$(echo "$INPUT" | jq -r '.cwd // empty')
@@ -90,6 +92,10 @@ REPO_ROOT="${REPO_ROOT:-$CWD}"
 
 # Expand ~ in transcript path
 TRANSCRIPT="${TRANSCRIPT/#\~/$HOME}"
+if [ -z "$SESSION_ID" ]; then
+  SESSION_ID="$(basename "$TRANSCRIPT" .jsonl)"
+  hook_set_session_context "$SESSION_ID"
+fi
 
 # Skip tiny transcripts (trivial sessions)
 LINES=$(wc -l < "$TRANSCRIPT" 2>/dev/null || echo "0")

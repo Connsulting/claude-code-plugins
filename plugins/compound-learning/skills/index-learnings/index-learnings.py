@@ -13,7 +13,6 @@ sys.path.insert(0, _PLUGIN_ROOT)
 
 import hashlib
 import re
-import uuid
 from pathlib import Path
 from datetime import datetime, timezone
 from collections import defaultdict
@@ -271,21 +270,7 @@ def index_learning_files():
     started = observability.now_perf()
     print("Loading configuration...")
     config = db.load_config()
-    obs_cfg = config.setdefault('observability', {})
-    if not isinstance(obs_cfg, dict):
-        obs_cfg = {}
-        config['observability'] = obs_cfg
-    context = obs_cfg.get('context')
-    if not isinstance(context, dict):
-        context = {}
-    context.setdefault(
-        'correlation_id',
-        os.environ.get('LEARNINGS_OBS_CORRELATION_ID') or uuid.uuid4().hex,
-    )
-    session_id = os.environ.get('CLAUDE_SESSION_ID') or os.environ.get('CLAUDE_SESSION')
-    if session_id:
-        context.setdefault('session_id', session_id)
-    obs_cfg['context'] = context
+    observability.attach_runtime_context(config)
 
     logger = observability.get_logger('index', config, operation_name='index_learning_files')
     logger.emit('index_pipeline', 'start', level='info')
@@ -426,6 +411,7 @@ if __name__ == '__main__':
 
     if args.file:
         config = db.load_config()
+        observability.attach_runtime_context(config)
         file_path = Path(args.file).expanduser().resolve()
         if not file_path.exists():
             print(f"[ERROR] File not found: {file_path}")

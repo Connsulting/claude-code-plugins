@@ -10,6 +10,7 @@ import json
 import os
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -146,6 +147,54 @@ def resolve_settings(config: Optional[Mapping[str, Any]]) -> ObservabilitySettin
         log_path=log_path,
         context=_clean_fields(context),
     )
+
+
+def attach_runtime_context(
+    config: MutableMapping[str, Any],
+    **extra_fields: Any,
+) -> Dict[str, Any]:
+    """
+    Ensure observability context includes runtime correlation/session identifiers.
+
+    Precedence for session_id:
+      1) LEARNINGS_OBS_SESSION_ID
+      2) CLAUDE_SESSION_ID
+      3) CLAUDE_SESSION
+
+    Correlation ID comes from LEARNINGS_OBS_CORRELATION_ID when present,
+    otherwise an existing config context value, otherwise a generated UUID.
+    """
+    obs_cfg = config.get("observability")
+    if not isinstance(obs_cfg, MutableMapping):
+        obs_cfg = {}
+        config["observability"] = obs_cfg
+
+    context = obs_cfg.get("context")
+    if not isinstance(context, MutableMapping):
+        context = {}
+
+    correlation_id = (
+        os.environ.get("LEARNINGS_OBS_CORRELATION_ID")
+        or str(context.get("correlation_id") or "").strip()
+        or uuid.uuid4().hex
+    )
+    context["correlation_id"] = correlation_id
+
+    session_id = (
+        os.environ.get("LEARNINGS_OBS_SESSION_ID")
+        or os.environ.get("CLAUDE_SESSION_ID")
+        or os.environ.get("CLAUDE_SESSION")
+        or str(context.get("session_id") or "").strip()
+    )
+    if session_id:
+        context["session_id"] = session_id
+    else:
+        context.pop("session_id", None)
+
+    context.update(_clean_fields(extra_fields))
+    cleaned = _clean_fields(context)
+    obs_cfg["context"] = cleaned
+    return cleaned
 
 
 def _append_event(path: str, event: Mapping[str, Any]) -> None:

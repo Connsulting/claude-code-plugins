@@ -10,6 +10,7 @@ source "$HOOK_DIR/observability.sh" || exit 0
 
 hook_log_init "setup"
 SESSION_ID="${CLAUDE_SESSION_ID:-}"
+hook_set_session_context "$SESSION_ID"
 HOOK_OUTCOME="success"
 HOOK_OUTCOME_MESSAGE=""
 

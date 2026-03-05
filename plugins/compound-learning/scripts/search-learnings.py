@@ -13,7 +13,6 @@ sys.path.insert(0, _PLUGIN_ROOT)
 
 import json
 import re
-import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Set
@@ -263,21 +262,7 @@ def search_learnings(
     Returns high confidence results (distance < 0.5) and possibly relevant (0.5-0.7).
     """
     config = db.load_config()
-    obs_cfg = config.setdefault('observability', {})
-    if not isinstance(obs_cfg, dict):
-        obs_cfg = {}
-        config['observability'] = obs_cfg
-    obs_context = obs_cfg.get('context')
-    if not isinstance(obs_context, dict):
-        obs_context = {}
-    obs_context.setdefault(
-        'correlation_id',
-        os.environ.get('LEARNINGS_OBS_CORRELATION_ID') or uuid.uuid4().hex,
-    )
-    session_id = os.environ.get('CLAUDE_SESSION_ID') or os.environ.get('CLAUDE_SESSION')
-    if session_id:
-        obs_context.setdefault('session_id', session_id)
-    obs_cfg['context'] = obs_context
+    observability.attach_runtime_context(config)
     logger = observability.get_logger(
         'search',
         config,

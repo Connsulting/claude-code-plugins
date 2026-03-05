@@ -9,6 +9,7 @@ source "$HOOK_DIR/observability.sh" || exit 0
 
 hook_log_init "auto-peek"
 SESSION_ID="${CLAUDE_SESSION_ID:-}"
+hook_set_session_context "$SESSION_ID"
 HOOK_OUTCOME="success"
 HOOK_OUTCOME_MESSAGE=""
 RESULT_COUNT=0
@@ -61,6 +62,7 @@ TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path')
 SESSION_FROM_INPUT=$(echo "$INPUT" | jq -r '.session_id // empty')
 if [ -n "$SESSION_FROM_INPUT" ] && [ "$SESSION_FROM_INPUT" != "null" ]; then
   SESSION_ID="$SESSION_FROM_INPUT"
+  hook_set_session_context "$SESSION_ID"
 fi
 if [ -z "$TRANSCRIPT" ] || [ "$TRANSCRIPT" = "null" ]; then
   HOOK_OUTCOME="skipped"
@@ -88,9 +90,13 @@ mkdir -p "$SESSIONS_DIR"
 # Prune session files older than 24 hours
 find "$SESSIONS_DIR" -name "*.seen" -mmin +1440 -delete 2>/dev/null
 
-# Derive session ID from the transcript filename UUID
-SESSION_ID=$(basename "$TRANSCRIPT" .jsonl)
-SESSION_FILE="$SESSIONS_DIR/${SESSION_ID}.seen"
+# Use transcript filename for dedupe state; keep observability session attribution stable.
+SESSION_STATE_ID=$(basename "$TRANSCRIPT" .jsonl)
+if [ -z "$SESSION_ID" ] && [ -n "$SESSION_STATE_ID" ]; then
+  SESSION_ID="$SESSION_STATE_ID"
+  hook_set_session_context "$SESSION_ID"
+fi
+SESSION_FILE="$SESSIONS_DIR/${SESSION_STATE_ID}.seen"
 
 # Read already-seen IDs from the session file
 EXCLUDE_IDS=""

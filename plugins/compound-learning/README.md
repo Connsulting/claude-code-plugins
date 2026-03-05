@@ -42,6 +42,8 @@ Run `/index-learnings` to build the index. The SQLite database is created automa
 | `LEARNINGS_OBS_ENABLED` | Enable structured observability events (`true`/`false`) | `false` |
 | `LEARNINGS_OBS_LEVEL` | Minimum observability level (`debug`, `info`, `warn`, `error`) | `info` |
 | `LEARNINGS_OBS_LOG_PATH` | JSONL observability log path | `~/.claude/plugins/compound-learning/observability.jsonl` |
+| `LEARNINGS_OBS_CORRELATION_ID` | Correlation ID for linking hook/search/index/DB events | Auto-generated per hook run |
+| `LEARNINGS_OBS_SESSION_ID` | Session identifier override used in observability context | Auto-detected from Claude/session input |
 
 **Example in `.claude/settings.json`:**
 ```json
@@ -86,6 +88,7 @@ When observability is enabled, the plugin writes structured JSONL events for:
 - DB operations (connection open, schema init, embeddings, upsert/delete/vector search)
 
 Event fields include: `timestamp`, `level`, `component`, `operation`, `status`, `duration_ms`, `counts`, optional `error`, and correlation/session identifiers when available.
+Hooks now export correlation/session context into Python subprocesses so hook events can be joined to search/index/db events in one trace.
 
 ## Usage
 

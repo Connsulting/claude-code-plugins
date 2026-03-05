@@ -73,6 +73,26 @@ def test_level_filtering(tmp_path):
     assert json.loads(lines[0])["level"] == "error"
 
 
+def test_attach_runtime_context_prefers_hook_env(monkeypatch):
+    config = {
+        "observability": {
+            "enabled": True,
+            "context": {
+                "correlation_id": "stale-correlation",
+                "session_id": "stale-session",
+            },
+        }
+    }
+    monkeypatch.setenv("LEARNINGS_OBS_CORRELATION_ID", "corr-hook-123")
+    monkeypatch.setenv("LEARNINGS_OBS_SESSION_ID", "sess-hook-123")
+
+    context = observability.attach_runtime_context(config, operation_name="search_learnings")
+
+    assert context["correlation_id"] == "corr-hook-123"
+    assert context["session_id"] == "sess-hook-123"
+    assert context["operation_name"] == "search_learnings"
+
+
 def test_search_stdout_contract_with_observability(monkeypatch, capsys, tmp_path):
     log_path = tmp_path / "search-observability.jsonl"
     config = {
@@ -87,6 +107,8 @@ def test_search_stdout_contract_with_observability(monkeypatch, capsys, tmp_path
             "logPath": str(log_path),
         },
     }
+    monkeypatch.setenv("LEARNINGS_OBS_CORRELATION_ID", "corr-hook-abc")
+    monkeypatch.setenv("LEARNINGS_OBS_SESSION_ID", "sess-hook-abc")
 
     class FakeConn:
         def close(self):
@@ -128,4 +150,7 @@ def test_search_stdout_contract_with_observability(monkeypatch, capsys, tmp_path
     assert payload["status"] == "success"
     assert "high_confidence" in payload
     assert log_path.exists()
-    assert log_path.read_text(encoding="utf-8").strip()
+    lines = [json.loads(line) for line in log_path.read_text(encoding="utf-8").strip().splitlines() if line.strip()]
+    assert lines
+    assert all(event.get("correlation_id") == "corr-hook-abc" for event in lines)
+    assert all(event.get("session_id") == "sess-hook-abc" for event in lines)

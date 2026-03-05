@@ -59,6 +59,13 @@ print(uuid.uuid4().hex)
 PY
 }
 
+hook_set_session_context() {
+  local session_id="$1"
+  if [ -n "$session_id" ] && [ "$session_id" != "null" ]; then
+    export LEARNINGS_OBS_SESSION_ID="$session_id"
+  fi
+}
+
 hook_json_or_null() {
   local raw="$1"
   if [ -z "$raw" ]; then
@@ -119,6 +126,13 @@ hook_log_init() {
 
   HOOK_CORRELATION_ID="$(hook_make_correlation_id)"
   HOOK_START_MS="$(hook_now_ms)"
+
+  # Export observability context so child Python processes emit joinable events.
+  export LEARNINGS_OBS_ENABLED="${HOOK_OBS_ENABLED:-0}"
+  export LEARNINGS_OBS_LEVEL="${HOOK_OBS_LEVEL:-info}"
+  export LEARNINGS_OBS_LOG_PATH="${HOOK_OBS_LOG_PATH:-$HOOK_LOG_DIR/observability.jsonl}"
+  export LEARNINGS_OBS_CORRELATION_ID="${HOOK_CORRELATION_ID:-}"
+  hook_set_session_context "${CLAUDE_SESSION_ID:-${CLAUDE_SESSION:-}}"
 }
 
 hook_log_activity() {
