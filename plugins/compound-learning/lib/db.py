@@ -9,7 +9,7 @@ import os
 import sys
 import threading
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping, Optional
 
 try:
     import sqlite3
@@ -28,6 +28,41 @@ except AttributeError:
 
 _model = None
 _model_lock = threading.Lock()
+
+
+import lib.observability as observability
+
+
+def _parse_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {'1', 'true', 'yes', 'on'}:
+            return True
+        if normalized in {'0', 'false', 'no', 'off'}:
+            return False
+    return None
+
+
+def _normalize_level(value: Any) -> str:
+    level = str(value or 'info').strip().lower()
+    if level == 'warning':
+        level = 'warn'
+    if level not in {'debug', 'info', 'warn', 'error'}:
+        return 'info'
+    return level
+
+
+def _db_logger(
+    config: Optional[Mapping[str, Any]],
+    **fields: Any,
+) -> observability.StructuredLogger:
+    return observability.get_logger('db', config, **fields)
 
 
 def load_config() -> Dict[str, Any]:
@@ -53,6 +88,11 @@ def load_config() -> Dict[str, Any]:
             'outdatedKeywords': ['temporary', 'workaround', 'deprecated', 'todo', 'fixme',
                                  'hack', 'remove later', 'obsolete'],
         },
+        'observability': {
+            'enabled': False,
+            'level': 'info',
+            'logPath': os.path.join(home, '.claude', 'plugins', 'compound-learning', 'observability.jsonl'),
+        },
     }
 
     # Determine plugin root for config file location
@@ -77,6 +117,9 @@ def load_config() -> Dict[str, Any]:
     env_db_path = os.environ.get('SQLITE_DB_PATH')
     env_global_dir = os.environ.get('LEARNINGS_GLOBAL_DIR')
     env_repo_path = os.environ.get('LEARNINGS_REPO_SEARCH_PATH')
+    env_obs_enabled = os.environ.get('LEARNINGS_OBS_ENABLED')
+    env_obs_level = os.environ.get('LEARNINGS_OBS_LEVEL')
+    env_obs_log_path = os.environ.get('LEARNINGS_OBS_LOG_PATH')
 
     result = _deep_merge(defaults, file_config)
 
@@ -86,6 +129,14 @@ def load_config() -> Dict[str, Any]:
         result['learnings']['globalDir'] = os.path.expanduser(env_global_dir)
     if env_repo_path:
         result['learnings']['repoSearchPath'] = os.path.expanduser(env_repo_path)
+    if env_obs_enabled is not None:
+        parsed = _parse_bool(env_obs_enabled)
+        if parsed is not None:
+            result['observability']['enabled'] = parsed
+    if env_obs_level:
+        result['observability']['level'] = _normalize_level(env_obs_level)
+    if env_obs_log_path:
+        result['observability']['logPath'] = os.path.expanduser(env_obs_log_path)
 
     return result
 
@@ -115,59 +166,135 @@ def get_connection(config: Dict[str, Any]) -> sqlite3.Connection:
     import sqlite_vec
 
     db_path = config['sqlite']['dbPath']
-    os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    logger = _db_logger(config, db_path=db_path)
+    started = observability.now_perf()
+    logger.emit('connection_open', 'start', level='debug')
 
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    try:
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
-    conn.enable_load_extension(True)
-    sqlite_vec.load(conn)
-    conn.enable_load_extension(False)
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
 
-    _create_schema(conn)
-    return conn
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        conn.enable_load_extension(False)
 
-
-def _create_schema(conn: sqlite3.Connection) -> None:
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS learnings (
-            id TEXT PRIMARY KEY,
-            content TEXT NOT NULL,
-            scope TEXT NOT NULL,
-            repo TEXT NOT NULL DEFAULT '',
-            file_path TEXT NOT NULL,
-            topic TEXT NOT NULL DEFAULT 'other',
-            keywords TEXT NOT NULL DEFAULT '',
-            created_at TEXT NOT NULL
-        );
-
-        CREATE VIRTUAL TABLE IF NOT EXISTS vec_learnings USING vec0(
-            id TEXT PRIMARY KEY,
-            embedding float[384]
-        );
-
-        CREATE VIRTUAL TABLE IF NOT EXISTS fts_learnings USING fts5(
-            id UNINDEXED,
-            content,
-            tokenize='porter unicode61'
-        );
-    """)
-    conn.commit()
+        _create_schema(conn, logger=logger)
+        logger.emit(
+            'connection_open',
+            'success',
+            duration_ms=observability.elapsed_ms(started),
+        )
+        return conn
+    except Exception as exc:
+        logger.emit(
+            'connection_open',
+            'error',
+            level='error',
+            duration_ms=observability.elapsed_ms(started),
+            error=exc,
+        )
+        raise
 
 
-def get_embedding(text: str):
+def _create_schema(
+    conn: sqlite3.Connection,
+    logger: observability.StructuredLogger | None = None,
+) -> None:
+    started = observability.now_perf()
+    if logger:
+        logger.emit('schema_init', 'start', level='debug')
+    try:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS learnings (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                scope TEXT NOT NULL,
+                repo TEXT NOT NULL DEFAULT '',
+                file_path TEXT NOT NULL,
+                topic TEXT NOT NULL DEFAULT 'other',
+                keywords TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS vec_learnings USING vec0(
+                id TEXT PRIMARY KEY,
+                embedding float[384]
+            );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS fts_learnings USING fts5(
+                id UNINDEXED,
+                content,
+                tokenize='porter unicode61'
+            );
+        """)
+        conn.commit()
+        if logger:
+            logger.emit(
+                'schema_init',
+                'success',
+                duration_ms=observability.elapsed_ms(started),
+            )
+    except Exception as exc:
+        if logger:
+            logger.emit(
+                'schema_init',
+                'error',
+                level='error',
+                duration_ms=observability.elapsed_ms(started),
+                error=exc,
+            )
+        raise
+
+
+def get_embedding(text: str, config: Optional[Dict[str, Any]] = None):
     """Lazy-load sentence-transformers model and return embedding as list."""
     global _model
+    logger = _db_logger(config, text_length=len(text))
+    encode_started = observability.now_perf()
+
     with _model_lock:
         if _model is None:
             model_cache = os.path.expanduser(
                 '~/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2'
             )
+            load_started = observability.now_perf()
+            logger.emit(
+                'embedding_model_load',
+                'start',
+                level='debug',
+                model='all-MiniLM-L6-v2',
+            )
             if not os.path.exists(model_cache):
                 print("Downloading embedding model (one-time, ~80MB)...", file=sys.stderr)
             from sentence_transformers import SentenceTransformer
             _model = SentenceTransformer('all-MiniLM-L6-v2')
-    return _model.encode(text, normalize_embeddings=True).tolist()
+            logger.emit(
+                'embedding_model_load',
+                'success',
+                duration_ms=observability.elapsed_ms(load_started),
+                model='all-MiniLM-L6-v2',
+            )
+    try:
+        embedding = _model.encode(text, normalize_embeddings=True)
+        logger.emit(
+            'embedding_encode',
+            'success',
+            level='debug',
+            duration_ms=observability.elapsed_ms(encode_started),
+            counts={'dimensions': len(embedding)},
+        )
+        return embedding.tolist()
+    except Exception as exc:
+        logger.emit(
+            'embedding_encode',
+            'error',
+            level='error',
+            duration_ms=observability.elapsed_ms(encode_started),
+            error=exc,
+        )
+        raise
 
 
 def upsert_document(
@@ -175,52 +302,106 @@ def upsert_document(
     doc_id: str,
     content: str,
     metadata: Dict[str, Any],
+    config: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Atomic upsert into learnings + vec_learnings + fts_learnings."""
     from datetime import datetime, timezone
 
-    embedding = get_embedding(content)
-    created_at = metadata.get('created_at', datetime.now(timezone.utc).isoformat())
-
-    # Delete-then-insert strategy (virtual tables don't support ON CONFLICT cleanly)
-    delete_document(conn, doc_id)
-
-    conn.execute(
-        """INSERT INTO learnings (id, content, scope, repo, file_path, topic, keywords, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            doc_id,
-            content,
-            metadata.get('scope', 'global'),
-            metadata.get('repo', ''),
-            metadata.get('file_path', ''),
-            metadata.get('topic', 'other'),
-            metadata.get('keywords', ''),
-            created_at,
-        ),
+    logger = _db_logger(
+        config,
+        doc_id=doc_id,
+        scope=metadata.get('scope', 'global'),
+        repo=metadata.get('repo', ''),
     )
+    started = observability.now_perf()
+    logger.emit('upsert', 'start', level='debug')
 
-    import struct
-    embedding_blob = struct.pack(f'{len(embedding)}f', *embedding)
-    conn.execute(
-        "INSERT INTO vec_learnings (id, embedding) VALUES (?, ?)",
-        (doc_id, embedding_blob),
-    )
+    try:
+        embedding = get_embedding(content, config=config)
+        created_at = metadata.get('created_at', datetime.now(timezone.utc).isoformat())
 
-    conn.execute(
-        "INSERT INTO fts_learnings (id, content) VALUES (?, ?)",
-        (doc_id, content),
-    )
+        # Delete-then-insert strategy (virtual tables don't support ON CONFLICT cleanly)
+        delete_document(conn, doc_id, config=config)
 
-    conn.commit()
+        conn.execute(
+            """INSERT INTO learnings (id, content, scope, repo, file_path, topic, keywords, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                doc_id,
+                content,
+                metadata.get('scope', 'global'),
+                metadata.get('repo', ''),
+                metadata.get('file_path', ''),
+                metadata.get('topic', 'other'),
+                metadata.get('keywords', ''),
+                created_at,
+            ),
+        )
+
+        import struct
+
+        embedding_blob = struct.pack(f'{len(embedding)}f', *embedding)
+        conn.execute(
+            "INSERT INTO vec_learnings (id, embedding) VALUES (?, ?)",
+            (doc_id, embedding_blob),
+        )
+
+        conn.execute(
+            "INSERT INTO fts_learnings (id, content) VALUES (?, ?)",
+            (doc_id, content),
+        )
+
+        conn.commit()
+        logger.emit(
+            'upsert',
+            'success',
+            duration_ms=observability.elapsed_ms(started),
+            counts={'embedding_dimensions': len(embedding), 'content_bytes': len(content.encode('utf-8'))},
+        )
+    except Exception as exc:
+        logger.emit(
+            'upsert',
+            'error',
+            level='error',
+            duration_ms=observability.elapsed_ms(started),
+            error=exc,
+        )
+        raise
 
 
-def delete_document(conn: sqlite3.Connection, doc_id: str) -> None:
+def delete_document(
+    conn: sqlite3.Connection,
+    doc_id: str,
+    config: Optional[Dict[str, Any]] = None,
+) -> None:
     """Remove a document from all three tables."""
-    conn.execute("DELETE FROM learnings WHERE id = ?", (doc_id,))
-    conn.execute("DELETE FROM vec_learnings WHERE id = ?", (doc_id,))
-    conn.execute("DELETE FROM fts_learnings WHERE id = ?", (doc_id,))
-    conn.commit()
+    logger = _db_logger(config, doc_id=doc_id)
+    started = observability.now_perf()
+    try:
+        primary_deleted = conn.execute("DELETE FROM learnings WHERE id = ?", (doc_id,)).rowcount
+        vec_deleted = conn.execute("DELETE FROM vec_learnings WHERE id = ?", (doc_id,)).rowcount
+        fts_deleted = conn.execute("DELETE FROM fts_learnings WHERE id = ?", (doc_id,)).rowcount
+        conn.commit()
+        logger.emit(
+            'delete',
+            'success',
+            level='debug',
+            duration_ms=observability.elapsed_ms(started),
+            counts={
+                'learnings': max(0, primary_deleted),
+                'vec_learnings': max(0, vec_deleted),
+                'fts_learnings': max(0, fts_deleted),
+            },
+        )
+    except Exception as exc:
+        logger.emit(
+            'delete',
+            'error',
+            level='error',
+            duration_ms=observability.elapsed_ms(started),
+            error=exc,
+        )
+        raise
 
 
 def search(
@@ -229,6 +410,7 @@ def search(
     scope_repos: List[str],
     n_results: int = 10,
     threshold: float = 1.0,
+    config: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     KNN vector search filtered by scope, returns list of result dicts.
@@ -238,62 +420,92 @@ def search(
     """
     import struct
 
-    query_emb = get_embedding(query_text)
-    embedding_blob = struct.pack(f'{len(query_emb)}f', *query_emb)
+    logger = _db_logger(
+        config,
+        query_preview=query_text[:120],
+        scope_repo_count=len(scope_repos),
+        n_results=n_results,
+        threshold=threshold,
+    )
+    started = observability.now_perf()
+    logger.emit('vector_search', 'start', level='debug')
 
-    # Build scope WHERE clause
-    scope_conditions = ["l.scope = 'global'"]
-    params: List[Any] = []
-    for repo in scope_repos:
-        scope_conditions.append("(l.scope = 'repo' AND l.repo = ?)")
-        params.append(repo)
-    scope_sql = ' OR '.join(scope_conditions)
+    try:
+        query_emb = get_embedding(query_text, config=config)
+        embedding_blob = struct.pack(f'{len(query_emb)}f', *query_emb)
 
-    # KNN query joined with learnings for scope filtering
-    # sqlite-vec returns distance as vec_distance_cosine
-    rows = conn.execute(
-        f"""
-        SELECT l.id, l.content, l.scope, l.repo, l.file_path, l.topic, l.keywords,
-               v.distance
-        FROM vec_learnings v
-        JOIN learnings l ON l.id = v.id
-        WHERE v.embedding MATCH ?
-          AND k = ?
-          AND ({scope_sql})
-        ORDER BY v.distance
-        """,
-        [embedding_blob, n_results * 3] + params,
-    ).fetchall()
+        # Build scope WHERE clause
+        scope_conditions = ["l.scope = 'global'"]
+        params: List[Any] = []
+        for repo in scope_repos:
+            scope_conditions.append("(l.scope = 'repo' AND l.repo = ?)")
+            params.append(repo)
+        scope_sql = ' OR '.join(scope_conditions)
 
-    results = []
-    for row in rows:
-        # sqlite-vec cosine distance is in [0, 2]; normalize to [0, 1] so
-        # existing thresholds (0.5, 0.6, 0.25) work unchanged
-        dist = float(row['distance']) / 2.0
-        if dist > threshold:
-            continue
-        results.append({
-            'id': row['id'],
-            'document': row['content'],
-            'metadata': {
-                'scope': row['scope'],
-                'repo': row['repo'],
-                'file_path': row['file_path'],
-                'topic': row['topic'],
-                'keywords': row['keywords'],
-            },
-            'distance': round(dist, 4),
-        })
-        if len(results) >= n_results:
-            break
+        # KNN query joined with learnings for scope filtering
+        # sqlite-vec returns distance as vec_distance_cosine
+        rows = conn.execute(
+            f"""
+            SELECT l.id, l.content, l.scope, l.repo, l.file_path, l.topic, l.keywords,
+                   v.distance
+            FROM vec_learnings v
+            JOIN learnings l ON l.id = v.id
+            WHERE v.embedding MATCH ?
+              AND k = ?
+              AND ({scope_sql})
+            ORDER BY v.distance
+            """,
+            [embedding_blob, n_results * 3] + params,
+        ).fetchall()
 
-    return results
+        results = []
+        for row in rows:
+            # sqlite-vec cosine distance is in [0, 2]; normalize to [0, 1] so
+            # existing thresholds (0.5, 0.6, 0.25) work unchanged
+            dist = float(row['distance']) / 2.0
+            if dist > threshold:
+                continue
+            results.append({
+                'id': row['id'],
+                'document': row['content'],
+                'metadata': {
+                    'scope': row['scope'],
+                    'repo': row['repo'],
+                    'file_path': row['file_path'],
+                    'topic': row['topic'],
+                    'keywords': row['keywords'],
+                },
+                'distance': round(dist, 4),
+            })
+            if len(results) >= n_results:
+                break
+
+        logger.emit(
+            'vector_search',
+            'success',
+            duration_ms=observability.elapsed_ms(started),
+            counts={'raw_rows': len(rows), 'results_returned': len(results)},
+        )
+        return results
+    except Exception as exc:
+        logger.emit(
+            'vector_search',
+            'error',
+            level='error',
+            duration_ms=observability.elapsed_ms(started),
+            error=exc,
+        )
+        raise
 
 
 def get_all_documents(
-    conn: sqlite3.Connection, include_content: bool = True
+    conn: sqlite3.Connection,
+    include_content: bool = True,
+    config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Return all documents in a dict format compatible with consolidate-discovery."""
+    logger = _db_logger(config, include_content=include_content)
+    started = observability.now_perf()
     rows = conn.execute(
         "SELECT id, content, scope, repo, file_path, topic, keywords FROM learnings"
     ).fetchall()
@@ -313,14 +525,32 @@ def get_all_documents(
             'keywords': row['keywords'],
         })
 
+    logger.emit(
+        'get_all_documents',
+        'success',
+        level='debug',
+        duration_ms=observability.elapsed_ms(started),
+        counts={'documents': len(ids)},
+    )
     return {'ids': ids, 'documents': documents, 'metadatas': metadatas}
 
 
 def get_documents_by_ids(
-    conn: sqlite3.Connection, ids: List[str]
+    conn: sqlite3.Connection,
+    ids: List[str],
+    config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Fetch specific documents by ID list."""
+    logger = _db_logger(config, requested_ids=len(ids))
+    started = observability.now_perf()
     if not ids:
+        logger.emit(
+            'get_documents_by_ids',
+            'success',
+            level='debug',
+            duration_ms=observability.elapsed_ms(started),
+            counts={'documents': 0},
+        )
         return {'ids': [], 'documents': [], 'metadatas': []}
 
     placeholders = ','.join('?' * len(ids))
@@ -348,10 +578,27 @@ def get_documents_by_ids(
                 'keywords': row['keywords'],
             })
 
+    logger.emit(
+        'get_documents_by_ids',
+        'success',
+        level='debug',
+        duration_ms=observability.elapsed_ms(started),
+        counts={'documents': len(result_ids)},
+    )
     return {'ids': result_ids, 'documents': result_docs, 'metadatas': result_metas}
 
 
-def count_documents(conn: sqlite3.Connection) -> int:
+def count_documents(conn: sqlite3.Connection, config: Optional[Dict[str, Any]] = None) -> int:
     """Return total number of indexed documents."""
+    logger = _db_logger(config)
+    started = observability.now_perf()
     row = conn.execute("SELECT COUNT(*) FROM learnings").fetchone()
-    return row[0] if row else 0
+    total = row[0] if row else 0
+    logger.emit(
+        'count_documents',
+        'success',
+        level='debug',
+        duration_ms=observability.elapsed_ms(started),
+        counts={'documents': total},
+    )
+    return total

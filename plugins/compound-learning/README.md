@@ -39,6 +39,9 @@ Run `/index-learnings` to build the index. The SQLite database is created automa
 | `LEARNINGS_GLOBAL_DIR` | Global learnings directory | `~/.projects/learnings` |
 | `LEARNINGS_REPO_SEARCH_PATH` | Base path to search for repo learnings | `~` |
 | `LEARNINGS_DISTANCE_THRESHOLD` | Similarity threshold (0-1, lower = more similar) | `0.5` |
+| `LEARNINGS_OBS_ENABLED` | Enable structured observability events (`true`/`false`) | `false` |
+| `LEARNINGS_OBS_LEVEL` | Minimum observability level (`debug`, `info`, `warn`, `error`) | `info` |
+| `LEARNINGS_OBS_LOG_PATH` | JSONL observability log path | `~/.claude/plugins/compound-learning/observability.jsonl` |
 
 **Example in `.claude/settings.json`:**
 ```json
@@ -63,11 +66,26 @@ Create `.claude-plugin/config.json` in the plugin directory:
     "globalDir": "${HOME}/.projects/learnings",
     "repoSearchPath": "${HOME}",
     "distanceThreshold": 0.5
+  },
+  "observability": {
+    "enabled": false,
+    "level": "info",
+    "logPath": "${HOME}/.claude/plugins/compound-learning/observability.jsonl"
   }
 }
 ```
 
 `${HOME}` expands to your home directory.
+
+### Observability Events
+
+When observability is enabled, the plugin writes structured JSONL events for:
+- Hooks (`setup`, `auto-peek`, `extract-learnings`) including start/end/skip/subprocess exit/duration
+- Search pipeline (keyword parse, repo scope, fan-out, merge/rerank/filter, threshold buckets, final status)
+- Index pipeline (discovery, per-file failures, prune summary, manifest generation, total runtime)
+- DB operations (connection open, schema init, embeddings, upsert/delete/vector search)
+
+Event fields include: `timestamp`, `level`, `component`, `operation`, `status`, `duration_ms`, `counts`, optional `error`, and correlation/session identifiers when available.
 
 ## Usage
 
@@ -217,3 +235,7 @@ Use topic + context: "authentication JWT refresh" not "implement login feature"
 
 **Hook activity log:**
 - Hook activity is logged to `~/.claude/plugins/compound-learning/activity.log`
+
+**Observability log:**
+- Structured events are logged to `~/.claude/plugins/compound-learning/observability.jsonl` (or `LEARNINGS_OBS_LOG_PATH`)
+- Tail recent events with: `tail -f ~/.claude/plugins/compound-learning/observability.jsonl`

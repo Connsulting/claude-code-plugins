@@ -13,6 +13,7 @@ sys.path.insert(0, _PLUGIN_ROOT)
 
 import hashlib
 import re
+import uuid
 from pathlib import Path
 from datetime import datetime, timezone
 from collections import defaultdict
@@ -20,6 +21,7 @@ from typing import Dict, List, Tuple, Any
 
 import lib.db as db
 import lib.git_utils as git_utils
+import lib.observability as observability
 from lib.topic_mapping import infer_topic_from_tags
 
 
@@ -127,6 +129,8 @@ def extract_type(content: str) -> str | None:
 
 def generate_manifest(manifest_data: Dict[str, List[Dict[str, Any]]], config: Dict[str, Any]) -> None:
     """Generate single manifest file at ~/.projects/learnings/MANIFEST.md"""
+    logger = observability.get_logger('index', config)
+    started = observability.now_perf()
     global_dir = Path(config['learnings']['globalDir'])
     global_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = global_dir / 'MANIFEST.md'
@@ -148,9 +152,27 @@ def generate_manifest(manifest_data: Dict[str, List[Dict[str, Any]]], config: Di
             continue
         lines.extend(_format_section(f"Repo: {scope}", manifest_data[scope]))
 
-    with open(manifest_path, 'w', encoding='utf-8') as f:
-        f.write('\n'.join(lines))
+    try:
+        with open(manifest_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines))
+    except Exception as exc:
+        logger.emit(
+            'manifest_generation',
+            'error',
+            level='error',
+            duration_ms=observability.elapsed_ms(started),
+            error=exc,
+            manifest_path=str(manifest_path),
+        )
+        raise
 
+    logger.emit(
+        'manifest_generation',
+        'success',
+        duration_ms=observability.elapsed_ms(started),
+        counts={'scopes': len(manifest_data), 'entries': sum(len(v) for v in manifest_data.values())},
+        manifest_path=str(manifest_path),
+    )
     print(f"\n[OK] Generated manifest: {manifest_path}")
 
 
@@ -194,9 +216,18 @@ def _format_section(title: str, learnings: List[Dict[str, Any]]) -> List[str]:
 
 def index_single_file(file_path: Path, config: Dict[str, Any]) -> bool:
     """Index a single learning file into SQLite. Returns True on success."""
+    logger = observability.get_logger('index', config, file_path=str(file_path))
+    started = observability.now_perf()
     try:
         conn = db.get_connection(config)
     except Exception as e:
+        logger.emit(
+            'single_file_connection',
+            'error',
+            level='error',
+            duration_ms=observability.elapsed_ms(started),
+            error=e,
+        )
         print(f"[WARN] Failed to open database, skipping index: {e}")
         return False
 
@@ -211,9 +242,24 @@ def index_single_file(file_path: Path, config: Dict[str, Any]) -> bool:
         metadata['keywords'] = ','.join(keywords)
 
         doc_id = hashlib.md5(str(file_path.resolve()).encode()).hexdigest()
-        db.upsert_document(conn, doc_id, content, metadata)
+        db.upsert_document(conn, doc_id, content, metadata, config=config)
+        logger.emit(
+            'single_file_index',
+            'success',
+            duration_ms=observability.elapsed_ms(started),
+            counts={'keywords': len(keywords)},
+            doc_id=doc_id,
+            topic=topic,
+        )
         return True
     except Exception as e:
+        logger.emit(
+            'single_file_index',
+            'error',
+            level='error',
+            duration_ms=observability.elapsed_ms(started),
+            error=e,
+        )
         print(f"[ERROR] Failed to index {file_path.name}: {e}")
         return False
     finally:
@@ -222,25 +268,70 @@ def index_single_file(file_path: Path, config: Dict[str, Any]) -> bool:
 
 def index_learning_files():
     """Main indexing function."""
+    started = observability.now_perf()
     print("Loading configuration...")
     config = db.load_config()
+    obs_cfg = config.setdefault('observability', {})
+    if not isinstance(obs_cfg, dict):
+        obs_cfg = {}
+        config['observability'] = obs_cfg
+    context = obs_cfg.get('context')
+    if not isinstance(context, dict):
+        context = {}
+    context.setdefault(
+        'correlation_id',
+        os.environ.get('LEARNINGS_OBS_CORRELATION_ID') or uuid.uuid4().hex,
+    )
+    session_id = os.environ.get('CLAUDE_SESSION_ID') or os.environ.get('CLAUDE_SESSION')
+    if session_id:
+        context.setdefault('session_id', session_id)
+    obs_cfg['context'] = context
+
+    logger = observability.get_logger('index', config, operation_name='index_learning_files')
+    logger.emit('index_pipeline', 'start', level='info')
 
     print("Opening database...")
     try:
         conn = db.get_connection(config)
         print(f"[OK] Database ready")
     except Exception as e:
+        logger.emit(
+            'index_pipeline',
+            'error',
+            level='error',
+            duration_ms=observability.elapsed_ms(started),
+            error=e,
+            message='Failed to open database',
+        )
         print(f"[ERROR] Failed to open database: {e}")
         sys.exit(1)
 
     print("\nDiscovering learning files...")
+    discovery_started = observability.now_perf()
     global_files, repo_files_by_name = find_all_learning_files(config)
     repo_files = [f for files in repo_files_by_name.values() for f in files]
     all_files = global_files + repo_files
 
+    logger.emit(
+        'file_discovery',
+        'success',
+        duration_ms=observability.elapsed_ms(discovery_started),
+        counts={
+            'global_files': len(global_files),
+            'repo_files': len(repo_files),
+            'repos': len(repo_files_by_name),
+            'total_files': len(all_files),
+        },
+    )
     print(f"Found {len(all_files)} files (Global: {len(global_files)}, Repos: {len(repo_files)})")
 
     if not all_files:
+        logger.emit(
+            'index_pipeline',
+            'empty',
+            level='info',
+            duration_ms=observability.elapsed_ms(started),
+        )
         print("\nNo learning files found. Run /compound to create some!")
         conn.close()
         return
@@ -248,6 +339,7 @@ def index_learning_files():
     print("\nIndexing...")
     manifest_data: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     indexed = 0
+    failed_files = 0
 
     for file_path in all_files:
         try:
@@ -262,7 +354,7 @@ def index_learning_files():
             metadata['keywords'] = ','.join(keywords)
 
             doc_id = hashlib.md5(str(file_path.resolve()).encode()).hexdigest()
-            db.upsert_document(conn, doc_id, content, metadata)
+            db.upsert_document(conn, doc_id, content, metadata, config=config)
 
             scope_key = metadata['repo'] if metadata['scope'] == 'repo' else 'global'
             manifest_data[scope_key].append({
@@ -276,26 +368,54 @@ def index_learning_files():
                 print(f"  {indexed}/{len(all_files)}...")
 
         except Exception as e:
+            failed_files += 1
+            logger.emit(
+                'file_index',
+                'error',
+                level='error',
+                error=e,
+                file_path=str(file_path),
+            )
             print(f"  [ERROR] {file_path.name}: {e}")
 
+    logger.emit(
+        'file_index',
+        'success',
+        counts={'indexed': indexed, 'failed': failed_files, 'total': len(all_files)},
+    )
+
     # Prune orphaned entries whose files no longer exist on disk
-    all_docs = db.get_all_documents(conn, include_content=False)
+    prune_started = observability.now_perf()
+    all_docs = db.get_all_documents(conn, include_content=False, config=config)
     pruned = 0
     for doc_id, metadata in zip(all_docs['ids'], all_docs['metadatas']):
         file_path_str = metadata.get('file_path', '')
         if file_path_str and not os.path.exists(file_path_str):
-            db.delete_document(conn, doc_id)
+            db.delete_document(conn, doc_id, config=config)
             pruned += 1
     if pruned:
         print(f"[OK] Pruned {pruned} orphaned entries")
     else:
         print("[OK] No orphaned entries found")
+    logger.emit(
+        'prune_orphans',
+        'success',
+        duration_ms=observability.elapsed_ms(prune_started),
+        counts={'candidates': len(all_docs['ids']), 'pruned': pruned},
+    )
 
     conn.close()
     print(f"\n[OK] Indexed {indexed} files")
 
     if manifest_data:
         generate_manifest(manifest_data, config)
+
+    logger.emit(
+        'index_pipeline',
+        'success',
+        duration_ms=observability.elapsed_ms(started),
+        counts={'indexed': indexed, 'failed': failed_files, 'pruned': pruned},
+    )
 
 
 if __name__ == '__main__':
