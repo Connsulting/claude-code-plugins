@@ -58,6 +58,32 @@ def _normalize_level(value: Any) -> str:
     return level
 
 
+def _coerce_float(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return float(stripped)
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_env_float(var_name: str, raw_value: Any) -> float | None:
+    if raw_value is None:
+        return None
+    value = _coerce_float(raw_value)
+    if value is None:
+        print(
+            f"Warning: Invalid numeric value for {var_name}: {raw_value!r}; ignoring.",
+            file=sys.stderr,
+        )
+    return value
+
+
 def _db_logger(
     config: Optional[Mapping[str, Any]],
     **fields: Any,
@@ -120,8 +146,39 @@ def load_config() -> Dict[str, Any]:
     env_obs_enabled = os.environ.get('LEARNINGS_OBS_ENABLED')
     env_obs_level = os.environ.get('LEARNINGS_OBS_LEVEL')
     env_obs_log_path = os.environ.get('LEARNINGS_OBS_LOG_PATH')
+    env_distance_threshold = _parse_env_float(
+        'LEARNINGS_DISTANCE_THRESHOLD',
+        os.environ.get('LEARNINGS_DISTANCE_THRESHOLD'),
+    )
+    env_high_confidence_threshold = _parse_env_float(
+        'LEARNINGS_HIGH_CONFIDENCE_THRESHOLD',
+        os.environ.get('LEARNINGS_HIGH_CONFIDENCE_THRESHOLD'),
+    )
+    env_possibly_relevant_threshold = _parse_env_float(
+        'LEARNINGS_POSSIBLY_RELEVANT_THRESHOLD',
+        os.environ.get('LEARNINGS_POSSIBLY_RELEVANT_THRESHOLD'),
+    )
+    env_keyword_boost_weight = _parse_env_float(
+        'LEARNINGS_KEYWORD_BOOST_WEIGHT',
+        os.environ.get('LEARNINGS_KEYWORD_BOOST_WEIGHT'),
+    )
 
     result = _deep_merge(defaults, file_config)
+    file_learnings = file_config.get('learnings')
+    if not isinstance(file_learnings, dict):
+        file_learnings = {}
+
+    file_has_high_confidence = 'highConfidenceThreshold' in file_learnings
+    file_has_possibly_relevant = 'possiblyRelevantThreshold' in file_learnings
+
+    file_distance_threshold: float | None = None
+    if 'distanceThreshold' in file_learnings:
+        file_distance_threshold = _coerce_float(file_learnings.get('distanceThreshold'))
+        if file_distance_threshold is None:
+            print(
+                "Warning: Invalid numeric value for learnings.distanceThreshold in config file; ignoring.",
+                file=sys.stderr,
+            )
 
     if env_db_path:
         result['sqlite']['dbPath'] = os.path.expanduser(env_db_path)
@@ -137,6 +194,72 @@ def load_config() -> Dict[str, Any]:
         result['observability']['level'] = _normalize_level(env_obs_level)
     if env_obs_log_path:
         result['observability']['logPath'] = os.path.expanduser(env_obs_log_path)
+
+    legacy_distance_threshold = (
+        env_distance_threshold
+        if env_distance_threshold is not None
+        else file_distance_threshold
+    )
+
+    learnings = result.setdefault('learnings', {})
+    if not isinstance(learnings, dict):
+        learnings = {}
+        result['learnings'] = learnings
+
+    # Legacy compatibility: distanceThreshold only applies when tiered keys are absent.
+    if env_high_confidence_threshold is not None:
+        learnings['highConfidenceThreshold'] = env_high_confidence_threshold
+    elif not file_has_high_confidence and legacy_distance_threshold is not None:
+        learnings['highConfidenceThreshold'] = legacy_distance_threshold
+
+    if env_possibly_relevant_threshold is not None:
+        learnings['possiblyRelevantThreshold'] = env_possibly_relevant_threshold
+    elif not file_has_possibly_relevant and legacy_distance_threshold is not None:
+        learnings['possiblyRelevantThreshold'] = legacy_distance_threshold
+
+    if env_keyword_boost_weight is not None:
+        learnings['keywordBoostWeight'] = env_keyword_boost_weight
+
+    default_learnings = defaults['learnings']
+
+    high_confidence = _coerce_float(learnings.get('highConfidenceThreshold'))
+    if high_confidence is None:
+        high_confidence = float(default_learnings['highConfidenceThreshold'])
+        print(
+            "Warning: Invalid learnings.highConfidenceThreshold; using default.",
+            file=sys.stderr,
+        )
+
+    possibly_relevant = _coerce_float(learnings.get('possiblyRelevantThreshold'))
+    if possibly_relevant is None:
+        possibly_relevant = float(default_learnings['possiblyRelevantThreshold'])
+        print(
+            "Warning: Invalid learnings.possiblyRelevantThreshold; using default.",
+            file=sys.stderr,
+        )
+
+    keyword_boost_weight = _coerce_float(learnings.get('keywordBoostWeight'))
+    if keyword_boost_weight is None:
+        keyword_boost_weight = float(default_learnings['keywordBoostWeight'])
+        print(
+            "Warning: Invalid learnings.keywordBoostWeight; using default.",
+            file=sys.stderr,
+        )
+
+    if possibly_relevant < high_confidence:
+        print(
+            (
+                "Warning: learnings.possiblyRelevantThreshold is lower than "
+                "learnings.highConfidenceThreshold; aligning both to "
+                "highConfidenceThreshold."
+            ),
+            file=sys.stderr,
+        )
+        possibly_relevant = high_confidence
+
+    learnings['highConfidenceThreshold'] = high_confidence
+    learnings['possiblyRelevantThreshold'] = possibly_relevant
+    learnings['keywordBoostWeight'] = keyword_boost_weight
 
     return result
 

@@ -5,7 +5,9 @@
   "learnings": {
     "globalDir": "${HOME}/.projects/learnings",
     "repoSearchPath": "${HOME}",
-    "distanceThreshold": 0.5
+    "highConfidenceThreshold": 0.4,
+    "possiblyRelevantThreshold": 0.55,
+    "keywordBoostWeight": 0.65
   },
   "observability": {
     "enabled": false,

@@ -38,7 +38,10 @@ Run `/index-learnings` to build the index. The SQLite database is created automa
 |----------|-------------|---------|
 | `LEARNINGS_GLOBAL_DIR` | Global learnings directory | `~/.projects/learnings` |
 | `LEARNINGS_REPO_SEARCH_PATH` | Base path to search for repo learnings | `~` |
-| `LEARNINGS_DISTANCE_THRESHOLD` | Similarity threshold (0-1, lower = more similar) | `0.5` |
+| `LEARNINGS_HIGH_CONFIDENCE_THRESHOLD` | High-confidence similarity threshold (0-1, lower = more similar) | `0.4` |
+| `LEARNINGS_POSSIBLY_RELEVANT_THRESHOLD` | Possibly-relevant similarity threshold (0-1) | `0.55` |
+| `LEARNINGS_KEYWORD_BOOST_WEIGHT` | Hybrid rerank keyword boost weight (0-1) | `0.65` |
+| `LEARNINGS_DISTANCE_THRESHOLD` | Legacy single-threshold fallback, used only when new tiered keys are not set | Legacy compatibility |
 | `LEARNINGS_OBS_ENABLED` | Enable structured observability events (`true`/`false`) | `false` |
 | `LEARNINGS_OBS_LEVEL` | Minimum observability level (`debug`, `info`, `warn`, `error`) | `info` |
 | `LEARNINGS_OBS_LOG_PATH` | JSONL observability log path | `~/.claude/plugins/compound-learning/observability.jsonl` |
@@ -67,7 +70,9 @@ Create `.claude-plugin/config.json` in the plugin directory:
   "learnings": {
     "globalDir": "${HOME}/.projects/learnings",
     "repoSearchPath": "${HOME}",
-    "distanceThreshold": 0.5
+    "highConfidenceThreshold": 0.4,
+    "possiblyRelevantThreshold": 0.55,
+    "keywordBoostWeight": 0.65
   },
   "observability": {
     "enabled": false,
@@ -78,6 +83,12 @@ Create `.claude-plugin/config.json` in the plugin directory:
 ```
 
 `${HOME}` expands to your home directory.
+
+Threshold precedence and backward compatibility:
+- New tiered env vars (`LEARNINGS_HIGH_CONFIDENCE_THRESHOLD`, `LEARNINGS_POSSIBLY_RELEVANT_THRESHOLD`, `LEARNINGS_KEYWORD_BOOST_WEIGHT`) override config file values.
+- New tiered config keys (`highConfidenceThreshold`, `possiblyRelevantThreshold`, `keywordBoostWeight`) override legacy `distanceThreshold`.
+- Legacy `LEARNINGS_DISTANCE_THRESHOLD` overrides legacy `distanceThreshold` when tiered keys are not explicitly set.
+- If thresholds are misordered (`possiblyRelevantThreshold < highConfidenceThreshold`), runtime aligns `possiblyRelevantThreshold` to `highConfidenceThreshold` and logs a warning.
 
 ### Observability Events
 
@@ -233,7 +244,8 @@ Use topic + context: "authentication JWT refresh" not "implement login feature"
 - Check config paths in `.claude-plugin/config.json`
 
 **Search returns no results:**
-- Check `distanceThreshold` setting (try increasing to 0.7)
+- Check threshold settings (`highConfidenceThreshold` / `possiblyRelevantThreshold`) and try increasing `possiblyRelevantThreshold` (for example to `0.7`)
+- If using legacy config, check `distanceThreshold` or `LEARNINGS_DISTANCE_THRESHOLD`
 - Run `/index-learnings` to ensure learnings are indexed
 
 **Hook activity log:**
