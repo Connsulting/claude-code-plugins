@@ -1,0 +1,22 @@
+[run]
+source =
+    lib
+    scripts
+    hooks
+    skills
+omit =
+    tests/*
+    */__pycache__/*
+    */.venv/*
+    */venv/*
+    */site-packages/*
+
+[report]
+omit =
+    tests/*
+    */__pycache__/*
+    */.venv/*
+    */venv/*
+    */site-packages/*
+skip_empty = True
+show_missing = True
