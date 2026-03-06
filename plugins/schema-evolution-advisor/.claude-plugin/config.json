@@ -1,0 +1,14 @@
+{
+  "analysis": {
+    "migrationGlobs": [
+      "migrations/**/*.sql",
+      "db/migrations/**/*.sql",
+      "**/migrations/**/*.sql",
+      "**/*migration*.sql"
+    ],
+    "minimumSeverity": "low",
+    "failOnSeverity": "high",
+    "defaultOutputFormat": "text",
+    "maxFindings": 200
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "schema-evolution-advisor",
+  "version": "0.1.0",
+  "description": "Deterministic static analysis for SQL schema migration evolution risks",
+  "keywords": [
+    "database",
+    "schema",
+    "migrations",
+    "risk-analysis"
+  ]
+}

@@ -11,6 +11,12 @@
       "description": "Learning compounding system with ChromaDB-backed knowledge extraction and hierarchical scope search",
       "source": "./plugins/compound-learning",
       "category": "productivity"
+    },
+    {
+      "name": "schema-evolution-advisor",
+      "description": "Deterministic static analysis of SQL migrations to flag risky schema evolution patterns before merge",
+      "source": "./plugins/schema-evolution-advisor",
+      "category": "development"
     }
   ]
 }

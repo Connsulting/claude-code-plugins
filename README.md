@@ -27,6 +27,22 @@ Learning compounding system that extracts knowledge from conversations and makes
 
 See [plugins/compound-learning/README.md](plugins/compound-learning/README.md) for setup and configuration.
 
+### schema-evolution-advisor
+
+Deterministic static analysis of SQL migration changes that flags risky schema evolution patterns before merge.
+
+**Features:**
+- Scans changed migration SQL files from git diff or explicit paths
+- Detects destructive and constraint-tightening patterns with severity rankings
+- Emits both human-readable and machine-readable (JSON) reports with mitigation hints
+
+**Install:**
+```bash
+/plugin install schema-evolution-advisor@connsulting-plugins
+```
+
+See [plugins/schema-evolution-advisor/README.md](plugins/schema-evolution-advisor/README.md) for usage and configuration.
+
 ## Development
 
 This marketplace is structured for standalone distribution. Each plugin in `plugins/` has its own `.claude-plugin/` directory with plugin.json.
