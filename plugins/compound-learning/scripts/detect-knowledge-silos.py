@@ -21,6 +21,7 @@ _PLUGIN_ROOT = os.environ.get(
 sys.path.insert(0, _PLUGIN_ROOT)
 
 import lib.db as db
+import lib.observability as observability
 
 
 ASSUMPTION_TEXT = (
@@ -272,15 +273,26 @@ def detect_knowledge_silos(
 
         topics_analyzed += 1
         repo_counts = Counter(record.repo for record in topic_records)
+        repo_scoped_counts = Counter({
+            repo: count for repo, count in repo_counts.items() if repo != "global"
+        })
         author_counts = Counter(record.author for record in topic_records)
 
-        dominant_repo, dominant_repo_count = _dominant(repo_counts)
+        dominant_repo, dominant_repo_count = _dominant(repo_scoped_counts)
         dominant_author, dominant_author_count = _dominant(author_counts)
 
-        repo_share = (dominant_repo_count / sample_size) if sample_size else 0.0
+        repo_scoped_sample_size = sum(repo_scoped_counts.values())
+        repo_share = (
+            (dominant_repo_count / repo_scoped_sample_size)
+            if repo_scoped_sample_size
+            else 0.0
+        )
         author_share = (dominant_author_count / sample_size) if sample_size else 0.0
 
-        repo_signal = repo_share >= repo_dominance_threshold
+        repo_signal = (
+            repo_scoped_sample_size >= min_topic_samples
+            and repo_share >= repo_dominance_threshold
+        )
         attribution_coverage = (
             (sample_size - author_counts.get("unknown", 0)) / sample_size
             if sample_size
@@ -331,8 +343,14 @@ def detect_knowledge_silos(
                     "dominant_repo": dominant_repo,
                     "dominant_count": dominant_repo_count,
                     "dominant_share": round(repo_share, 4),
+                    "evaluated_sample_size": repo_scoped_sample_size,
+                    "global_sample_size": repo_counts.get("global", 0),
                     "threshold": repo_dominance_threshold,
                     "distribution": _distribution(repo_counts, sample_size),
+                    "evaluated_distribution": _distribution(
+                        repo_scoped_counts,
+                        repo_scoped_sample_size,
+                    ),
                 },
                 "author_dominance": {
                     "is_silo": author_signal,
@@ -421,15 +439,24 @@ def render_text_report(report: Mapping[str, Any]) -> str:
         )
 
         repo_dominance = finding["repo_dominance"]
-        lines.append(
-            (
-                "Repo concentration: "
-                f"{repo_dominance['dominant_repo']} "
-                f"{_format_percent(repo_dominance['dominant_share'])} "
-                f"({repo_dominance['dominant_count']}/{finding['sample_size']}) "
-                f"threshold {_format_percent(repo_dominance['threshold'])}"
+        repo_sample_size = int(repo_dominance.get("evaluated_sample_size", finding["sample_size"]))
+        if repo_sample_size == 0:
+            lines.append(
+                (
+                    "Repo concentration: n/a "
+                    "(no repo-scoped samples for this topic; global entries are excluded)"
+                )
             )
-        )
+        else:
+            lines.append(
+                (
+                    "Repo concentration: "
+                    f"{repo_dominance['dominant_repo']} "
+                    f"{_format_percent(repo_dominance['dominant_share'])} "
+                    f"({repo_dominance['dominant_count']}/{repo_sample_size}) "
+                    f"threshold {_format_percent(repo_dominance['threshold'])}"
+                )
+            )
 
         author_dominance = finding["author_dominance"]
         author_name = (
@@ -530,56 +557,299 @@ def _validate_range(name: str, value: float) -> None:
         raise ValueError(f"{name} must be between 0 and 1, got {value}.")
 
 
+def _fallback_observability_config() -> Dict[str, Any]:
+    cfg: Dict[str, Any] = {
+        "enabled": os.environ.get("LEARNINGS_OBS_ENABLED", "false"),
+    }
+
+    level = os.environ.get("LEARNINGS_OBS_LEVEL")
+    if level:
+        cfg["level"] = level
+
+    log_path = os.environ.get("LEARNINGS_OBS_LOG_PATH")
+    if log_path:
+        cfg["logPath"] = os.path.expanduser(log_path)
+
+    return {"observability": cfg}
+
+
+def _detector_logger(
+    config: Mapping[str, Any] | None = None,
+) -> observability.StructuredLogger:
+    return observability.get_logger(
+        "knowledge_silo_detector",
+        config,
+        operation_name="detect_knowledge_silos",
+    )
+
+
+def _emit_terminal(
+    logger: observability.StructuredLogger,
+    started: float,
+    *,
+    status: str,
+    exit_code: int,
+    summary: Mapping[str, Any] | None = None,
+) -> None:
+    counts: Dict[str, Any] = {"exit_code": exit_code}
+    if isinstance(summary, Mapping):
+        for key in ("total_learnings", "topics_analyzed", "topics_with_findings"):
+            value = summary.get(key)
+            if isinstance(value, (int, float)):
+                counts[key] = int(value)
+
+    logger.emit(
+        "detector_complete",
+        status,
+        level="info" if status == "success" else "error",
+        duration_ms=observability.elapsed_ms(started),
+        counts=counts,
+    )
+
+
 def main() -> int:
     args = parse_args()
+    run_started = observability.now_perf()
+
+    fallback_config = _fallback_observability_config()
+    bootstrap_context = observability.attach_runtime_context(
+        fallback_config,
+        operation_name="detect_knowledge_silos",
+    )
+    logger = _detector_logger(fallback_config)
 
     if args.min_topic_samples <= 0:
-        print("--min-topic-samples must be greater than 0.", file=sys.stderr)
+        message = "--min-topic-samples must be greater than 0."
+        logger.emit(
+            "validation",
+            "error",
+            level="error",
+            message=message,
+            counts={"min_topic_samples": args.min_topic_samples},
+        )
+        _emit_terminal(logger, run_started, status="error", exit_code=2)
+        print(message, file=sys.stderr)
         return 2
 
     if args.max_findings < 0:
-        print("--max-findings cannot be negative.", file=sys.stderr)
+        message = "--max-findings cannot be negative."
+        logger.emit(
+            "validation",
+            "error",
+            level="error",
+            message=message,
+            counts={"max_findings": args.max_findings},
+        )
+        _emit_terminal(logger, run_started, status="error", exit_code=2)
+        print(message, file=sys.stderr)
         return 2
 
     try:
         _validate_range("--repo-dominance-threshold", args.repo_dominance_threshold)
         _validate_range("--author-dominance-threshold", args.author_dominance_threshold)
     except ValueError as exc:
-        print(str(exc), file=sys.stderr)
+        message = str(exc)
+        logger.emit(
+            "validation",
+            "error",
+            level="error",
+            message=message,
+            counts={
+                "repo_dominance_threshold": args.repo_dominance_threshold,
+                "author_dominance_threshold": args.author_dominance_threshold,
+            },
+        )
+        _emit_terminal(logger, run_started, status="error", exit_code=2)
+        print(message, file=sys.stderr)
         return 2
 
+    config_started = observability.now_perf()
     try:
         config = db.load_config()
-        conn = db.get_connection(config)
     except Exception as exc:
+        logger.emit(
+            "config_load",
+            "error",
+            level="error",
+            duration_ms=observability.elapsed_ms(config_started),
+            error=exc,
+        )
+        _emit_terminal(logger, run_started, status="error", exit_code=1)
         print(f"Failed to initialize database connection: {exc}", file=sys.stderr)
         return 1
+    observability.attach_runtime_context(
+        config,
+        operation_name="detect_knowledge_silos",
+        correlation_id=bootstrap_context.get("correlation_id"),
+        session_id=bootstrap_context.get("session_id"),
+    )
+    logger = _detector_logger(config)
+    logger.emit(
+        "config_load",
+        "success",
+        level="debug",
+        duration_ms=observability.elapsed_ms(config_started),
+    )
+    logger.emit(
+        "detector_run",
+        "start",
+        level="info",
+        counts={"max_findings": args.max_findings},
+        output_format=args.format,
+    )
 
+    db_init_started = observability.now_perf()
+    logger.emit("db_init", "start", level="debug")
+    try:
+        conn = db.get_connection(config)
+    except Exception as exc:
+        logger.emit(
+            "db_init",
+            "error",
+            level="error",
+            duration_ms=observability.elapsed_ms(db_init_started),
+            error=exc,
+        )
+        _emit_terminal(logger, run_started, status="error", exit_code=1)
+        print(f"Failed to initialize database connection: {exc}", file=sys.stderr)
+        return 1
+    logger.emit(
+        "db_init",
+        "success",
+        level="info",
+        duration_ms=observability.elapsed_ms(db_init_started),
+        counts={"connections": 1},
+    )
+
+    read_started = observability.now_perf()
+    logger.emit("db_read", "start", level="debug")
     try:
         rows = fetch_indexed_learnings(conn)
     except Exception as exc:
+        logger.emit(
+            "db_read",
+            "error",
+            level="error",
+            duration_ms=observability.elapsed_ms(read_started),
+            error=exc,
+        )
+        _emit_terminal(logger, run_started, status="error", exit_code=1)
         print(f"Failed to read indexed learnings: {exc}", file=sys.stderr)
-        conn.close()
         return 1
-
-    conn.close()
-
-    report = detect_knowledge_silos(
-        rows,
-        min_topic_samples=args.min_topic_samples,
-        repo_dominance_threshold=args.repo_dominance_threshold,
-        author_dominance_threshold=args.author_dominance_threshold,
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            # Close failures must not change detector behavior.
+            pass
+    logger.emit(
+        "db_read",
+        "success",
+        level="info",
+        duration_ms=observability.elapsed_ms(read_started),
+        counts={"rows_read": len(rows)},
     )
 
-    if args.max_findings and len(report["findings"]) > args.max_findings:
+    compute_started = observability.now_perf()
+    logger.emit(
+        "detector_compute",
+        "start",
+        level="info",
+        counts={"rows_read": len(rows)},
+    )
+    try:
+        report = detect_knowledge_silos(
+            rows,
+            min_topic_samples=args.min_topic_samples,
+            repo_dominance_threshold=args.repo_dominance_threshold,
+            author_dominance_threshold=args.author_dominance_threshold,
+        )
+    except Exception as exc:
+        logger.emit(
+            "detector_compute",
+            "error",
+            level="error",
+            duration_ms=observability.elapsed_ms(compute_started),
+            error=exc,
+            counts={"rows_read": len(rows)},
+        )
+        _emit_terminal(logger, run_started, status="error", exit_code=1)
+        raise
+    summary = report.get("summary", {})
+    logger.emit(
+        "detector_compute",
+        "success",
+        level="info",
+        duration_ms=observability.elapsed_ms(compute_started),
+        counts={
+            "rows_read": len(rows),
+            "topics_analyzed": summary.get("topics_analyzed", 0),
+            "topics_with_findings": summary.get("topics_with_findings", 0),
+        },
+    )
+
+    findings_before = len(report["findings"])
+    if args.max_findings and findings_before > args.max_findings:
         report["findings"] = report["findings"][: args.max_findings]
         report["summary"]["topics_with_findings"] = len(report["findings"])
         report["truncated"] = True
-
-    if args.format == "json":
-        print(json.dumps(report, indent=2, sort_keys=True))
+        logger.emit(
+            "truncation",
+            "applied",
+            level="info",
+            counts={
+                "findings_before": findings_before,
+                "findings_after": len(report["findings"]),
+                "max_findings": args.max_findings,
+            },
+        )
+    elif args.max_findings == 0:
+        logger.emit(
+            "truncation",
+            "disabled",
+            level="debug",
+            counts={
+                "findings_before": findings_before,
+                "max_findings": args.max_findings,
+            },
+        )
     else:
-        print(render_text_report(report))
+        logger.emit(
+            "truncation",
+            "not_needed",
+            level="debug",
+            counts={
+                "findings_before": findings_before,
+                "max_findings": args.max_findings,
+            },
+        )
+
+    emit_started = observability.now_perf()
+    try:
+        if args.format == "json":
+            print(json.dumps(report, indent=2, sort_keys=True))
+        else:
+            print(render_text_report(report))
+    except Exception as exc:
+        logger.emit(
+            "output_emit",
+            "error",
+            level="error",
+            duration_ms=observability.elapsed_ms(emit_started),
+            error=exc,
+            output_format=args.format,
+        )
+        _emit_terminal(logger, run_started, status="error", exit_code=1, summary=summary)
+        raise
+    logger.emit(
+        "output_emit",
+        "success",
+        level="info",
+        duration_ms=observability.elapsed_ms(emit_started),
+        counts={"findings_emitted": len(report.get("findings", []))},
+        output_format=args.format,
+    )
+    _emit_terminal(logger, run_started, status="success", exit_code=0, summary=summary)
 
     return 0
 

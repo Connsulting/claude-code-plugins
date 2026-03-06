@@ -1,4 +1,6 @@
+import argparse
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -27,6 +29,20 @@ def _rows(topic: str, repos: list[str], file_prefix: str = "learning") -> list[d
     return rows
 
 
+def _global_rows(topic: str, count: int, file_prefix: str = "global-learning") -> list[dict]:
+    rows = []
+    for index in range(1, count + 1):
+        rows.append(
+            {
+                "topic": topic,
+                "scope": "global",
+                "repo": "",
+                "file_path": f"/{file_prefix}-{index}.md",
+            }
+        )
+    return rows
+
+
 def _resolver(author_map: dict[str, str]):
     return lambda file_path: author_map[file_path]
 
@@ -41,6 +57,51 @@ def test_empty_dataset_returns_guidance():
     assert report["findings"] == []
     assert "index-learnings" in report["guidance"]
     assert report["summary"]["total_learnings"] == 0
+
+
+def test_main_validation_failure_preserves_exit_and_stderr(monkeypatch, capsys, tmp_path):
+    log_path = tmp_path / "detector-observability.jsonl"
+    args = argparse.Namespace(
+        min_topic_samples=0,
+        repo_dominance_threshold=0.70,
+        author_dominance_threshold=0.65,
+        max_findings=25,
+        format="text",
+    )
+    monkeypatch.setenv("LEARNINGS_OBS_ENABLED", "true")
+    monkeypatch.setenv("LEARNINGS_OBS_LEVEL", "debug")
+    monkeypatch.setenv("LEARNINGS_OBS_LOG_PATH", str(log_path))
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("load_config/get_connection must not run for invalid arguments")
+
+    monkeypatch.setattr(DETECTOR, "parse_args", lambda: args)
+    monkeypatch.setattr(DETECTOR.db, "load_config", fail_if_called)
+    monkeypatch.setattr(DETECTOR.db, "get_connection", fail_if_called)
+
+    exit_code = DETECTOR.main()
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert captured.out == ""
+    assert captured.err.strip() == "--min-topic-samples must be greater than 0."
+    assert log_path.exists()
+
+    events = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert any(
+        event.get("operation") == "validation" and event.get("status") == "error"
+        for event in events
+    )
+    assert any(
+        event.get("operation") == "detector_complete"
+        and event.get("status") == "error"
+        and event.get("counts", {}).get("exit_code") == 2
+        for event in events
+    )
 
 
 def test_single_repo_dominance_detected():
@@ -149,3 +210,62 @@ def test_threshold_boundaries_are_respected():
     assert finding["author_dominance"]["is_silo"] is True
 
     assert above_boundary["findings"] == []
+
+
+def test_global_scope_topic_is_not_flagged_as_repo_silo():
+    rows = _global_rows("release-process", 5)
+    author_map = {
+        "/global-learning-1.md": "alice",
+        "/global-learning-2.md": "bob",
+        "/global-learning-3.md": "carol",
+        "/global-learning-4.md": "dave",
+        "/global-learning-5.md": "erin",
+    }
+
+    report = DETECTOR.detect_knowledge_silos(
+        rows,
+        min_topic_samples=4,
+        repo_dominance_threshold=0.70,
+        author_dominance_threshold=0.90,
+        contributor_resolver=_resolver(author_map),
+    )
+
+    assert report["status"] == "ok"
+    assert report["findings"] == []
+
+
+def test_repo_dominance_requires_enough_repo_scoped_samples():
+    rows = _global_rows("runbooks", 4) + _rows(
+        "runbooks",
+        ["repo-a", "repo-a"],
+        file_prefix="repo-learning",
+    )
+    author_map = {
+        "/global-learning-1.md": "alice",
+        "/global-learning-2.md": "alice",
+        "/global-learning-3.md": "alice",
+        "/global-learning-4.md": "alice",
+        "/repo-learning-1.md": "alice",
+        "/repo-learning-2.md": "bob",
+    }
+
+    report = DETECTOR.detect_knowledge_silos(
+        rows,
+        min_topic_samples=4,
+        repo_dominance_threshold=0.70,
+        author_dominance_threshold=0.80,
+        contributor_resolver=_resolver(author_map),
+    )
+
+    assert len(report["findings"]) == 1
+    finding = report["findings"][0]
+
+    assert finding["author_dominance"]["is_silo"] is True
+    assert finding["repo_dominance"]["is_silo"] is False
+    assert finding["repo_dominance"]["dominant_repo"] == "repo-a"
+    assert finding["repo_dominance"]["evaluated_sample_size"] == 2
+    assert finding["repo_dominance"]["global_sample_size"] == 4
+    assert all(
+        "Reduce repo concentration" not in recommendation
+        for recommendation in finding["recommendations"]
+    )

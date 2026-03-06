@@ -1,3 +1,4 @@
+import argparse
 import importlib.util
 import json
 import sys
@@ -14,6 +15,13 @@ _search_spec = importlib.util.spec_from_file_location(
 )
 search_module = importlib.util.module_from_spec(_search_spec)
 _search_spec.loader.exec_module(search_module)
+
+_detector_spec = importlib.util.spec_from_file_location(
+    "knowledge_silo_detector",
+    PLUGIN_ROOT / "scripts" / "detect-knowledge-silos.py",
+)
+detector_module = importlib.util.module_from_spec(_detector_spec)
+_detector_spec.loader.exec_module(detector_module)
 
 
 def test_structured_event_shape(tmp_path):
@@ -154,3 +162,55 @@ def test_search_stdout_contract_with_observability(monkeypatch, capsys, tmp_path
     assert lines
     assert all(event.get("correlation_id") == "corr-hook-abc" for event in lines)
     assert all(event.get("session_id") == "sess-hook-abc" for event in lines)
+
+
+def test_detector_stdout_contract_with_observability(monkeypatch, capsys, tmp_path):
+    log_path = tmp_path / "detector-observability.jsonl"
+    config = {
+        "observability": {
+            "enabled": True,
+            "level": "debug",
+            "logPath": str(log_path),
+        }
+    }
+    args = argparse.Namespace(
+        min_topic_samples=4,
+        repo_dominance_threshold=0.70,
+        author_dominance_threshold=0.65,
+        max_findings=2,
+        format="json",
+    )
+    monkeypatch.setenv("LEARNINGS_OBS_CORRELATION_ID", "corr-detector-xyz")
+    monkeypatch.setenv("LEARNINGS_OBS_SESSION_ID", "sess-detector-xyz")
+
+    class FakeConn:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(detector_module, "parse_args", lambda: args)
+    monkeypatch.setattr(detector_module.db, "load_config", lambda: config)
+    monkeypatch.setattr(detector_module.db, "get_connection", lambda _config: FakeConn())
+    monkeypatch.setattr(detector_module, "fetch_indexed_learnings", lambda _conn: [])
+
+    exit_code = detector_module.main()
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert captured.err == ""
+    payload = json.loads(captured.out)
+    assert payload["status"] == "empty"
+    assert payload["summary"]["total_learnings"] == 0
+
+    lines = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert lines
+    assert all(event.get("correlation_id") == "corr-detector-xyz" for event in lines)
+    assert all(event.get("session_id") == "sess-detector-xyz" for event in lines)
+
+    operations = {event.get("operation") for event in lines}
+    assert {"db_init", "db_read", "detector_compute", "output_emit", "detector_complete"}.issubset(
+        operations
+    )
