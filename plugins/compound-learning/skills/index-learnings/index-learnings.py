@@ -12,7 +12,6 @@ _PLUGIN_ROOT = os.environ.get('CLAUDE_PLUGIN_ROOT', os.path.dirname(os.path.dirn
 sys.path.insert(0, _PLUGIN_ROOT)
 
 import hashlib
-import re
 from pathlib import Path
 from datetime import datetime, timezone
 from collections import defaultdict
@@ -21,6 +20,7 @@ from typing import Dict, List, Tuple, Any
 import lib.db as db
 import lib.git_utils as git_utils
 import lib.observability as observability
+from lib.learning_metadata import extract_field, extract_tags
 from lib.topic_mapping import infer_topic_from_tags
 
 
@@ -99,26 +99,12 @@ def extract_metadata_from_path(file_path: Path, config: Dict[str, Any]) -> Dict[
     return {"scope": "repo", "repo": repo_name, "file_path": path_str}
 
 
-def extract_field(content: str, field: str) -> str | None:
-    """Extract a **Field:** value from learning content."""
-    match = re.search(rf'\*\*{field}:\*\*\s*(.+?)(?:\n|$)', content, re.IGNORECASE)
-    return match.group(1).strip() if match else None
-
-
 def extract_topic(content: str) -> str:
     """Extract topic from **Topic:** field, fallback to tag-based inference."""
     topic = extract_field(content, 'Topic')
     if topic:
         return topic.lower().replace(' ', '-')
     return infer_topic_from_tags(extract_tags(content))
-
-
-def extract_tags(content: str) -> List[str]:
-    """Extract tags from **Tags:** field."""
-    tags_str = extract_field(content, 'Tags')
-    if tags_str:
-        return [t.strip().lower() for t in tags_str.split(',') if t.strip()][:8]
-    return []
 
 
 def extract_type(content: str) -> str | None:

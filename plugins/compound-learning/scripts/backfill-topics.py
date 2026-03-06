@@ -22,26 +22,8 @@ _PLUGIN_ROOT = os.environ.get(
 )
 sys.path.insert(0, _PLUGIN_ROOT)
 
+from lib.learning_metadata import extract_field, extract_tags
 from lib.topic_mapping import infer_topic_from_tags
-
-
-def extract_field(content: str, field: str) -> str | None:
-    """Extract a **Field:** value from learning content.
-
-    Mirrors the pattern used in index-learnings.py for consistency.
-    """
-    match = re.search(rf"\*\*{field}:\*\*\s*(.+?)(?:\n|$)", content, re.IGNORECASE)
-    return match.group(1).strip() if match else None
-
-
-def extract_tags(content: str) -> list[str]:
-    """Extract and normalise tags from **Tags:** field."""
-    tags_str = extract_field(content, "Tags")
-    if not tags_str:
-        return []
-    # Strip surrounding brackets that appear in some files, e.g. [tag1, tag2]
-    tags_str = tags_str.strip("[]")
-    return [t.strip().lower() for t in tags_str.split(",") if t.strip()][:8]
 
 
 def insert_topic_line(content: str, topic: str) -> str:
@@ -80,7 +62,7 @@ def process_file(
     if extract_field(content, "Topic"):
         return False, None
 
-    tags = extract_tags(content)
+    tags = extract_tags(content, strip_brackets=True, max_tags=8)
     topic = infer_topic_from_tags(tags)
     new_content = insert_topic_line(content, topic)
 
