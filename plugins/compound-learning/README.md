@@ -90,6 +90,47 @@ When observability is enabled, the plugin writes structured JSONL events for:
 Event fields include: `timestamp`, `level`, `component`, `operation`, `status`, `duration_ms`, `counts`, optional `error`, and correlation/session identifiers when available.
 Hooks now export correlation/session context into Python subprocesses so hook events can be joined to search/index/db events in one trace.
 
+### Metrics Coverage Analyzer
+
+Use the static analyzer to measure instrumentation coverage of:
+- Python `logger.emit(...)` calls
+- Shell `hook_obs_event ...` calls
+
+Run from repo root:
+
+```bash
+python plugins/compound-learning/scripts/metrics-coverage-analyzer.py \
+  --scan-root plugins/compound-learning \
+  --output text
+```
+
+Machine-readable JSON:
+
+```bash
+python plugins/compound-learning/scripts/metrics-coverage-analyzer.py \
+  --scan-root plugins/compound-learning \
+  --output json
+```
+
+Optional threshold gate (non-zero exit when below threshold):
+
+```bash
+python plugins/compound-learning/scripts/metrics-coverage-analyzer.py \
+  --scan-root plugins/compound-learning \
+  --output text \
+  --fail-under 80
+```
+
+Report fields:
+- `overall.instrumented_operations`: unique operations detected
+- `overall.operations_with_terminal_status`: operations with at least one terminal status
+- `overall.coverage_percent`: terminal-status coverage percentage
+- `overall.missing_terminal_operations`: operations seen only with non-terminal/dynamic status
+- `files[]`: per-file operation coverage and missing operations
+- `hotspots[]`: files sorted by missing terminal-status coverage gaps
+
+Use missing operations/hotspots to prioritize follow-up instrumentation work (for example, add success/failure/skipped outcomes where only `start` is emitted).
+
 ## Usage
 
 ### Creating Learnings
