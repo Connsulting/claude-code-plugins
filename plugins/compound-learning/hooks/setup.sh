@@ -38,6 +38,9 @@ trap setup_hook_finalize EXIT
 hook_obs_event "info" "hook_start" "start" --session-id "$SESSION_ID"
 
 declare -a REQUIREMENTS
+declare -a IMPORT_NAMES
+declare -a MISSING_IMPORTS
+declare -a MISSING_REQUIREMENTS
 
 is_truthy() {
   case "${1:-}" in
@@ -130,6 +133,55 @@ write_cache_stamp() {
   return 0
 }
 
+collect_missing_requirements() {
+  local missing_output
+  local missing_check_exit
+
+  missing_output="$(python3 - "${IMPORT_NAMES[@]}" <<'PY'
+import importlib.util
+import sys
+
+for module_name in sys.argv[1:]:
+    if importlib.util.find_spec(module_name) is None:
+        print(module_name)
+PY
+)"
+  missing_check_exit=$?
+
+  if [ "$missing_check_exit" -ne 0 ]; then
+    hook_log_activity "[setup] Python import check failed (exit $missing_check_exit)"
+    HOOK_OUTCOME="error"
+    HOOK_OUTCOME_MESSAGE="Python import check failed (exit $missing_check_exit)"
+    hook_obs_event "error" "subprocess_exit" "failure" \
+      --session-id "$SESSION_ID" \
+      --counts-json "{\"command\":\"python_import_check\",\"exit_code\":$missing_check_exit}"
+    return 1
+  fi
+
+  MISSING_IMPORTS=()
+  if [ -n "$missing_output" ]; then
+    while IFS= read -r module_name; do
+      [ -n "$module_name" ] && MISSING_IMPORTS+=("$module_name")
+    done <<< "$missing_output"
+  fi
+
+  MISSING_REQUIREMENTS=()
+  for idx in "${!IMPORT_NAMES[@]}"; do
+    local module_name="${IMPORT_NAMES[$idx]}"
+    for missing_module in "${MISSING_IMPORTS[@]}"; do
+      if [ "$module_name" = "$missing_module" ]; then
+        MISSING_REQUIREMENTS+=("${REQUIREMENTS[$idx]}")
+        break
+      fi
+    done
+  done
+
+  hook_obs_event "info" "subprocess_exit" "success" \
+    --session-id "$SESSION_ID" \
+    --counts-json '{"command":"python_import_check","exit_code":0}'
+  return 0
+}
+
 if ! command -v python3 >/dev/null 2>&1; then
   hook_log_activity "[setup] python3 not found; skipping dependency bootstrap"
   HOOK_OUTCOME="error"
@@ -170,6 +222,11 @@ hook_obs_event "info" "dependency_manifest" "loaded" \
   --session-id "$SESSION_ID" \
   --counts-json "{\"total_packages\":${#REQUIREMENTS[@]}}"
 
+IMPORT_NAMES=()
+for requirement in "${REQUIREMENTS[@]}"; do
+  IMPORT_NAMES+=("$(requirement_to_import "$requirement")")
+done
+
 PYTHON_VERSION="$(python3 - <<'PY'
 import sys
 print(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
@@ -185,81 +242,53 @@ if is_truthy "$FORCE_REFRESH_RAW"; then
   FORCE_REFRESH=1
 fi
 
+CACHE_STATE="miss"
 if [ "$FORCE_REFRESH" -eq 1 ]; then
+  CACHE_STATE="bypass"
   hook_log_activity "[setup] Force-refresh requested; bypassing cache stamp"
   hook_obs_event "info" "dependency_cache" "bypass" \
     --session-id "$SESSION_ID" \
     --message "force refresh requested"
 elif [ -f "$STAMP_FILE" ]; then
+  CACHE_STATE="hit"
   hook_obs_event "info" "dependency_cache" "hit" \
     --session-id "$SESSION_ID" \
     --counts-json '{"cache_hit":1}'
-  HOOK_OUTCOME="skipped"
-  HOOK_OUTCOME_MESSAGE="Dependency cache hit"
-  hook_obs_event "info" "skip_reason" "skipped" \
-    --session-id "$SESSION_ID" \
-    --message "dependency cache hit"
-  exit 0
 else
   hook_obs_event "info" "dependency_cache" "miss" \
     --session-id "$SESSION_ID" \
     --counts-json '{"cache_hit":0}'
 fi
 
-declare -a IMPORT_NAMES
-IMPORT_NAMES=()
-for requirement in "${REQUIREMENTS[@]}"; do
-  IMPORT_NAMES+=("$(requirement_to_import "$requirement")")
-done
-
-missing_output="$(python3 - "${IMPORT_NAMES[@]}" <<'PY'
-import importlib.util
-import sys
-
-for module_name in sys.argv[1:]:
-    if importlib.util.find_spec(module_name) is None:
-        print(module_name)
-PY
-)"
-missing_check_exit=$?
-
-if [ "$missing_check_exit" -ne 0 ]; then
-  hook_log_activity "[setup] Python import check failed (exit $missing_check_exit)"
-  HOOK_OUTCOME="error"
-  HOOK_OUTCOME_MESSAGE="Python import check failed (exit $missing_check_exit)"
-  hook_obs_event "error" "subprocess_exit" "failure" \
-    --session-id "$SESSION_ID" \
-    --counts-json "{\"command\":\"python_import_check\",\"exit_code\":$missing_check_exit}"
+if ! collect_missing_requirements; then
   exit 0
 fi
 
-declare -a MISSING_IMPORTS
-MISSING_IMPORTS=()
-if [ -n "$missing_output" ]; then
-  while IFS= read -r module_name; do
-    [ -n "$module_name" ] && MISSING_IMPORTS+=("$module_name")
-  done <<< "$missing_output"
+if [ "$CACHE_STATE" = "hit" ] && [ "${#MISSING_REQUIREMENTS[@]}" -eq 0 ]; then
+  hook_obs_event "info" "dependency_check" "success" \
+    --session-id "$SESSION_ID" \
+    --counts-json "{\"missing_packages\":0,\"total_packages\":${#REQUIREMENTS[@]}}"
+  HOOK_OUTCOME="skipped"
+  HOOK_OUTCOME_MESSAGE="Dependency cache hit (validated)"
+  hook_obs_event "info" "skip_reason" "skipped" \
+    --session-id "$SESSION_ID" \
+    --message "dependency cache hit (validated)"
+  exit 0
 fi
 
-declare -a MISSING_REQUIREMENTS
-MISSING_REQUIREMENTS=()
-for idx in "${!IMPORT_NAMES[@]}"; do
-  module_name="${IMPORT_NAMES[$idx]}"
-  for missing_module in "${MISSING_IMPORTS[@]}"; do
-    if [ "$module_name" = "$missing_module" ]; then
-      MISSING_REQUIREMENTS+=("${REQUIREMENTS[$idx]}")
-      break
-    fi
-  done
-done
+if [ "$CACHE_STATE" = "hit" ] && [ "${#MISSING_REQUIREMENTS[@]}" -gt 0 ]; then
+  missing_csv="$(IFS=,; echo "${MISSING_REQUIREMENTS[*]}")"
+  hook_log_activity "[setup] Dependency cache stale; missing modules detected (${missing_csv})"
+  hook_obs_event "warn" "dependency_cache" "stale" \
+    --session-id "$SESSION_ID" \
+    --counts-json "{\"cache_hit\":1,\"missing_packages\":${#MISSING_REQUIREMENTS[@]}}"
+  rm -f "$STAMP_FILE" 2>/dev/null || true
+fi
 
 if [ "${#MISSING_REQUIREMENTS[@]}" -eq 0 ]; then
   hook_obs_event "info" "dependency_check" "success" \
     --session-id "$SESSION_ID" \
     --counts-json "{\"missing_packages\":0,\"total_packages\":${#REQUIREMENTS[@]}}"
-  hook_obs_event "info" "subprocess_exit" "success" \
-    --session-id "$SESSION_ID" \
-    --counts-json '{"command":"python_import_check","exit_code":0}'
 
   if write_cache_stamp; then
     hook_log_activity "[setup] Dependency check passed; cache stamp updated"

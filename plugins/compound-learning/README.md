@@ -42,9 +42,9 @@ Run `/index-learnings` to build the index. The SQLite database is created automa
 
 1. Reads runtime dependencies from `requirements-runtime.txt`
 2. Builds a cache key from Python version + manifest SHA256
-3. Skips dependency checks entirely when a matching warm stamp exists at `~/.claude/plugins/compound-learning/cache/`
-4. On cache miss, checks imports and installs only missing packages
-5. Writes a new stamp after successful validation/install
+3. Uses a warm stamp in `~/.claude/plugins/compound-learning/cache/` to fast-path startup
+4. Validates imports on cache hits and auto-invalidates stale stamps when modules are missing
+5. On cache miss or stale hit, installs only missing packages and writes a fresh stamp
 
 Force a refresh when debugging stale environments:
 
