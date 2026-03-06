@@ -1,6 +1,6 @@
 ---
 name: consolidate-actions
-description: Execute consolidation actions (merge, archive, delete, rescope, get)
+description: Execute approved consolidation actions (merge, archive, delete, rescope, get). Use after review and user approval.
 ---
 
 # Consolidate Actions
@@ -11,26 +11,28 @@ Execute consolidation operations on learnings. All destructive operations create
 
 ```bash
 # Fetch full content for review
-python3 consolidate-actions.py get --ids=id1,id2
+python3 [plugin-path]/skills/consolidate-actions/consolidate-actions.py get --ids=id1,id2
 
 # Delete with backup
-python3 consolidate-actions.py delete --ids=id1,id2
+python3 [plugin-path]/skills/consolidate-actions/consolidate-actions.py delete --ids=id1,id2
 
 # Move to archive
-python3 consolidate-actions.py archive --ids=id1,id2
+python3 [plugin-path]/skills/consolidate-actions/consolidate-actions.py archive --ids=id1,id2
 
 # Change scope (repo -> global)
-python3 consolidate-actions.py rescope --id=abc123 --scope=global
+python3 [plugin-path]/skills/consolidate-actions/consolidate-actions.py rescope --id=abc123 --scope=global
 
 # Merge multiple into one
-python3 consolidate-actions.py merge --ids=id1,id2,id3 --name=jwt-patterns
+python3 [plugin-path]/skills/consolidate-actions/consolidate-actions.py merge --ids=id1,id2,id3 --name=jwt-patterns
 
 # Merge with explicit output directory (overrides scope logic)
-python3 consolidate-actions.py merge --ids=id1,id2 --name=patterns --output-dir=/path/to/repo/.projects/learnings/
+python3 [plugin-path]/skills/consolidate-actions/consolidate-actions.py merge --ids=id1,id2 --name=patterns --output-dir=/absolute/path/to/repo/.projects/learnings
 
 # Dry run (show what would happen)
-python3 consolidate-actions.py merge --ids=id1,id2 --name=patterns --dry-run
+python3 [plugin-path]/skills/consolidate-actions/consolidate-actions.py merge --ids=id1,id2 --name=patterns --dry-run
 ```
+
+`[plugin-path]` is the absolute path to this plugin root (the directory containing `commands/` and `skills/`).
 
 ## Actions
 

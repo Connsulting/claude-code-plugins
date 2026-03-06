@@ -1,6 +1,6 @@
 ---
 name: index-learnings
-description: Index learning files into SQLite and generate topic manifest
+description: Build or refresh the learnings SQLite index and topic manifest. Use when new or updated learnings need to be searchable.
 ---
 
 # Index Learnings
@@ -9,13 +9,24 @@ Indexes all learning markdown files into SQLite and generates a manifest summari
 
 ## Usage
 
+Preferred:
+
 ```
 /index-learnings
 ```
 
+Direct script (if command routing is unavailable):
+
+```bash
+python3 [plugin-path]/skills/index-learnings/index-learnings.py
+python3 [plugin-path]/skills/index-learnings/index-learnings.py --file /absolute/path/to/learning.md
+```
+
+`[plugin-path]` is the absolute path to this plugin root (the directory containing `commands/` and `skills/`).
+
 ## What It Does
 
-1. Discovers `.md` files in `~/.projects/learnings/` (global) and `[repo]/.projects/learnings/` (repo)
+1. Discovers `.md` files in `~/.projects/learnings/` (global) and `<repo-root>/.projects/learnings/` (repo)
 2. Extracts `**Topic:**` and `**Tags:**` from each file
 3. Indexes into SQLite
 4. Generates `~/.projects/learnings/MANIFEST.md`
