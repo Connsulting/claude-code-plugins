@@ -79,8 +79,8 @@
           "coverage_pct": null,
           "is_public": true,
           "line_range": [
-            714,
-            727
+            591,
+            604
           ],
           "missing_symbols": [
             "count_documents"
@@ -100,8 +100,8 @@
           "coverage_pct": null,
           "is_public": true,
           "line_range": [
-            495,
-            527
+            372,
+            404
           ],
           "missing_symbols": [
             "delete_document"
@@ -121,8 +121,8 @@
           "coverage_pct": null,
           "is_public": true,
           "line_range": [
-            624,
-            658
+            501,
+            535
           ],
           "missing_symbols": [
             "get_all_documents"
@@ -142,8 +142,8 @@
           "coverage_pct": null,
           "is_public": true,
           "line_range": [
-            661,
-            711
+            538,
+            588
           ],
           "missing_symbols": [
             "get_documents_by_ids"
@@ -156,6 +156,27 @@
         "score": 75,
         "suggested_next_tests": [
           "Add/extend a test that calls get_documents_by_ids in lib/db.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": null,
+          "is_public": true,
+          "line_range": [
+            68,
+            141
+          ],
+          "missing_symbols": [
+            "load_config"
+          ],
+          "tested_by": []
+        },
+        "function": "load_config",
+        "module": "lib/db.py",
+        "priority": "high",
+        "score": 75,
+        "suggested_next_tests": [
+          "Add/extend a test that calls load_config in lib/db.py and asserts expected side effects."
         ]
       },
       {
@@ -829,27 +850,6 @@
         "suggested_next_tests": [
           "Add/extend a test that calls action_delete in skills/consolidate-actions/consolidate-actions.py and asserts expected side effects."
         ]
-      },
-      {
-        "evidence": {
-          "coverage_pct": null,
-          "is_public": true,
-          "line_range": [
-            46,
-            66
-          ],
-          "missing_symbols": [
-            "action_get"
-          ],
-          "tested_by": []
-        },
-        "function": "action_get",
-        "module": "skills/consolidate-actions/consolidate-actions.py",
-        "priority": "high",
-        "score": 75,
-        "suggested_next_tests": [
-          "Add/extend a test that calls action_get in skills/consolidate-actions/consolidate-actions.py and asserts expected side effects."
-        ]
       }
     ],
     "modules": [
@@ -1088,19 +1088,19 @@
             "count_documents",
             "delete_document",
             "get_all_documents",
-            "get_documents_by_ids"
+            "get_documents_by_ids",
+            "load_config"
           ],
           "public_symbol_count": 9,
           "tested_by": [
-            "tests/test_config_backward_compat.py",
             "tests/test_search_relevance.py"
           ],
-          "untested_function_count": 12,
-          "untested_public_symbol_count": 4
+          "untested_function_count": 11,
+          "untested_public_symbol_count": 5
         },
         "module": "lib/db.py",
         "priority": "medium",
-        "score": 58,
+        "score": 62,
         "suggested_next_tests": [
           "Add focused tests for uncovered public symbols in lib/db.py: count_documents, delete_document, get_all_documents."
         ]
@@ -1143,12 +1143,12 @@
   },
   "summary": {
     "coverage_loaded": false,
-    "high_priority_function_gaps": 56,
+    "high_priority_function_gaps": 57,
     "high_priority_module_gaps": 8,
     "modules_with_direct_tests": 4,
     "modules_without_direct_tests": 8,
     "overall_module_coverage_pct": null,
     "source_modules": 12,
-    "test_files": 4
+    "test_files": 3
   }
 }
