@@ -124,8 +124,47 @@ Fetches PR data including reviews, comments, and code changes, then extracts 1-3
 
 Learnings are automatically searched at the start of tasks. To manually search:
 ```
-Skill(skill="search-learnings", args="JWT authentication patterns")
+Skill(skill="compound-learning:search-learnings", args="JWT authentication patterns")
 ```
+
+For local debugging/maintenance, you can run the script directly:
+
+```bash
+python3 "$CLAUDE_PLUGIN_ROOT/scripts/search-learnings.py" "JWT authentication patterns" "$(pwd)"
+```
+
+`search-learnings.py` options:
+- `--peek`: return a single merged list (high-confidence first, then fallback results)
+- `--exclude-ids "<id1,id2>"`: skip specific learning IDs
+- `--threshold <float>`: override high-confidence threshold for this run
+- `--max-results <int>`: cap returned results (default `5`)
+- `--keywords-json '["keyword1","keyword2"]'`: fan out parallel keyword searches
+
+### Maintenance Scripts
+
+Use `scripts/backfill-topics.py` to add missing `**Topic:**` lines to learning files using existing `**Tags:**`.
+
+Default behavior is dry-run against `~/.projects/learnings`:
+
+```bash
+python3 "$CLAUDE_PLUGIN_ROOT/scripts/backfill-topics.py"
+```
+
+Explicit dry-run for a custom directory:
+
+```bash
+python3 "$CLAUDE_PLUGIN_ROOT/scripts/backfill-topics.py" --dry-run --dir ~/.projects/learnings
+```
+
+Apply changes in-place:
+
+```bash
+python3 "$CLAUDE_PLUGIN_ROOT/scripts/backfill-topics.py" --apply --dir ~/.projects/learnings
+```
+
+Notes:
+- The scan includes `*.md` files in the target directory and skips `MANIFEST.md`
+- `--dry-run` is the default; use `--apply` to write changes
 
 ### Rebuilding the Index
 
@@ -191,22 +230,28 @@ Generated: 2026-02-03T14:30:00Z
 
 Topics come from `**Topic:**` and `**Tags:**` fields in learning files. `**Type:** gotcha` learnings are flagged with ⚠️.
 
-### Auto-Extraction via Hooks
+### Hook Lifecycle
 
-The plugin automatically extracts learnings at key moments:
+Configured hooks and script mappings:
 
-- **PreCompact**: Before context compaction to preserve insights
-- **Stop**: When Claude finishes responding
+| Hook event | Script | Purpose |
+|------------|--------|---------|
+| `SessionStart` | `hooks/setup.sh` | Verifies/installs Python dependencies used by the plugin |
+| `UserPromptSubmit` | `hooks/auto-peek.sh` | Extracts keywords and injects relevant learnings before Claude responds |
+| `PreCompact` | `hooks/extract-learnings.sh` | Asynchronously extracts learnings before context compaction |
+| `SessionEnd` | `hooks/extract-learnings.sh` | Asynchronously performs a final extraction at session end |
 
-How it works:
-1. Hooks trigger `extract-learnings.sh` which invokes `claude -p` to analyze the transcript
-2. Claude reads the conversation transcript and identifies 0-3 meaningful learnings
-3. Learning files are written to the appropriate scope (global or repo)
-4. A session tracking file (`~/.claude/compound-processed-sessions`) prevents duplicate extraction
+Extraction flow for `PreCompact` and `SessionEnd`:
+1. `extract-learnings.sh` reads hook input (`transcript_path`, `cwd`, session context)
+2. It skips trivial transcripts (<20 lines), then invokes `claude -p` to write 0-3 learning files
+3. Newly created files are indexed immediately via `skills/index-learnings/index-learnings.py --file`
 
-**Debug log:** `~/.claude/compound-hook-debug.log`
+Operational files:
+- Hook activity log: `~/.claude/plugins/compound-learning/activity.log`
+- Hook observability log: `~/.claude/plugins/compound-learning/observability.jsonl`
+- Auto-peek seen-ID cache: `~/.claude/plugins/compound-learning/sessions/*.seen`
 
-**Note:** Extraction uses minimal permissions (`Read`, `Write`, `Bash(mkdir:*)`) and skips trivial sessions (<20 transcript lines).
+**Note:** Extraction uses minimal permissions (`Write`, `Bash(mkdir:*)`) and runs asynchronously for `PreCompact` and `SessionEnd`.
 
 ## Architecture
 
@@ -229,8 +274,10 @@ How it works:
   - `consolidate-actions`: Executes consolidation actions (merge, archive, delete)
 
 - **Hooks:**
-  - `PreCompact`: Auto-extracts learnings before context compaction
-  - `Stop`: Auto-extracts learnings when Claude finishes responding
+  - `SessionStart` -> `hooks/setup.sh`: Auto-installs/checks Python dependencies
+  - `UserPromptSubmit` -> `hooks/auto-peek.sh`: Auto-searches and injects relevant learnings
+  - `PreCompact` -> `hooks/extract-learnings.sh`: Auto-extracts learnings before compaction
+  - `SessionEnd` -> `hooks/extract-learnings.sh`: Auto-extracts learnings at session end
 
 ### Learning Scopes
 
