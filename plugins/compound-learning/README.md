@@ -135,6 +135,38 @@ Skill(skill="search-learnings", args="JWT authentication patterns")
 
 Also generates a manifest at `~/.projects/learnings/MANIFEST.md` summarizing learnings by topic.
 
+### Test Gap Finder
+
+Use the deterministic test-gap report to prioritize under-tested Python modules/functions in:
+`lib/`, `scripts/`, `hooks/`, and `skills/`.
+
+Generate a baseline report without line coverage:
+
+```bash
+python3 plugins/compound-learning/scripts/test-gap-finder.py \
+  --plugin-root plugins/compound-learning \
+  --output plugins/compound-learning/reports/test-gap-report.baseline.json
+```
+
+Generate `coverage.xml` and include line-coverage evidence:
+
+```bash
+cd plugins/compound-learning
+coverage run --rcfile .coveragerc -m pytest tests/test_test_gap_finder.py tests/test_observability.py
+coverage xml -o coverage.xml
+python3 scripts/test-gap-finder.py --coverage-xml coverage.xml --output reports/test-gap-report.coverage.json
+```
+
+Report contract highlights:
+- `summary`: module/test counts, direct-test counts, and overall coverage summary when available
+- `prioritized_gaps.modules`: ranked module gaps with `coverage_pct`, `tested_by`, `missing_symbols`, and `suggested_next_tests`
+- `prioritized_gaps.functions`: ranked callable gaps with line-range evidence and suggested next tests
+
+Current limitations:
+- Static heuristics for imports/symbol references can miss dynamic execution paths
+- Branch coverage is not scored
+- Shell/markdown assets are intentionally excluded from gap scoring
+
 ### Learnings Manifest
 
 The manifest helps Claude decide when to search by showing what topics have learnings:

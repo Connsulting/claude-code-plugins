@@ -1,0 +1,1154 @@
+{
+  "assumptions": [
+    "Gap scoring targets plugin Python runtime code only (lib/scripts/hooks/skills).",
+    "Test linkage uses static import/path/symbol heuristics and may under-report dynamic test coverage.",
+    "Function-level coverage is approximated from coverage.xml line hits inside AST function ranges."
+  ],
+  "limitations": [
+    "No branch coverage scoring is applied.",
+    "References inferred by symbol names can miss indirect execution paths.",
+    "Shell/markdown assets are intentionally excluded from scoring."
+  ],
+  "prioritized_gaps": {
+    "functions": [
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            24,
+            84
+          ],
+          "missing_symbols": [
+            "extract_context"
+          ],
+          "tested_by": []
+        },
+        "function": "extract_context",
+        "module": "hooks/extract-transcript-context.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls extract_context in hooks/extract-transcript-context.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            15,
+            21
+          ],
+          "missing_symbols": [
+            "is_real_user_prompt"
+          ],
+          "tested_by": []
+        },
+        "function": "is_real_user_prompt",
+        "module": "hooks/extract-transcript-context.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls is_real_user_prompt in hooks/extract-transcript-context.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            9,
+            67
+          ],
+          "missing_symbols": [
+            "extract_messages"
+          ],
+          "tested_by": []
+        },
+        "function": "extract_messages",
+        "module": "hooks/extract-transcript-messages.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls extract_messages in hooks/extract-transcript-messages.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 8.33,
+          "is_public": true,
+          "line_range": [
+            372,
+            404
+          ],
+          "missing_symbols": [
+            "delete_document"
+          ],
+          "tested_by": []
+        },
+        "function": "delete_document",
+        "module": "lib/db.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls delete_document in lib/db.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 7.69,
+          "is_public": true,
+          "line_range": [
+            501,
+            535
+          ],
+          "missing_symbols": [
+            "get_all_documents"
+          ],
+          "tested_by": []
+        },
+        "function": "get_all_documents",
+        "module": "lib/db.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls get_all_documents in lib/db.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 5.0,
+          "is_public": true,
+          "line_range": [
+            538,
+            588
+          ],
+          "missing_symbols": [
+            "get_documents_by_ids"
+          ],
+          "tested_by": []
+        },
+        "function": "get_documents_by_ids",
+        "module": "lib/db.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls get_documents_by_ids in lib/db.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 7.14,
+          "is_public": true,
+          "line_range": [
+            54,
+            73
+          ],
+          "missing_symbols": [
+            "is_worktree"
+          ],
+          "tested_by": []
+        },
+        "function": "is_worktree",
+        "module": "lib/git_utils.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls is_worktree in lib/git_utils.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 5.26,
+          "is_public": true,
+          "line_range": [
+            14,
+            46
+          ],
+          "missing_symbols": [
+            "resolve_repo_root"
+          ],
+          "tested_by": []
+        },
+        "function": "resolve_repo_root",
+        "module": "lib/git_utils.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls resolve_repo_root in lib/git_utils.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            136,
+            157
+          ],
+          "missing_symbols": [
+            "infer_topic_from_tags"
+          ],
+          "tested_by": []
+        },
+        "function": "infer_topic_from_tags",
+        "module": "lib/topic_mapping.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls infer_topic_from_tags in lib/topic_mapping.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            28,
+            34
+          ],
+          "missing_symbols": [
+            "extract_field"
+          ],
+          "tested_by": []
+        },
+        "function": "extract_field",
+        "module": "scripts/backfill-topics.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls extract_field in scripts/backfill-topics.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            37,
+            44
+          ],
+          "missing_symbols": [
+            "extract_tags"
+          ],
+          "tested_by": []
+        },
+        "function": "extract_tags",
+        "module": "scripts/backfill-topics.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls extract_tags in scripts/backfill-topics.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            47,
+            68
+          ],
+          "missing_symbols": [
+            "insert_topic_line"
+          ],
+          "tested_by": []
+        },
+        "function": "insert_topic_line",
+        "module": "scripts/backfill-topics.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls insert_topic_line in scripts/backfill-topics.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            94,
+            156
+          ],
+          "missing_symbols": [
+            "main"
+          ],
+          "tested_by": []
+        },
+        "function": "main",
+        "module": "scripts/backfill-topics.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls main in scripts/backfill-topics.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            71,
+            91
+          ],
+          "missing_symbols": [
+            "process_file"
+          ],
+          "tested_by": []
+        },
+        "function": "process_file",
+        "module": "scripts/backfill-topics.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls process_file in scripts/backfill-topics.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 5.56,
+          "is_public": true,
+          "line_range": [
+            663,
+            703
+          ],
+          "missing_symbols": [
+            "main"
+          ],
+          "tested_by": []
+        },
+        "function": "main",
+        "module": "scripts/test-gap-finder.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls main in scripts/test-gap-finder.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            103,
+            146
+          ],
+          "missing_symbols": [
+            "action_archive"
+          ],
+          "tested_by": []
+        },
+        "function": "action_archive",
+        "module": "skills/consolidate-actions/consolidate-actions.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls action_archive in skills/consolidate-actions/consolidate-actions.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            69,
+            100
+          ],
+          "missing_symbols": [
+            "action_delete"
+          ],
+          "tested_by": []
+        },
+        "function": "action_delete",
+        "module": "skills/consolidate-actions/consolidate-actions.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls action_delete in skills/consolidate-actions/consolidate-actions.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            46,
+            66
+          ],
+          "missing_symbols": [
+            "action_get"
+          ],
+          "tested_by": []
+        },
+        "function": "action_get",
+        "module": "skills/consolidate-actions/consolidate-actions.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls action_get in skills/consolidate-actions/consolidate-actions.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            219,
+            355
+          ],
+          "missing_symbols": [
+            "action_merge"
+          ],
+          "tested_by": []
+        },
+        "function": "action_merge",
+        "module": "skills/consolidate-actions/consolidate-actions.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls action_merge in skills/consolidate-actions/consolidate-actions.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            149,
+            216
+          ],
+          "missing_symbols": [
+            "action_rescope"
+          ],
+          "tested_by": []
+        },
+        "function": "action_rescope",
+        "module": "skills/consolidate-actions/consolidate-actions.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls action_rescope in skills/consolidate-actions/consolidate-actions.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            24,
+            43
+          ],
+          "missing_symbols": [
+            "create_backup"
+          ],
+          "tested_by": []
+        },
+        "function": "create_backup",
+        "module": "skills/consolidate-actions/consolidate-actions.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls create_backup in skills/consolidate-actions/consolidate-actions.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            358,
+            403
+          ],
+          "missing_symbols": [
+            "main"
+          ],
+          "tested_by": []
+        },
+        "function": "main",
+        "module": "skills/consolidate-actions/consolidate-actions.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls main in skills/consolidate-actions/consolidate-actions.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            21,
+            78
+          ],
+          "missing_symbols": [
+            "find_duplicate_clusters"
+          ],
+          "tested_by": []
+        },
+        "function": "find_duplicate_clusters",
+        "module": "skills/consolidate-discovery/consolidate-discovery.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls find_duplicate_clusters in skills/consolidate-discovery/consolidate-discovery.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            107,
+            135
+          ],
+          "missing_symbols": [
+            "find_outdated_candidates"
+          ],
+          "tested_by": []
+        },
+        "function": "find_outdated_candidates",
+        "module": "skills/consolidate-discovery/consolidate-discovery.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls find_outdated_candidates in skills/consolidate-discovery/consolidate-discovery.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            138,
+            173
+          ],
+          "missing_symbols": [
+            "run_discovery"
+          ],
+          "tested_by": []
+        },
+        "function": "run_discovery",
+        "module": "skills/consolidate-discovery/consolidate-discovery.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls run_discovery in skills/consolidate-discovery/consolidate-discovery.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            102,
+            105
+          ],
+          "missing_symbols": [
+            "extract_field"
+          ],
+          "tested_by": []
+        },
+        "function": "extract_field",
+        "module": "skills/index-learnings/index-learnings.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls extract_field in skills/index-learnings/index-learnings.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            89,
+            99
+          ],
+          "missing_symbols": [
+            "extract_metadata_from_path"
+          ],
+          "tested_by": []
+        },
+        "function": "extract_metadata_from_path",
+        "module": "skills/index-learnings/index-learnings.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls extract_metadata_from_path in skills/index-learnings/index-learnings.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            116,
+            121
+          ],
+          "missing_symbols": [
+            "extract_tags"
+          ],
+          "tested_by": []
+        },
+        "function": "extract_tags",
+        "module": "skills/index-learnings/index-learnings.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls extract_tags in skills/index-learnings/index-learnings.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            108,
+            113
+          ],
+          "missing_symbols": [
+            "extract_topic"
+          ],
+          "tested_by": []
+        },
+        "function": "extract_topic",
+        "module": "skills/index-learnings/index-learnings.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls extract_topic in skills/index-learnings/index-learnings.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            124,
+            126
+          ],
+          "missing_symbols": [
+            "extract_type"
+          ],
+          "tested_by": []
+        },
+        "function": "extract_type",
+        "module": "skills/index-learnings/index-learnings.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls extract_type in skills/index-learnings/index-learnings.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            41,
+            86
+          ],
+          "missing_symbols": [
+            "find_all_learning_files"
+          ],
+          "tested_by": []
+        },
+        "function": "find_all_learning_files",
+        "module": "skills/index-learnings/index-learnings.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls find_all_learning_files in skills/index-learnings/index-learnings.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            129,
+            175
+          ],
+          "missing_symbols": [
+            "generate_manifest"
+          ],
+          "tested_by": []
+        },
+        "function": "generate_manifest",
+        "module": "skills/index-learnings/index-learnings.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls generate_manifest in skills/index-learnings/index-learnings.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            268,
+            403
+          ],
+          "missing_symbols": [
+            "index_learning_files"
+          ],
+          "tested_by": []
+        },
+        "function": "index_learning_files",
+        "module": "skills/index-learnings/index-learnings.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls index_learning_files in skills/index-learnings/index-learnings.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "is_public": true,
+          "line_range": [
+            216,
+            265
+          ],
+          "missing_symbols": [
+            "index_single_file"
+          ],
+          "tested_by": []
+        },
+        "function": "index_single_file",
+        "module": "skills/index-learnings/index-learnings.py",
+        "priority": "high",
+        "score": 95,
+        "suggested_next_tests": [
+          "Add/extend a test that calls index_single_file in skills/index-learnings/index-learnings.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 7.69,
+          "is_public": false,
+          "line_range": [
+            201,
+            248
+          ],
+          "missing_symbols": [
+            "_create_schema"
+          ],
+          "tested_by": []
+        },
+        "function": "_create_schema",
+        "module": "lib/db.py",
+        "priority": "high",
+        "score": 85,
+        "suggested_next_tests": [
+          "Add/extend a test that calls _create_schema in lib/db.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 7.14,
+          "is_public": false,
+          "line_range": [
+            36,
+            49
+          ],
+          "missing_symbols": [
+            "_parse_bool"
+          ],
+          "tested_by": []
+        },
+        "function": "_parse_bool",
+        "module": "lib/db.py",
+        "priority": "high",
+        "score": 85,
+        "suggested_next_tests": [
+          "Add/extend a test that calls _parse_bool in lib/db.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 14.29,
+          "is_public": true,
+          "line_range": [
+            591,
+            604
+          ],
+          "missing_symbols": [
+            "count_documents"
+          ],
+          "tested_by": []
+        },
+        "function": "count_documents",
+        "module": "lib/db.py",
+        "priority": "high",
+        "score": 85,
+        "suggested_next_tests": [
+          "Add/extend a test that calls count_documents in lib/db.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 25.0,
+          "is_public": true,
+          "line_range": [
+            229,
+            232
+          ],
+          "missing_symbols": [
+            "StructuredLogger.bind"
+          ],
+          "tested_by": []
+        },
+        "function": "StructuredLogger.bind",
+        "module": "lib/observability.py",
+        "priority": "high",
+        "score": 85,
+        "suggested_next_tests": [
+          "Add/extend a test that calls StructuredLogger.bind in lib/observability.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 11.11,
+          "is_public": true,
+          "line_range": [
+            299,
+            330
+          ],
+          "missing_symbols": [
+            "StructuredLogger.timed"
+          ],
+          "tested_by": []
+        },
+        "function": "StructuredLogger.timed",
+        "module": "lib/observability.py",
+        "priority": "high",
+        "score": 85,
+        "suggested_next_tests": [
+          "Add/extend a test that calls StructuredLogger.timed in lib/observability.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 11.11,
+          "is_public": true,
+          "line_range": [
+            624,
+            660
+          ],
+          "missing_symbols": [
+            "parse_args"
+          ],
+          "tested_by": []
+        },
+        "function": "parse_args",
+        "module": "scripts/test-gap-finder.py",
+        "priority": "high",
+        "score": 85,
+        "suggested_next_tests": [
+          "Add/extend a test that calls parse_args in scripts/test-gap-finder.py and asserts expected side effects."
+        ]
+      }
+    ],
+    "modules": [
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "missing_symbols": [
+            "extract_context",
+            "is_real_user_prompt"
+          ],
+          "public_symbol_count": 2,
+          "tested_by": [],
+          "untested_function_count": 2,
+          "untested_public_symbol_count": 2
+        },
+        "module": "hooks/extract-transcript-context.py",
+        "priority": "high",
+        "score": 100,
+        "suggested_next_tests": [
+          "Create a direct test module for hooks/extract-transcript-context.py covering: extract_context, is_real_user_prompt."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "missing_symbols": [
+            "extract_messages"
+          ],
+          "public_symbol_count": 1,
+          "tested_by": [],
+          "untested_function_count": 1,
+          "untested_public_symbol_count": 1
+        },
+        "module": "hooks/extract-transcript-messages.py",
+        "priority": "high",
+        "score": 100,
+        "suggested_next_tests": [
+          "Create a direct test module for hooks/extract-transcript-messages.py covering: extract_messages."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 15.22,
+          "missing_symbols": [
+            "is_worktree",
+            "resolve_repo_name",
+            "resolve_repo_root"
+          ],
+          "public_symbol_count": 3,
+          "tested_by": [],
+          "untested_function_count": 4,
+          "untested_public_symbol_count": 3
+        },
+        "module": "lib/git_utils.py",
+        "priority": "high",
+        "score": 100,
+        "suggested_next_tests": [
+          "Create a direct test module for lib/git_utils.py covering: is_worktree, resolve_repo_name, resolve_repo_root."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "missing_symbols": [
+            "infer_topic_from_tags"
+          ],
+          "public_symbol_count": 1,
+          "tested_by": [],
+          "untested_function_count": 1,
+          "untested_public_symbol_count": 1
+        },
+        "module": "lib/topic_mapping.py",
+        "priority": "high",
+        "score": 100,
+        "suggested_next_tests": [
+          "Create a direct test module for lib/topic_mapping.py covering: infer_topic_from_tags."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "missing_symbols": [
+            "extract_field",
+            "extract_tags",
+            "insert_topic_line",
+            "main",
+            "process_file"
+          ],
+          "public_symbol_count": 5,
+          "tested_by": [],
+          "untested_function_count": 5,
+          "untested_public_symbol_count": 5
+        },
+        "module": "scripts/backfill-topics.py",
+        "priority": "high",
+        "score": 100,
+        "suggested_next_tests": [
+          "Create a direct test module for scripts/backfill-topics.py covering: extract_field, extract_tags, insert_topic_line."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "missing_symbols": [
+            "action_archive",
+            "action_delete",
+            "action_get",
+            "action_merge",
+            "action_rescope",
+            "create_backup",
+            "main"
+          ],
+          "public_symbol_count": 7,
+          "tested_by": [],
+          "untested_function_count": 7,
+          "untested_public_symbol_count": 7
+        },
+        "module": "skills/consolidate-actions/consolidate-actions.py",
+        "priority": "high",
+        "score": 100,
+        "suggested_next_tests": [
+          "Create a direct test module for skills/consolidate-actions/consolidate-actions.py covering: action_archive, action_delete, action_get."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "missing_symbols": [
+            "find_duplicate_clusters",
+            "find_outdated_candidates",
+            "run_discovery"
+          ],
+          "public_symbol_count": 3,
+          "tested_by": [],
+          "untested_function_count": 4,
+          "untested_public_symbol_count": 3
+        },
+        "module": "skills/consolidate-discovery/consolidate-discovery.py",
+        "priority": "high",
+        "score": 100,
+        "suggested_next_tests": [
+          "Create a direct test module for skills/consolidate-discovery/consolidate-discovery.py covering: find_duplicate_clusters, find_outdated_candidates, run_discovery."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 0.0,
+          "missing_symbols": [
+            "extract_field",
+            "extract_metadata_from_path",
+            "extract_tags",
+            "extract_topic",
+            "extract_type",
+            "find_all_learning_files",
+            "generate_manifest",
+            "index_learning_files",
+            "index_single_file"
+          ],
+          "public_symbol_count": 9,
+          "tested_by": [],
+          "untested_function_count": 11,
+          "untested_public_symbol_count": 9
+        },
+        "module": "skills/index-learnings/index-learnings.py",
+        "priority": "high",
+        "score": 100,
+        "suggested_next_tests": [
+          "Create a direct test module for skills/index-learnings/index-learnings.py covering: extract_field, extract_metadata_from_path, extract_tags."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 13.01,
+          "missing_symbols": [
+            "count_documents",
+            "delete_document",
+            "get_all_documents",
+            "get_documents_by_ids"
+          ],
+          "public_symbol_count": 9,
+          "tested_by": [
+            "tests/test_search_relevance.py",
+            "tests/test_test_gap_finder.py"
+          ],
+          "untested_function_count": 10,
+          "untested_public_symbol_count": 4
+        },
+        "module": "lib/db.py",
+        "priority": "medium",
+        "score": 68,
+        "suggested_next_tests": [
+          "Add focused tests for uncovered public symbols in lib/db.py: count_documents, delete_document, get_all_documents."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 79.56,
+          "missing_symbols": [
+            "CoverageData",
+            "SourceFunction",
+            "SourceModule",
+            "TestReference",
+            "classify_priority",
+            "collect_test_references",
+            "coverage_pct_from_hits",
+            "coverage_penalty",
+            "discover_python_files",
+            "function_coverage_pct",
+            "main",
+            "module_import_candidates",
+            "module_test_matches",
+            "normalize_coverage_filename",
+            "parse_args",
+            "parse_coverage_xml",
+            "parse_test_reference",
+            "symbol_test_matches"
+          ],
+          "public_symbol_count": 22,
+          "tested_by": [
+            "tests/test_test_gap_finder.py"
+          ],
+          "untested_function_count": 19,
+          "untested_public_symbol_count": 18
+        },
+        "module": "scripts/test-gap-finder.py",
+        "priority": "medium",
+        "score": 60,
+        "suggested_next_tests": [
+          "Add focused tests for uncovered public symbols in scripts/test-gap-finder.py: CoverageData, SourceFunction, SourceModule."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 72.47,
+          "missing_symbols": [
+            "ObservabilitySettings",
+            "StructuredLogger",
+            "elapsed_ms",
+            "now_perf",
+            "resolve_settings"
+          ],
+          "public_symbol_count": 7,
+          "tested_by": [
+            "tests/test_observability.py"
+          ],
+          "untested_function_count": 14,
+          "untested_public_symbol_count": 5
+        },
+        "module": "lib/observability.py",
+        "priority": "medium",
+        "score": 56,
+        "suggested_next_tests": [
+          "Add focused tests for uncovered public symbols in lib/observability.py: ObservabilitySettings, StructuredLogger, elapsed_ms."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": 53.78,
+          "missing_symbols": [
+            "merge_parallel_results",
+            "parse_tag_filters"
+          ],
+          "public_symbol_count": 9,
+          "tested_by": [
+            "tests/test_observability.py",
+            "tests/test_search_relevance.py"
+          ],
+          "untested_function_count": 2,
+          "untested_public_symbol_count": 2
+        },
+        "module": "scripts/search-learnings.py",
+        "priority": "low",
+        "score": 40,
+        "suggested_next_tests": [
+          "Add focused tests for uncovered public symbols in scripts/search-learnings.py: merge_parallel_results, parse_tag_filters."
+        ]
+      }
+    ]
+  },
+  "report_version": 1,
+  "scope": {
+    "coverage_xml": "/home/theconnman/git/connsulting/claude-code-plugins/plugins/compound-learning/coverage.xml",
+    "plugin_root": "/home/theconnman/git/connsulting/claude-code-plugins/plugins/compound-learning",
+    "source_dirs": [
+      "lib",
+      "scripts",
+      "hooks",
+      "skills"
+    ],
+    "tests_dir": "tests"
+  },
+  "summary": {
+    "coverage_loaded": true,
+    "high_priority_function_gaps": 52,
+    "high_priority_module_gaps": 8,
+    "modules_with_direct_tests": 4,
+    "modules_without_direct_tests": 8,
+    "overall_module_coverage_pct": 19.5,
+    "source_modules": 12,
+    "test_files": 3
+  }
+}
