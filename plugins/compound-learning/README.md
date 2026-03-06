@@ -88,6 +88,7 @@ Threshold precedence and backward compatibility:
 - New tiered env vars (`LEARNINGS_HIGH_CONFIDENCE_THRESHOLD`, `LEARNINGS_POSSIBLY_RELEVANT_THRESHOLD`, `LEARNINGS_KEYWORD_BOOST_WEIGHT`) override config file values.
 - New tiered config keys (`highConfidenceThreshold`, `possiblyRelevantThreshold`, `keywordBoostWeight`) override legacy `distanceThreshold`.
 - Legacy `LEARNINGS_DISTANCE_THRESHOLD` overrides legacy `distanceThreshold` when tiered keys are not explicitly set.
+- Invalid or out-of-range threshold values are ignored (with a warning), then the next fallback source is used.
 - If thresholds are misordered (`possiblyRelevantThreshold < highConfidenceThreshold`), runtime aligns `possiblyRelevantThreshold` to `highConfidenceThreshold` and logs a warning.
 
 ### Observability Events
