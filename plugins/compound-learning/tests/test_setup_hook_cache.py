@@ -73,7 +73,7 @@ def _read_pip_calls(pip_log: Path) -> List[str]:
     return [line for line in pip_log.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def test_setup_installs_only_missing_packages_and_reuses_cache_stamp(tmp_path):
+def test_setup_cache_hit_validates_and_recovers_from_dependency_drift(tmp_path):
     plugin_root = tmp_path / "plugin"
     module_dir = tmp_path / "modules"
     bin_dir = tmp_path / "bin"
@@ -95,13 +95,19 @@ def test_setup_installs_only_missing_packages_and_reuses_cache_stamp(tmp_path):
     assert "alpha-pkg" not in first_calls[0]
     assert len(_cache_stamp_files(home_dir)) == 1
 
+    warm_run = _run_setup(env)
+    assert warm_run.returncode == 0
+    assert len(_read_pip_calls(pip_log)) == 1
+
     (module_dir / "beta_pkg.py").unlink(missing_ok=True)
 
-    second_run = _run_setup(env)
-    assert second_run.returncode == 0
+    drift_run = _run_setup(env)
+    assert drift_run.returncode == 0
 
-    second_calls = _read_pip_calls(pip_log)
-    assert len(second_calls) == 1
+    calls = _read_pip_calls(pip_log)
+    assert len(calls) == 2
+    assert "beta-pkg" in calls[1]
+    assert len(_cache_stamp_files(home_dir)) == 1
 
 
 def test_setup_cache_invalidates_when_manifest_checksum_changes(tmp_path):
