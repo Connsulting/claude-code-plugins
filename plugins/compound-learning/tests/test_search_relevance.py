@@ -45,8 +45,11 @@ hybrid_rerank = _search_mod.hybrid_rerank
 @pytest.fixture(scope="module")
 def embedding_model():
     """Warm up the embedding model once per test module."""
-    # Trigger lazy load
-    db.get_embedding("warmup")
+    try:
+        # Trigger lazy load
+        db.get_embedding("warmup")
+    except Exception as exc:
+        pytest.skip(f"Embedding backend unavailable for relevance tests: {exc}")
     yield
 
 

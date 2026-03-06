@@ -152,6 +152,32 @@ Skill(skill="search-learnings", args="JWT authentication patterns")
 
 Also generates a manifest at `~/.projects/learnings/MANIFEST.md` summarizing learnings by topic.
 
+### Detecting Knowledge Silos
+
+```
+/knowledge-silo-detector
+```
+
+This runs `scripts/detect-knowledge-silos.py` against indexed learnings and reports topic concentration risks.
+
+What counts as a silo:
+- A topic has at least `minTopicSamples` indexed learnings (default: `4`)
+- One repo holds at least `repoDominanceThreshold` share of that topic (default: `0.70`)
+  - Repo scope is used as a team/domain proxy when explicit team metadata is unavailable
+- And/or one contributor holds at least `authorDominanceThreshold` share (default: `0.65`)
+
+Machine-readable output for automation:
+
+```bash
+python3 scripts/detect-knowledge-silos.py --format json
+```
+
+Typical workflow:
+1. Run `/index-learnings` to refresh the SQLite index
+2. Run `/knowledge-silo-detector` to review risk-ranked findings
+3. Address recommendations (cross-repo propagation, contributor backup coverage)
+4. Re-run `/index-learnings` and detector to verify risk reduction
+
 ### Learnings Manifest
 
 The manifest helps Claude decide when to search by showing what topics have learnings:
@@ -201,6 +227,7 @@ How it works:
   - `/compound`: Extracts learnings from conversations and commits to appropriate scope
   - `/pr-learnings`: Extracts learnings from GitHub PR reviews, comments, and code changes
   - `/index-learnings`: Re-indexes all learning files into SQLite-vec
+  - `/knowledge-silo-detector`: Detects topic concentration risk across repos and contributors
   - `/consolidate-learnings`: Finds and merges duplicate or overlapping learnings
 
 - **Agents:**
