@@ -236,3 +236,62 @@ def test_report_schema_and_json_stability(tmp_path):
     assert "tested_by" in first_module["evidence"]
     assert "missing_symbols" in first_module["evidence"]
     assert isinstance(first_module["suggested_next_tests"], list)
+
+
+def test_module_matching_ignores_bare_filename_mentions(tmp_path):
+    plugin_root = tmp_path / "compound-learning"
+
+    _write(plugin_root / "lib" / "db.py", "def connect():\n    return True\n")
+    _write(
+        plugin_root / "tests" / "test_fixture_only.py",
+        """
+        FIXTURE_XML = '''
+        <coverage>
+          <class name="db.py" filename="db.py"></class>
+        </coverage>
+        '''
+        """,
+    )
+
+    report = mod.analyze_test_gaps(
+        plugin_root=plugin_root,
+        source_dirs=("lib",),
+        tests_dir="tests",
+        coverage_xml=None,
+    )
+
+    module_gap = report["prioritized_gaps"]["modules"][0]
+    assert module_gap["module"] == "lib/db.py"
+    assert module_gap["evidence"]["tested_by"] == []
+
+
+def test_module_matching_detects_spec_from_file_location_paths(tmp_path):
+    plugin_root = tmp_path / "compound-learning"
+
+    _write(plugin_root / "scripts" / "tool.py", "def run_tool():\n    return 1\n")
+    _write(
+        plugin_root / "tests" / "test_tool_loader.py",
+        """
+        import importlib.util
+        from pathlib import Path
+
+        PLUGIN_ROOT = Path(__file__).parent.parent
+        _spec = importlib.util.spec_from_file_location("tool", PLUGIN_ROOT / "scripts" / "tool.py")
+        tool_mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(tool_mod)
+
+        def test_run_tool():
+            assert tool_mod.run_tool() == 1
+        """,
+    )
+
+    report = mod.analyze_test_gaps(
+        plugin_root=plugin_root,
+        source_dirs=("scripts",),
+        tests_dir="tests",
+        coverage_xml=None,
+    )
+
+    module_gap = report["prioritized_gaps"]["modules"][0]
+    assert module_gap["module"] == "scripts/tool.py"
+    assert module_gap["evidence"]["tested_by"] == ["tests/test_tool_loader.py"]
