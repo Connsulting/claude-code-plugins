@@ -1,6 +1,6 @@
 {
   "name": "compound-learning",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Learning compounding system with local vector search",
   "keywords": ["learning", "knowledge-base", "ai-memory"]
 }
