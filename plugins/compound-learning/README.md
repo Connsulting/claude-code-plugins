@@ -8,6 +8,7 @@ A learning compounding system for Claude Code that extracts and indexes knowledg
 - GitHub CLI (`gh`) - optional, required for `/pr-learnings`
 
 Python dependencies (`pysqlite3-binary`, `sqlite-vec`, `sentence-transformers`) are auto-installed on session start via the `SessionStart` hook.
+Runtime dependency declarations are tracked in `requirements-runtime.txt`.
 
 ## Installation
 
@@ -23,12 +24,30 @@ Python dependencies (`pysqlite3-binary`, `sqlite-vec`, `sentence-transformers`) 
 1. Clone or download this plugin to your Claude plugins directory
 2. Python dependencies install automatically on first session start, or install manually:
 ```bash
-pip install pysqlite3-binary sqlite-vec sentence-transformers
+pip install -r requirements-runtime.txt
 ```
 
 ### Post-Installation
 
 Run `/index-learnings` to build the index. The SQLite database is created automatically and the embedding model (~80MB) downloads on first use.
+
+## SessionStart Bootstrap
+
+`hooks/setup.sh` is manifest-driven and cache-aware:
+
+1. Reads runtime dependencies from `requirements-runtime.txt`
+2. Builds a cache key from Python version + manifest SHA256
+3. Skips dependency checks entirely when a matching warm stamp exists at `~/.claude/plugins/compound-learning/cache/`
+4. On cache miss, checks imports and installs only missing packages
+5. Writes a new stamp after successful validation/install
+
+Force a refresh when debugging stale environments:
+
+```bash
+LEARNINGS_SETUP_FORCE_REFRESH=true bash hooks/setup.sh
+```
+
+Equivalent legacy alias: `COMPOUND_LEARNING_SETUP_FORCE_REFRESH=true`.
 
 ## Configuration
 
@@ -250,6 +269,10 @@ Use topic + context: "authentication JWT refresh" not "implement login feature"
 
 **Hook activity log:**
 - Hook activity is logged to `~/.claude/plugins/compound-learning/activity.log`
+
+**Stale bootstrap cache or dependency drift:**
+- Force a refresh once: `LEARNINGS_SETUP_FORCE_REFRESH=true bash hooks/setup.sh`
+- Or remove cache stamps manually: `rm -f ~/.claude/plugins/compound-learning/cache/setup-*.stamp`
 
 **Observability log:**
 - Structured events are logged to `~/.claude/plugins/compound-learning/observability.jsonl` (or `LEARNINGS_OBS_LOG_PATH`)

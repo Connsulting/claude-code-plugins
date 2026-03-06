@@ -1,0 +1,4 @@
+# Runtime Python dependencies for compound-learning SessionStart bootstrap.
+pysqlite3-binary
+sqlite-vec
+sentence-transformers
