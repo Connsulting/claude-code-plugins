@@ -2,6 +2,11 @@
 
 A learning compounding system for Claude Code that extracts and indexes knowledge from conversations using local SQLite-vec semantic search. No Docker required.
 
+## Privacy Policy
+
+- Privacy policy: [PRIVACY_POLICY.md](PRIVACY_POLICY.md)
+- Automated consistency checker: `python3 scripts/check-privacy-policy.py`
+
 ## Prerequisites
 
 - Python 3.x with pip
@@ -182,9 +187,9 @@ How it works:
 1. Hooks trigger `extract-learnings.sh` which invokes `claude -p` to analyze the transcript
 2. Claude reads the conversation transcript and identifies 0-3 meaningful learnings
 3. Learning files are written to the appropriate scope (global or repo)
-4. A session tracking file (`~/.claude/compound-processed-sessions`) prevents duplicate extraction
+4. Session tracking files (`~/.claude/plugins/compound-learning/sessions/*.seen`) prevent duplicate surfacing within a session window
 
-**Debug log:** `~/.claude/compound-hook-debug.log`
+**Debug log:** `~/.claude/plugins/compound-learning/activity.log`
 
 **Note:** Extraction uses minimal permissions (`Read`, `Write`, `Bash(mkdir:*)`) and skips trivial sessions (<20 transcript lines).
 

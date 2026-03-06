@@ -1,0 +1,158 @@
+{
+  "version": 1,
+  "claims": [
+    {
+      "id": "CL-PRIV-001",
+      "title": "SQLite database default is local to user home",
+      "enforcement": "automated",
+      "statement": "Default SQLite DB path is ${HOME}/.claude/compound-learning.db.",
+      "checks": [
+        {
+          "type": "json_value",
+          "file": ".claude-plugin/config.json",
+          "path": "sqlite.dbPath",
+          "equals": "${HOME}/.claude/compound-learning.db"
+        },
+        {
+          "type": "contains",
+          "file": "lib/db.py",
+          "value": "os.path.join(home, '.claude', 'compound-learning.db')"
+        }
+      ]
+    },
+    {
+      "id": "CL-PRIV-002",
+      "title": "Observability is disabled by default",
+      "enforcement": "automated",
+      "statement": "Observability default enabled state is false.",
+      "checks": [
+        {
+          "type": "json_value",
+          "file": ".claude-plugin/config.json",
+          "path": "observability.enabled",
+          "equals": false
+        },
+        {
+          "type": "contains",
+          "file": "lib/db.py",
+          "value": "'enabled': False"
+        }
+      ]
+    },
+    {
+      "id": "CL-PRIV-003",
+      "title": "Observability logs default to local filesystem path",
+      "enforcement": "automated",
+      "statement": "Default observability log path is ~/.claude/plugins/compound-learning/observability.jsonl.",
+      "checks": [
+        {
+          "type": "json_value",
+          "file": ".claude-plugin/config.json",
+          "path": "observability.logPath",
+          "equals": "${HOME}/.claude/plugins/compound-learning/observability.jsonl"
+        },
+        {
+          "type": "contains",
+          "file": "lib/db.py",
+          "value": "os.path.join(home, '.claude', 'plugins', 'compound-learning', 'observability.jsonl')"
+        },
+        {
+          "type": "contains",
+          "file": "lib/observability.py",
+          "value": "~/.claude/plugins/compound-learning/observability.jsonl"
+        }
+      ]
+    },
+    {
+      "id": "CL-PRIV-004",
+      "title": "Session dedupe state uses local per-session files with 24h pruning",
+      "enforcement": "automated",
+      "statement": "Session dedupe state is stored in ~/.claude/plugins/compound-learning/sessions/*.seen and stale files are pruned after 24 hours.",
+      "checks": [
+        {
+          "type": "contains",
+          "file": "hooks/auto-peek.sh",
+          "value": "SESSIONS_DIR=\"$HOME/.claude/plugins/compound-learning/sessions\""
+        },
+        {
+          "type": "contains",
+          "file": "hooks/auto-peek.sh",
+          "value": "find \"$SESSIONS_DIR\" -name \"*.seen\" -mmin +1440 -delete"
+        },
+        {
+          "type": "contains",
+          "file": "hooks/auto-peek.sh",
+          "value": "SESSION_FILE=\"$SESSIONS_DIR/${SESSION_STATE_ID}.seen\""
+        }
+      ]
+    },
+    {
+      "id": "CL-PRIV-005",
+      "title": "Hooks guard against recursive subprocess execution",
+      "enforcement": "automated",
+      "statement": "extract-learnings and auto-peek skip execution when CLAUDE_SUBPROCESS is set.",
+      "checks": [
+        {
+          "type": "contains",
+          "file": "hooks/extract-learnings.sh",
+          "value": "if [ -n \"$CLAUDE_SUBPROCESS\" ]; then"
+        },
+        {
+          "type": "contains",
+          "file": "hooks/auto-peek.sh",
+          "value": "if [ -n \"$CLAUDE_SUBPROCESS\" ]; then"
+        }
+      ]
+    },
+    {
+      "id": "CL-PRIV-006",
+      "title": "Auto-extraction uses restricted declared tool permissions",
+      "enforcement": "automated",
+      "statement": "extract-learnings passes --allowedTools \"Write,Bash(mkdir:*)\" to claude -p.",
+      "checks": [
+        {
+          "type": "contains",
+          "file": "hooks/extract-learnings.sh",
+          "value": "--allowedTools \"Write,Bash(mkdir:*)\""
+        }
+      ]
+    },
+    {
+      "id": "CL-PRIV-007",
+      "title": "Hook activity log path is local",
+      "enforcement": "automated",
+      "statement": "Hook activity logs default to ~/.claude/plugins/compound-learning/activity.log with local fallback directories.",
+      "checks": [
+        {
+          "type": "contains",
+          "file": "hooks/observability.sh",
+          "value": "HOOK_LOG_DIR=\"$HOME/.claude/plugins/compound-learning\""
+        },
+        {
+          "type": "contains",
+          "file": "hooks/observability.sh",
+          "value": "HOOK_ACTIVITY_LOG=\"$HOOK_LOG_DIR/activity.log\""
+        },
+        {
+          "type": "contains",
+          "file": "hooks/observability.sh",
+          "value": "HOOK_LOG_DIR=\"/tmp/compound-learning-logs\""
+        }
+      ]
+    },
+    {
+      "id": "CL-PRIV-900",
+      "title": "External transport behavior requires runtime review",
+      "enforcement": "manual_review",
+      "statement": "This repository cannot statically prove runtime network routing behavior of claude subprocess calls.",
+      "manual_review_reason": "Requires runtime environment and provider/network review outside repository static analysis."
+    },
+    {
+      "id": "CL-PRIV-901",
+      "title": "Retention controls for generated learning content require operational review",
+      "enforcement": "manual_review",
+      "statement": "Local file retention and access controls depend on user host configuration and operational policy.",
+      "manual_review_reason": "Requires deployment-specific filesystem permissions and retention policy checks."
+    }
+  ]
+}
