@@ -48,6 +48,7 @@ class TestReference:
     imported_modules: frozenset[str]
     imported_names: frozenset[str]
     symbol_refs: frozenset[str]
+    module_path_refs: frozenset[str]
     text: str
 
 
@@ -213,6 +214,96 @@ def _collect_name_refs(tree: ast.AST) -> frozenset[str]:
     return frozenset(names)
 
 
+def _extract_dynamic_import_module(call: ast.Call) -> str | None:
+    if call.args:
+        first_arg = call.args[0]
+        if isinstance(first_arg, ast.Constant) and isinstance(first_arg.value, str):
+            if isinstance(call.func, ast.Attribute) and call.func.attr == "import_module":
+                return first_arg.value
+            if isinstance(call.func, ast.Name) and call.func.id == "__import__":
+                return first_arg.value
+    return None
+
+
+def _extract_string_literals(node: ast.AST) -> List[str]:
+    literals: List[str] = []
+
+    class Collector(ast.NodeVisitor):
+        def visit_Constant(self, const_node: ast.Constant) -> Any:
+            if isinstance(const_node.value, str):
+                literals.append(const_node.value)
+            self.generic_visit(const_node)
+
+    Collector().visit(node)
+    return literals
+
+
+def _extract_module_path_from_expr(
+    expr: ast.AST,
+    named_path_refs: Mapping[str, str] | None = None,
+) -> str | None:
+    if named_path_refs and isinstance(expr, ast.Name):
+        return named_path_refs.get(expr.id)
+
+    raw_literals: List[str]
+    if isinstance(expr, ast.Constant):
+        if not isinstance(expr.value, str):
+            return None
+        raw_literals = [expr.value]
+    else:
+        raw_literals = _extract_string_literals(expr)
+
+    literals = [value.replace("\\", "/").strip("/") for value in raw_literals if value.strip("/")]
+    if not literals:
+        return None
+
+    for index, value in enumerate(literals):
+        if value in DEFAULT_SOURCE_DIRS:
+            candidate_parts = [part for part in literals[index:] if part]
+            if candidate_parts and candidate_parts[-1].endswith(".py"):
+                return "/".join(candidate_parts)
+    return None
+
+
+def _collect_named_path_refs(tree: ast.AST) -> Dict[str, str]:
+    named_refs: Dict[str, str] = {}
+
+    if not isinstance(tree, ast.Module):
+        return named_refs
+
+    for node in tree.body:
+        value_node: ast.AST | None = None
+        targets: List[ast.AST] = []
+
+        if isinstance(node, ast.Assign):
+            value_node = node.value
+            targets = list(node.targets)
+        elif isinstance(node, ast.AnnAssign):
+            value_node = node.value
+            targets = [node.target]
+
+        if value_node is None:
+            continue
+
+        resolved_path = _extract_module_path_from_expr(value_node)
+        if not resolved_path:
+            continue
+
+        for target in targets:
+            if isinstance(target, ast.Name):
+                named_refs[target.id] = resolved_path
+
+    return named_refs
+
+
+def _extract_module_path_ref(call: ast.Call, named_path_refs: Mapping[str, str]) -> str | None:
+    if not (isinstance(call.func, ast.Attribute) and call.func.attr == "spec_from_file_location"):
+        return None
+    if len(call.args) < 2:
+        return None
+    return _extract_module_path_from_expr(call.args[1], named_path_refs=named_path_refs)
+
+
 def parse_test_reference(test_path: Path, plugin_root: Path) -> TestReference:
     """Parse import and symbol hints from a test file."""
     text = test_path.read_text(encoding="utf-8")
@@ -220,10 +311,12 @@ def parse_test_reference(test_path: Path, plugin_root: Path) -> TestReference:
     imported_modules: set[str] = set()
     imported_names: set[str] = set()
     symbol_refs: frozenset[str] = frozenset()
+    module_path_refs: set[str] = set()
 
     try:
         tree = ast.parse(text, filename=test_path.as_posix())
         symbol_refs = _collect_name_refs(tree)
+        named_path_refs = _collect_named_path_refs(tree)
 
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -243,6 +336,13 @@ def parse_test_reference(test_path: Path, plugin_root: Path) -> TestReference:
                     imported_names.add(alias.name.split(".")[-1])
                     if alias.asname:
                         imported_names.add(alias.asname)
+            elif isinstance(node, ast.Call):
+                dynamic_module = _extract_dynamic_import_module(node)
+                if dynamic_module:
+                    imported_modules.add(dynamic_module)
+                module_path_ref = _extract_module_path_ref(node, named_path_refs)
+                if module_path_ref:
+                    module_path_refs.add(module_path_ref)
     except SyntaxError:
         # Keep fallback text matching when AST parsing fails.
         pass
@@ -253,6 +353,7 @@ def parse_test_reference(test_path: Path, plugin_root: Path) -> TestReference:
         imported_modules=frozenset(imported_modules),
         imported_names=frozenset(imported_names),
         symbol_refs=symbol_refs,
+        module_path_refs=frozenset(module_path_refs),
         text=text,
     )
 
@@ -272,15 +373,7 @@ def module_test_matches(module: SourceModule, test_ref: TestReference) -> bool:
         if any(item.startswith(f"{candidate}.") for item in imported_modules):
             return True
 
-    rel_path = module.rel_path
-    file_name = Path(rel_path).name
-    stem_raw = Path(rel_path).stem
-    stem_normalized = stem_raw.replace("-", "_")
-
-    if rel_path in test_ref.text or file_name in test_ref.text:
-        return True
-
-    if stem_raw in test_ref.imported_names or stem_normalized in test_ref.imported_names:
+    if module.rel_path in test_ref.module_path_refs:
         return True
 
     return False
