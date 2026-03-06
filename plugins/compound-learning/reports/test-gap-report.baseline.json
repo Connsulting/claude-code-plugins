@@ -79,8 +79,8 @@
           "coverage_pct": null,
           "is_public": true,
           "line_range": [
-            591,
-            604
+            714,
+            727
           ],
           "missing_symbols": [
             "count_documents"
@@ -100,8 +100,8 @@
           "coverage_pct": null,
           "is_public": true,
           "line_range": [
-            372,
-            404
+            495,
+            527
           ],
           "missing_symbols": [
             "delete_document"
@@ -121,8 +121,8 @@
           "coverage_pct": null,
           "is_public": true,
           "line_range": [
-            501,
-            535
+            624,
+            658
           ],
           "missing_symbols": [
             "get_all_documents"
@@ -142,8 +142,8 @@
           "coverage_pct": null,
           "is_public": true,
           "line_range": [
-            538,
-            588
+            661,
+            711
           ],
           "missing_symbols": [
             "get_documents_by_ids"
@@ -156,27 +156,6 @@
         "score": 75,
         "suggested_next_tests": [
           "Add/extend a test that calls get_documents_by_ids in lib/db.py and asserts expected side effects."
-        ]
-      },
-      {
-        "evidence": {
-          "coverage_pct": null,
-          "is_public": true,
-          "line_range": [
-            68,
-            141
-          ],
-          "missing_symbols": [
-            "load_config"
-          ],
-          "tested_by": []
-        },
-        "function": "load_config",
-        "module": "lib/db.py",
-        "priority": "high",
-        "score": 75,
-        "suggested_next_tests": [
-          "Add/extend a test that calls load_config in lib/db.py and asserts expected side effects."
         ]
       },
       {
@@ -520,8 +499,8 @@
           "coverage_pct": null,
           "is_public": true,
           "line_range": [
-            525,
-            530
+            650,
+            655
           ],
           "missing_symbols": [
             "classify_priority"
@@ -541,8 +520,8 @@
           "coverage_pct": null,
           "is_public": true,
           "line_range": [
-            361,
-            363
+            486,
+            488
           ],
           "missing_symbols": [
             "collect_test_references"
@@ -562,8 +541,8 @@
           "coverage_pct": null,
           "is_public": true,
           "line_range": [
-            481,
-            489
+            606,
+            614
           ],
           "missing_symbols": [
             "coverage_pct_from_hits"
@@ -583,8 +562,8 @@
           "coverage_pct": null,
           "is_public": true,
           "line_range": [
-            511,
-            522
+            636,
+            647
           ],
           "missing_symbols": [
             "coverage_penalty"
@@ -625,8 +604,8 @@
           "coverage_pct": null,
           "is_public": true,
           "line_range": [
-            492,
-            508
+            617,
+            633
           ],
           "missing_symbols": [
             "function_coverage_pct"
@@ -646,8 +625,8 @@
           "coverage_pct": null,
           "is_public": true,
           "line_range": [
-            756,
-            796
+            881,
+            921
           ],
           "missing_symbols": [
             "main"
@@ -688,8 +667,8 @@
           "coverage_pct": null,
           "is_public": true,
           "line_range": [
-            366,
-            379
+            491,
+            504
           ],
           "missing_symbols": [
             "module_test_matches"
@@ -709,8 +688,8 @@
           "coverage_pct": null,
           "is_public": true,
           "line_range": [
-            399,
-            436
+            524,
+            561
           ],
           "missing_symbols": [
             "normalize_coverage_filename"
@@ -730,8 +709,8 @@
           "coverage_pct": null,
           "is_public": true,
           "line_range": [
-            717,
-            753
+            842,
+            878
           ],
           "missing_symbols": [
             "parse_args"
@@ -751,8 +730,8 @@
           "coverage_pct": null,
           "is_public": true,
           "line_range": [
-            439,
-            478
+            564,
+            603
           ],
           "missing_symbols": [
             "parse_coverage_xml"
@@ -772,8 +751,8 @@
           "coverage_pct": null,
           "is_public": true,
           "line_range": [
-            307,
-            358
+            419,
+            483
           ],
           "missing_symbols": [
             "parse_test_reference"
@@ -793,8 +772,8 @@
           "coverage_pct": null,
           "is_public": true,
           "line_range": [
-            382,
-            396
+            507,
+            521
           ],
           "missing_symbols": [
             "symbol_test_matches"
@@ -849,6 +828,27 @@
         "score": 75,
         "suggested_next_tests": [
           "Add/extend a test that calls action_delete in skills/consolidate-actions/consolidate-actions.py and asserts expected side effects."
+        ]
+      },
+      {
+        "evidence": {
+          "coverage_pct": null,
+          "is_public": true,
+          "line_range": [
+            46,
+            66
+          ],
+          "missing_symbols": [
+            "action_get"
+          ],
+          "tested_by": []
+        },
+        "function": "action_get",
+        "module": "skills/consolidate-actions/consolidate-actions.py",
+        "priority": "high",
+        "score": 75,
+        "suggested_next_tests": [
+          "Add/extend a test that calls action_get in skills/consolidate-actions/consolidate-actions.py and asserts expected side effects."
         ]
       }
     ],
@@ -1047,7 +1047,7 @@
           "tested_by": [
             "tests/test_test_gap_finder.py"
           ],
-          "untested_function_count": 24,
+          "untested_function_count": 26,
           "untested_public_symbol_count": 18
         },
         "module": "scripts/test-gap-finder.py",
@@ -1088,19 +1088,19 @@
             "count_documents",
             "delete_document",
             "get_all_documents",
-            "get_documents_by_ids",
-            "load_config"
+            "get_documents_by_ids"
           ],
           "public_symbol_count": 9,
           "tested_by": [
+            "tests/test_config_backward_compat.py",
             "tests/test_search_relevance.py"
           ],
-          "untested_function_count": 11,
-          "untested_public_symbol_count": 5
+          "untested_function_count": 12,
+          "untested_public_symbol_count": 4
         },
         "module": "lib/db.py",
         "priority": "medium",
-        "score": 62,
+        "score": 58,
         "suggested_next_tests": [
           "Add focused tests for uncovered public symbols in lib/db.py: count_documents, delete_document, get_all_documents."
         ]
@@ -1143,12 +1143,12 @@
   },
   "summary": {
     "coverage_loaded": false,
-    "high_priority_function_gaps": 57,
+    "high_priority_function_gaps": 56,
     "high_priority_module_gaps": 8,
     "modules_with_direct_tests": 4,
     "modules_without_direct_tests": 8,
     "overall_module_coverage_pct": null,
     "source_modules": 12,
-    "test_files": 3
+    "test_files": 4
   }
 }

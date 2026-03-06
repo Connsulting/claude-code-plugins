@@ -295,3 +295,69 @@ def test_module_matching_detects_spec_from_file_location_paths(tmp_path):
     module_gap = report["prioritized_gaps"]["modules"][0]
     assert module_gap["module"] == "scripts/tool.py"
     assert module_gap["evidence"]["tested_by"] == ["tests/test_tool_loader.py"]
+
+
+def test_module_matching_detects_spec_from_file_location_alias_import(tmp_path):
+    plugin_root = tmp_path / "compound-learning"
+
+    _write(plugin_root / "scripts" / "tool.py", "def run_tool():\n    return 1\n")
+    _write(
+        plugin_root / "tests" / "test_tool_alias_loader.py",
+        """
+        from importlib.util import module_from_spec, spec_from_file_location
+        from pathlib import Path
+
+        PLUGIN_ROOT = Path(__file__).parent.parent
+        spec = spec_from_file_location("tool", PLUGIN_ROOT / "scripts" / "tool.py")
+        tool_mod = module_from_spec(spec)
+        spec.loader.exec_module(tool_mod)
+
+        def test_run_tool():
+            assert tool_mod.run_tool() == 1
+        """,
+    )
+
+    report = mod.analyze_test_gaps(
+        plugin_root=plugin_root,
+        source_dirs=("scripts",),
+        tests_dir="tests",
+        coverage_xml=None,
+    )
+
+    module_gap = report["prioritized_gaps"]["modules"][0]
+    assert module_gap["module"] == "scripts/tool.py"
+    assert module_gap["evidence"]["tested_by"] == ["tests/test_tool_alias_loader.py"]
+
+
+def test_module_matching_detects_chained_location_path_refs(tmp_path):
+    plugin_root = tmp_path / "compound-learning"
+
+    _write(plugin_root / "scripts" / "tool.py", "def run_tool():\n    return 1\n")
+    _write(
+        plugin_root / "tests" / "test_tool_keyword_loader.py",
+        """
+        import importlib.util
+        from pathlib import Path
+
+        PLUGIN_ROOT = Path(__file__).parent.parent
+        SCRIPTS_DIR = PLUGIN_ROOT / "scripts"
+        SCRIPT_PATH = SCRIPTS_DIR / "tool.py"
+        _spec = importlib.util.spec_from_file_location(name="tool", location=SCRIPT_PATH)
+        tool_mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(tool_mod)
+
+        def test_run_tool():
+            assert tool_mod.run_tool() == 1
+        """,
+    )
+
+    report = mod.analyze_test_gaps(
+        plugin_root=plugin_root,
+        source_dirs=("scripts",),
+        tests_dir="tests",
+        coverage_xml=None,
+    )
+
+    module_gap = report["prioritized_gaps"]["modules"][0]
+    assert module_gap["module"] == "scripts/tool.py"
+    assert module_gap["evidence"]["tested_by"] == ["tests/test_tool_keyword_loader.py"]

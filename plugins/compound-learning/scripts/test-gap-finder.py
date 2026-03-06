@@ -238,12 +238,76 @@ def _extract_string_literals(node: ast.AST) -> List[str]:
     return literals
 
 
+def _normalize_module_path_candidate(raw_value: str, *, require_py_file: bool) -> str | None:
+    raw = raw_value.replace("\\", "/").strip()
+    if not raw:
+        return None
+
+    parts = [part for part in raw.split("/") if part and part != "."]
+    if not parts:
+        return None
+
+    for index, part in enumerate(parts):
+        if part not in DEFAULT_SOURCE_DIRS:
+            continue
+
+        candidate_parts: List[str] = []
+        for piece in parts[index:]:
+            if piece == "..":
+                if candidate_parts:
+                    candidate_parts.pop()
+                continue
+            candidate_parts.append(piece)
+
+        if not candidate_parts or candidate_parts[0] not in DEFAULT_SOURCE_DIRS:
+            continue
+
+        candidate = "/".join(candidate_parts)
+        if require_py_file and not candidate.endswith(".py"):
+            continue
+        return candidate
+
+    return None
+
+
 def _extract_module_path_from_expr(
     expr: ast.AST,
     named_path_refs: Mapping[str, str] | None = None,
+    require_py_file: bool = True,
 ) -> str | None:
     if named_path_refs and isinstance(expr, ast.Name):
-        return named_path_refs.get(expr.id)
+        resolved = named_path_refs.get(expr.id)
+        if not resolved:
+            return None
+        if require_py_file and not resolved.endswith(".py"):
+            return None
+        return resolved
+
+    if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Div):
+        left = _extract_module_path_from_expr(
+            expr.left,
+            named_path_refs=named_path_refs,
+            require_py_file=False,
+        )
+        right = _extract_module_path_from_expr(
+            expr.right,
+            named_path_refs=named_path_refs,
+            require_py_file=False,
+        )
+        if left and right:
+            candidate = _normalize_module_path_candidate(
+                f"{left}/{right}",
+                require_py_file=require_py_file,
+            )
+            if candidate:
+                return candidate
+        if left and isinstance(expr.right, ast.Constant) and isinstance(expr.right.value, str):
+            candidate = _normalize_module_path_candidate(
+                f"{left}/{expr.right.value}",
+                require_py_file=require_py_file,
+            )
+            if candidate:
+                return candidate
 
     raw_literals: List[str]
     if isinstance(expr, ast.Constant):
@@ -257,11 +321,23 @@ def _extract_module_path_from_expr(
     if not literals:
         return None
 
+    for literal in literals:
+        candidate = _normalize_module_path_candidate(
+            literal,
+            require_py_file=require_py_file,
+        )
+        if candidate:
+            return candidate
+
     for index, value in enumerate(literals):
         if value in DEFAULT_SOURCE_DIRS:
             candidate_parts = [part for part in literals[index:] if part]
-            if candidate_parts and candidate_parts[-1].endswith(".py"):
-                return "/".join(candidate_parts)
+            candidate = _normalize_module_path_candidate(
+                "/".join(candidate_parts),
+                require_py_file=require_py_file,
+            )
+            if candidate:
+                return candidate
     return None
 
 
@@ -285,7 +361,11 @@ def _collect_named_path_refs(tree: ast.AST) -> Dict[str, str]:
         if value_node is None:
             continue
 
-        resolved_path = _extract_module_path_from_expr(value_node)
+        resolved_path = _extract_module_path_from_expr(
+            value_node,
+            named_path_refs=named_refs,
+            require_py_file=False,
+        )
         if not resolved_path:
             continue
 
@@ -296,12 +376,44 @@ def _collect_named_path_refs(tree: ast.AST) -> Dict[str, str]:
     return named_refs
 
 
-def _extract_module_path_ref(call: ast.Call, named_path_refs: Mapping[str, str]) -> str | None:
-    if not (isinstance(call.func, ast.Attribute) and call.func.attr == "spec_from_file_location"):
+def _is_spec_from_file_location_call(
+    call: ast.Call,
+    spec_loader_aliases: frozenset[str],
+) -> bool:
+    if isinstance(call.func, ast.Attribute):
+        return call.func.attr == "spec_from_file_location"
+    if isinstance(call.func, ast.Name):
+        return call.func.id in spec_loader_aliases
+    return False
+
+
+def _extract_module_path_ref(
+    call: ast.Call,
+    named_path_refs: Mapping[str, str],
+    spec_loader_aliases: frozenset[str],
+) -> str | None:
+    if not _is_spec_from_file_location_call(call, spec_loader_aliases):
         return None
-    if len(call.args) < 2:
-        return None
-    return _extract_module_path_from_expr(call.args[1], named_path_refs=named_path_refs)
+
+    if len(call.args) >= 2:
+        module_path = _extract_module_path_from_expr(
+            call.args[1],
+            named_path_refs=named_path_refs,
+        )
+        if module_path:
+            return module_path
+
+    for keyword in call.keywords:
+        if keyword.arg != "location" or keyword.value is None:
+            continue
+        module_path = _extract_module_path_from_expr(
+            keyword.value,
+            named_path_refs=named_path_refs,
+        )
+        if module_path:
+            return module_path
+
+    return None
 
 
 def parse_test_reference(test_path: Path, plugin_root: Path) -> TestReference:
@@ -312,6 +424,7 @@ def parse_test_reference(test_path: Path, plugin_root: Path) -> TestReference:
     imported_names: set[str] = set()
     symbol_refs: frozenset[str] = frozenset()
     module_path_refs: set[str] = set()
+    spec_loader_aliases: set[str] = set()
 
     try:
         tree = ast.parse(text, filename=test_path.as_posix())
@@ -336,13 +449,25 @@ def parse_test_reference(test_path: Path, plugin_root: Path) -> TestReference:
                     imported_names.add(alias.name.split(".")[-1])
                     if alias.asname:
                         imported_names.add(alias.asname)
-            elif isinstance(node, ast.Call):
-                dynamic_module = _extract_dynamic_import_module(node)
-                if dynamic_module:
-                    imported_modules.add(dynamic_module)
-                module_path_ref = _extract_module_path_ref(node, named_path_refs)
-                if module_path_ref:
-                    module_path_refs.add(module_path_ref)
+
+                    if node.module == "importlib.util" and alias.name == "spec_from_file_location":
+                        spec_loader_aliases.add(alias.asname or alias.name)
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+
+            dynamic_module = _extract_dynamic_import_module(node)
+            if dynamic_module:
+                imported_modules.add(dynamic_module)
+
+            module_path_ref = _extract_module_path_ref(
+                node,
+                named_path_refs,
+                frozenset(spec_loader_aliases),
+            )
+            if module_path_ref:
+                module_path_refs.add(module_path_ref)
     except SyntaxError:
         # Keep fallback text matching when AST parsing fails.
         pass
