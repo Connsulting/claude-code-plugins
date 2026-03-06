@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """
 Index all learning markdown files into SQLite + sqlite-vec.
 Generates a manifest summarizing learnings by topic for CLAUDE.md integration.
@@ -178,7 +179,7 @@ def generate_manifest(manifest_data: Dict[str, List[Dict[str, Any]]], config: Di
 def _format_section(title: str, learnings: List[Dict[str, Any]]) -> List[str]:
     """Format a manifest section."""
     total = len(learnings)
-    gotchas = sum(1 for l in learnings if l.get('is_gotcha'))
+    gotchas = sum(1 for learning in learnings if learning.get('is_gotcha'))
 
     lines = []
     if gotchas > 0:
@@ -190,12 +191,12 @@ def _format_section(title: str, learnings: List[Dict[str, Any]]) -> List[str]:
     # Aggregate by topic
     topics: Dict[str, Dict] = defaultdict(lambda: {'count': 0, 'keywords': defaultdict(int), 'gotchas': 0})
 
-    for l in learnings:
-        topic = l['topic']
+    for learning in learnings:
+        topic = learning['topic']
         topics[topic]['count'] += 1
-        if l.get('is_gotcha'):
+        if learning.get('is_gotcha'):
             topics[topic]['gotchas'] += 1
-        for kw in l.get('keywords', []):
+        for kw in learning.get('keywords', []):
             topics[topic]['keywords'][kw] += 1
 
     # Table sorted by count
@@ -278,7 +279,7 @@ def index_learning_files():
     print("Opening database...")
     try:
         conn = db.get_connection(config)
-        print(f"[OK] Database ready")
+        print("[OK] Database ready")
     except Exception as e:
         logger.emit(
             'index_pipeline',

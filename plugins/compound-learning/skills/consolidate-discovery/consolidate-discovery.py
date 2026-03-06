@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """
 Discover consolidation candidates in SQLite.
 Returns compact output to avoid token bloat.

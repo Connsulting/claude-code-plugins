@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """Detect knowledge silo concentration risk from indexed learnings."""
 
 from __future__ import annotations

@@ -5,14 +5,11 @@ These tests exercise the full search pipeline: real embeddings (all-MiniLM-L6-v2
 real SQLite/sqlite-vec/fts5, real indexing, and real reranking logic.
 No internal modules are mocked.
 """
+# ruff: noqa: E402
 
-import json
-import os
 import sys
-import tempfile
-import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List
 
 import pytest
 
@@ -205,7 +202,7 @@ def test_relevant_results_ranked_above_irrelevant(tmp_db):
         f"Expected PDF learning in results but got ids: {all_ids}"
     )
     assert GRAFANA_LEARNING[0] not in all_ids, (
-        f"Grafana learning should be excluded (zero keyword overlap with 'slash command pdf layout')"
+        "Grafana learning should be excluded (zero keyword overlap with 'slash command pdf layout')"
     )
 
 
@@ -366,7 +363,6 @@ def test_fts5_boost_helps_stemmed_matches(tmp_db):
 
     stem_raw = next((r for r in raw if r["id"] == stem_doc_id), None)
     assert stem_raw is not None, "stem doc not found in raw KNN results"
-    original_distance = stem_raw["distance"]
 
     # Rerank with FTS5 boost
     reranked_with_fts = hybrid_rerank(
@@ -389,7 +385,7 @@ def test_fts5_boost_helps_stemmed_matches(tmp_db):
         f"FTS5 boost should lower distance: with={with_fts['distance']} without={without_fts['distance']}"
     )
     assert abs(with_fts["distance"] - (without_fts["distance"] - 0.05)) < 0.001, (
-        f"Expected 0.05 reduction from FTS5 boost"
+        "Expected 0.05 reduction from FTS5 boost"
     )
 
 

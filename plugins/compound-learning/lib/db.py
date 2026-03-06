@@ -12,6 +12,8 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
+import lib.observability as observability
+
 try:
     import sqlite3
     _test_conn = sqlite3.connect(':memory:')
@@ -29,9 +31,6 @@ except AttributeError:
 
 _model = None
 _model_lock = threading.Lock()
-
-
-import lib.observability as observability
 
 
 def _parse_bool(value: Any) -> bool | None:

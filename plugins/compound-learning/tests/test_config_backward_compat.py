@@ -1,3 +1,4 @@
+# ruff: noqa: E402
 import json
 import sys
 from pathlib import Path
