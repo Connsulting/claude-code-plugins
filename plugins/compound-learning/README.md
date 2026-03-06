@@ -122,9 +122,11 @@ When observability is enabled, the plugin writes structured JSONL events for:
 - Search pipeline (keyword parse, repo scope, fan-out, merge/rerank/filter, threshold buckets, final status)
 - Index pipeline (discovery, per-file failures, prune summary, manifest generation, total runtime)
 - DB operations (connection open, schema init, embeddings, upsert/delete/vector search)
+- Knowledge silo detector (`detect-knowledge-silos.py`) lifecycle (validation, DB init/read, compute, truncation, output emit, terminal status)
 
 Event fields include: `timestamp`, `level`, `component`, `operation`, `status`, `duration_ms`, `counts`, optional `error`, and correlation/session identifiers when available.
-Hooks now export correlation/session context into Python subprocesses so hook events can be joined to search/index/db events in one trace.
+Hooks now export correlation/session context into Python subprocesses so hook events can be joined to search/index/db/detector events in one trace.
+Detector trace shape typically appears as: `config_load` -> `db_init` -> `db_read` -> `detector_compute` -> `truncation` -> `output_emit` -> `detector_complete`.
 
 ## Usage
 

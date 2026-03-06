@@ -1,4 +1,6 @@
+import argparse
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -41,6 +43,55 @@ def test_empty_dataset_returns_guidance():
     assert report["findings"] == []
     assert "index-learnings" in report["guidance"]
     assert report["summary"]["total_learnings"] == 0
+
+
+def test_main_validation_failure_emits_observability(monkeypatch, capsys, tmp_path):
+    log_path = tmp_path / "detector-observability.jsonl"
+    config = {
+        "observability": {
+            "enabled": True,
+            "level": "debug",
+            "logPath": str(log_path),
+        }
+    }
+    args = argparse.Namespace(
+        min_topic_samples=0,
+        repo_dominance_threshold=0.70,
+        author_dominance_threshold=0.65,
+        max_findings=25,
+        format="text",
+    )
+
+    def fail_if_called(_config):
+        raise AssertionError("db.get_connection should not be called on validation failure")
+
+    monkeypatch.setattr(DETECTOR, "parse_args", lambda: args)
+    monkeypatch.setattr(DETECTOR.db, "load_config", lambda: config)
+    monkeypatch.setattr(DETECTOR.db, "get_connection", fail_if_called)
+
+    exit_code = DETECTOR.main()
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert captured.out == ""
+    assert captured.err.strip() == "--min-topic-samples must be greater than 0."
+    assert log_path.exists()
+
+    events = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert any(
+        event.get("operation") == "validation" and event.get("status") == "error"
+        for event in events
+    )
+    assert any(
+        event.get("operation") == "detector_complete"
+        and event.get("status") == "error"
+        and event.get("counts", {}).get("exit_code") == 2
+        for event in events
+    )
 
 
 def test_single_repo_dominance_detected():
