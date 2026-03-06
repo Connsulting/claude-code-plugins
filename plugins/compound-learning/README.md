@@ -191,7 +191,7 @@ How it works:
 
 **Debug log:** `~/.claude/plugins/compound-learning/activity.log`
 
-**Note:** Extraction uses minimal permissions (`Read`, `Write`, `Bash(mkdir:*)`) and skips trivial sessions (<20 transcript lines).
+**Note:** Extraction uses minimal permissions (`Write`, `Bash(mkdir:*)`) and skips trivial sessions (<20 transcript lines).
 
 ## Architecture
 

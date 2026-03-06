@@ -7,18 +7,27 @@ from pathlib import Path
 PLUGIN_ROOT = Path(__file__).parent.parent
 CHECKER_SCRIPT = PLUGIN_ROOT / "scripts" / "check-privacy-policy.py"
 CLAIMS_MANIFEST = PLUGIN_ROOT / "privacy-policy-claims.json"
+POLICY_DOC = PLUGIN_ROOT / "PRIVACY_POLICY.md"
 
 
-def _run_checker(manifest_path: Path) -> subprocess.CompletedProcess[str]:
+def _run_checker(
+    manifest_path: Path,
+    *,
+    policy_path: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    command = [
+        sys.executable,
+        str(CHECKER_SCRIPT),
+        "--plugin-root",
+        str(PLUGIN_ROOT),
+        "--manifest",
+        str(manifest_path),
+    ]
+    if policy_path is not None:
+        command.extend(["--policy", str(policy_path)])
+
     return subprocess.run(
-        [
-            sys.executable,
-            str(CHECKER_SCRIPT),
-            "--plugin-root",
-            str(PLUGIN_ROOT),
-            "--manifest",
-            str(manifest_path),
-        ],
+        command,
         capture_output=True,
         text=True,
         check=False,
@@ -26,7 +35,7 @@ def _run_checker(manifest_path: Path) -> subprocess.CompletedProcess[str]:
 
 
 def test_privacy_policy_checker_passes_for_repository_baseline():
-    result = _run_checker(CLAIMS_MANIFEST)
+    result = _run_checker(CLAIMS_MANIFEST, policy_path=POLICY_DOC)
 
     assert result.returncode == 0, (
         "checker should pass for repository baseline\n"
@@ -61,3 +70,26 @@ def test_privacy_policy_checker_fails_on_manifest_mismatch(tmp_path):
     assert result.returncode != 0
     assert "[FAIL]" in result.stdout
     assert "THIS_SENTINEL_SHOULD_NOT_EXIST_IN_README" in result.stdout
+
+
+def test_privacy_policy_checker_fails_on_policy_manifest_drift(tmp_path):
+    policy_text = POLICY_DOC.read_text(encoding="utf-8")
+    original_row = (
+        "| `CL-PRIV-001` | Default SQLite DB path is "
+        "`${HOME}/.claude/compound-learning.db`. | automated |"
+    )
+    drifted_row = (
+        "| `CL-PRIV-001` | Default SQLite DB path is "
+        "`${HOME}/.claude/compound-learning.sqlite`. | automated |"
+    )
+    drifted_policy_text = policy_text.replace(original_row, drifted_row, 1)
+    assert drifted_policy_text != policy_text
+
+    drifted_policy = tmp_path / "PRIVACY_POLICY.md"
+    drifted_policy.write_text(drifted_policy_text, encoding="utf-8")
+
+    result = _run_checker(CLAIMS_MANIFEST, policy_path=drifted_policy)
+
+    assert result.returncode != 0
+    assert "[FAIL] POLICY-MANIFEST alignment" in result.stdout
+    assert "claim statement mismatch for CL-PRIV-001" in result.stdout
