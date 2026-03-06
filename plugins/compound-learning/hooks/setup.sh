@@ -41,6 +41,7 @@ declare -a REQUIREMENTS
 declare -a IMPORT_NAMES
 declare -a MISSING_IMPORTS
 declare -a MISSING_REQUIREMENTS
+declare -a STAMP_MISSING_IMPORTS
 
 is_truthy() {
   case "${1:-}" in
@@ -120,13 +121,81 @@ print(hashlib.sha256(payload).hexdigest())
 PY
 }
 
+resolve_import_paths() {
+  python3 - "${IMPORT_NAMES[@]}" <<'PY'
+import importlib.util
+import os
+import sys
+
+missing = []
+
+for module_name in sys.argv[1:]:
+    spec = importlib.util.find_spec(module_name)
+    module_path = ""
+
+    if spec is None:
+        missing.append(module_name)
+        continue
+
+    if spec.origin and spec.origin not in {"built-in", "frozen"}:
+        module_path = os.path.realpath(spec.origin)
+    elif spec.submodule_search_locations:
+        locations = list(spec.submodule_search_locations)
+        if locations:
+            module_path = os.path.realpath(locations[0])
+
+    if not module_path:
+        missing.append(module_name)
+        continue
+
+    print(f"{module_name}\t{module_path}")
+
+if missing:
+    print(",".join(missing), file=sys.stderr)
+    sys.exit(1)
+PY
+}
+
+read_cached_import_path() {
+  local module_name="$1"
+  local entry
+
+  entry="$(grep -m 1 "^module_path:${module_name}=" "$STAMP_FILE" 2>/dev/null || true)"
+  [ -n "$entry" ] || return 1
+  printf '%s' "${entry#*=}"
+}
+
+cache_stamp_paths_valid() {
+  STAMP_MISSING_IMPORTS=()
+
+  local module_name
+  local module_path
+  for module_name in "${IMPORT_NAMES[@]}"; do
+    module_path="$(read_cached_import_path "$module_name")"
+    if [ -z "$module_path" ] || [ ! -e "$module_path" ]; then
+      STAMP_MISSING_IMPORTS+=("$module_name")
+    fi
+  done
+
+  [ "${#STAMP_MISSING_IMPORTS[@]}" -eq 0 ]
+}
+
 write_cache_stamp() {
+  local import_paths
+  import_paths="$(resolve_import_paths)" || return 1
+
   mkdir -p "$CACHE_DIR" 2>/dev/null || return 1
 
   {
     printf 'python_version=%s\n' "$PYTHON_VERSION"
     printf 'manifest_sha256=%s\n' "$MANIFEST_SHA256"
     printf 'generated_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+    while IFS=$'\t' read -r module_name module_path; do
+      [ -n "$module_name" ] || continue
+      [ -n "$module_path" ] || continue
+      printf 'module_path:%s=%s\n' "$module_name" "$module_path"
+    done <<< "$import_paths"
   } > "$STAMP_FILE" 2>/dev/null || return 1
 
   find "$CACHE_DIR" -maxdepth 1 -type f -name 'setup-*.stamp' ! -name "$(basename "$STAMP_FILE")" -delete 2>/dev/null || true
@@ -250,10 +319,30 @@ if [ "$FORCE_REFRESH" -eq 1 ]; then
     --session-id "$SESSION_ID" \
     --message "force refresh requested"
 elif [ -f "$STAMP_FILE" ]; then
-  CACHE_STATE="hit"
-  hook_obs_event "info" "dependency_cache" "hit" \
+  if cache_stamp_paths_valid; then
+    CACHE_STATE="hit"
+    hook_obs_event "info" "dependency_cache" "hit" \
+      --session-id "$SESSION_ID" \
+      --counts-json '{"cache_hit":1}'
+
+    hook_obs_event "info" "dependency_check" "success" \
+      --session-id "$SESSION_ID" \
+      --counts-json "{\"missing_packages\":0,\"total_packages\":${#REQUIREMENTS[@]}}"
+    HOOK_OUTCOME="skipped"
+    HOOK_OUTCOME_MESSAGE="Dependency cache hit"
+    hook_obs_event "info" "skip_reason" "skipped" \
+      --session-id "$SESSION_ID" \
+      --message "dependency cache hit"
+    exit 0
+  fi
+
+  CACHE_STATE="stale"
+  stale_csv="$(IFS=,; echo "${STAMP_MISSING_IMPORTS[*]}")"
+  hook_log_activity "[setup] Dependency cache stale; missing module paths detected (${stale_csv})"
+  hook_obs_event "warn" "dependency_cache" "stale" \
     --session-id "$SESSION_ID" \
-    --counts-json '{"cache_hit":1}'
+    --counts-json "{\"cache_hit\":1,\"missing_packages\":${#STAMP_MISSING_IMPORTS[@]}}"
+  rm -f "$STAMP_FILE" 2>/dev/null || true
 else
   hook_obs_event "info" "dependency_cache" "miss" \
     --session-id "$SESSION_ID" \
@@ -262,27 +351,6 @@ fi
 
 if ! collect_missing_requirements; then
   exit 0
-fi
-
-if [ "$CACHE_STATE" = "hit" ] && [ "${#MISSING_REQUIREMENTS[@]}" -eq 0 ]; then
-  hook_obs_event "info" "dependency_check" "success" \
-    --session-id "$SESSION_ID" \
-    --counts-json "{\"missing_packages\":0,\"total_packages\":${#REQUIREMENTS[@]}}"
-  HOOK_OUTCOME="skipped"
-  HOOK_OUTCOME_MESSAGE="Dependency cache hit (validated)"
-  hook_obs_event "info" "skip_reason" "skipped" \
-    --session-id "$SESSION_ID" \
-    --message "dependency cache hit (validated)"
-  exit 0
-fi
-
-if [ "$CACHE_STATE" = "hit" ] && [ "${#MISSING_REQUIREMENTS[@]}" -gt 0 ]; then
-  missing_csv="$(IFS=,; echo "${MISSING_REQUIREMENTS[*]}")"
-  hook_log_activity "[setup] Dependency cache stale; missing modules detected (${missing_csv})"
-  hook_obs_event "warn" "dependency_cache" "stale" \
-    --session-id "$SESSION_ID" \
-    --counts-json "{\"cache_hit\":1,\"missing_packages\":${#MISSING_REQUIREMENTS[@]}}"
-  rm -f "$STAMP_FILE" 2>/dev/null || true
 fi
 
 if [ "${#MISSING_REQUIREMENTS[@]}" -eq 0 ]; then
@@ -304,9 +372,6 @@ if [ "${#MISSING_REQUIREMENTS[@]}" -eq 0 ]; then
   exit 0
 fi
 
-hook_obs_event "warn" "subprocess_exit" "failure" \
-  --session-id "$SESSION_ID" \
-  --counts-json '{"command":"python_import_check","exit_code":1}'
 hook_obs_event "info" "dependency_check" "missing" \
   --session-id "$SESSION_ID" \
   --counts-json "{\"missing_packages\":${#MISSING_REQUIREMENTS[@]},\"total_packages\":${#REQUIREMENTS[@]}}"
