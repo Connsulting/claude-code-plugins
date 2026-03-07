@@ -15,13 +15,14 @@ Find and consolidate learnings that are duplicated or outdated.
 ## Your Task
 
 You orchestrate a three-phase workflow: Discovery -> Approval -> Parallel Execution.
+Run script commands from the plugin root (`plugins/compound-learning` in this repository).
 
 ### Phase 1: Discovery
 
 Run the discovery skill:
 
 ```bash
-python3 [plugin-path]/skills/consolidate-discovery/consolidate-discovery.py --mode all 2>/dev/null
+python3 skills/consolidate-discovery/consolidate-discovery.py --mode all 2>/dev/null
 ```
 
 Parse the JSON output to build your report.
@@ -70,7 +71,7 @@ Approve this plan? (You can request modifications first)
 ```
 
 **Important for report:**
-- Use `python3 [plugin-path]/skills/consolidate-actions/consolidate-actions.py get --ids=...` to fetch content if needed to understand WHY files should be merged
+- Use `python3 skills/consolidate-actions/consolidate-actions.py get --ids=...` to fetch content if needed to understand WHY files should be merged
 - Group name should be descriptive (e.g., "jwt-authentication", "helm-deployment-patterns")
 - **CRITICAL: Deletions must EXCLUDE files that appear in any merge group** - those get deleted automatically by the merge operation
 - Only list truly orphaned outdated files in the Deletions section
@@ -85,10 +86,10 @@ After user approval, launch sub-agents in parallel:
 Each sub-agent runs:
 ```bash
 # Merge sub-agent
-python3 [plugin-path]/skills/consolidate-actions/consolidate-actions.py merge --ids=id1,id2 --name=group-name
+python3 skills/consolidate-actions/consolidate-actions.py merge --ids=id1,id2 --name=group-name
 
 # Deletion sub-agent
-python3 [plugin-path]/skills/consolidate-actions/consolidate-actions.py delete --ids=id1,id2,id3
+python3 skills/consolidate-actions/consolidate-actions.py delete --ids=id1,id2,id3
 ```
 
 ### Phase 4: Report Results

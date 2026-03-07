@@ -1,6 +1,6 @@
 ---
 name: consolidate-actions
-description: Execute approved consolidation actions (merge, archive, delete, rescope, get). Use after review and user approval.
+description: Execute approved learning-consolidation actions (get, merge, archive, delete, rescope) against indexed learnings. Use only after the user approves a consolidation plan.
 ---
 
 # Consolidate Actions
@@ -9,30 +9,36 @@ Execute consolidation operations on learnings. All destructive operations create
 
 ## Usage
 
+Preferred workflow:
+
 ```bash
-# Fetch full content for review
-python3 [plugin-path]/skills/consolidate-actions/consolidate-actions.py get --ids=id1,id2
-
-# Delete with backup
-python3 [plugin-path]/skills/consolidate-actions/consolidate-actions.py delete --ids=id1,id2
-
-# Move to archive
-python3 [plugin-path]/skills/consolidate-actions/consolidate-actions.py archive --ids=id1,id2
-
-# Change scope (repo -> global)
-python3 [plugin-path]/skills/consolidate-actions/consolidate-actions.py rescope --id=abc123 --scope=global
-
-# Merge multiple into one
-python3 [plugin-path]/skills/consolidate-actions/consolidate-actions.py merge --ids=id1,id2,id3 --name=jwt-patterns
-
-# Merge with explicit output directory (overrides scope logic)
-python3 [plugin-path]/skills/consolidate-actions/consolidate-actions.py merge --ids=id1,id2 --name=patterns --output-dir=/absolute/path/to/repo/.projects/learnings
-
-# Dry run (show what would happen)
-python3 [plugin-path]/skills/consolidate-actions/consolidate-actions.py merge --ids=id1,id2 --name=patterns --dry-run
+/consolidate-learnings
 ```
 
-`[plugin-path]` is the absolute path to this plugin root (the directory containing `commands/` and `skills/`).
+Direct script usage (run from this skill directory root):
+
+```bash
+# Fetch full content for review
+python3 consolidate-actions.py get --ids=id1,id2
+
+# Delete with backup
+python3 consolidate-actions.py delete --ids=id1,id2
+
+# Move to archive
+python3 consolidate-actions.py archive --ids=id1,id2
+
+# Change scope (repo -> global)
+python3 consolidate-actions.py rescope --id=abc123 --scope=global
+
+# Merge multiple into one
+python3 consolidate-actions.py merge --ids=id1,id2,id3 --name=jwt-patterns
+
+# Merge with explicit output directory (overrides scope logic)
+python3 consolidate-actions.py merge --ids=id1,id2 --name=patterns --output-dir=/absolute/path/to/repo/.projects/learnings
+
+# Dry run (show what would happen)
+python3 consolidate-actions.py merge --ids=id1,id2 --name=patterns --dry-run
+```
 
 ## Actions
 

@@ -1,6 +1,6 @@
 ---
 name: consolidate-discovery
-description: Find duplicate and outdated learnings in SQLite. Use before proposing or running consolidation actions.
+description: Find duplicate and outdated learnings in the SQLite index and return compact JSON candidates. Use before proposing merge/delete consolidation actions.
 ---
 
 # Consolidate Discovery
@@ -9,11 +9,17 @@ Discovers learnings that may need consolidation: duplicates and outdated content
 
 ## Usage
 
+Preferred workflow:
+
 ```bash
-python3 [plugin-path]/skills/consolidate-discovery/consolidate-discovery.py [--mode all|duplicates|outdated] [--limit N]
+/consolidate-learnings
 ```
 
-`[plugin-path]` is the absolute path to this plugin root (the directory containing `commands/` and `skills/`).
+Direct script usage (run from this skill directory root):
+
+```bash
+python3 consolidate-discovery.py [--mode all|duplicates|outdated] [--limit N]
+```
 
 ## Options
 
@@ -52,4 +58,4 @@ Compact JSON with file basenames, paths, and IDs:
 
 - Uses tight similarity threshold (0.25) for true duplicates
 - Output is compact to avoid token bloat
-- Use `python3 [plugin-path]/skills/consolidate-actions/consolidate-actions.py get --ids=...` to fetch full content when needed
+- Use `python3 ../consolidate-actions/consolidate-actions.py get --ids=...` to fetch full content when needed

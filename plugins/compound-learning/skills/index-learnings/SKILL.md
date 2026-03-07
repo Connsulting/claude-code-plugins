@@ -1,6 +1,6 @@
 ---
 name: index-learnings
-description: Build or refresh the learnings SQLite index and topic manifest. Use when new or updated learnings need to be searchable.
+description: Build or refresh the learnings SQLite index and regenerate MANIFEST.md topic summaries. Use after adding or updating learnings, or before search and analysis commands.
 ---
 
 # Index Learnings
@@ -15,14 +15,12 @@ Preferred:
 /index-learnings
 ```
 
-Direct script (if command routing is unavailable):
+Direct script (if command routing is unavailable; run from this skill directory root):
 
 ```bash
-python3 [plugin-path]/skills/index-learnings/index-learnings.py
-python3 [plugin-path]/skills/index-learnings/index-learnings.py --file /absolute/path/to/learning.md
+python3 index-learnings.py
+python3 index-learnings.py --file /absolute/path/to/learning.md
 ```
-
-`[plugin-path]` is the absolute path to this plugin root (the directory containing `commands/` and `skills/`).
 
 ## What It Does
 

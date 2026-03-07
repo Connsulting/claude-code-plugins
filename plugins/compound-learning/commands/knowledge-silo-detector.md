@@ -14,16 +14,18 @@ Analyze indexed learnings for concentration risk by topic.
 
 ## Your Task
 
+Run script commands from the plugin root (`plugins/compound-learning` in this repository).
+
 1. Run the detector in human-readable mode:
 
 ```bash
-python3 [plugin-path]/scripts/detect-knowledge-silos.py --format text
+python3 scripts/detect-knowledge-silos.py --format text
 ```
 
 2. If the user requests machine-readable output or automation, run:
 
 ```bash
-python3 [plugin-path]/scripts/detect-knowledge-silos.py --format json
+python3 scripts/detect-knowledge-silos.py --format json
 ```
 
 3. Present results using this structure:
@@ -57,7 +59,7 @@ Assumption: repository scope approximates team/domain boundaries when explicit t
 Pass thresholds explicitly when requested:
 
 ```bash
-python3 [plugin-path]/scripts/detect-knowledge-silos.py \
+python3 scripts/detect-knowledge-silos.py \
   --min-topic-samples 5 \
   --repo-dominance-threshold 0.75 \
   --author-dominance-threshold 0.70 \
