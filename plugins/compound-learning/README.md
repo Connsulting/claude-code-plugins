@@ -197,6 +197,27 @@ Typical workflow:
 3. Address recommendations (cross-repo propagation, contributor backup coverage)
 4. Re-run `/index-learnings` and detector to verify risk reduction
 
+### Explaining Semantic Diffs
+
+```
+/semantic-diff
+```
+
+Explain semantic meaning for local workspace changes (`HEAD` vs current index + working tree).
+
+Additional modes:
+
+```bash
+/semantic-diff --staged
+/semantic-diff --working-tree
+/semantic-diff main..HEAD
+/semantic-diff main...feature-branch
+```
+
+The command uses `scripts/semantic-diff.py` to gather deterministic structured diff context
+(status, rename metadata, numstat, bounded patch snippets), then calls `semantic-diff-explainer`
+to summarize behavioral impact, contract changes, risk level, and recommended test focus.
+
 ### Learnings Manifest
 
 The manifest helps Claude decide when to search by showing what topics have learnings:
@@ -248,10 +269,12 @@ How it works:
   - `/index-learnings`: Re-indexes all learning files into SQLite-vec
   - `/knowledge-silo-detector`: Detects topic concentration risk across repos and contributors
   - `/consolidate-learnings`: Finds and merges duplicate or overlapping learnings
+  - `/semantic-diff`: Explains semantic meaning of local git diff ranges and workspace changes
 
 - **Agents:**
   - `learning-writer`: Analyzes conversations and extracts learnings
   - `pr-learning-extractor`: Analyzes GitHub PRs and extracts learnings from reviews
+  - `semantic-diff-explainer`: Interprets structured diff payloads into behavior/risk analysis
 
 - **Skills:**
   - `search-learnings`: Queries SQLite-vec for relevant learnings with hierarchical scoping
