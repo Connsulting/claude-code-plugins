@@ -158,9 +158,12 @@ Fetches PR data including reviews, comments, and code changes, then extracts 1-3
 
 ### Searching Learnings
 
-Learnings are automatically searched at the start of tasks. To manually search:
-```
-Skill(skill="search-learnings", args="JWT authentication patterns")
+Learnings are automatically searched on `UserPromptSubmit` by `hooks/auto-peek.sh`, which calls `scripts/search-learnings.py`.
+
+For a manual check from the repository root:
+
+```bash
+python3 plugins/compound-learning/scripts/search-learnings.py "JWT authentication patterns" "$(pwd)" --max-results 5
 ```
 
 ### Rebuilding the Index
@@ -221,22 +224,24 @@ Generated: 2026-02-03T14:30:00Z
 
 Topics come from `**Topic:**` and `**Tags:**` fields in learning files. `**Type:** gotcha` learnings are flagged with ⚠️.
 
-### Auto-Extraction via Hooks
+### Automation via Hooks
 
-The plugin automatically extracts learnings at key moments:
+The plugin wiring is defined in `hooks/hooks.json`:
 
-- **PreCompact**: Before context compaction to preserve insights
-- **Stop**: When Claude finishes responding
+- **SessionStart**: Runs `hooks/setup.sh` to install dependencies and initialize runtime
+- **SessionEnd**: Runs `hooks/extract-learnings.sh` asynchronously after the session
+- **PreCompact**: Runs `hooks/extract-learnings.sh` before context compaction
+- **UserPromptSubmit**: Runs `hooks/auto-peek.sh` to surface relevant learnings
 
 How it works:
-1. Hooks trigger `extract-learnings.sh` which invokes `claude -p` to analyze the transcript
+1. Extraction hooks trigger `hooks/extract-learnings.sh`, which invokes `claude -p` to analyze the transcript
 2. Claude reads the conversation transcript and identifies 0-3 meaningful learnings
 3. Learning files are written to the appropriate scope (global or repo)
-4. Session tracking files (`~/.claude/plugins/compound-learning/sessions/*.seen`) prevent duplicate surfacing within a session window
+4. User-prompt peeks track seen IDs in `~/.claude/plugins/compound-learning/sessions/*.seen`
 
 **Debug log:** `~/.claude/plugins/compound-learning/activity.log`
 
-**Note:** Extraction uses minimal permissions (`Write`, `Bash(mkdir:*)`) and skips trivial sessions (<20 transcript lines).
+**Note:** Extraction uses minimal permissions (`Read`, `Write`, `Bash(mkdir:*)`) and skips trivial sessions (<20 transcript lines).
 
 ## Architecture
 
@@ -254,21 +259,22 @@ How it works:
   - `pr-learning-extractor`: Analyzes GitHub PRs and extracts learnings from reviews
 
 - **Skills:**
-  - `search-learnings`: Queries SQLite-vec for relevant learnings with hierarchical scoping
   - `index-learnings`: Indexes all learning markdown files into SQLite-vec
   - `consolidate-discovery`: Finds consolidation candidates
   - `consolidate-actions`: Executes consolidation actions (merge, archive, delete)
 
 - **Hooks:**
+  - `SessionStart`: Initializes environment and dependencies
+  - `SessionEnd`: Extracts learnings asynchronously after response completion
+  - `UserPromptSubmit`: Runs auto-peek retrieval before Claude answers
   - `PreCompact`: Auto-extracts learnings before context compaction
-  - `Stop`: Auto-extracts learnings when Claude finishes responding
 
 ### Learning Scopes
 
 1. **Global** (`~/.projects/learnings/`): Security patterns, general best practices, cross-project knowledge
 2. **Repo** (`[repo]/.projects/learnings/`): Repository-specific gotchas, patterns, architecture decisions
 
-The search skill automatically detects which repository you're working in and includes both global and repo-scoped learnings.
+The search pipeline in `scripts/search-learnings.py` detects repository scope automatically and includes both global and repo-scoped learnings.
 
 ## Recommended CLAUDE.md Configuration
 
@@ -282,7 +288,7 @@ Add this to your global `~/.claude/CLAUDE.md`:
 **When to search:** If manifest shows a topic matching your task, search for it.
 **When to skip:** If no relevant topic in manifest, don't search.
 
-**Search:** `Skill(skill="compound-learning:search-learnings", args="[topic] [context]")`
+**Search:** `python3 plugins/compound-learning/scripts/search-learnings.py "[topic] [context]" "$PWD"`
 **Peek:** Add `--peek --exclude-ids [seen-ids]` when shifting to a new manifest topic mid-conversation.
 
 Use topic + context: "authentication JWT refresh" not "implement login feature"
