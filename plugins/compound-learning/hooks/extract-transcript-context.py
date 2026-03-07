@@ -10,15 +10,43 @@ Output is truncated to a reasonable size for fast Haiku processing.
 
 import json
 import sys
+from typing import Iterator
 
 
 def is_real_user_prompt(entry: dict) -> bool:
     """Check if entry is a real user prompt (not a tool_result)."""
+    if not isinstance(entry, dict):
+        return False
     if entry.get('type') != 'user':
         return False
-    content = entry.get('message', {}).get('content')
+    message = entry.get('message', {})
+    if not isinstance(message, dict):
+        return False
+    content = message.get('content')
     # Real user prompts have string content, tool results have array content
     return isinstance(content, str)
+
+
+def iter_assistant_text(content) -> Iterator[str]:
+    """Yield assistant text blocks from supported transcript content shapes."""
+    if isinstance(content, str):
+        yield content
+        return
+
+    if not isinstance(content, list):
+        return
+
+    for item in content:
+        if isinstance(item, str):
+            yield item
+            continue
+        if not isinstance(item, dict):
+            continue
+        if item.get('type') != 'text':
+            continue
+        text = item.get('text', '')
+        if isinstance(text, str):
+            yield text
 
 
 def extract_context(transcript_path: str, max_chars: int = 3000) -> str:
@@ -38,6 +66,8 @@ def extract_context(transcript_path: str, max_chars: int = 3000) -> str:
         try:
             entry = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        if not isinstance(entry, dict):
             continue
 
         entry_type = entry.get('type')
@@ -60,21 +90,21 @@ def extract_context(transcript_path: str, max_chars: int = 3000) -> str:
 
         # Extract text from assistant messages
         message = entry.get('message', {})
+        if not isinstance(message, dict):
+            continue
         content = message.get('content', [])
 
-        if isinstance(content, list):
-            for item in content:
-                if item.get('type') == 'text':
-                    text = item.get('text', '')
-                    if text and total_chars + len(text) <= max_chars:
-                        context_parts.append(text)
-                        total_chars += len(text)
-                    elif text:
-                        # Truncate to fit
-                        remaining = max_chars - total_chars
-                        if remaining > 100:
-                            context_parts.append(text[:remaining] + "...")
-                        break
+        for text in iter_assistant_text(content):
+            if text and total_chars + len(text) <= max_chars:
+                context_parts.append(text)
+                total_chars += len(text)
+            elif text:
+                # Truncate to fit
+                remaining = max_chars - total_chars
+                if remaining > 100:
+                    context_parts.append(text[:remaining] + "...")
+                total_chars = max_chars
+                break
 
         if total_chars >= max_chars:
             break
