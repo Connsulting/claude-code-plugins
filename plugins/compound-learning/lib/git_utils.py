@@ -51,28 +51,6 @@ def resolve_repo_name(cwd: str) -> str:
     return os.path.basename(resolve_repo_root(cwd))
 
 
-def is_worktree(path: str) -> bool:
-    """Return True if *path* is inside a git worktree (not a normal repo)."""
-    check = Path(path).resolve()
-
-    while True:
-        git_path = check / ".git"
-
-        if git_path.is_file():
-            gitdir = _read_gitdir(git_path)
-            return gitdir is not None
-
-        if git_path.is_dir():
-            return False
-
-        parent = check.parent
-        if parent == check:
-            break
-        check = parent
-
-    return False
-
-
 def _read_gitdir(git_file: Path) -> str | None:
     """Read a .git worktree file and return the gitdir path, or None."""
     try:

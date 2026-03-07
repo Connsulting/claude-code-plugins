@@ -11,11 +11,10 @@ import os
 import threading
 import time
 import uuid
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, Mapping, MutableMapping, Optional
+from typing import Any, Dict, Mapping, MutableMapping, Optional
 
 try:
     import fcntl
@@ -226,11 +225,6 @@ class StructuredLogger:
         self.settings = settings
         self._fields = _clean_fields(fields)
 
-    def bind(self, **fields: Any) -> "StructuredLogger":
-        merged: Dict[str, Any] = dict(self._fields)
-        merged.update(_clean_fields(fields))
-        return StructuredLogger(self.component, self.settings, merged)
-
     def _allows(self, level: str) -> bool:
         if not self.settings.enabled:
             return False
@@ -294,40 +288,6 @@ class StructuredLogger:
         except Exception:
             # Observability must never change runtime behavior.
             return
-
-    @contextmanager
-    def timed(
-        self,
-        operation: str,
-        *,
-        level: str = "info",
-        start_level: str = "debug",
-        start_status: str = "start",
-        success_status: str = "success",
-        **fields: Any,
-    ) -> Iterator[None]:
-        start = now_perf()
-        self.emit(operation, start_status, level=start_level, **fields)
-        try:
-            yield
-        except Exception as exc:
-            self.emit(
-                operation,
-                "error",
-                level="error",
-                duration_ms=elapsed_ms(start),
-                error=exc,
-                **fields,
-            )
-            raise
-        else:
-            self.emit(
-                operation,
-                success_status,
-                level=level,
-                duration_ms=elapsed_ms(start),
-                **fields,
-            )
 
 
 def get_logger(

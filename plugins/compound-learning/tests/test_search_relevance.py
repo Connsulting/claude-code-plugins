@@ -6,13 +6,9 @@ real SQLite/sqlite-vec/fts5, real indexing, and real reranking logic.
 No internal modules are mocked.
 """
 
-import json
-import os
 import sys
-import tempfile
-import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List
 
 import pytest
 
@@ -43,7 +39,7 @@ hybrid_rerank = _search_mod.hybrid_rerank
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
-def embedding_model():
+def _embedding_model():
     """Warm up the embedding model once per test module."""
     # Trigger lazy load
     db.get_embedding("warmup")
@@ -51,7 +47,7 @@ def embedding_model():
 
 
 @pytest.fixture()
-def tmp_db(tmp_path, embedding_model):
+def tmp_db(tmp_path, _embedding_model):
     """
     Isolated SQLite database in a temporary directory.
     Returns (config, conn) tuple. Caller is responsible for conn.close().
@@ -363,7 +359,6 @@ def test_fts5_boost_helps_stemmed_matches(tmp_db):
 
     stem_raw = next((r for r in raw if r["id"] == stem_doc_id), None)
     assert stem_raw is not None, "stem doc not found in raw KNN results"
-    original_distance = stem_raw["distance"]
 
     # Rerank with FTS5 boost
     reranked_with_fts = hybrid_rerank(
