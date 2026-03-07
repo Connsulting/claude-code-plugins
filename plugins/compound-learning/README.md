@@ -8,6 +8,7 @@ A learning compounding system for Claude Code that extracts and indexes knowledg
 - GitHub CLI (`gh`) - optional, required for `/pr-learnings`
 
 Python dependencies (`pysqlite3-binary`, `sqlite-vec`, `sentence-transformers`) are auto-installed on session start via the `SessionStart` hook.
+Runtime dependencies are declared in `requirements-runtime.txt` and consumed by `hooks/setup.sh`.
 
 ## Installation
 
@@ -23,12 +24,26 @@ Python dependencies (`pysqlite3-binary`, `sqlite-vec`, `sentence-transformers`) 
 1. Clone or download this plugin to your Claude plugins directory
 2. Python dependencies install automatically on first session start, or install manually:
 ```bash
-pip install pysqlite3-binary sqlite-vec sentence-transformers
+pip install -r requirements-runtime.txt
 ```
 
 ### Post-Installation
 
 Run `/index-learnings` to build the index. The SQLite database is created automatically and the embedding model (~80MB) downloads on first use.
+
+### SessionStart Dependency Bootstrap
+
+`hooks/setup.sh` uses a manifest-driven bootstrap flow:
+
+1. Parse `requirements-runtime.txt` and normalize requirement-to-import mappings
+2. Build a cache key from Python version + manifest checksum
+3. On cache hit, validate cached imports/origins and skip reinstall
+4. On cache miss/stale, install only missing requirements
+5. Write a refreshed cache stamp to `~/.claude/plugins/compound-learning/setup-cache/`
+
+Force refresh controls:
+- `LEARNINGS_SETUP_FORCE_REFRESH=true`: invalidate cache and reinstall manifest dependencies
+- `LEARNINGS_FORCE_SETUP_REFRESH=true`: legacy alias for force refresh
 
 ## Configuration
 
@@ -217,3 +232,11 @@ Use topic + context: "authentication JWT refresh" not "implement login feature"
 
 **Hook activity log:**
 - Hook activity is logged to `~/.claude/plugins/compound-learning/activity.log`
+
+**SessionStart dependency issues:**
+- Force a one-time reinstall: `LEARNINGS_SETUP_FORCE_REFRESH=true`
+- Legacy force-refresh alias also works: `LEARNINGS_FORCE_SETUP_REFRESH=true`
+- Clear cache stamps manually: `rm -f ~/.claude/plugins/compound-learning/setup-cache/setup-*.stamp.json`
+
+**Observability log:**
+- Structured events are logged to `~/.claude/plugins/compound-learning/observability.jsonl` when `LEARNINGS_OBS_ENABLED=true`

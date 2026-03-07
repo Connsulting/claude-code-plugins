@@ -1,0 +1,5 @@
+# Runtime dependency manifest for hooks/setup.sh
+# Format: requirement-spec|import-name (import-name is optional)
+pysqlite3-binary|pysqlite3
+sqlite-vec|sqlite_vec
+sentence-transformers|sentence_transformers
