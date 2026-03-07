@@ -1,0 +1,6 @@
+{
+  "name": "privacy-policy-checker",
+  "version": "0.1.0",
+  "description": "Deterministic static checks that validate tagged privacy policy claims against repository code",
+  "keywords": ["privacy", "compliance", "security", "static-analysis"]
+}
