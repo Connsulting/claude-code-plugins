@@ -171,6 +171,43 @@ Skill(skill="search-learnings", args="JWT authentication patterns")
 
 Also generates a manifest at `~/.projects/learnings/MANIFEST.md` summarizing learnings by topic.
 
+### Test Gap Finder
+
+Use `scripts/find-test-gaps.py` to identify under-tested executable plugin files in:
+`hooks/*.py`, `hooks/*.sh`, `lib/*.py`, `lib/*.sh`, `scripts/*.py`, and `skills/*/*.py`.
+
+Generate coverage JSON from the plugin root:
+
+```bash
+cd plugins/compound-learning
+pytest --cov=hooks --cov=lib --cov=scripts --cov=skills --cov-report=json:coverage.json -q tests
+```
+
+Run the finder in text mode:
+
+```bash
+python3 scripts/find-test-gaps.py --plugin-root . --format text
+```
+
+Run the finder in JSON mode (CI-friendly):
+
+```bash
+python3 scripts/find-test-gaps.py \
+  --plugin-root . \
+  --format json \
+  --threshold 60 \
+  --output reports/test-gap-report.latest.json
+```
+
+Gap categories:
+- `untested`: file has 0% coverage or no test reference signal.
+- `low_coverage`: file coverage is below the configured threshold (`--threshold`, default `60`).
+- `indirectly_tested`: file appears in subprocess/path invocation signals from tests, but has no measured line coverage.
+
+Notes:
+- Coverage data comes from `coverage.json` (or `--coverage-json <path>`).
+- Reference matching is heuristic-based (imports + path/subprocess signals), so dynamic execution can be missed.
+
 ### Detecting Knowledge Silos
 
 ```
