@@ -55,6 +55,7 @@ def tmp_db(tmp_path, _embedding_model):
     Isolated SQLite database in a temporary directory.
     Returns (config, conn) tuple. Caller is responsible for conn.close().
     """
+    _ = embedding_model
     db_path = str(tmp_path / "test-compound-learning.db")
     config = {
         "sqlite": {"dbPath": db_path},

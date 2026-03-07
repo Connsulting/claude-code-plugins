@@ -34,7 +34,6 @@ class SourceFunction:
 
 @dataclass(frozen=True)
 class SourceModule:
-    abs_path: Path
     rel_path: str
     import_candidates: tuple[str, ...]
     public_symbols: tuple[str, ...]
@@ -43,7 +42,6 @@ class SourceModule:
 
 @dataclass(frozen=True)
 class TestReference:
-    abs_path: Path
     rel_path: str
     imported_modules: frozenset[str]
     imported_names: frozenset[str]
@@ -187,7 +185,6 @@ def discover_source_modules(
         public_symbols, functions = _extract_module_symbols(source_file, rel_path)
         modules.append(
             SourceModule(
-                abs_path=source_file,
                 rel_path=rel_path,
                 import_candidates=module_import_candidates(rel_path),
                 public_symbols=public_symbols,
@@ -348,7 +345,6 @@ def parse_test_reference(test_path: Path, plugin_root: Path) -> TestReference:
         pass
 
     return TestReference(
-        abs_path=test_path,
         rel_path=test_path.relative_to(plugin_root).as_posix(),
         imported_modules=frozenset(imported_modules),
         imported_names=frozenset(imported_names),
