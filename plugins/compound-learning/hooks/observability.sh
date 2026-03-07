@@ -39,6 +39,68 @@ hook_level_rank() {
   esac
 }
 
+hook_normalize_token() {
+  local raw="${1:-}"
+  local default_value="${2:-unknown}"
+  local normalized
+
+  normalized="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/_/g; s/^_+//; s/_+$//')"
+  if [ -z "$normalized" ]; then
+    echo "$default_value"
+  else
+    echo "$normalized"
+  fi
+}
+
+hook_normalize_operation() {
+  local normalized
+  normalized="$(hook_normalize_token "$1" "unknown_operation")"
+
+  case "$normalized" in
+    hook_start|hook_end)
+      printf 'hook\t%s\n' "$normalized"
+      ;;
+    extract_start|extract_complete)
+      printf 'extract\t%s\n' "$normalized"
+      ;;
+    search_request|search_complete|search_result)
+      printf 'search\t%s\n' "$normalized"
+      ;;
+    *)
+      printf '%s\t\n' "$normalized"
+      ;;
+  esac
+}
+
+hook_normalize_status() {
+  local normalized
+  normalized="$(hook_normalize_token "$1" "success")"
+
+  case "$normalized" in
+    start|success|error|skipped|empty|degraded)
+      printf '%s\t\n' "$normalized"
+      ;;
+    ok|loaded|found|hit|write)
+      printf 'success\t%s\n' "$normalized"
+      ;;
+    failure|failed|write_failed|exception)
+      printf 'error\t%s\n' "$normalized"
+      ;;
+    bypass)
+      printf 'skipped\t%s\n' "$normalized"
+      ;;
+    miss|missing|not_found)
+      printf 'empty\t%s\n' "$normalized"
+      ;;
+    fallback|stale)
+      printf 'degraded\t%s\n' "$normalized"
+      ;;
+    *)
+      printf 'degraded\t%s\n' "$normalized"
+      ;;
+  esac
+}
+
 hook_expand_home() {
   local raw="$1"
   echo "${raw//\$\{HOME\}/$HOME}"
@@ -170,6 +232,14 @@ hook_obs_event() {
   [ "${HOOK_OBS_ENABLED:-0}" = "1" ] || return 0
   hook_obs_level_allows "$level" || return 0
 
+  local operation_parts
+  local status_parts
+  operation_parts="$(hook_normalize_operation "$operation")"
+  status_parts="$(hook_normalize_status "$status")"
+  local normalized_operation operation_alias normalized_status status_alias
+  IFS=$'\t' read -r normalized_operation operation_alias <<< "$operation_parts"
+  IFS=$'\t' read -r normalized_status status_alias <<< "$status_parts"
+
   local message=""
   local duration_ms=""
   local session_id=""
@@ -225,8 +295,10 @@ hook_obs_event() {
     --arg level "$(hook_normalize_level "$level")" \
     --arg component "hook" \
     --arg hook "${HOOK_NAME:-unknown}" \
-    --arg operation "$operation" \
-    --arg status "$status" \
+    --arg operation "$normalized_operation" \
+    --arg status "$normalized_status" \
+    --arg operation_alias "$operation_alias" \
+    --arg status_alias "$status_alias" \
     --arg message "$message" \
     --arg session_id "$session_id" \
     --arg correlation_id "$correlation_id" \
@@ -243,6 +315,8 @@ hook_obs_event() {
       operation: $operation,
       status: $status
     }
+    + (if ($operation_alias | length) == 0 then {} else {operation_alias: $operation_alias} end)
+    + (if ($status_alias | length) == 0 then {} else {status_alias: $status_alias} end)
     + (if $duration_ms == null then {} else {duration_ms: $duration_ms} end)
     + (if ($message | length) == 0 then {} else {message: $message} end)
     + (if ($session_id | length) == 0 then {} else {session_id: $session_id} end)

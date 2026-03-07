@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, Mapping, MutableMapping, Optional
 
+from lib.observability_taxonomy import normalize_event_taxonomy
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - fcntl is unavailable on Windows
@@ -254,12 +256,15 @@ class StructuredLogger:
             return
 
         normalized_level = _normalize_level(level)
+        normalized_taxonomy = normalize_event_taxonomy(operation, status)
+        normalized_operation = str(normalized_taxonomy.pop("operation"))
+        normalized_status = str(normalized_taxonomy.pop("status"))
         event: Dict[str, Any] = {
             "timestamp": _now_timestamp(),
             "level": normalized_level,
             "component": self.component,
-            "operation": operation,
-            "status": status,
+            "operation": normalized_operation,
+            "status": normalized_status,
         }
 
         if duration_ms is not None:
@@ -288,6 +293,12 @@ class StructuredLogger:
         extra = _clean_fields(fields)
         if extra:
             event.update(extra)
+
+        # Keep taxonomy keys authoritative even if callers pass colliding fields.
+        event["operation"] = normalized_operation
+        event["status"] = normalized_status
+        for key, value in normalized_taxonomy.items():
+            event[key] = value
 
         try:
             _append_event(self.settings.log_path, event)
