@@ -108,6 +108,50 @@ def test_taxonomy_alias_normalization_preserves_legacy_values(tmp_path):
     assert all(event["status"] in CANONICAL_STATUSES for event in events)
 
 
+def test_taxonomy_maps_search_no_results_to_empty(tmp_path):
+    log_path = tmp_path / "observability.jsonl"
+    config = {
+        "observability": {
+            "enabled": True,
+            "level": "debug",
+            "logPath": str(log_path),
+        }
+    }
+    logger = observability.get_logger("search", config)
+    logger.emit("search_complete", "no_results", level="info")
+
+    event = json.loads(log_path.read_text(encoding="utf-8").strip())
+    assert event["operation"] == "search"
+    assert event["status"] == "empty"
+    assert event["operation_alias"] == "search_complete"
+    assert event["status_alias"] == "no_results"
+
+
+def test_canonical_taxonomy_clears_injected_alias_fields(tmp_path):
+    log_path = tmp_path / "observability.jsonl"
+    config = {
+        "observability": {
+            "enabled": True,
+            "level": "debug",
+            "logPath": str(log_path),
+        }
+    }
+    logger = observability.get_logger("db", config)
+    logger.emit(
+        "vector_search",
+        "success",
+        level="info",
+        operation_alias="caller_alias",
+        status_alias="caller_status_alias",
+    )
+
+    event = json.loads(log_path.read_text(encoding="utf-8").strip())
+    assert event["operation"] == "vector_search"
+    assert event["status"] == "success"
+    assert "operation_alias" not in event
+    assert "status_alias" not in event
+
+
 def test_attach_runtime_context_prefers_hook_env(monkeypatch):
     config = {
         "observability": {

@@ -96,6 +96,51 @@ def _read_observability_events(log_path: Path) -> List[Dict[str, object]]:
     ]
 
 
+def _emit_hook_event(
+    tmp_path: Path,
+    *,
+    operation: str,
+    status: str,
+    extra_json: Optional[str] = None,
+) -> List[Dict[str, object]]:
+    home_dir = tmp_path / "hook-home"
+    home_dir.mkdir(parents=True, exist_ok=True)
+    log_path = tmp_path / "hook-observability.jsonl"
+
+    env = os.environ.copy()
+    env["HOME"] = str(home_dir)
+    env["CLAUDE_PLUGIN_ROOT"] = str(PLUGIN_ROOT)
+    env["LEARNINGS_OBS_ENABLED"] = "true"
+    env["LEARNINGS_OBS_LEVEL"] = "debug"
+    env["LEARNINGS_OBS_LOG_PATH"] = str(log_path)
+    env["HOOK_EVENT_OPERATION"] = operation
+    env["HOOK_EVENT_STATUS"] = status
+    if extra_json is not None:
+        env["HOOK_EVENT_EXTRA_JSON"] = extra_json
+    else:
+        env.pop("HOOK_EVENT_EXTRA_JSON", None)
+
+    script = f"""
+set -euo pipefail
+source "{PLUGIN_ROOT / "hooks" / "observability.sh"}"
+hook_log_init "setup"
+if [ -n "${{HOOK_EVENT_EXTRA_JSON:-}}" ]; then
+  hook_obs_event "info" "$HOOK_EVENT_OPERATION" "$HOOK_EVENT_STATUS" --session-id "sess-test" --extra-json "$HOOK_EVENT_EXTRA_JSON"
+else
+  hook_obs_event "info" "$HOOK_EVENT_OPERATION" "$HOOK_EVENT_STATUS" --session-id "sess-test"
+fi
+"""
+    run = subprocess.run(
+        ["bash", "-lc", script],
+        capture_output=True,
+        check=False,
+        env=env,
+        text=True,
+    )
+    assert run.returncode == 0, run.stderr
+    return _read_observability_events(log_path)
+
+
 def test_setup_cache_hit_validates_and_recovers_from_dependency_drift(tmp_path):
     plugin_root = tmp_path / "plugin"
     module_dir = tmp_path / "modules"
@@ -204,3 +249,35 @@ def test_setup_hook_observability_uses_canonical_taxonomy(tmp_path):
     assert all(event["status"] not in legacy_statuses for event in events)
     assert any(event["operation"] == "hook" and event.get("operation_alias") in {"hook_start", "hook_end"} for event in events)
     assert any(event.get("status_alias") for event in events)
+
+
+def test_hook_observability_extra_json_cannot_override_taxonomy(tmp_path):
+    events = _emit_hook_event(
+        tmp_path,
+        operation="hook_end",
+        status="failure",
+        extra_json='{"operation":"override","status":"success","operation_alias":"bad","status_alias":"bad","detail":"kept"}',
+    )
+
+    assert len(events) == 1
+    event = events[0]
+    assert event["operation"] == "hook"
+    assert event["status"] == "error"
+    assert event["operation_alias"] == "hook_end"
+    assert event["status_alias"] == "failure"
+    assert event["detail"] == "kept"
+
+
+def test_hook_observability_maps_no_results_status_to_empty(tmp_path):
+    events = _emit_hook_event(
+        tmp_path,
+        operation="search_complete",
+        status="no_results",
+    )
+
+    assert len(events) == 1
+    event = events[0]
+    assert event["operation"] == "search"
+    assert event["status"] == "empty"
+    assert event["operation_alias"] == "search_complete"
+    assert event["status_alias"] == "no_results"

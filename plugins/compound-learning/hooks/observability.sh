@@ -89,7 +89,7 @@ hook_normalize_status() {
     bypass)
       printf 'skipped\t%s\n' "$normalized"
       ;;
-    miss|missing|not_found)
+    miss|missing|not_found|no_results)
       printf 'empty\t%s\n' "$normalized"
       ;;
     fallback|stale)
@@ -323,7 +323,7 @@ hook_obs_event() {
     + (if ($correlation_id | length) == 0 then {} else {correlation_id: $correlation_id} end)
     + (if $counts == null then {} else {counts: $counts} end)
     + (if $error == null then {} else {error: $error} end)
-    + (if $extra == null then {} else $extra end)
+    + (if $extra == null then {} else ($extra | del(.operation, .status, .operation_alias, .status_alias)) end)
     ' 2>/dev/null)
 
   [ -n "$event" ] || return 0

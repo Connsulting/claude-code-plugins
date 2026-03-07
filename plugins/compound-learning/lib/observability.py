@@ -295,6 +295,8 @@ class StructuredLogger:
             event.update(extra)
 
         # Keep taxonomy keys authoritative even if callers pass colliding fields.
+        event.pop("operation_alias", None)
+        event.pop("status_alias", None)
         event["operation"] = normalized_operation
         event["status"] = normalized_status
         for key, value in normalized_taxonomy.items():

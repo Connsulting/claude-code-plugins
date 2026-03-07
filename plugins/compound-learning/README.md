@@ -139,6 +139,8 @@ Operation names are normalized to snake_case. Shared aliases now collapse lifecy
 
 Migration and backward compatibility:
 - When an alias is applied, the original token is preserved as `operation_alias` and/or `status_alias`.
+- Empty-result aliases (`miss`, `missing`, `not_found`, `no_results`) normalize to canonical `empty`.
+- Canonical taxonomy fields stay authoritative even when additional payload fields include colliding taxonomy keys.
 - Existing detail fields (`counts`, command metadata, scoped context) are retained unchanged.
 - Hooks continue exporting correlation/session context to Python subprocesses so events remain joinable in one trace.
 

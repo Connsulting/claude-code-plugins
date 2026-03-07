@@ -32,6 +32,7 @@ STATUS_ALIASES = {
     "miss": "empty",
     "missing": "empty",
     "not_found": "empty",
+    "no_results": "empty",
     "fallback": "degraded",
     "stale": "degraded",
 }
