@@ -11,6 +11,12 @@
       "description": "Learning compounding system with ChromaDB-backed knowledge extraction and hierarchical scope search",
       "source": "./plugins/compound-learning",
       "category": "productivity"
+    },
+    {
+      "name": "privacy-policy-checker",
+      "description": "Deterministic static checks for tagged privacy policy claims in repository code",
+      "source": "./plugins/privacy-policy-checker",
+      "category": "security"
     }
   ]
 }
