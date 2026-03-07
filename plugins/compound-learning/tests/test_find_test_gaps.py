@@ -121,6 +121,29 @@ def test_prioritization_is_deterministic(tmp_path):
     assert [gap["priority_rank"] for gap in report["gaps"]] == [1, 2, 3]
 
 
+def test_high_coverage_without_detected_reference_is_not_untested(tmp_path):
+    plugin_root = tmp_path / "compound-learning"
+
+    _write(plugin_root / "lib" / "well_covered.py", "def run_it():\n    return 7\n")
+    _write(plugin_root / "tests" / "test_placeholder.py", "def test_placeholder():\n    assert True\n")
+
+    coverage_path = _write_coverage(
+        plugin_root,
+        {
+            "lib/well_covered.py": 93.0,
+        },
+    )
+
+    report = mod.find_test_gaps(
+        plugin_root=plugin_root,
+        threshold=60.0,
+        coverage_json=coverage_path,
+    )
+    by_path = {gap["path"]: gap for gap in report["gaps"]}
+
+    assert "lib/well_covered.py" not in by_path
+
+
 def test_renderers_and_cli_json_output(tmp_path, capsys):
     plugin_root = tmp_path / "compound-learning"
     _write(plugin_root / "lib" / "only.py", "def only():\n    return 1\n")

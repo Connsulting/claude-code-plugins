@@ -200,7 +200,7 @@ python3 scripts/find-test-gaps.py \
 ```
 
 Gap categories:
-- `untested`: file has 0% coverage or no test reference signal.
+- `untested`: file has 0% coverage, or has neither coverage data nor any test-reference signal.
 - `low_coverage`: file coverage is below the configured threshold (`--threshold`, default `60`).
 - `indirectly_tested`: file appears in subprocess/path invocation signals from tests, but has no measured line coverage.
 

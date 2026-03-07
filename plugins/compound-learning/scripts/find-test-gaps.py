@@ -380,19 +380,20 @@ def _classify_gap(
             "Referenced via subprocess/path invocation, but no measured line coverage.",
         )
 
-    reasons: List[str] = []
     if coverage_pct == 0.0:
-        reasons.append("0% coverage")
-    if not has_test_reference:
-        reasons.append("no test reference")
-    if reasons:
-        return "untested", " and ".join(reasons).capitalize() + "."
+        reason = "0% coverage."
+        if has_test_reference:
+            reason = "0% coverage despite test references."
+        return "untested", reason
 
     if coverage_pct is not None and coverage_pct < threshold:
         return (
             "low_coverage",
             f"Coverage {coverage_pct:.1f}% is below the {threshold:.1f}% threshold.",
         )
+
+    if coverage_pct is None and not has_test_reference:
+        return "untested", "No test reference or coverage signal."
 
     return None, None
 
