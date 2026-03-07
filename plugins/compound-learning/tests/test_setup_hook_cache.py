@@ -1,7 +1,8 @@
+import json
 import os
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 PLUGIN_ROOT = Path(__file__).parent.parent
 SETUP_SCRIPT = PLUGIN_ROOT / "hooks" / "setup.sh"
@@ -33,7 +34,16 @@ done
     pip_path.chmod(0o755)
 
 
-def _build_env(tmp_path: Path, plugin_root: Path, module_dir: Path, bin_dir: Path) -> Tuple[Dict[str, str], Path, Path]:
+def _build_env(
+    tmp_path: Path,
+    plugin_root: Path,
+    module_dir: Path,
+    bin_dir: Path,
+    *,
+    observability_enabled: bool = False,
+    observability_level: str = "info",
+    observability_log_path: Optional[Path] = None,
+) -> Tuple[Dict[str, str], Path, Path]:
     home_dir = tmp_path / "home"
     home_dir.mkdir(parents=True, exist_ok=True)
     pip_log = tmp_path / "pip.log"
@@ -43,7 +53,10 @@ def _build_env(tmp_path: Path, plugin_root: Path, module_dir: Path, bin_dir: Pat
     env["HOME"] = str(home_dir)
     env["PIP_LOG"] = str(pip_log)
     env["MODULE_DIR"] = str(module_dir)
-    env["LEARNINGS_OBS_ENABLED"] = "false"
+    env["LEARNINGS_OBS_ENABLED"] = "true" if observability_enabled else "false"
+    env["LEARNINGS_OBS_LEVEL"] = observability_level
+    if observability_log_path is not None:
+        env["LEARNINGS_OBS_LOG_PATH"] = str(observability_log_path)
     env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
 
     existing_pythonpath = env.get("PYTHONPATH", "")
@@ -71,6 +84,16 @@ def _read_pip_calls(pip_log: Path) -> List[str]:
     if not pip_log.exists():
         return []
     return [line for line in pip_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _read_observability_events(log_path: Path) -> List[Dict[str, object]]:
+    if not log_path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
 
 
 def test_setup_cache_hit_validates_and_recovers_from_dependency_drift(tmp_path):
@@ -140,3 +163,44 @@ def test_setup_cache_invalidates_when_manifest_checksum_changes(tmp_path):
     assert "alpha-pkg" not in calls[0]
     assert "beta-pkg" not in calls[0]
     assert len(_cache_stamp_files(home_dir)) == 1
+
+
+def test_setup_hook_observability_uses_canonical_taxonomy(tmp_path):
+    plugin_root = tmp_path / "plugin"
+    module_dir = tmp_path / "modules"
+    bin_dir = tmp_path / "bin"
+    module_dir.mkdir(parents=True, exist_ok=True)
+    bin_dir.mkdir(parents=True, exist_ok=True)
+
+    _write_runtime_manifest(plugin_root, ["alpha-pkg", "beta-pkg"])
+    (module_dir / "alpha_pkg.py").write_text("ALPHA = True\n", encoding="utf-8")
+    _write_fake_pip(bin_dir)
+
+    observability_log_path = tmp_path / "observability.jsonl"
+    env, _home_dir, _pip_log = _build_env(
+        tmp_path,
+        plugin_root,
+        module_dir,
+        bin_dir,
+        observability_enabled=True,
+        observability_level="debug",
+        observability_log_path=observability_log_path,
+    )
+
+    run = _run_setup(env)
+    assert run.returncode == 0
+
+    events = _read_observability_events(observability_log_path)
+    assert events
+
+    required_keys = {"timestamp", "level", "component", "operation", "status"}
+    canonical_statuses = {"start", "success", "error", "skipped", "empty", "degraded"}
+    legacy_statuses = {"failure", "found", "loaded", "bypass", "hit", "miss", "missing", "stale", "write", "write_failed", "fallback"}
+
+    assert all(required_keys.issubset(event.keys()) for event in events)
+    assert all(event["component"] == "hook" for event in events)
+    assert all(event.get("hook") == "setup" for event in events)
+    assert all(event["status"] in canonical_statuses for event in events)
+    assert all(event["status"] not in legacy_statuses for event in events)
+    assert any(event["operation"] == "hook" and event.get("operation_alias") in {"hook_start", "hook_end"} for event in events)
+    assert any(event.get("status_alias") for event in events)

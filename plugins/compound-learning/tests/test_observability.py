@@ -7,6 +7,7 @@ PLUGIN_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PLUGIN_ROOT))
 
 import lib.observability as observability
+from lib.observability_taxonomy import CANONICAL_STATUSES
 
 _search_spec = importlib.util.spec_from_file_location(
     "search_learnings",
@@ -71,6 +72,40 @@ def test_level_filtering(tmp_path):
     lines = log_path.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 1
     assert json.loads(lines[0])["level"] == "error"
+
+
+def test_taxonomy_alias_normalization_preserves_legacy_values(tmp_path):
+    log_path = tmp_path / "observability.jsonl"
+    config = {
+        "observability": {
+            "enabled": True,
+            "level": "debug",
+            "logPath": str(log_path),
+        }
+    }
+    logger = observability.get_logger("hook", config)
+    logger.emit("hook_end", "failure", level="error")
+    logger.emit("search_result", "found", level="info")
+
+    events = [
+        json.loads(line)
+        for line in log_path.read_text(encoding="utf-8").strip().splitlines()
+        if line.strip()
+    ]
+    assert len(events) == 2
+
+    first = events[0]
+    assert first["operation"] == "hook"
+    assert first["status"] == "error"
+    assert first["operation_alias"] == "hook_end"
+    assert first["status_alias"] == "failure"
+
+    second = events[1]
+    assert second["operation"] == "search"
+    assert second["status"] == "success"
+    assert second["operation_alias"] == "search_result"
+    assert second["status_alias"] == "found"
+    assert all(event["status"] in CANONICAL_STATUSES for event in events)
 
 
 def test_attach_runtime_context_prefers_hook_env(monkeypatch):

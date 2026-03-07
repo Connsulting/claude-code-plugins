@@ -117,14 +117,30 @@ Threshold precedence and backward compatibility:
 
 ### Observability Events
 
-When observability is enabled, the plugin writes structured JSONL events for:
-- Hooks (`setup`, `auto-peek`, `extract-learnings`) including start/end/skip/subprocess exit/duration
-- Search pipeline (keyword parse, repo scope, fan-out, merge/rerank/filter, threshold buckets, final status)
-- Index pipeline (discovery, per-file failures, prune summary, manifest generation, total runtime)
-- DB operations (connection open, schema init, embeddings, upsert/delete/vector search)
+When observability is enabled, the plugin writes structured JSONL events for setup/auto-peek/extract hooks plus search/index/db Python flows.
 
-Event fields include: `timestamp`, `level`, `component`, `operation`, `status`, `duration_ms`, `counts`, optional `error`, and correlation/session identifiers when available.
-Hooks now export correlation/session context into Python subprocesses so hook events can be joined to search/index/db events in one trace.
+Canonical event contract:
+- Required: `timestamp`, `level`, `component`, `operation`, `status`
+- Optional (standard): `duration_ms`, `counts`, `message`, `error`, `session_id`, `correlation_id`
+- Optional (context/detail): additional emitted fields are preserved for per-event detail
+
+Canonical status set:
+- `start`
+- `success`
+- `error`
+- `skipped`
+- `empty`
+- `degraded`
+
+Operation names are normalized to snake_case. Shared aliases now collapse lifecycle/search variants at emit time:
+- `hook_start` / `hook_end` -> `hook`
+- `extract_start` / `extract_complete` -> `extract`
+- `search_request` / `search_complete` / `search_result` -> `search`
+
+Migration and backward compatibility:
+- When an alias is applied, the original token is preserved as `operation_alias` and/or `status_alias`.
+- Existing detail fields (`counts`, command metadata, scoped context) are retained unchanged.
+- Hooks continue exporting correlation/session context to Python subprocesses so events remain joinable in one trace.
 
 ## Usage
 
