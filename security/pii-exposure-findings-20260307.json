@@ -1,0 +1,87 @@
+{
+  "task_id": "pii-scanner:/home/theconnman/git/connsulting/claude-code-plugins",
+  "title": "PII Exposure Scanner",
+  "scan_date_utc": "2026-03-07",
+  "assumptions": [
+    "Primary scan scope used tracked files from `git ls-files`; untracked secret-prone filenames were additionally checked for ignore-gap and secret exposure risk.",
+    "This is static analysis only; no runtime traffic inspection or production data samples were available."
+  ],
+  "exclusions": [
+    "Excluded `.git` internals, cache artifacts (`.pytest_cache`, `.ruff_cache`, coverage artifacts), and vendored/third-party code (none detected).",
+    "No hardcoded literal emails, phone numbers, SSNs, card numbers, DOB values, passport/license numbers, or structured full-person-name datasets were found in tracked source/config/test files."
+  ],
+  "findings": [
+    {
+      "file": "plugins/compound-learning/hooks/auto-peek.sh",
+      "line": "130,153,165-168",
+      "category": "pii-in-logs",
+      "severity": "high",
+      "detail": "The hook writes extracted query keywords and per-result title/summary snippets to `activity.log`. Those values are derived from user prompts and stored learning content, so names, emails, phone numbers, or other identifiers can be persisted in plaintext logs without redaction.",
+      "recommendation": "Stop logging raw query/snippet text; log opaque IDs/counts only. Add a centralized redaction step before any log write."
+    },
+    {
+      "file": "plugins/compound-learning/hooks/auto-peek.sh",
+      "line": "66,114,142",
+      "category": "pii-in-logs",
+      "severity": "medium",
+      "detail": "Subprocess stderr is appended directly to `activity.log` (`$(cat \"$ERR_FILE\")`). Error streams from transcript parsing/search paths may include user-derived content or identifiers and are not sanitized.",
+      "recommendation": "Log bounded error codes/messages instead of raw stderr; if stderr must be retained, apply PII masking before write."
+    },
+    {
+      "file": "plugins/compound-learning/hooks/extract-learnings.sh",
+      "line": "113,117-119",
+      "category": "pii-in-logs",
+      "severity": "medium",
+      "detail": "Generated learning titles (transcript-derived) and indexer output are written to `activity.log`. If transcripts include personal identifiers, they can be reflected in titles/error output and logged unredacted.",
+      "recommendation": "Avoid logging transcript-derived titles/content; log file IDs plus status. Sanitize child process output before appending to logs."
+    },
+    {
+      "file": "plugins/compound-learning/lib/db.py",
+      "line": "133-153,188-213",
+      "category": "unencrypted-storage",
+      "severity": "high",
+      "detail": "Database schema stores raw `content` in `learnings` and duplicates it into `fts_learnings`; `upsert_document` writes plaintext content directly. Any PII present in learnings is stored unencrypted at rest.",
+      "recommendation": "Add at-rest encryption (for example SQLCipher or application-layer field encryption) and run a PII scrub/tokenization step before persistence and FTS indexing."
+    },
+    {
+      "file": "plugins/compound-learning/hooks/extract-learnings.sh",
+      "line": "86-87,93,104-121",
+      "category": "unencrypted-storage",
+      "severity": "high",
+      "detail": "Transcript-derived learnings are written directly to markdown files in `${HOME}/.projects/learnings` and repo `.projects/learnings` with no masking/encryption guardrails.",
+      "recommendation": "Introduce pre-write PII filtering (mask/remove direct identifiers), support encrypted local storage options, and restrict file permissions for learning directories."
+    },
+    {
+      "file": "plugins/compound-learning/skills/index-learnings/index-learnings.py",
+      "line": "204-214,254-266",
+      "category": "unencrypted-storage",
+      "severity": "high",
+      "detail": "Indexer reads full markdown learning content and persists it as-is via `db.upsert_document`, propagating any personal data from files into SQLite plaintext storage.",
+      "recommendation": "Apply content sanitization before indexing and store sensitive fields encrypted/tokenized; keep only minimal searchable metadata in clear text."
+    },
+    {
+      "file": ".gitignore",
+      "line": "1-12",
+      "category": "gitignore-gap",
+      "severity": "low",
+      "detail": "Required ignore patterns for `.env*`, key material, credential/secrets files, and common data dumps were missing, increasing accidental commit risk for local secrets or PII exports.",
+      "recommendation": "Keep the added patterns (`.env*`, `*.pem`, `*.key`, `credentials.*`, `secrets.*`, `*.sql`, `*.csv`, `*.xlsx`) and use checked-in `.example` templates for expected local configs."
+    }
+  ],
+  "totals": {
+    "total_findings": 7,
+    "by_category": {
+      "hardcoded-pii": 0,
+      "pii-in-logs": 3,
+      "env-secret": 0,
+      "unencrypted-storage": 3,
+      "gitignore-gap": 1
+    },
+    "by_severity": {
+      "critical": 0,
+      "high": 4,
+      "medium": 2,
+      "low": 1
+    }
+  }
+}
