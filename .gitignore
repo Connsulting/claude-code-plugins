@@ -2,4 +2,12 @@
 __pycache__/
 *.pyc
 activity.log
-
+.env
+.env.*
+*.pem
+*.key
+credentials.*
+secrets.*
+*.sql
+*.csv
+*.xlsx

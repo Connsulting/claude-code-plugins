@@ -1,0 +1,63 @@
+{
+  "task_id": "pii-scanner:/home/theconnman/git/connsulting/claude-code-plugins",
+  "title": "PII Exposure Scanner",
+  "scan_date_utc": "2026-03-07",
+  "assumptions": [
+    "Scan scope used tracked files from `git ls-files` plus untracked secret-prone filenames in the working tree.",
+    "This audit is static-analysis focused; runtime data flow and production environment controls were not validated."
+  ],
+  "exclusions": [
+    "Excluded `.git` internals, generated scan artifacts, and vendored/third-party code (none detected in this repository).",
+    "Did not classify generic date-like strings in filenames as DOB unless accompanied by explicit person context."
+  ],
+  "findings": [
+    {
+      "file": "plugins/compound-learning/lib/db.py",
+      "line": "133-141,188-213",
+      "category": "unencrypted-storage",
+      "severity": "high",
+      "detail": "The SQLite schema stores plaintext `content` and duplicates it into `fts_learnings`; `upsert_document` writes raw extracted text without encryption or hashing. If learnings contain names, emails, or other identifiers from transcripts, that data is persisted in clear text.",
+      "recommendation": "Apply at-rest protection (for example SQLCipher or app-level field encryption), and add a PII-scrubbing/tokenization step before persistence and FTS indexing."
+    },
+    {
+      "file": "plugins/compound-learning/hooks/auto-peek.sh",
+      "line": "130,165-168",
+      "category": "pii-in-logs",
+      "severity": "medium",
+      "detail": "Hook logging writes extracted query keywords plus result title/summary lines to `activity.log` via `log_activity`. Those fields are derived from stored learning documents and may include unredacted PII.",
+      "recommendation": "Do not log document snippets; log only opaque IDs/counts. Add PII redaction before any log write."
+    },
+    {
+      "file": "plugins/compound-learning/hooks/extract-learnings.sh",
+      "line": "86-94",
+      "category": "unencrypted-storage",
+      "severity": "medium",
+      "detail": "The extraction prompt directs writing transcript-derived learnings to markdown files under `~/.projects/learnings` and repo `.projects/learnings` without explicit PII sanitization or encryption controls.",
+      "recommendation": "Introduce a pre-write PII filter (mask/remove emails, phone numbers, IDs), support opt-out for sensitive sessions, and enforce restrictive filesystem permissions for learning stores."
+    },
+    {
+      "file": ".gitignore",
+      "line": "5-13",
+      "category": "gitignore-gap",
+      "severity": "low",
+      "detail": "Repository ignore coverage previously omitted common secret/data-dump patterns (`.env*`, key material, credential files, SQL/CSV/XLSX dumps), increasing accidental commit risk.",
+      "recommendation": "Keep the added ignore patterns in place and use tracked `.example` templates for expected local environment files."
+    }
+  ],
+  "totals": {
+    "total_findings": 4,
+    "by_category": {
+      "hardcoded-pii": 0,
+      "pii-in-logs": 1,
+      "env-secret": 0,
+      "unencrypted-storage": 2,
+      "gitignore-gap": 1
+    },
+    "by_severity": {
+      "critical": 0,
+      "high": 1,
+      "medium": 2,
+      "low": 1
+    }
+  }
+}
