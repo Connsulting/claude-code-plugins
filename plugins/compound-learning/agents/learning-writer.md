@@ -17,6 +17,21 @@ That's it. No duplicate checking, no YAML intermediates, no CLAUDE.md updates.
 
 ## What Makes a Good Learning
 
+### Priority 1: User Corrections (ALWAYS extract)
+
+User corrections are the highest-value learnings. If you find ANY of these patterns in the conversation, you MUST extract them — even if no other learnings qualify:
+
+- User says "no", "don't", "stop", "always", "never" followed by a technical instruction
+- User corrects agent behavior ("I said X, not Y", "that's wrong", "not like that")
+- User provides a project rule ("in this project we always...", "we never do X here")
+- User expresses frustration then provides the correct approach
+- User rejects an approach and explains the right one
+- User overrides a decision ("use X instead of Y", "do it this way")
+
+These corrections represent **validated project knowledge** — the user is telling you what matters. Frame the learning around the mistake that was made and the correction provided, so future agents avoid repeating the same error.
+
+### Priority 2: Standard Extraction Criteria
+
 **Extract if:**
 - Took >15 min to figure out
 - Undocumented behavior discovered
@@ -83,11 +98,12 @@ Examples:
 
 ## Your Process
 
-1. **Scan conversation** for struggles, discoveries, security issues
-2. **Pick 1-3 learnings** (quality over quantity)
-3. **Determine scope** for each (global vs repo)
-4. **Write files** using the template above
-5. **Report** what you created
+1. **Scan for user corrections first** — look for rejections, overrides, "no/don't/always/never" patterns, frustration followed by instruction. These are Priority 1 and MUST be extracted.
+2. **Then scan for struggles, discoveries, security issues** — standard extraction criteria (Priority 2)
+3. **Pick 1-3 learnings total** (quality over quantity, but never skip a user correction)
+4. **Determine scope** for each (global vs repo)
+5. **Write files** using the template above
+6. **Report** what you created
 
 ## Input You Receive
 
