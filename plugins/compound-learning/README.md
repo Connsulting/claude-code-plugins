@@ -215,5 +215,26 @@ Use topic + context: "authentication JWT refresh" not "implement login feature"
 - Check `distanceThreshold` setting (try increasing to 0.7)
 - Run `/index-learnings` to ensure learnings are indexed
 
+## Logging Audit
+
+Use the static logging auditor to find silent or weak diagnostics in the plugin's Python and shell entry points:
+
+```bash
+python3 scripts/logging-quality-auditor.py --plugin-root . --format text
+python3 scripts/logging-quality-auditor.py --plugin-root . --format json --fail-on high
+```
+
+Version 1 checks a narrow, deterministic rule set:
+- exception handlers around file, subprocess, database, and model-loading operations that suppress failures without diagnostics
+- shell failure branches such as `if ! cmd; then ... fi` that exit without `log_activity` or stderr output
+- generic error messages like `error` or `warning` with no useful context
+- functions that print JSON to stdout and human-readable status text to stdout in the same scope
+
+What it does not cover:
+- runtime log volume, log sinks, or telemetry collection
+- dynamic control flow that only appears at execution time
+- redaction policy verification beyond basic static heuristics
+- non-Python and non-shell sources outside `hooks/`, `lib/`, `scripts/`, and `skills/`
+
 **Hook activity log:**
 - Hook activity is logged to `~/.claude/plugins/compound-learning/activity.log`
