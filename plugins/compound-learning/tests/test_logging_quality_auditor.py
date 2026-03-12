@@ -82,17 +82,33 @@ def test_detects_expected_logging_audit_findings(tmp_path):
     report = mod.audit_logging_quality(plugin_root)
     findings_by_path = {
         path: findings[0]
-        for path in ("scripts/silent.py", "scripts/generic.py", "scripts/mixed.py", "hooks/silent.sh")
+        for path in (
+            "scripts/silent.py",
+            "scripts/generic.py",
+            "scripts/mixed.py",
+            "hooks/silent.sh",
+        )
         for findings in [_findings_for_path(report, path)]
     }
 
-    assert findings_by_path["scripts/silent.py"]["classification"] == "missing_exception_diagnostics"
+    assert (
+        findings_by_path["scripts/silent.py"]["classification"]
+        == "missing_exception_diagnostics"
+    )
     assert findings_by_path["scripts/silent.py"]["severity"] == "high"
-    assert findings_by_path["scripts/generic.py"]["classification"] == "low_context_diagnostic"
+    assert (
+        findings_by_path["scripts/generic.py"]["classification"]
+        == "low_context_diagnostic"
+    )
     assert findings_by_path["scripts/generic.py"]["severity"] == "low"
-    assert findings_by_path["scripts/mixed.py"]["classification"] == "mixed_machine_output"
+    assert (
+        findings_by_path["scripts/mixed.py"]["classification"] == "mixed_machine_output"
+    )
     assert findings_by_path["scripts/mixed.py"]["severity"] == "medium"
-    assert findings_by_path["hooks/silent.sh"]["classification"] == "missing_failure_diagnostics"
+    assert (
+        findings_by_path["hooks/silent.sh"]["classification"]
+        == "missing_failure_diagnostics"
+    )
     assert not _findings_for_path(report, "hooks/pure-data.py")
 
 
@@ -147,7 +163,9 @@ def test_prioritization_is_deterministic(tmp_path):
 
     report = mod.audit_logging_quality(plugin_root)
 
-    assert [(finding["path"], finding["classification"]) for finding in report["findings"]] == [
+    assert [
+        (finding["path"], finding["classification"]) for finding in report["findings"]
+    ] == [
         ("scripts/alpha.py", "missing_exception_diagnostics"),
         ("hooks/beta.sh", "missing_failure_diagnostics"),
         ("scripts/gamma.py", "mixed_machine_output"),
@@ -319,7 +337,9 @@ def test_renderers_and_cli_fail_on(tmp_path, capsys):
     captured = capsys.readouterr()
     cli_payload = json.loads(captured.out)
     assert cli_payload["gate"]["fail_on"] == "high"
-    assert cli_payload["findings"][0]["classification"] == "missing_exception_diagnostics"
+    assert (
+        cli_payload["findings"][0]["classification"] == "missing_exception_diagnostics"
+    )
 
 
 def test_prefers_git_tracked_files_when_available(tmp_path):
@@ -349,8 +369,16 @@ def test_prefers_git_tracked_files_when_available(tmp_path):
         """,
     )
 
-    subprocess.run(["git", "init"], cwd=plugin_root, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "add", "scripts/tracked.py"], cwd=plugin_root, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "init"], cwd=plugin_root, check=True, capture_output=True, text=True
+    )
+    subprocess.run(
+        ["git", "add", "scripts/tracked.py"],
+        cwd=plugin_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
     report = mod.audit_logging_quality(plugin_root)
 

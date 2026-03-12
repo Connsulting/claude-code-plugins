@@ -3,14 +3,16 @@
 
 Filters out tool calls, file snapshots, and metadata to produce clean conversation text.
 """
+
 import json
 import sys
+
 
 def extract_messages(jsonl_path: str, max_bytes: int = 100000) -> str:
     """Extract user and assistant message content from transcript."""
     messages = []
 
-    with open(jsonl_path, 'r') as f:
+    with open(jsonl_path, "r") as f:
         for line in f:
             try:
                 entry = json.loads(line.strip())
@@ -18,15 +20,15 @@ def extract_messages(jsonl_path: str, max_bytes: int = 100000) -> str:
                 continue
 
             # Skip non-message entries
-            if entry.get('type') not in ('user', 'assistant'):
+            if entry.get("type") not in ("user", "assistant"):
                 continue
 
             # Skip meta messages
-            if entry.get('isMeta'):
+            if entry.get("isMeta"):
                 continue
 
-            msg = entry.get('message', {})
-            content = msg.get('content', '')
+            msg = entry.get("message", {})
+            content = msg.get("content", "")
 
             # Skip empty content
             if not content:
@@ -37,38 +39,42 @@ def extract_messages(jsonl_path: str, max_bytes: int = 100000) -> str:
                 # Extract just text blocks, skip tool_use blocks
                 text_parts = []
                 for block in content:
-                    if isinstance(block, dict) and block.get('type') == 'text':
-                        text_parts.append(block.get('text', ''))
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text_parts.append(block.get("text", ""))
                     elif isinstance(block, str):
                         text_parts.append(block)
-                content = '\n'.join(text_parts)
+                content = "\n".join(text_parts)
 
             # Skip command-related content
-            if '<command-name>' in content or '<local-command' in content:
+            if "<command-name>" in content or "<local-command" in content:
                 continue
 
             # Skip tool results
-            if '<system-reminder>' in content and 'Called the' in content:
+            if "<system-reminder>" in content and "Called the" in content:
                 continue
 
-            role = entry.get('type', 'unknown')
+            role = entry.get("type", "unknown")
             messages.append(f"[{role.upper()}]: {content[:2000]}")  # Limit per message
 
     # Join and truncate to max bytes
-    full_text = '\n\n'.join(messages)
-    if len(full_text.encode('utf-8')) > max_bytes:
+    full_text = "\n\n".join(messages)
+    if len(full_text.encode("utf-8")) > max_bytes:
         # Take from end (most recent)
         full_text = full_text[-max_bytes:]
         # Find first complete message
-        first_bracket = full_text.find('[')
+        first_bracket = full_text.find("[")
         if first_bracket > 0:
             full_text = full_text[first_bracket:]
 
     return full_text
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: extract-transcript-messages.py <jsonl_path> [max_bytes]", file=sys.stderr)
+        print(
+            "Usage: extract-transcript-messages.py <jsonl_path> [max_bytes]",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     jsonl_path = sys.argv[1]

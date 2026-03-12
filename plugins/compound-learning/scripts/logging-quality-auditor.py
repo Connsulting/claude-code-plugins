@@ -122,7 +122,9 @@ class DiagnosticCall:
     context_tokens: tuple[str, ...] = ()
 
 
-def discover_source_files(plugin_root: Path, patterns: Sequence[str] = SCOPE_GLOBS) -> list[SourceFile]:
+def discover_source_files(
+    plugin_root: Path, patterns: Sequence[str] = SCOPE_GLOBS
+) -> list[SourceFile]:
     tracked = _discover_tracked_source_files(plugin_root, patterns)
     if tracked is not None:
         return tracked
@@ -144,7 +146,9 @@ def discover_source_files(plugin_root: Path, patterns: Sequence[str] = SCOPE_GLO
     return [discovered[key] for key in sorted(discovered)]
 
 
-def _discover_tracked_source_files(plugin_root: Path, patterns: Sequence[str]) -> list[SourceFile] | None:
+def _discover_tracked_source_files(
+    plugin_root: Path, patterns: Sequence[str]
+) -> list[SourceFile] | None:
     result = subprocess.run(
         ["git", "-C", str(plugin_root), "ls-files", "--", *patterns],
         capture_output=True,
@@ -177,7 +181,12 @@ def _call_name(func: ast.AST) -> str:
 
 
 def _is_sys_stderr(node: ast.AST | None) -> bool:
-    return isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "sys" and node.attr == "stderr"
+    return (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "sys"
+        and node.attr == "stderr"
+    )
 
 
 def _print_targets_stderr(node: ast.Call) -> bool:
@@ -236,7 +245,11 @@ def _message_details(node: ast.AST | None) -> tuple[str, bool, bool, tuple[str, 
                 dynamic = True
                 context_tokens.update(_expression_context_tokens(value.value))
         message_text = "".join(parts)
-        exception_only = dynamic and not message_text.strip() and not _has_contextual_tokens(context_tokens)
+        exception_only = (
+            dynamic
+            and not message_text.strip()
+            and not _has_contextual_tokens(context_tokens)
+        )
         return message_text, dynamic, exception_only, tuple(sorted(context_tokens))
 
     if isinstance(node, ast.Name):
@@ -262,17 +275,25 @@ def _diagnostic_is_low_context(diagnostic: DiagnosticCall) -> bool:
 
     normalized = _normalize_message(diagnostic.message_text)
     if not normalized:
-        return diagnostic.dynamic and not _has_contextual_tokens(diagnostic.context_tokens)
+        return diagnostic.dynamic and not _has_contextual_tokens(
+            diagnostic.context_tokens
+        )
 
-    return normalized in GENERIC_DIAGNOSTIC_MESSAGES and not _has_contextual_tokens(diagnostic.context_tokens)
+    return normalized in GENERIC_DIAGNOSTIC_MESSAGES and not _has_contextual_tokens(
+        diagnostic.context_tokens
+    )
 
 
-def _iter_nodes(nodes: Iterable[ast.stmt], stop_types: tuple[type[ast.AST], ...]) -> Iterable[ast.AST]:
+def _iter_nodes(
+    nodes: Iterable[ast.stmt], stop_types: tuple[type[ast.AST], ...]
+) -> Iterable[ast.AST]:
     for node in nodes:
         yield from _walk_node(node, stop_types)
 
 
-def _walk_node(node: ast.AST, stop_types: tuple[type[ast.AST], ...]) -> Iterable[ast.AST]:
+def _walk_node(
+    node: ast.AST, stop_types: tuple[type[ast.AST], ...]
+) -> Iterable[ast.AST]:
     yield node
     for child in ast.iter_child_nodes(node):
         if isinstance(child, stop_types):
@@ -282,10 +303,18 @@ def _walk_node(node: ast.AST, stop_types: tuple[type[ast.AST], ...]) -> Iterable
 
 
 def _open_mode(call: ast.Call) -> str | None:
-    if len(call.args) >= 2 and isinstance(call.args[1], ast.Constant) and isinstance(call.args[1].value, str):
+    if (
+        len(call.args) >= 2
+        and isinstance(call.args[1], ast.Constant)
+        and isinstance(call.args[1].value, str)
+    ):
         return call.args[1].value
     for keyword in call.keywords:
-        if keyword.arg == "mode" and isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
+        if (
+            keyword.arg == "mode"
+            and isinstance(keyword.value, ast.Constant)
+            and isinstance(keyword.value.value, str)
+        ):
             return keyword.value.value
     return None
 
@@ -299,13 +328,30 @@ def _python_risky_call_kind(call: ast.Call) -> str | None:
             return "file_write"
         return "file_read"
 
-    if name in {"read_text", "read_bytes"} or name.endswith(".read_text") or name.endswith(".read_bytes"):
+    if (
+        name in {"read_text", "read_bytes"}
+        or name.endswith(".read_text")
+        or name.endswith(".read_bytes")
+    ):
         return "file_read"
-    if name in {"write_text", "write_bytes"} or name.endswith(".write_text") or name.endswith(".write_bytes"):
+    if (
+        name in {"write_text", "write_bytes"}
+        or name.endswith(".write_text")
+        or name.endswith(".write_bytes")
+    ):
         return "file_write"
-    if name in {"mkdir"} or name.endswith(".mkdir") or name in {"os.makedirs", "makedirs", "Path.mkdir"}:
+    if (
+        name in {"mkdir"}
+        or name.endswith(".mkdir")
+        or name in {"os.makedirs", "makedirs", "Path.mkdir"}
+    ):
         return "filesystem"
-    if name in {"replace", "rename"} or name in {"shutil.copy2", "shutil.move"} or name.endswith(".replace") or name.endswith(".rename"):
+    if (
+        name in {"replace", "rename"}
+        or name in {"shutil.copy2", "shutil.move"}
+        or name.endswith(".replace")
+        or name.endswith(".rename")
+    ):
         return "filesystem"
 
     if name in {
@@ -342,7 +388,9 @@ def _collect_risky_calls(nodes: Iterable[ast.stmt]) -> list[RiskyCall]:
         if key in seen:
             continue
         seen.add(key)
-        risky_calls.append(RiskyCall(kind=kind, line=node.lineno, call_name=_call_name(node.func)))
+        risky_calls.append(
+            RiskyCall(kind=kind, line=node.lineno, call_name=_call_name(node.func))
+        )
 
     return risky_calls
 
@@ -353,7 +401,9 @@ def _diagnostic_from_call(node: ast.Call) -> DiagnosticCall | None:
     if name == "print":
         if _structured_stdout_call(node):
             return None
-        message_text, dynamic, exception_only, context_tokens = _message_details(node.args[0] if node.args else None)
+        message_text, dynamic, exception_only, context_tokens = _message_details(
+            node.args[0] if node.args else None
+        )
         if not _print_targets_stderr(node) and not message_text.strip() and not dynamic:
             return None
         return DiagnosticCall(
@@ -365,7 +415,9 @@ def _diagnostic_from_call(node: ast.Call) -> DiagnosticCall | None:
         )
 
     if name == "sys.stderr.write":
-        message_text, dynamic, exception_only, context_tokens = _message_details(node.args[0] if node.args else None)
+        message_text, dynamic, exception_only, context_tokens = _message_details(
+            node.args[0] if node.args else None
+        )
         return DiagnosticCall(
             line=node.lineno,
             message_text=message_text,
@@ -375,7 +427,9 @@ def _diagnostic_from_call(node: ast.Call) -> DiagnosticCall | None:
         )
 
     if any(name == method or name.endswith(f".{method}") for method in LOGGER_METHODS):
-        message_text, dynamic, exception_only, context_tokens = _message_details(node.args[0] if node.args else None)
+        message_text, dynamic, exception_only, context_tokens = _message_details(
+            node.args[0] if node.args else None
+        )
         return DiagnosticCall(
             line=node.lineno,
             message_text=message_text,
@@ -394,7 +448,9 @@ def _structured_stdout_call(node: ast.Call) -> bool:
         return False
 
     first_arg = node.args[0]
-    return isinstance(first_arg, ast.Call) and _call_name(first_arg.func) == "json.dumps"
+    return (
+        isinstance(first_arg, ast.Call) and _call_name(first_arg.func) == "json.dumps"
+    )
 
 
 def _human_stdout_call(node: ast.Call) -> bool:
@@ -434,7 +490,10 @@ def _mapping_looks_like_error_payload(node: ast.Dict) -> bool:
             return True
         if normalized_key == "status":
             status_value = _string_literal(value_node)
-            if status_value and _normalize_message(status_value) in STRUCTURED_ERROR_STATUSES:
+            if (
+                status_value
+                and _normalize_message(status_value) in STRUCTURED_ERROR_STATUSES
+            ):
                 return True
     return False
 
@@ -451,8 +510,12 @@ def _structured_error_name(target: ast.AST) -> str | None:
     return None
 
 
-def _assignment_marks_structured_error(target: ast.AST, value: ast.AST | None, error_names: set[str]) -> str | None:
-    if isinstance(target, ast.Name) and _expression_is_structured_error(value, error_names):
+def _assignment_marks_structured_error(
+    target: ast.AST, value: ast.AST | None, error_names: set[str]
+) -> str | None:
+    if isinstance(target, ast.Name) and _expression_is_structured_error(
+        value, error_names
+    ):
         return target.id
 
     if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name):
@@ -464,7 +527,10 @@ def _assignment_marks_structured_error(target: ast.AST, value: ast.AST | None, e
             return target.value.id
         if normalized_key == "status":
             status_value = _string_literal(value)
-            if status_value and _normalize_message(status_value) in STRUCTURED_ERROR_STATUSES:
+            if (
+                status_value
+                and _normalize_message(status_value) in STRUCTURED_ERROR_STATUSES
+            ):
                 return target.value.id
 
     return None
@@ -477,17 +543,31 @@ def _call_updates_structured_error(node: ast.Call) -> str | None:
         and isinstance(node.func.value.value, ast.Name)
     ):
         key = _string_literal(node.func.value.slice)
-        if key and key.lower() in STRUCTURED_ERROR_KEYS and node.func.attr in {"append", "extend"}:
+        if (
+            key
+            and key.lower() in STRUCTURED_ERROR_KEYS
+            and node.func.attr in {"append", "extend"}
+        ):
             return node.func.value.value.id
 
-    if isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name) and node.func.attr == "update":
-        if node.args and isinstance(node.args[0], ast.Dict) and _mapping_looks_like_error_payload(node.args[0]):
+    if (
+        isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.attr == "update"
+    ):
+        if (
+            node.args
+            and isinstance(node.args[0], ast.Dict)
+            and _mapping_looks_like_error_payload(node.args[0])
+        ):
             return node.func.value.id
 
     return None
 
 
-def _expression_is_structured_error(node: ast.AST | None, error_names: set[str]) -> bool:
+def _expression_is_structured_error(
+    node: ast.AST | None, error_names: set[str]
+) -> bool:
     if node is None:
         return False
     if isinstance(node, ast.Dict):
@@ -503,11 +583,15 @@ def _handler_has_structured_error_output(handler: ast.ExceptHandler) -> bool:
     for node in _iter_nodes(handler.body, stop_types=PYTHON_STOP_TYPES):
         if isinstance(node, ast.Assign):
             for target in node.targets:
-                name = _assignment_marks_structured_error(target, node.value, error_names)
+                name = _assignment_marks_structured_error(
+                    target, node.value, error_names
+                )
                 if name:
                     error_names.add(name)
         elif isinstance(node, ast.AnnAssign):
-            name = _assignment_marks_structured_error(node.target, node.value, error_names)
+            name = _assignment_marks_structured_error(
+                node.target, node.value, error_names
+            )
             if name:
                 error_names.add(name)
         elif isinstance(node, ast.Call):
@@ -517,7 +601,9 @@ def _handler_has_structured_error_output(handler: ast.ExceptHandler) -> bool:
 
         if isinstance(node, ast.Call) and _structured_stdout_call(node):
             return True
-        if isinstance(node, ast.Return) and _expression_is_structured_error(node.value, error_names):
+        if isinstance(node, ast.Return) and _expression_is_structured_error(
+            node.value, error_names
+        ):
             return True
 
     return False
@@ -530,7 +616,9 @@ def _statement_guarantees_reraise(node: ast.stmt) -> bool:
     if isinstance(node, ast.If):
         if not node.orelse:
             return False
-        return _block_guarantees_reraise(node.body) and _block_guarantees_reraise(node.orelse)
+        return _block_guarantees_reraise(node.body) and _block_guarantees_reraise(
+            node.orelse
+        )
 
     return False
 
@@ -596,7 +684,9 @@ def _make_finding(
     return finding
 
 
-def _analyze_python_try_handlers(source: SourceFile, text: str, tree: ast.AST) -> list[dict[str, Any]]:
+def _analyze_python_try_handlers(
+    source: SourceFile, text: str, tree: ast.AST
+) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
 
     for node in ast.walk(tree):
@@ -608,7 +698,9 @@ def _analyze_python_try_handlers(source: SourceFile, text: str, tree: ast.AST) -
             continue
 
         operation_types = sorted({call.kind for call in risky_calls})
-        primary_call = sorted(risky_calls, key=lambda item: (item.line, item.call_name))[0]
+        primary_call = sorted(
+            risky_calls, key=lambda item: (item.line, item.call_name)
+        )[0]
 
         for handler in node.handlers:
             diagnostics = _collect_handler_diagnostics(handler)
@@ -618,7 +710,9 @@ def _analyze_python_try_handlers(source: SourceFile, text: str, tree: ast.AST) -
                 and not _handler_reraises(handler)
                 and _handler_suppresses_exception(handler)
             ):
-                evidence = _module_snippet(text, handler.lineno) or _module_snippet(text, primary_call.line)
+                evidence = _module_snippet(text, handler.lineno) or _module_snippet(
+                    text, primary_call.line
+                )
                 findings.append(
                     _make_finding(
                         source=source,
@@ -655,10 +749,14 @@ def _analyze_python_try_handlers(source: SourceFile, text: str, tree: ast.AST) -
     return findings
 
 
-def _analyze_python_output_mix(source: SourceFile, text: str, tree: ast.AST) -> list[dict[str, Any]]:
+def _analyze_python_output_mix(
+    source: SourceFile, text: str, tree: ast.AST
+) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
 
-    scopes: list[tuple[str, list[ast.stmt], int]] = [("<module>", list(getattr(tree, "body", [])), 1)]
+    scopes: list[tuple[str, list[ast.stmt], int]] = [
+        ("<module>", list(getattr(tree, "body", [])), 1)
+    ]
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             scopes.append((node.name, list(node.body), node.lineno))
@@ -667,9 +765,14 @@ def _analyze_python_output_mix(source: SourceFile, text: str, tree: ast.AST) -> 
         machine_calls: list[ast.Call] = []
         human_calls: list[ast.Call] = []
         for statement in body:
-            if isinstance(statement, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef)):
+            if isinstance(
+                statement, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef)
+            ):
                 continue
-            for node in _walk_node(statement, (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef, ast.Lambda)):
+            for node in _walk_node(
+                statement,
+                (ast.AsyncFunctionDef, ast.ClassDef, ast.FunctionDef, ast.Lambda),
+            ):
                 if not isinstance(node, ast.Call):
                     continue
                 if _structured_stdout_call(node):
@@ -769,11 +872,18 @@ def analyze_shell_source(source: SourceFile, text: str) -> list[dict[str, Any]]:
         command = match.group(1).strip()
         command_kind = _shell_command_kind(command)
         block, end_index = _shell_failure_block(lines, index)
-        stripped_block = [entry.strip() for entry in block if entry.strip() and not entry.strip().startswith("#")]
+        stripped_block = [
+            entry.strip()
+            for entry in block
+            if entry.strip() and not entry.strip().startswith("#")
+        ]
 
         if command_kind and stripped_block:
             if not _shell_has_diagnostic(stripped_block):
-                if any(token.startswith(("exit", "return", "continue")) for token in stripped_block):
+                if any(
+                    token.startswith(("exit", "return", "continue"))
+                    for token in stripped_block
+                ):
                     findings.append(
                         _make_finding(
                             source=source,
@@ -790,10 +900,16 @@ def analyze_shell_source(source: SourceFile, text: str) -> list[dict[str, Any]]:
                     )
             else:
                 for branch_line in stripped_block:
-                    if "log_activity" not in branch_line and not re.search(r"\b(?:echo|printf)\b.*>&2", branch_line):
+                    if "log_activity" not in branch_line and not re.search(
+                        r"\b(?:echo|printf)\b.*>&2", branch_line
+                    ):
                         continue
                     message = _shell_extract_message(branch_line)
-                    if not message or not _normalize_message(message) in GENERIC_DIAGNOSTIC_MESSAGES:
+                    if (
+                        not message
+                        or _normalize_message(message)
+                        not in GENERIC_DIAGNOSTIC_MESSAGES
+                    ):
                         continue
                     findings.append(
                         _make_finding(
@@ -829,7 +945,9 @@ def _sort_key(item: Mapping[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def audit_logging_quality(plugin_root: Path, min_severity: str = "low", fail_on: str = "none") -> dict[str, Any]:
+def audit_logging_quality(
+    plugin_root: Path, min_severity: str = "low", fail_on: str = "none"
+) -> dict[str, Any]:
     source_files = discover_source_files(plugin_root)
     findings: list[dict[str, Any]] = []
 
@@ -845,7 +963,11 @@ def audit_logging_quality(plugin_root: Path, min_severity: str = "low", fail_on:
     for index, finding in enumerate(findings, start=1):
         finding["priority_rank"] = index
 
-    filtered_findings = [finding for finding in findings if _severity_matches(finding["severity"], min_severity)]
+    filtered_findings = [
+        finding
+        for finding in findings
+        if _severity_matches(finding["severity"], min_severity)
+    ]
 
     by_classification = {name: 0 for name in CLASSIFICATION_PRIORITY}
     by_severity = {name: 0 for name in SEVERITY_PRIORITY}
@@ -856,7 +978,9 @@ def audit_logging_quality(plugin_root: Path, min_severity: str = "low", fail_on:
     gate_triggered = False
     gate_matches = 0
     if fail_on != "none":
-        gate_matches = sum(1 for finding in findings if _severity_matches(finding["severity"], fail_on))
+        gate_matches = sum(
+            1 for finding in findings if _severity_matches(finding["severity"], fail_on)
+        )
         gate_triggered = gate_matches > 0
 
     return {
@@ -909,7 +1033,9 @@ def render_text_report(report: Mapping[str, Any]) -> str:
         lines.append("")
         lines.append("Prioritized findings:")
         for finding in report["findings"]:
-            suffix = f" | function={finding['function']}" if "function" in finding else ""
+            suffix = (
+                f" | function={finding['function']}" if "function" in finding else ""
+            )
             operations = ",".join(finding["operation_types"]) or "n/a"
             lines.append(
                 (
@@ -928,7 +1054,9 @@ def render_text_report(report: Mapping[str, Any]) -> str:
 
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Audit logging quality for the compound-learning plugin.")
+    parser = argparse.ArgumentParser(
+        description="Audit logging quality for the compound-learning plugin."
+    )
     parser.add_argument(
         "--plugin-root",
         default=str(Path(__file__).resolve().parent.parent),
@@ -973,7 +1101,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         fail_on=args.fail_on,
     )
 
-    output = render_json_report(report) if args.format == "json" else render_text_report(report)
+    output = (
+        render_json_report(report)
+        if args.format == "json"
+        else render_text_report(report)
+    )
 
     if args.output:
         output_path = Path(args.output).expanduser().resolve()

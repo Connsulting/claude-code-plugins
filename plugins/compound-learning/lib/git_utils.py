@@ -81,6 +81,6 @@ def _read_gitdir(git_file: Path) -> str | None:
         return None
 
     if content.startswith("gitdir: "):
-        return content[len("gitdir: "):]
+        return content[len("gitdir: ") :]
 
     return None
