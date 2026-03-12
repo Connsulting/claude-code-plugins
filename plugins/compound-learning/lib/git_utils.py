@@ -8,6 +8,7 @@ In a worktree, .git is a file containing "gitdir: /path/to/main/.git/worktrees/n
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 
@@ -77,7 +78,11 @@ def _read_gitdir(git_file: Path) -> str | None:
     """Read a .git worktree file and return the gitdir path, or None."""
     try:
         content = git_file.read_text().strip()
-    except OSError:
+    except OSError as exc:
+        print(
+            f"[git_utils] failed to read gitdir marker {git_file}: {exc}",
+            file=sys.stderr,
+        )
         return None
 
     if content.startswith("gitdir: "):

@@ -26,7 +26,11 @@ def extract_context(transcript_path: str, max_chars: int = 3000) -> str:
     try:
         with open(transcript_path, 'r') as f:
             lines = f.readlines()
-    except (FileNotFoundError, PermissionError):
+    except (FileNotFoundError, PermissionError) as exc:
+        print(
+            f"[extract-transcript-context] failed to read transcript {transcript_path}: {exc}",
+            file=sys.stderr,
+        )
         return ""
 
     # Parse lines in reverse to find content between last two user prompts

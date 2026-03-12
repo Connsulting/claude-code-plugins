@@ -231,6 +231,50 @@ def test_dynamic_f_string_context_is_not_low_context(tmp_path):
     assert not _findings_for_path(report, "scripts/dynamic-context.py")
 
 
+def test_contextual_stderr_diagnostics_clear_exception_handler_findings(tmp_path):
+    plugin_root = tmp_path / "compound-learning"
+
+    _write(
+        plugin_root / "hooks" / "contextual.py",
+        """
+        import sys
+
+        def extract_context(transcript_path: str):
+            try:
+                with open(transcript_path, "r", encoding="utf-8") as handle:
+                    return handle.read()
+            except (FileNotFoundError, PermissionError) as exc:
+                print(
+                    f"failed to read transcript {transcript_path}: {exc}",
+                    file=sys.stderr,
+                )
+                return ""
+        """,
+    )
+    _write(
+        plugin_root / "lib" / "gitdir.py",
+        """
+        import sys
+        from pathlib import Path
+
+        def read_gitdir(git_file: Path):
+            try:
+                return git_file.read_text().strip()
+            except OSError as exc:
+                print(
+                    f"failed to read gitdir marker {git_file}: {exc}",
+                    file=sys.stderr,
+                )
+                return None
+        """,
+    )
+
+    report = mod.audit_logging_quality(plugin_root)
+
+    assert not _findings_for_path(report, "hooks/contextual.py")
+    assert not _findings_for_path(report, "lib/gitdir.py")
+
+
 def test_conditional_reraise_still_flags_silent_branch(tmp_path):
     plugin_root = tmp_path / "compound-learning"
 
