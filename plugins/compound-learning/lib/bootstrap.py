@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import importlib
 import importlib.util
 import json
 import os
@@ -121,7 +122,9 @@ def _ensure_directory(path: Path) -> None:
 
 
 def ensure_managed_site_dir_on_path() -> None:
-    site_dirs = [managed_site_dir_path()]
+    # Create the managed site-packages directory before probing it so Python
+    # does not cache the path as missing on first-run bootstrap.
+    site_dirs = [managed_site_dir()]
     legacy_site_dir = legacy_managed_site_dir()
     if legacy_site_dir.is_dir() and legacy_site_dir not in site_dirs:
         site_dirs.append(legacy_site_dir)
@@ -429,6 +432,7 @@ def _install_packages(dependency: str, packages: list[str]) -> str:
                 f"{backend_name} exited with code {process.returncode} while installing {', '.join(packages)}.",
             )
         )
+    _invalidate_import_caches()
     return backend_name
 
 
@@ -692,6 +696,12 @@ def _python_has_pip() -> bool:
 def _module_available(module_name: str) -> bool:
     ensure_managed_site_dir_on_path()
     return importlib.util.find_spec(module_name) is not None
+
+
+def _invalidate_import_caches() -> None:
+    importlib.invalidate_caches()
+    for site_dir in (managed_site_dir_path(), legacy_managed_site_dir()):
+        sys.path_importer_cache.pop(str(site_dir), None)
 
 
 def _core_runtime_ready() -> bool:

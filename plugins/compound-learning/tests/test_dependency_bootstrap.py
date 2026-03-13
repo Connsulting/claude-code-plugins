@@ -66,6 +66,51 @@ def test_module_discovery_includes_legacy_site_packages(monkeypatch, tmp_path):
     assert bootstrap._module_available("legacy_bootstrap_probe_module") is True
 
 
+def test_ensure_dependency_sees_new_modules_installed_in_same_process(monkeypatch):
+    monkeypatch.setattr(sys, "path", list(sys.path))
+
+    module_name = "bootstrap_dynamic_dependency_module"
+    sys.modules.pop(module_name, None)
+
+    def fake_dependency_ready(dependency):
+        if dependency == bootstrap.CORE:
+            return True
+        if dependency == bootstrap.EMBEDDING:
+            return bootstrap._module_available(module_name)
+        raise ValueError(f"Unexpected dependency: {dependency}")
+
+    def fake_missing_packages(dependency):
+        if dependency == bootstrap.CORE:
+            return []
+        if dependency == bootstrap.EMBEDDING:
+            return [] if bootstrap._module_available(module_name) else ["sentence-transformers"]
+        raise ValueError(f"Unexpected dependency: {dependency}")
+
+    def fake_build_install_command(dependency, packages):
+        assert dependency == bootstrap.EMBEDDING
+        assert packages == ["sentence-transformers"]
+        script = "\n".join(
+            [
+                "from pathlib import Path",
+                "import sys",
+                "target = Path(sys.argv[1])",
+                "target.mkdir(parents=True, exist_ok=True)",
+                f"(target / '{module_name}.py').write_text('value = 1\\n', encoding='utf-8')",
+            ]
+        )
+        return "fake-installer", [sys.executable, "-c", script, str(bootstrap.managed_site_dir_path())]
+
+    monkeypatch.setattr(bootstrap, "dependency_ready", fake_dependency_ready)
+    monkeypatch.setattr(bootstrap, "missing_packages", fake_missing_packages)
+    monkeypatch.setattr(bootstrap, "_build_install_command", fake_build_install_command)
+
+    result = bootstrap.ensure_embedding_dependencies()
+
+    assert result.state == bootstrap.STATE_READY
+    assert result.backend == "fake-installer"
+    assert bootstrap._module_available(module_name) is True
+
+
 def test_probe_dependency_returns_ready_for_persisted_ready_state(monkeypatch):
     ready = {
         bootstrap.CORE: True,
