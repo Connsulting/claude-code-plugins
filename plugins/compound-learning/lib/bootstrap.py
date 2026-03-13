@@ -92,7 +92,9 @@ def lock_file() -> Path:
 
 
 def plugin_root() -> Path:
-    return Path(os.environ.get("CLAUDE_PLUGIN_ROOT", Path(__file__).resolve().parent.parent))
+    return Path(
+        os.environ.get("CLAUDE_PLUGIN_ROOT", Path(__file__).resolve().parent.parent)
+    )
 
 
 def _ensure_directory(path: Path) -> None:
@@ -112,6 +114,7 @@ def ensure_managed_site_dir_on_path() -> None:
 def log_activity(message: str) -> None:
     with open(log_file(), "a", encoding="utf-8") as handle:
         handle.write(f"[{_timestamp()}] {message}\n")
+
 
 def ensure_core_dependencies(wait: bool = True) -> BootstrapResult:
     return ensure_dependency(CORE, wait=wait, background=False)
@@ -145,7 +148,11 @@ def missing_packages(dependency: str) -> list[str]:
             packages.append("sqlite-vec")
         return packages
     if dependency == EMBEDDING:
-        return [] if _module_available("sentence_transformers") else ["sentence-transformers"]
+        return (
+            []
+            if _module_available("sentence_transformers")
+            else ["sentence-transformers"]
+        )
     raise ValueError(f"Unknown dependency group: {dependency}")
 
 
@@ -173,7 +180,9 @@ def probe_dependency(dependency: str) -> BootstrapResult:
                 )
 
             dependencies = status.get("dependencies")
-            dep_state = dependencies.get(dependency) if isinstance(dependencies, dict) else None
+            dep_state = (
+                dependencies.get(dependency) if isinstance(dependencies, dict) else None
+            )
             if not isinstance(dep_state, dict):
                 return BootstrapResult(
                     dependency=dependency,
@@ -413,7 +422,15 @@ def _build_install_command(packages: list[str]) -> tuple[str, list[str]]:
     target_dir = str(managed_site_dir())
 
     if _python_has_pip():
-        command = [sys.executable, "-m", "pip", "install", "--quiet", "--target", target_dir]
+        command = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--quiet",
+            "--target",
+            target_dir,
+        ]
         return "pip", command + packages
 
     uv_path = shutil.which("uv")
@@ -722,7 +739,9 @@ def _timestamp() -> str:
 def _manual_install_message(dependency: str, detail: str) -> str:
     packages = missing_packages(dependency)
     package_list = packages or (
-        ["sentence-transformers"] if dependency == EMBEDDING else [_pysqlite_package_name(), "sqlite-vec"]
+        ["sentence-transformers"]
+        if dependency == EMBEDDING
+        else [_pysqlite_package_name(), "sqlite-vec"]
     )
     target_dir = managed_site_dir()
     return (
@@ -746,13 +765,19 @@ def _probe_exit_code(result: BootstrapResult) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Compound-learning dependency bootstrap")
+    parser = argparse.ArgumentParser(
+        description="Compound-learning dependency bootstrap"
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    ensure_parser = subparsers.add_parser("ensure", help="Ensure a dependency group is ready")
+    ensure_parser = subparsers.add_parser(
+        "ensure", help="Ensure a dependency group is ready"
+    )
     ensure_parser.add_argument("dependency", choices=[CORE, EMBEDDING])
     ensure_parser.add_argument("--background", action="store_true")
-    ensure_parser.add_argument("--foreground", action="store_true", help=argparse.SUPPRESS)
+    ensure_parser.add_argument(
+        "--foreground", action="store_true", help=argparse.SUPPRESS
+    )
     ensure_parser.add_argument("--json", action="store_true")
     ensure_parser.add_argument("--quiet", action="store_true")
 

@@ -1,3 +1,4 @@
+import importlib
 import json
 import sys
 from pathlib import Path
@@ -5,9 +6,10 @@ from pathlib import Path
 import pytest
 
 PLUGIN_ROOT = str(Path(__file__).parent.parent)
-sys.path.insert(0, PLUGIN_ROOT)
+if PLUGIN_ROOT not in sys.path:
+    sys.path.insert(0, PLUGIN_ROOT)
 
-from lib import bootstrap
+bootstrap = importlib.import_module("lib.bootstrap")
 
 
 @pytest.fixture(autouse=True)
@@ -25,11 +27,18 @@ def test_missing_packages_distinguishes_core_and_embedding(monkeypatch):
         "pysqlite3": False,
     }
 
-    monkeypatch.setattr(bootstrap, "_module_available", lambda name: available.get(name, False))
-    monkeypatch.setattr(bootstrap, "_sqlite_module_supports_extensions", lambda module: False)
+    monkeypatch.setattr(
+        bootstrap, "_module_available", lambda name: available.get(name, False)
+    )
+    monkeypatch.setattr(
+        bootstrap, "_sqlite_module_supports_extensions", lambda module: False
+    )
     monkeypatch.setattr(bootstrap, "_pysqlite_package_name", lambda: "pysqlite3-binary")
 
-    assert bootstrap.missing_packages(bootstrap.CORE) == ["pysqlite3-binary", "sqlite-vec"]
+    assert bootstrap.missing_packages(bootstrap.CORE) == [
+        "pysqlite3-binary",
+        "sqlite-vec",
+    ]
     assert bootstrap.missing_packages(bootstrap.EMBEDDING) == ["sentence-transformers"]
 
     available["sqlite_vec"] = True
@@ -43,11 +52,15 @@ def test_probe_dependency_returns_ready_for_persisted_ready_state(monkeypatch):
     }
     install_calls = []
 
-    monkeypatch.setattr(bootstrap, "dependency_ready", lambda dependency: ready[dependency])
+    monkeypatch.setattr(
+        bootstrap, "dependency_ready", lambda dependency: ready[dependency]
+    )
     monkeypatch.setattr(
         bootstrap,
         "_install_packages",
-        lambda dependency, packages: install_calls.append((dependency, packages)) or "fake-installer",
+        lambda dependency, packages: (
+            install_calls.append((dependency, packages)) or "fake-installer"
+        ),
     )
 
     persisted_status = {
@@ -86,7 +99,9 @@ def test_probe_dependency_ready_state_falls_back_when_runtime_is_missing(monkeyp
         bootstrap.EMBEDDING: False,
     }
 
-    monkeypatch.setattr(bootstrap, "dependency_ready", lambda dependency: ready[dependency])
+    monkeypatch.setattr(
+        bootstrap, "dependency_ready", lambda dependency: ready[dependency]
+    )
 
     persisted_status = {
         "dependencies": {
@@ -126,7 +141,9 @@ def test_probe_dependency_normalizes_stale_install_to_failed(monkeypatch):
         bootstrap.EMBEDDING: False,
     }
 
-    monkeypatch.setattr(bootstrap, "dependency_ready", lambda dependency: ready[dependency])
+    monkeypatch.setattr(
+        bootstrap, "dependency_ready", lambda dependency: ready[dependency]
+    )
     monkeypatch.setattr(bootstrap, "_pid_is_running", lambda pid: False)
 
     stale_status = {
@@ -170,7 +187,9 @@ def test_missing_or_corrupt_status_files_recover_safely(monkeypatch, corrupt_con
     }
     install_calls = []
 
-    monkeypatch.setattr(bootstrap, "dependency_ready", lambda dependency: ready[dependency])
+    monkeypatch.setattr(
+        bootstrap, "dependency_ready", lambda dependency: ready[dependency]
+    )
     monkeypatch.setattr(
         bootstrap,
         "missing_packages",
@@ -205,7 +224,9 @@ def test_stale_install_state_becomes_failed_and_can_recover(monkeypatch):
         bootstrap.EMBEDDING: False,
     }
 
-    monkeypatch.setattr(bootstrap, "dependency_ready", lambda dependency: ready[dependency])
+    monkeypatch.setattr(
+        bootstrap, "dependency_ready", lambda dependency: ready[dependency]
+    )
     monkeypatch.setattr(bootstrap, "_pid_is_running", lambda pid: False)
 
     stale_status = {
@@ -255,7 +276,10 @@ def test_stale_install_state_becomes_failed_and_can_recover(monkeypatch):
     assert result.backend == "fake-installer"
 
     recovered_status = bootstrap.read_status()
-    assert recovered_status["dependencies"][bootstrap.EMBEDDING]["state"] == bootstrap.STATE_READY
+    assert (
+        recovered_status["dependencies"][bootstrap.EMBEDDING]["state"]
+        == bootstrap.STATE_READY
+    )
 
 
 def test_prepare_embedding_for_auto_peek_is_non_blocking(monkeypatch):
@@ -265,7 +289,9 @@ def test_prepare_embedding_for_auto_peek_is_non_blocking(monkeypatch):
     }
     spawn_calls = []
 
-    monkeypatch.setattr(bootstrap, "dependency_ready", lambda dependency: ready[dependency])
+    monkeypatch.setattr(
+        bootstrap, "dependency_ready", lambda dependency: ready[dependency]
+    )
     monkeypatch.setattr(
         bootstrap,
         "missing_packages",
