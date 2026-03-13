@@ -9,9 +9,9 @@ if [ -z "$CLAUDE_PLUGIN_ROOT" ]; then
 fi
 
 # Setup logging
-LOG_DIR="$HOME/.claude/plugins/compound-learning"
-mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/activity.log"
+STATE_DIR="$HOME/.claude/state/compound-learning"
+mkdir -p "$STATE_DIR"
+LOG_FILE="$STATE_DIR/activity.log"
 
 log_activity() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"

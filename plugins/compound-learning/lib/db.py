@@ -6,30 +6,16 @@ All four Python scripts import from here instead of duplicating database boilerp
 
 import json
 import os
+import sqlite3 as stdlib_sqlite3
 import sys
 import threading
 from pathlib import Path
 from typing import Any, Dict, List
 
-try:
-    import sqlite3
-    _test_conn = sqlite3.connect(':memory:')
-    if not hasattr(_test_conn, 'enable_load_extension'):
-        raise AttributeError('no enable_load_extension')
-    _test_conn.close()
-except AttributeError:
-    try:
-        import pysqlite3 as sqlite3  # type: ignore[no-redef]
-    except ImportError:
-        import platform
-        is_arm = platform.machine().startswith('arm') or platform.machine() == 'aarch64'
-        pkg = 'pysqlite3' if is_arm else 'pysqlite3-binary'
-        print(
-            '[ERROR] sqlite3 extension loading is not available.\n'
-            'Install the required dependency:\n'
-            f'  pip install {pkg}'
-        )
-        raise
+from . import bootstrap
+
+sqlite3 = stdlib_sqlite3
+_sqlite_module = None
 
 _model = None
 _model_lock = threading.Lock()
@@ -115,23 +101,55 @@ def _deep_merge(base: Dict, override: Dict) -> Dict:
     return result
 
 
-def get_connection(config: Dict[str, Any]) -> sqlite3.Connection:
+def _sqlite_module_supports_extensions(sqlite_module: Any) -> bool:
+    try:
+        conn = sqlite_module.connect(':memory:')
+    except Exception:
+        return False
+    try:
+        return hasattr(conn, 'enable_load_extension')
+    finally:
+        conn.close()
+
+
+def _get_sqlite_module() -> Any:
+    global _sqlite_module
+    if _sqlite_module is not None:
+        return _sqlite_module
+
+    if _sqlite_module_supports_extensions(stdlib_sqlite3):
+        _sqlite_module = stdlib_sqlite3
+        return _sqlite_module
+
+    bootstrap.ensure_core_dependencies()
+    try:
+        import pysqlite3 as pysqlite3_sqlite
+    except ImportError as exc:
+        raise RuntimeError(
+            'sqlite3 extension loading is still unavailable after core dependency bootstrap'
+        ) from exc
+
+    _sqlite_module = pysqlite3_sqlite
+    return _sqlite_module
+
+
+def get_connection(config: Dict[str, Any]) -> Any:
     """Open SQLite DB, load sqlite-vec extension, create schema if missing."""
+    bootstrap.ensure_core_dependencies()
+    sqlite_module = _get_sqlite_module()
+
     try:
         import sqlite_vec
-    except ImportError:
-        print(
-            '[ERROR] sqlite-vec is not installed.\n'
-            'Install the required dependency:\n'
-            '  pip install sqlite-vec'
-        )
-        raise
+    except ImportError as exc:
+        raise RuntimeError(
+            'sqlite-vec is still unavailable after core dependency bootstrap'
+        ) from exc
 
     db_path = config['sqlite']['dbPath']
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    conn = sqlite_module.connect(db_path)
+    conn.row_factory = sqlite_module.Row
 
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
@@ -141,7 +159,7 @@ def get_connection(config: Dict[str, Any]) -> sqlite3.Connection:
     return conn
 
 
-def _create_schema(conn: sqlite3.Connection) -> None:
+def _create_schema(conn: Any) -> None:
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS learnings (
             id TEXT PRIMARY KEY,
@@ -173,6 +191,7 @@ def get_embedding(text: str):
     global _model
     with _model_lock:
         if _model is None:
+            bootstrap.ensure_embedding_dependencies()
             model_cache = os.path.expanduser(
                 '~/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2'
             )
@@ -180,19 +199,16 @@ def get_embedding(text: str):
                 print("Downloading embedding model (one-time, ~80MB)...", file=sys.stderr)
             try:
                 from sentence_transformers import SentenceTransformer
-            except ImportError:
-                print(
-                    '[ERROR] sentence-transformers is not installed.\n'
-                    'Install the required dependency:\n'
-                    '  pip install sentence-transformers'
-                )
-                raise
+            except ImportError as exc:
+                raise RuntimeError(
+                    'sentence-transformers is still unavailable after embedding bootstrap'
+                ) from exc
             _model = SentenceTransformer('all-MiniLM-L6-v2')
     return _model.encode(text, normalize_embeddings=True).tolist()
 
 
 def upsert_document(
-    conn: sqlite3.Connection,
+    conn: Any,
     doc_id: str,
     content: str,
     metadata: Dict[str, Any],
@@ -236,7 +252,7 @@ def upsert_document(
     conn.commit()
 
 
-def delete_document(conn: sqlite3.Connection, doc_id: str) -> None:
+def delete_document(conn: Any, doc_id: str) -> None:
     """Remove a document from all three tables."""
     conn.execute("DELETE FROM learnings WHERE id = ?", (doc_id,))
     conn.execute("DELETE FROM vec_learnings WHERE id = ?", (doc_id,))
@@ -245,7 +261,7 @@ def delete_document(conn: sqlite3.Connection, doc_id: str) -> None:
 
 
 def search(
-    conn: sqlite3.Connection,
+    conn: Any,
     query_text: str,
     scope_repos: List[str],
     n_results: int = 10,
@@ -312,7 +328,7 @@ def search(
 
 
 def get_all_documents(
-    conn: sqlite3.Connection, include_content: bool = True
+    conn: Any, include_content: bool = True
 ) -> Dict[str, Any]:
     """Return all documents in a dict format compatible with consolidate-discovery."""
     rows = conn.execute(
@@ -338,7 +354,7 @@ def get_all_documents(
 
 
 def get_documents_by_ids(
-    conn: sqlite3.Connection, ids: List[str]
+    conn: Any, ids: List[str]
 ) -> Dict[str, Any]:
     """Fetch specific documents by ID list."""
     if not ids:
@@ -372,7 +388,7 @@ def get_documents_by_ids(
     return {'ids': result_ids, 'documents': result_docs, 'metadatas': result_metas}
 
 
-def count_documents(conn: sqlite3.Connection) -> int:
+def count_documents(conn: Any) -> int:
     """Return total number of indexed documents."""
     row = conn.execute("SELECT COUNT(*) FROM learnings").fetchone()
     return row[0] if row else 0

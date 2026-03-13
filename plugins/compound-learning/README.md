@@ -7,7 +7,7 @@ A learning compounding system for Claude Code that extracts and indexes knowledg
 - Python 3.x with pip
 - GitHub CLI (`gh`) - optional, required for `/pr-learnings`
 
-Python dependencies (`pysqlite3-binary`, `sqlite-vec`, `sentence-transformers`) are auto-installed on session start via the `SessionStart` hook.
+Core SQLite dependencies (`pysqlite3-binary`, `sqlite-vec`) are bootstrapped on session start. Embedding dependencies (`sentence-transformers`) install lazily on first semantic search or indexing use.
 
 ## Installation
 
@@ -21,14 +21,16 @@ Python dependencies (`pysqlite3-binary`, `sqlite-vec`, `sentence-transformers`) 
 ### Manual Installation
 
 1. Clone or download this plugin to your Claude plugins directory
-2. Python dependencies install automatically on first session start, or install manually:
+2. Core Python dependencies install automatically on first session start, or install manually:
 ```bash
-pip install pysqlite3-binary sqlite-vec sentence-transformers
+pip install --target ~/.claude/state/compound-learning/site-packages pysqlite3-binary sqlite-vec sentence-transformers
 ```
 
 ### Post-Installation
 
 Run `/index-learnings` to build the index. The SQLite database is created automatically and the embedding model (~80MB) downloads on first use.
+
+Runtime state now lives under `~/.claude/state/compound-learning/`. The plugin installation path under `~/.claude/plugins/compound-learning` is no longer used for logs, dependency state, or managed `site-packages`.
 
 ## Configuration
 
@@ -149,9 +151,9 @@ How it works:
 1. Hooks trigger `extract-learnings.sh` which invokes `claude -p` to analyze the transcript
 2. Claude reads the conversation transcript and identifies 0-3 meaningful learnings
 3. Learning files are written to the appropriate scope (global or repo)
-4. A session tracking file (`~/.claude/compound-processed-sessions`) prevents duplicate extraction
+4. Newly created files are indexed into SQLite when indexing dependencies are available
 
-**Debug log:** `~/.claude/compound-hook-debug.log`
+Semantic auto-peek stores session-scoped `.seen` files in `~/.claude/state/compound-learning/sessions/` to avoid repeating the same suggestions within a session.
 
 **Note:** Extraction uses minimal permissions (`Read`, `Write`, `Bash(mkdir:*)`) and skips trivial sessions (<20 transcript lines).
 
@@ -216,4 +218,7 @@ Use topic + context: "authentication JWT refresh" not "implement login feature"
 - Run `/index-learnings` to ensure learnings are indexed
 
 **Hook activity log:**
-- Hook activity is logged to `~/.claude/plugins/compound-learning/activity.log`
+- Hook activity is logged to `~/.claude/state/compound-learning/activity.log`
+
+**Bootstrap status:**
+- Dependency bootstrap status is stored in `~/.claude/state/compound-learning/bootstrap-status.json`
