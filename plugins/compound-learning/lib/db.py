@@ -23,67 +23,89 @@ _model_lock = threading.Lock()
 
 def load_config() -> Dict[str, Any]:
     """Load configuration from environment variables, then config file, then defaults."""
-    home = os.path.expanduser('~')
+    home = os.path.expanduser("~")
 
     defaults: Dict[str, Any] = {
-        'sqlite': {
-            'dbPath': os.path.join(home, '.claude', 'compound-learning.db'),
+        "sqlite": {
+            "dbPath": os.path.join(home, ".claude", "compound-learning.db"),
         },
-        'learnings': {
-            'globalDir': os.path.join(home, '.projects/learnings'),
-            'repoSearchPath': home,
-            'archiveDir': os.path.join(home, '.projects/archive/learnings'),
-            'highConfidenceThreshold': 0.40,
-            'possiblyRelevantThreshold': 0.55,
-            'keywordBoostWeight': 0.65,
+        "learnings": {
+            "globalDir": os.path.join(home, ".projects/learnings"),
+            "repoSearchPath": home,
+            "archiveDir": os.path.join(home, ".projects/archive/learnings"),
+            "highConfidenceThreshold": 0.40,
+            "possiblyRelevantThreshold": 0.55,
+            "keywordBoostWeight": 0.65,
         },
-        'consolidation': {
-            'duplicateThreshold': 0.25,
-            'scopeKeywords': ['security', 'authentication', 'jwt', 'oauth', 'encryption',
-                              'password', 'token', 'api-key', 'secret', 'xss', 'sql-injection'],
-            'outdatedKeywords': ['temporary', 'workaround', 'deprecated', 'todo', 'fixme',
-                                 'hack', 'remove later', 'obsolete'],
+        "consolidation": {
+            "duplicateThreshold": 0.25,
+            "scopeKeywords": [
+                "security",
+                "authentication",
+                "jwt",
+                "oauth",
+                "encryption",
+                "password",
+                "token",
+                "api-key",
+                "secret",
+                "xss",
+                "sql-injection",
+            ],
+            "outdatedKeywords": [
+                "temporary",
+                "workaround",
+                "deprecated",
+                "todo",
+                "fixme",
+                "hack",
+                "remove later",
+                "obsolete",
+            ],
         },
     }
 
     # Determine plugin root for config file location
-    plugin_root = os.environ.get('CLAUDE_PLUGIN_ROOT')
+    plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT")
     if not plugin_root:
         # Auto-detect: this file lives at <plugin_root>/lib/db.py
         plugin_root = str(Path(__file__).parent.parent)
 
-    config_file = Path(plugin_root) / '.claude-plugin' / 'config.json'
+    config_file = Path(plugin_root) / ".claude-plugin" / "config.json"
     file_config: Dict[str, Any] = {}
 
     if config_file.exists():
         try:
-            with open(config_file, 'r') as f:
+            with open(config_file, "r") as f:
                 file_config = json.load(f)
             # Expand ${HOME} in all string values recursively
             file_config = _expand_home(file_config, home)
         except Exception as e:
-            print(f"Warning: Failed to load config from {config_file}: {e}", file=sys.stderr)
+            print(
+                f"Warning: Failed to load config from {config_file}: {e}",
+                file=sys.stderr,
+            )
 
     # Env var overrides
-    env_db_path = os.environ.get('SQLITE_DB_PATH')
-    env_global_dir = os.environ.get('LEARNINGS_GLOBAL_DIR')
-    env_repo_path = os.environ.get('LEARNINGS_REPO_SEARCH_PATH')
+    env_db_path = os.environ.get("SQLITE_DB_PATH")
+    env_global_dir = os.environ.get("LEARNINGS_GLOBAL_DIR")
+    env_repo_path = os.environ.get("LEARNINGS_REPO_SEARCH_PATH")
 
     result = _deep_merge(defaults, file_config)
 
     if env_db_path:
-        result['sqlite']['dbPath'] = os.path.expanduser(env_db_path)
+        result["sqlite"]["dbPath"] = os.path.expanduser(env_db_path)
     if env_global_dir:
-        result['learnings']['globalDir'] = os.path.expanduser(env_global_dir)
+        result["learnings"]["globalDir"] = os.path.expanduser(env_global_dir)
     if env_repo_path:
-        result['learnings']['repoSearchPath'] = os.path.expanduser(env_repo_path)
+        result["learnings"]["repoSearchPath"] = os.path.expanduser(env_repo_path)
 
     return result
 
 
 def _expand_home(obj: Any, home: str) -> Any:
     if isinstance(obj, str):
-        return obj.replace('${HOME}', home)
+        return obj.replace("${HOME}", home)
     if isinstance(obj, dict):
         return {k: _expand_home(v, home) for k, v in obj.items()}
     if isinstance(obj, list):
@@ -103,11 +125,11 @@ def _deep_merge(base: Dict, override: Dict) -> Dict:
 
 def _sqlite_module_supports_extensions(sqlite_module: Any) -> bool:
     try:
-        conn = sqlite_module.connect(':memory:')
+        conn = sqlite_module.connect(":memory:")
     except Exception:
         return False
     try:
-        return hasattr(conn, 'enable_load_extension')
+        return hasattr(conn, "enable_load_extension")
     finally:
         conn.close()
 
@@ -126,7 +148,7 @@ def _get_sqlite_module() -> Any:
         import pysqlite3 as pysqlite3_sqlite
     except ImportError as exc:
         raise RuntimeError(
-            'sqlite3 extension loading is still unavailable after core dependency bootstrap'
+            "sqlite3 extension loading is still unavailable after core dependency bootstrap"
         ) from exc
 
     _sqlite_module = pysqlite3_sqlite
@@ -142,10 +164,10 @@ def get_connection(config: Dict[str, Any]) -> Any:
         import sqlite_vec
     except ImportError as exc:
         raise RuntimeError(
-            'sqlite-vec is still unavailable after core dependency bootstrap'
+            "sqlite-vec is still unavailable after core dependency bootstrap"
         ) from exc
 
-    db_path = config['sqlite']['dbPath']
+    db_path = config["sqlite"]["dbPath"]
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
     conn = sqlite_module.connect(db_path)
@@ -193,17 +215,19 @@ def get_embedding(text: str):
         if _model is None:
             bootstrap.ensure_embedding_dependencies()
             model_cache = os.path.expanduser(
-                '~/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2'
+                "~/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2"
             )
             if not os.path.exists(model_cache):
-                print("Downloading embedding model (one-time, ~80MB)...", file=sys.stderr)
+                print(
+                    "Downloading embedding model (one-time, ~80MB)...", file=sys.stderr
+                )
             try:
                 from sentence_transformers import SentenceTransformer
             except ImportError as exc:
                 raise RuntimeError(
-                    'sentence-transformers is still unavailable after embedding bootstrap'
+                    "sentence-transformers is still unavailable after embedding bootstrap"
                 ) from exc
-            _model = SentenceTransformer('all-MiniLM-L6-v2')
+            _model = SentenceTransformer("all-MiniLM-L6-v2")
     return _model.encode(text, normalize_embeddings=True).tolist()
 
 
@@ -217,7 +241,7 @@ def upsert_document(
     from datetime import datetime, timezone
 
     embedding = get_embedding(content)
-    created_at = metadata.get('created_at', datetime.now(timezone.utc).isoformat())
+    created_at = metadata.get("created_at", datetime.now(timezone.utc).isoformat())
 
     # Delete-then-insert strategy (virtual tables don't support ON CONFLICT cleanly)
     delete_document(conn, doc_id)
@@ -228,17 +252,18 @@ def upsert_document(
         (
             doc_id,
             content,
-            metadata.get('scope', 'global'),
-            metadata.get('repo', ''),
-            metadata.get('file_path', ''),
-            metadata.get('topic', 'other'),
-            metadata.get('keywords', ''),
+            metadata.get("scope", "global"),
+            metadata.get("repo", ""),
+            metadata.get("file_path", ""),
+            metadata.get("topic", "other"),
+            metadata.get("keywords", ""),
             created_at,
         ),
     )
 
     import struct
-    embedding_blob = struct.pack(f'{len(embedding)}f', *embedding)
+
+    embedding_blob = struct.pack(f"{len(embedding)}f", *embedding)
     conn.execute(
         "INSERT INTO vec_learnings (id, embedding) VALUES (?, ?)",
         (doc_id, embedding_blob),
@@ -276,7 +301,7 @@ def search(
     import struct
 
     query_emb = get_embedding(query_text)
-    embedding_blob = struct.pack(f'{len(query_emb)}f', *query_emb)
+    embedding_blob = struct.pack(f"{len(query_emb)}f", *query_emb)
 
     # Build scope WHERE clause
     scope_conditions = ["l.scope = 'global'"]
@@ -284,7 +309,7 @@ def search(
     for repo in scope_repos:
         scope_conditions.append("(l.scope = 'repo' AND l.repo = ?)")
         params.append(repo)
-    scope_sql = ' OR '.join(scope_conditions)
+    scope_sql = " OR ".join(scope_conditions)
 
     # KNN query joined with learnings for scope filtering
     # sqlite-vec returns distance as vec_distance_cosine
@@ -306,30 +331,30 @@ def search(
     for row in rows:
         # sqlite-vec cosine distance is in [0, 2]; normalize to [0, 1] so
         # existing thresholds (0.5, 0.6, 0.25) work unchanged
-        dist = float(row['distance']) / 2.0
+        dist = float(row["distance"]) / 2.0
         if dist > threshold:
             continue
-        results.append({
-            'id': row['id'],
-            'document': row['content'],
-            'metadata': {
-                'scope': row['scope'],
-                'repo': row['repo'],
-                'file_path': row['file_path'],
-                'topic': row['topic'],
-                'keywords': row['keywords'],
-            },
-            'distance': round(dist, 4),
-        })
+        results.append(
+            {
+                "id": row["id"],
+                "document": row["content"],
+                "metadata": {
+                    "scope": row["scope"],
+                    "repo": row["repo"],
+                    "file_path": row["file_path"],
+                    "topic": row["topic"],
+                    "keywords": row["keywords"],
+                },
+                "distance": round(dist, 4),
+            }
+        )
         if len(results) >= n_results:
             break
 
     return results
 
 
-def get_all_documents(
-    conn: Any, include_content: bool = True
-) -> Dict[str, Any]:
+def get_all_documents(conn: Any, include_content: bool = True) -> Dict[str, Any]:
     """Return all documents in a dict format compatible with consolidate-discovery."""
     rows = conn.execute(
         "SELECT id, content, scope, repo, file_path, topic, keywords FROM learnings"
@@ -340,34 +365,34 @@ def get_all_documents(
     metadatas = []
 
     for row in rows:
-        ids.append(row['id'])
-        documents.append(row['content'] if include_content else '')
-        metadatas.append({
-            'scope': row['scope'],
-            'repo': row['repo'],
-            'file_path': row['file_path'],
-            'topic': row['topic'],
-            'keywords': row['keywords'],
-        })
+        ids.append(row["id"])
+        documents.append(row["content"] if include_content else "")
+        metadatas.append(
+            {
+                "scope": row["scope"],
+                "repo": row["repo"],
+                "file_path": row["file_path"],
+                "topic": row["topic"],
+                "keywords": row["keywords"],
+            }
+        )
 
-    return {'ids': ids, 'documents': documents, 'metadatas': metadatas}
+    return {"ids": ids, "documents": documents, "metadatas": metadatas}
 
 
-def get_documents_by_ids(
-    conn: Any, ids: List[str]
-) -> Dict[str, Any]:
+def get_documents_by_ids(conn: Any, ids: List[str]) -> Dict[str, Any]:
     """Fetch specific documents by ID list."""
     if not ids:
-        return {'ids': [], 'documents': [], 'metadatas': []}
+        return {"ids": [], "documents": [], "metadatas": []}
 
-    placeholders = ','.join('?' * len(ids))
+    placeholders = ",".join("?" * len(ids))
     rows = conn.execute(
         f"SELECT id, content, scope, repo, file_path, topic, keywords FROM learnings WHERE id IN ({placeholders})",
         ids,
     ).fetchall()
 
     # Preserve requested order
-    row_map = {row['id']: row for row in rows}
+    row_map = {row["id"]: row for row in rows}
     result_ids = []
     result_docs = []
     result_metas = []
@@ -375,17 +400,19 @@ def get_documents_by_ids(
     for doc_id in ids:
         if doc_id in row_map:
             row = row_map[doc_id]
-            result_ids.append(row['id'])
-            result_docs.append(row['content'])
-            result_metas.append({
-                'scope': row['scope'],
-                'repo': row['repo'],
-                'file_path': row['file_path'],
-                'topic': row['topic'],
-                'keywords': row['keywords'],
-            })
+            result_ids.append(row["id"])
+            result_docs.append(row["content"])
+            result_metas.append(
+                {
+                    "scope": row["scope"],
+                    "repo": row["repo"],
+                    "file_path": row["file_path"],
+                    "topic": row["topic"],
+                    "keywords": row["keywords"],
+                }
+            )
 
-    return {'ids': result_ids, 'documents': result_docs, 'metadatas': result_metas}
+    return {"ids": result_ids, "documents": result_docs, "metadatas": result_metas}
 
 
 def count_documents(conn: Any) -> int:

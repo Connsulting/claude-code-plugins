@@ -10,9 +10,10 @@ changes (--dry-run, the default) or writes them to disk (--apply).
 from __future__ import annotations
 
 import argparse
+import importlib
+import os
 import re
 import sys
-import os
 from pathlib import Path
 
 # Locate plugin root so lib/ is importable regardless of cwd
@@ -20,9 +21,12 @@ _PLUGIN_ROOT = os.environ.get(
     "CLAUDE_PLUGIN_ROOT",
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
 )
-sys.path.insert(0, _PLUGIN_ROOT)
+if _PLUGIN_ROOT not in sys.path:
+    sys.path.insert(0, _PLUGIN_ROOT)
 
-from lib.topic_mapping import infer_topic_from_tags
+infer_topic_from_tags = importlib.import_module(
+    "lib.topic_mapping"
+).infer_topic_from_tags
 
 
 def extract_field(content: str, field: str) -> str | None:
@@ -68,9 +72,7 @@ def insert_topic_line(content: str, topic: str) -> str:
     return topic_line + "\n" + content
 
 
-def process_file(
-    file_path: Path, dry_run: bool
-) -> tuple[bool, str | None]:
+def process_file(file_path: Path, dry_run: bool) -> tuple[bool, str | None]:
     """Process a single file.
 
     Returns (changed, topic) where changed=True means a topic was added.
@@ -123,9 +125,7 @@ def main() -> None:
         print(f"[ERROR] Directory not found: {learnings_dir}")
         sys.exit(1)
 
-    files = sorted(
-        f for f in learnings_dir.glob("*.md") if f.name != "MANIFEST.md"
-    )
+    files = sorted(f for f in learnings_dir.glob("*.md") if f.name != "MANIFEST.md")
 
     if not files:
         print(f"No .md files found in {learnings_dir}")
@@ -151,7 +151,9 @@ def main() -> None:
         else:
             skipped += 1
 
-    print(f"\nSummary: {changed} files {'would be ' if dry_run else ''}updated, {skipped} already have a topic.")
+    print(
+        f"\nSummary: {changed} files {'would be ' if dry_run else ''}updated, {skipped} already have a topic."
+    )
     if dry_run and changed > 0:
         print("Run with --apply to write changes.")
 

@@ -14,9 +14,9 @@ import sys
 
 def is_real_user_prompt(entry: dict) -> bool:
     """Check if entry is a real user prompt (not a tool_result)."""
-    if entry.get('type') != 'user':
+    if entry.get("type") != "user":
         return False
-    content = entry.get('message', {}).get('content')
+    content = entry.get("message", {}).get("content")
     # Real user prompts have string content, tool results have array content
     return isinstance(content, str)
 
@@ -24,7 +24,7 @@ def is_real_user_prompt(entry: dict) -> bool:
 def extract_context(transcript_path: str, max_chars: int = 3000) -> str:
     """Extract text content from transcript since last user message."""
     try:
-        with open(transcript_path, 'r') as f:
+        with open(transcript_path, "r") as f:
             lines = f.readlines()
     except (FileNotFoundError, PermissionError):
         return ""
@@ -40,7 +40,7 @@ def extract_context(transcript_path: str, max_chars: int = 3000) -> str:
         except json.JSONDecodeError:
             continue
 
-        entry_type = entry.get('type')
+        entry_type = entry.get("type")
 
         # Check for real user prompt (not tool_result)
         if is_real_user_prompt(entry):
@@ -51,7 +51,7 @@ def extract_context(transcript_path: str, max_chars: int = 3000) -> str:
             continue
 
         # Skip non-assistant types (progress, file-history-snapshot, tool results, etc)
-        if entry_type != 'assistant':
+        if entry_type != "assistant":
             continue
 
         # Only collect after we've passed the current user prompt
@@ -59,13 +59,13 @@ def extract_context(transcript_path: str, max_chars: int = 3000) -> str:
             continue
 
         # Extract text from assistant messages
-        message = entry.get('message', {})
-        content = message.get('content', [])
+        message = entry.get("message", {})
+        content = message.get("content", [])
 
         if isinstance(content, list):
             for item in content:
-                if item.get('type') == 'text':
-                    text = item.get('text', '')
+                if item.get("type") == "text":
+                    text = item.get("text", "")
                     if text and total_chars + len(text) <= max_chars:
                         context_parts.append(text)
                         total_chars += len(text)

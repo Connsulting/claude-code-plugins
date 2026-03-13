@@ -6,23 +6,20 @@ real SQLite/sqlite-vec/fts5, real indexing, and real reranking logic.
 No internal modules are mocked.
 """
 
-import json
-import os
+import importlib
+import importlib.util
 import sys
-import tempfile
-import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List
 
 import pytest
 
 # Ensure plugin root is on path so lib/ and scripts/ are importable
 PLUGIN_ROOT = str(Path(__file__).parent.parent)
-sys.path.insert(0, PLUGIN_ROOT)
+if PLUGIN_ROOT not in sys.path:
+    sys.path.insert(0, PLUGIN_ROOT)
 
-import importlib.util
-
-import lib.db as db
+db = importlib.import_module("lib.db")
 
 # Import search-learnings.py via spec because the hyphen prevents normal import
 _spec = importlib.util.spec_from_file_location(
@@ -41,6 +38,7 @@ hybrid_rerank = _search_mod.hybrid_rerank
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture(scope="module")
 def embedding_model():
@@ -82,7 +80,9 @@ def _insert(conn: Any, doc_id: str, content: str, scope: str = "global") -> None
     )
 
 
-def _search_raw(config: Dict, conn: Any, query: str, n: int = 20) -> List[Dict[str, Any]]:
+def _search_raw(
+    config: Dict, conn: Any, query: str, n: int = 20
+) -> List[Dict[str, Any]]:
     """KNN search returning raw results (before reranking)."""
     return db.search(conn, query, scope_repos=[], n_results=n, threshold=1.0)
 
@@ -109,19 +109,26 @@ def _full_search(
 
     # Keyword overlap floor (mirrors search-learnings.py)
     reranked = [
-        r for r in reranked
+        r
+        for r in reranked
         if r.get("keyword_overlap", 0) > 0 or r.get("original_distance", 1.0) < 0.25
     ]
 
     high_confidence = [r for r in reranked if r["distance"] < high_threshold]
-    possibly_relevant = [r for r in reranked if high_threshold <= r["distance"] < possible_threshold]
+    possibly_relevant = [
+        r for r in reranked if high_threshold <= r["distance"] < possible_threshold
+    ]
 
     if peek:
         max_results = 5
         peek_results = high_confidence[:max_results]
         if len(peek_results) < max_results:
             peek_results.extend(possibly_relevant[: max_results - len(peek_results)])
-        return {"peek_results": peek_results, "high_confidence": high_confidence, "possibly_relevant": possibly_relevant}
+        return {
+            "peek_results": peek_results,
+            "high_confidence": high_confidence,
+            "possibly_relevant": possibly_relevant,
+        }
 
     return {
         "high_confidence": high_confidence,
@@ -184,6 +191,7 @@ COMMAND_LEARNING = (
 # Test 1: Relevant results ranked above irrelevant
 # ---------------------------------------------------------------------------
 
+
 def test_relevant_results_ranked_above_irrelevant(tmp_db):
     """
     Search 'slash command pdf layout' must return the PDF learning and must
@@ -202,7 +210,7 @@ def test_relevant_results_ranked_above_irrelevant(tmp_db):
         f"Expected PDF learning in results but got ids: {all_ids}"
     )
     assert GRAFANA_LEARNING[0] not in all_ids, (
-        f"Grafana learning should be excluded (zero keyword overlap with 'slash command pdf layout')"
+        "Grafana learning should be excluded (zero keyword overlap with 'slash command pdf layout')"
     )
 
 
@@ -210,12 +218,17 @@ def test_relevant_results_ranked_above_irrelevant(tmp_db):
 # Test 2: High confidence threshold filters weak matches
 # ---------------------------------------------------------------------------
 
+
 def test_high_confidence_threshold_filters_weak_matches(tmp_db):
     """
     All results in high_confidence bucket must have adjusted distance < 0.40.
     """
     config, conn = tmp_db
-    for doc_id, content in [PDF_LEARNING, PYTHON_ASYNC_LEARNING, REACT_TESTING_LEARNING]:
+    for doc_id, content in [
+        PDF_LEARNING,
+        PYTHON_ASYNC_LEARNING,
+        REACT_TESTING_LEARNING,
+    ]:
         _insert(conn, doc_id, content)
 
     results = _full_search(config, conn, "slash command pdf layout")
@@ -231,12 +244,18 @@ def test_high_confidence_threshold_filters_weak_matches(tmp_db):
 # Test 3: Possibly relevant threshold boundary
 # ---------------------------------------------------------------------------
 
+
 def test_possibly_relevant_threshold_boundary(tmp_db):
     """
     Results in possibly_relevant bucket must have distance in [0.40, 0.55).
     """
     config, conn = tmp_db
-    for doc_id, content in [PDF_LEARNING, PYTHON_ASYNC_LEARNING, REACT_TESTING_LEARNING, COMMAND_LEARNING]:
+    for doc_id, content in [
+        PDF_LEARNING,
+        PYTHON_ASYNC_LEARNING,
+        REACT_TESTING_LEARNING,
+        COMMAND_LEARNING,
+    ]:
         _insert(conn, doc_id, content)
 
     results = _full_search(config, conn, "pdf command slash")
@@ -252,6 +271,7 @@ def test_possibly_relevant_threshold_boundary(tmp_db):
 # Test 4: Keyword overlap floor removes zero-overlap results
 # ---------------------------------------------------------------------------
 
+
 def test_keyword_overlap_floor_removes_zero_overlap(tmp_db):
     """
     A document with moderate semantic similarity but zero keyword overlap should
@@ -261,7 +281,12 @@ def test_keyword_overlap_floor_removes_zero_overlap(tmp_db):
     original_distance >= 0.25.
     """
     config, conn = tmp_db
-    for doc_id, content in [PDF_LEARNING, GRAFANA_LEARNING, PYTHON_ASYNC_LEARNING, REACT_TESTING_LEARNING]:
+    for doc_id, content in [
+        PDF_LEARNING,
+        GRAFANA_LEARNING,
+        PYTHON_ASYNC_LEARNING,
+        REACT_TESTING_LEARNING,
+    ]:
         _insert(conn, doc_id, content)
 
     results = _full_search(config, conn, "slash command pdf layout")
@@ -281,6 +306,7 @@ def test_keyword_overlap_floor_removes_zero_overlap(tmp_db):
 # ---------------------------------------------------------------------------
 # Test 5: Keyword boost improves ranking
 # ---------------------------------------------------------------------------
+
 
 def test_keyword_boost_improves_ranking(tmp_db):
     """
@@ -316,7 +342,9 @@ def test_keyword_boost_improves_ranking(tmp_db):
 
     assert kw_result is not None, "keyword-overlap doc not found in results"
 
-    assert no_kw_result is not None, "Expected no-overlap document in results for ranking comparison"
+    assert no_kw_result is not None, (
+        "Expected no-overlap document in results for ranking comparison"
+    )
     assert kw_result["distance"] < no_kw_result["distance"], (
         f"Keyword-overlap doc (dist={kw_result['distance']}) should rank higher than "
         f"no-overlap doc (dist={no_kw_result['distance']})"
@@ -331,6 +359,7 @@ def test_keyword_boost_improves_ranking(tmp_db):
 # ---------------------------------------------------------------------------
 # Test 6: FTS5 boost helps stemmed matches
 # ---------------------------------------------------------------------------
+
 
 def test_fts5_boost_helps_stemmed_matches(tmp_db):
     """
@@ -363,7 +392,6 @@ def test_fts5_boost_helps_stemmed_matches(tmp_db):
 
     stem_raw = next((r for r in raw if r["id"] == stem_doc_id), None)
     assert stem_raw is not None, "stem doc not found in raw KNN results"
-    original_distance = stem_raw["distance"]
 
     # Rerank with FTS5 boost
     reranked_with_fts = hybrid_rerank(
@@ -375,7 +403,9 @@ def test_fts5_boost_helps_stemmed_matches(tmp_db):
     )
 
     with_fts = next((r for r in reranked_with_fts if r["id"] == stem_doc_id), None)
-    without_fts = next((r for r in reranked_without_fts if r["id"] == stem_doc_id), None)
+    without_fts = next(
+        (r for r in reranked_without_fts if r["id"] == stem_doc_id), None
+    )
 
     assert with_fts is not None
     assert without_fts is not None
@@ -386,13 +416,14 @@ def test_fts5_boost_helps_stemmed_matches(tmp_db):
         f"FTS5 boost should lower distance: with={with_fts['distance']} without={without_fts['distance']}"
     )
     assert abs(with_fts["distance"] - (without_fts["distance"] - 0.05)) < 0.001, (
-        f"Expected 0.05 reduction from FTS5 boost"
+        "Expected 0.05 reduction from FTS5 boost"
     )
 
 
 # ---------------------------------------------------------------------------
 # Test 7: Very high similarity bypasses keyword floor
 # ---------------------------------------------------------------------------
+
 
 def test_very_high_similarity_bypasses_keyword_floor(tmp_db):
     """
@@ -431,7 +462,8 @@ def test_very_high_similarity_bypasses_keyword_floor(tmp_db):
 
     # Apply the keyword floor filter (same logic as search-learnings.py)
     filtered = [
-        r for r in results_before_filter
+        r
+        for r in results_before_filter
         if r.get("keyword_overlap", 0) > 0 or r.get("original_distance", 1.0) < 0.25
     ]
 
@@ -448,13 +480,20 @@ def test_very_high_similarity_bypasses_keyword_floor(tmp_db):
 # Test 8: Peek mode respects new thresholds
 # ---------------------------------------------------------------------------
 
+
 def test_peek_mode_respects_new_thresholds(tmp_db):
     """
     Peek mode results must only contain items that passed the tightened thresholds
     (high_confidence < 0.40, possibly_relevant < 0.55). No result above 0.55 should appear.
     """
     config, conn = tmp_db
-    for doc_id, content in [PDF_LEARNING, GRAFANA_LEARNING, PYTHON_ASYNC_LEARNING, REACT_TESTING_LEARNING, COMMAND_LEARNING]:
+    for doc_id, content in [
+        PDF_LEARNING,
+        GRAFANA_LEARNING,
+        PYTHON_ASYNC_LEARNING,
+        REACT_TESTING_LEARNING,
+        COMMAND_LEARNING,
+    ]:
         _insert(conn, doc_id, content)
 
     results = _full_search(config, conn, "slash command pdf layout", peek=True)
