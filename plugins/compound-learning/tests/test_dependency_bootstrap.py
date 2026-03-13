@@ -144,6 +144,36 @@ def test_stale_install_state_becomes_failed_and_can_recover(load_bootstrap, tmp_
     assert recovered_status["dependencies"][bootstrap.EMBEDDING]["state"] == bootstrap.STATE_READY
 
 
+def test_embedding_manual_install_message_uses_embedding_packages_when_no_installer(
+    load_bootstrap,
+    tmp_path,
+    monkeypatch,
+):
+    bootstrap = load_bootstrap(tmp_path)
+
+    monkeypatch.setattr(bootstrap, "dependency_ready", lambda dependency: False)
+    monkeypatch.setattr(
+        bootstrap,
+        "missing_packages",
+        lambda dependency: ["sentence-transformers"] if dependency == bootstrap.EMBEDDING else [],
+    )
+
+    def fake_python_has_pip():
+        return False
+
+    fake_python_has_pip.cache_clear = lambda: None
+
+    monkeypatch.setattr(bootstrap, "_python_has_pip", fake_python_has_pip)
+    monkeypatch.setattr(bootstrap.shutil, "which", lambda name: None)
+
+    with pytest.raises(bootstrap.BootstrapError) as exc_info:
+        bootstrap.ensure_embedding_dependencies()
+
+    assert "sentence-transformers" in str(exc_info.value)
+    assert "sqlite-vec" not in str(exc_info.value)
+    assert "pysqlite3" not in str(exc_info.value)
+
+
 def test_prepare_embedding_for_auto_peek_is_non_blocking(load_bootstrap, tmp_path, monkeypatch):
     bootstrap = load_bootstrap(tmp_path)
     ready = {

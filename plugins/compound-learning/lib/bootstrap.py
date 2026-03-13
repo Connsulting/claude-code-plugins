@@ -330,7 +330,7 @@ def _wait_for_dependency(dependency: str, timeout_seconds: int) -> BootstrapResu
 
 
 def _install_packages(dependency: str, packages: list[str]) -> str:
-    backend_name, install_cmd = _build_install_command(packages)
+    backend_name, install_cmd = _build_install_command(dependency, packages)
     log_activity(
         f"[bootstrap] Installing {dependency} dependencies via {backend_name}: {', '.join(packages)}"
     )
@@ -352,7 +352,7 @@ def _install_packages(dependency: str, packages: list[str]) -> str:
     return backend_name
 
 
-def _build_install_command(packages: list[str]) -> tuple[str, list[str]]:
+def _build_install_command(dependency: str, packages: list[str]) -> tuple[str, list[str]]:
     target_dir = str(_ensure_directory(managed_site_dir(), "Managed site-packages"))
 
     if _python_has_pip():
@@ -381,7 +381,7 @@ def _build_install_command(packages: list[str]) -> tuple[str, list[str]]:
 
     raise BootstrapError(
         _manual_install_message(
-            CORE,
+            dependency,
             "Neither pip nor uv is available for automatic dependency bootstrap.",
         )
     )
