@@ -7,7 +7,7 @@ A learning compounding system for Claude Code that extracts and indexes knowledg
 - Python 3.x with pip
 - GitHub CLI (`gh`) - optional, required for `/pr-learnings`
 
-Python dependencies (`pysqlite3-binary`, `sqlite-vec`, `sentence-transformers`) are auto-installed on session start via the `SessionStart` hook.
+On `SessionStart`, the plugin only ensures the lightweight core runtime needed for SQLite + `sqlite-vec`. Embedding dependencies such as `sentence-transformers` stay lazy and install on first semantic use or in the background when auto-peek starts warming them.
 
 ## Installation
 
@@ -21,14 +21,18 @@ Python dependencies (`pysqlite3-binary`, `sqlite-vec`, `sentence-transformers`) 
 ### Manual Installation
 
 1. Clone or download this plugin to your Claude plugins directory
-2. Python dependencies install automatically on first session start, or install manually:
+2. Core dependencies install automatically on first session start, or install them manually:
 ```bash
-pip install pysqlite3-binary sqlite-vec sentence-transformers
+pip install --target ~/.claude/plugins/compound-learning/site-packages pysqlite3-binary sqlite-vec
+```
+3. Install embedding dependencies only if you want to pre-warm semantic search/indexing instead of letting the plugin do it lazily:
+```bash
+pip install --target ~/.claude/plugins/compound-learning/site-packages sentence-transformers
 ```
 
 ### Post-Installation
 
-Run `/index-learnings` to build the index. The SQLite database is created automatically and the embedding model (~80MB) downloads on first use.
+Run `/index-learnings` to build the index. The SQLite database is created automatically, and the embedding model (~80MB) downloads on first semantic use.
 
 ## Configuration
 
@@ -155,6 +159,12 @@ How it works:
 
 **Note:** Extraction uses minimal permissions (`Read`, `Write`, `Bash(mkdir:*)`) and skips trivial sessions (<20 transcript lines).
 
+### Startup Dependency Bootstrap
+
+- `SessionStart` only performs foreground bootstrap for the `core` dependency group (`sqlite-vec` plus SQLite extension loading support).
+- Warm sessions skip the foreground bootstrap when `~/.claude/plugins/compound-learning/bootstrap-status.json` already marks `core` as `ready` and runtime checks still pass.
+- Embedding dependencies remain lazy. `auto-peek` can start them in the background, and the first embedding-heavy command will wait only if that runtime is still unavailable.
+
 ## Architecture
 
 ### Components
@@ -214,6 +224,11 @@ Use topic + context: "authentication JWT refresh" not "implement login feature"
 **Search returns no results:**
 - Check `distanceThreshold` setting (try increasing to 0.7)
 - Run `/index-learnings` to ensure learnings are indexed
+
+**Bootstrap state is stuck or corrupt:**
+- Remove `~/.claude/plugins/compound-learning/bootstrap-status.json`
+- Optionally clear `~/.claude/plugins/compound-learning/site-packages/` if you want a clean dependency reinstall
+- Re-run Claude, or run `python3 plugins/compound-learning/lib/bootstrap.py ensure core`
 
 **Hook activity log:**
 - Hook activity is logged to `~/.claude/plugins/compound-learning/activity.log`

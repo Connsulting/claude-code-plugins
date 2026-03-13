@@ -37,6 +37,27 @@ if [ ${#PROMPT} -lt 10 ]; then
   exit 0
 fi
 
+# Keep prompt-submit fast: start heavy embedding bootstrap in the background
+# and skip semantic peek work until the dependency is ready.
+BOOTSTRAP_JSON=$(python3 "${CLAUDE_PLUGIN_ROOT}/lib/bootstrap.py" ensure embedding --background --json 2>/dev/null)
+BOOTSTRAP_STATE=$(echo "$BOOTSTRAP_JSON" | jq -r '.state // empty' 2>/dev/null)
+
+if [ "$BOOTSTRAP_STATE" = "started" ]; then
+  log_activity "[auto-peek] embedding bootstrap started in background; skipping semantic peek"
+  exit 0
+fi
+
+if [ "$BOOTSTRAP_STATE" = "installing" ]; then
+  log_activity "[auto-peek] embedding bootstrap still running; skipping semantic peek"
+  exit 0
+fi
+
+if [ "$BOOTSTRAP_STATE" = "failed" ] || [ -z "$BOOTSTRAP_STATE" ]; then
+  BOOTSTRAP_ERROR=$(echo "$BOOTSTRAP_JSON" | jq -r '.error // .message // "bootstrap status unavailable"' 2>/dev/null)
+  log_activity "[auto-peek] embedding bootstrap unavailable; skipping semantic peek: $BOOTSTRAP_ERROR"
+  exit 0
+fi
+
 # Expand ~ in transcript path
 TRANSCRIPT="${TRANSCRIPT/#\~/$HOME}"
 
