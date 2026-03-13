@@ -1,0 +1,717 @@
+#!/usr/bin/env python3
+"""
+Shared dependency bootstrap helpers for the compound-learning plugin.
+
+This module centralizes dependency detection, installation, and status/logging
+for both shell hooks and Python entry points.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import importlib.util
+import json
+import os
+import platform
+import shutil
+import sqlite3 as stdlib_sqlite3
+import subprocess
+import sys
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
+CORE = "core"
+EMBEDDING = "embedding"
+
+STATE_READY = "ready"
+STATE_INSTALLING = "installing"
+STATE_FAILED = "failed"
+STATE_MISSING = "missing"
+
+DEFAULT_WAIT_TIMEOUT = 900
+
+
+class BootstrapError(RuntimeError):
+    """Raised when dependency bootstrap fails."""
+
+
+@dataclass
+class BootstrapResult:
+    dependency: str
+    state: str
+    changed: bool = False
+    message: str = ""
+    backend: str | None = None
+    pid: int | None = None
+    error: str | None = None
+    warning: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "dependency": self.dependency,
+            "state": self.state,
+            "changed": self.changed,
+            "message": self.message,
+        }
+        if self.backend:
+            data["backend"] = self.backend
+        if self.pid:
+            data["pid"] = self.pid
+        if self.error:
+            data["error"] = self.error
+        if self.warning:
+            data["warning"] = self.warning
+        return data
+
+
+def state_dir() -> Path:
+    return Path.home() / ".claude" / "state" / "compound-learning"
+
+
+def legacy_state_dir() -> Path:
+    return Path.home() / ".claude" / "plugins" / "compound-learning"
+
+
+def managed_site_dir() -> Path:
+    return state_dir() / "site-packages"
+
+
+def log_file() -> Path:
+    return state_dir() / "activity.log"
+
+
+def status_file() -> Path:
+    return state_dir() / "bootstrap-status.json"
+
+
+def lock_file() -> Path:
+    return state_dir() / "bootstrap-status.lock"
+
+
+def ensure_managed_site_dir_on_path() -> None:
+    site_dir = str(managed_site_dir())
+    if site_dir not in sys.path:
+        sys.path.insert(0, site_dir)
+
+
+def log_activity(message: str) -> None:
+    _ensure_directory(state_dir(), "Runtime state")
+    with open(log_file(), "a", encoding="utf-8") as handle:
+        handle.write(f"[{_timestamp()}] {message}\n")
+
+
+def ensure_core_dependencies(wait: bool = True) -> BootstrapResult:
+    return ensure_dependency(CORE, wait=wait, background=False)
+
+
+def ensure_embedding_dependencies(
+    wait: bool = True,
+    background: bool = False,
+) -> BootstrapResult:
+    return ensure_dependency(EMBEDDING, wait=wait, background=background)
+
+
+def prepare_embedding_for_auto_peek() -> BootstrapResult:
+    return ensure_embedding_dependencies(wait=False, background=True)
+
+
+def dependency_ready(dependency: str) -> bool:
+    ensure_managed_site_dir_on_path()
+    if dependency == CORE:
+        return _core_runtime_ready()
+    if dependency == EMBEDDING:
+        return _module_available("sentence_transformers")
+    raise ValueError(f"Unknown dependency group: {dependency}")
+
+
+def missing_packages(dependency: str) -> list[str]:
+    ensure_managed_site_dir_on_path()
+    if dependency == CORE:
+        packages: list[str] = []
+        if not _sqlite_runtime_ready():
+            packages.append(_pysqlite_package_name())
+        if not _module_available("sqlite_vec"):
+            packages.append("sqlite-vec")
+        return packages
+    if dependency == EMBEDDING:
+        return [] if _module_available("sentence_transformers") else ["sentence-transformers"]
+    raise ValueError(f"Unknown dependency group: {dependency}")
+
+
+def read_status() -> dict[str, Any]:
+    with _locked_status() as status:
+        return json.loads(json.dumps(status))
+
+
+def ensure_dependency(
+    dependency: str,
+    wait: bool = True,
+    background: bool = False,
+    timeout_seconds: int = DEFAULT_WAIT_TIMEOUT,
+) -> BootstrapResult:
+    ensure_managed_site_dir_on_path()
+
+    if dependency_ready(dependency):
+        with _locked_status() as status:
+            dep_state = status["dependencies"][dependency]
+            dep_state.update(
+                {
+                    "state": STATE_READY,
+                    "updated_at": _timestamp(),
+                    "finished_at": dep_state.get("finished_at") or _timestamp(),
+                    "pid": None,
+                    "error": None,
+                }
+            )
+            warning = status.get("legacy_path_warning")
+        return BootstrapResult(
+            dependency=dependency,
+            state=STATE_READY,
+            message=f"{dependency} dependencies are ready",
+            warning=warning,
+        )
+
+    wait_for_existing = False
+    warning: str | None = None
+    with _locked_status() as status:
+        dep_state = status["dependencies"][dependency]
+        warning = status.get("legacy_path_warning")
+
+        if dep_state["state"] == STATE_READY and dependency_ready(dependency):
+            return BootstrapResult(
+                dependency=dependency,
+                state=STATE_READY,
+                message=f"{dependency} dependencies are ready",
+                warning=warning,
+            )
+
+        owner_pid = dep_state.get("pid")
+        if dep_state["state"] == STATE_INSTALLING and owner_pid == os.getpid():
+            pass
+        elif dep_state["state"] == STATE_INSTALLING:
+            if background or not wait:
+                return BootstrapResult(
+                    dependency=dependency,
+                    state=STATE_INSTALLING,
+                    message=f"{dependency} dependency bootstrap is already running",
+                    pid=owner_pid,
+                    warning=warning,
+                )
+            wait_for_existing = True
+        elif background:
+            child_pid = _spawn_background_install(dependency)
+            dep_state.update(
+                {
+                    "state": STATE_INSTALLING,
+                    "updated_at": _timestamp(),
+                    "started_at": dep_state.get("started_at") or _timestamp(),
+                    "finished_at": None,
+                    "pid": child_pid,
+                    "error": None,
+                }
+            )
+            log_activity(
+                f"[bootstrap] Started background install for {dependency} dependencies (pid {child_pid})"
+            )
+            return BootstrapResult(
+                dependency=dependency,
+                state="started",
+                changed=True,
+                message=f"Started background install for {dependency} dependencies",
+                pid=child_pid,
+                warning=warning,
+            )
+        else:
+            dep_state.update(
+                {
+                    "state": STATE_INSTALLING,
+                    "updated_at": _timestamp(),
+                    "started_at": dep_state.get("started_at") or _timestamp(),
+                    "finished_at": None,
+                    "pid": os.getpid(),
+                    "error": None,
+                }
+            )
+
+    if wait_for_existing:
+        return _wait_for_dependency(dependency, timeout_seconds)
+
+    packages = missing_packages(dependency)
+    if not packages and dependency_ready(dependency):
+        return BootstrapResult(
+            dependency=dependency,
+            state=STATE_READY,
+            message=f"{dependency} dependencies are ready",
+            warning=warning,
+        )
+    if not packages:
+        error = _manual_install_message(
+            dependency,
+            "Automatic dependency detection found no installable packages for this missing runtime.",
+        )
+        _mark_failed(dependency, error)
+        raise BootstrapError(error)
+
+    backend: str | None = None
+    try:
+        backend = _install_packages(dependency, packages)
+        ensure_managed_site_dir_on_path()
+        if not dependency_ready(dependency):
+            raise BootstrapError(
+                _manual_install_message(
+                    dependency,
+                    f"{dependency} packages installed via {backend}, but the runtime is still unavailable.",
+                )
+            )
+    except BootstrapError as exc:
+        _mark_failed(dependency, str(exc))
+        log_activity(f"[bootstrap] Failed to install {dependency} dependencies: {exc}")
+        raise
+
+    with _locked_status() as status:
+        dep_state = status["dependencies"][dependency]
+        dep_state.update(
+            {
+                "state": STATE_READY,
+                "updated_at": _timestamp(),
+                "finished_at": _timestamp(),
+                "pid": None,
+                "error": None,
+            }
+        )
+        warning = status.get("legacy_path_warning")
+    log_activity(
+        f"[bootstrap] {dependency} dependencies are ready"
+        + (f" via {backend}" if backend else "")
+    )
+    return BootstrapResult(
+        dependency=dependency,
+        state=STATE_READY,
+        changed=True,
+        message=f"{dependency} dependencies are ready",
+        backend=backend,
+        warning=warning,
+    )
+
+
+def _wait_for_dependency(dependency: str, timeout_seconds: int) -> BootstrapResult:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        status = read_status()
+        dep_state = status["dependencies"][dependency]
+        warning = status.get("legacy_path_warning")
+        if dep_state["state"] == STATE_READY or dependency_ready(dependency):
+            return BootstrapResult(
+                dependency=dependency,
+                state=STATE_READY,
+                message=f"{dependency} dependencies are ready",
+                warning=warning,
+            )
+        if dep_state["state"] == STATE_FAILED:
+            error = dep_state.get("error") or _manual_install_message(
+                dependency,
+                f"{dependency} dependency bootstrap failed.",
+            )
+            raise BootstrapError(error)
+        time.sleep(1)
+
+    error = _manual_install_message(
+        dependency,
+        f"Timed out waiting for {dependency} dependency bootstrap to finish.",
+    )
+    _mark_failed(dependency, error)
+    raise BootstrapError(error)
+
+
+def _install_packages(dependency: str, packages: list[str]) -> str:
+    backend_name, install_cmd = _build_install_command(packages)
+    log_activity(
+        f"[bootstrap] Installing {dependency} dependencies via {backend_name}: {', '.join(packages)}"
+    )
+    _ensure_directory(state_dir(), "Runtime state")
+    with open(log_file(), "a", encoding="utf-8") as handle:
+        process = subprocess.run(
+            install_cmd,
+            stdout=handle,
+            stderr=handle,
+            check=False,
+        )
+    if process.returncode != 0:
+        raise BootstrapError(
+            _manual_install_message(
+                dependency,
+                f"{backend_name} exited with code {process.returncode} while installing {', '.join(packages)}.",
+            )
+        )
+    return backend_name
+
+
+def _build_install_command(packages: list[str]) -> tuple[str, list[str]]:
+    target_dir = str(_ensure_directory(managed_site_dir(), "Managed site-packages"))
+
+    if _python_has_pip():
+        command = [sys.executable, "-m", "pip", "install", "--quiet", "--target", target_dir]
+        return "pip", command + packages
+
+    uv_path = shutil.which("uv")
+    if uv_path:
+        command = [
+            uv_path,
+            "pip",
+            "install",
+            "--python",
+            sys.executable,
+            "--quiet",
+            "--no-progress",
+            "--target",
+            target_dir,
+        ]
+        return "uv", command + packages
+
+    pip_path = shutil.which("pip")
+    if pip_path:
+        command = [pip_path, "install", "--quiet", "--target", target_dir]
+        return "pip", command + packages
+
+    raise BootstrapError(
+        _manual_install_message(
+            CORE,
+            "Neither pip nor uv is available for automatic dependency bootstrap.",
+        )
+    )
+
+
+def _spawn_background_install(dependency: str) -> int:
+    _ensure_directory(state_dir(), "Runtime state")
+    with open(log_file(), "a", encoding="utf-8") as handle:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "ensure",
+                dependency,
+                "--foreground",
+                "--quiet",
+            ],
+            stdout=handle,
+            stderr=handle,
+            start_new_session=True,
+            close_fds=True,
+        )
+    return process.pid
+
+
+def _mark_failed(dependency: str, error: str) -> None:
+    with _locked_status() as status:
+        dep_state = status["dependencies"][dependency]
+        dep_state.update(
+            {
+                "state": STATE_FAILED,
+                "updated_at": _timestamp(),
+                "finished_at": _timestamp(),
+                "pid": None,
+                "error": error,
+            }
+        )
+
+
+@contextmanager
+def _locked_status() -> Any:
+    _ensure_directory(state_dir(), "Runtime state")
+    with open(lock_file(), "a+", encoding="utf-8") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        status = _load_status_unlocked()
+        if _normalize_status_unlocked(status):
+            _write_status_unlocked(status)
+        try:
+            yield status
+        finally:
+            _write_status_unlocked(status)
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _load_status_unlocked() -> dict[str, Any]:
+    path = status_file()
+    if not path.exists():
+        return {"dependencies": _default_dependencies_status()}
+
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            status = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        status = {"dependencies": _default_dependencies_status()}
+
+    status.setdefault("dependencies", {})
+    for dependency, dep_state in _default_dependencies_status().items():
+        status["dependencies"].setdefault(dependency, dep_state)
+    return status
+
+
+def _write_status_unlocked(status: dict[str, Any]) -> None:
+    path = status_file()
+    _ensure_directory(path.parent, "Runtime state")
+    tmp_path = path.with_suffix(".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as handle:
+        json.dump(status, handle, indent=2, sort_keys=True)
+    os.replace(tmp_path, path)
+
+
+def _default_dependencies_status() -> dict[str, dict[str, Any]]:
+    timestamp = _timestamp()
+    return {
+        CORE: {
+            "state": STATE_READY if dependency_ready(CORE) else STATE_MISSING,
+            "updated_at": timestamp,
+            "started_at": None,
+            "finished_at": None,
+            "pid": None,
+            "error": None,
+        },
+        EMBEDDING: {
+            "state": STATE_READY if dependency_ready(EMBEDDING) else STATE_MISSING,
+            "updated_at": timestamp,
+            "started_at": None,
+            "finished_at": None,
+            "pid": None,
+            "error": None,
+        },
+    }
+
+
+def _normalize_status_unlocked(status: dict[str, Any]) -> bool:
+    changed = False
+
+    warning = _legacy_path_warning()
+    if warning:
+        if status.get("legacy_path_warning") != warning:
+            status["legacy_path_warning"] = warning
+            changed = True
+    elif "legacy_path_warning" in status:
+        status.pop("legacy_path_warning", None)
+        changed = True
+
+    for dependency in (CORE, EMBEDDING):
+        dep_state = status["dependencies"][dependency]
+        runtime_ready = dependency_ready(dependency)
+        current_state = dep_state.get("state", STATE_MISSING)
+
+        if runtime_ready and current_state != STATE_READY:
+            dep_state.update(
+                {
+                    "state": STATE_READY,
+                    "updated_at": _timestamp(),
+                    "finished_at": dep_state.get("finished_at") or _timestamp(),
+                    "pid": None,
+                    "error": None,
+                }
+            )
+            changed = True
+            continue
+
+        if runtime_ready or current_state != STATE_INSTALLING:
+            if not runtime_ready and current_state == STATE_READY:
+                dep_state.update(
+                    {
+                        "state": STATE_MISSING,
+                        "updated_at": _timestamp(),
+                        "finished_at": None,
+                        "pid": None,
+                        "error": None,
+                    }
+                )
+                changed = True
+            continue
+
+        if dep_state.get("pid") and _pid_is_running(dep_state["pid"]):
+            continue
+
+        dep_state.update(
+            {
+                "state": STATE_FAILED,
+                "updated_at": _timestamp(),
+                "finished_at": _timestamp(),
+                "pid": None,
+                "error": dep_state.get("error")
+                or _manual_install_message(
+                    dependency,
+                    f"{dependency} dependency bootstrap exited before the runtime became available.",
+                ),
+            }
+        )
+        changed = True
+    return changed
+
+
+@lru_cache(maxsize=1)
+def _python_has_pip() -> bool:
+    result = subprocess.run(
+        [sys.executable, "-m", "pip", "--version"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def _module_available(module_name: str) -> bool:
+    return importlib.util.find_spec(module_name) is not None
+
+
+def _core_runtime_ready() -> bool:
+    return _module_available("sqlite_vec") and _sqlite_runtime_ready()
+
+
+def _sqlite_runtime_ready() -> bool:
+    if _sqlite_module_supports_extensions(stdlib_sqlite3):
+        return True
+    if not _module_available("pysqlite3"):
+        return False
+    try:
+        import pysqlite3 as pysqlite3_sqlite
+    except ImportError:
+        return False
+    return _sqlite_module_supports_extensions(pysqlite3_sqlite)
+
+
+def _sqlite_module_supports_extensions(sqlite_module: Any) -> bool:
+    try:
+        conn = sqlite_module.connect(":memory:")
+    except Exception:
+        return False
+    try:
+        return hasattr(conn, "enable_load_extension")
+    finally:
+        conn.close()
+
+
+def _pysqlite_package_name() -> str:
+    machine = platform.machine().lower()
+    if machine.startswith("arm") or machine == "aarch64":
+        return "pysqlite3"
+    return "pysqlite3-binary"
+
+
+def _pid_is_running(pid: int | None) -> bool:
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return False
+    return True
+
+
+def _timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _manual_install_message(dependency: str, detail: str) -> str:
+    packages = missing_packages(dependency)
+    package_list = packages or (
+        ["sentence-transformers"]
+        if dependency == EMBEDDING
+        else [_pysqlite_package_name(), "sqlite-vec"]
+    )
+    target_dir = managed_site_dir()
+    return (
+        f"{detail} Install manually with: "
+        f"pip install --target {target_dir} {' '.join(package_list)}"
+    )
+
+
+def _path_exists(path: Path) -> bool:
+    return os.path.lexists(path)
+
+
+def _path_kind(path: Path) -> str:
+    if path.is_symlink():
+        return "symlink"
+    return "file"
+
+
+def _ensure_directory(path: Path, description: str) -> Path:
+    if _path_exists(path) and not path.is_dir():
+        raise BootstrapError(
+            f"{description} path {path} is a {_path_kind(path)}, not a directory. "
+            "Remove or rename it, then retry."
+        )
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _legacy_path_warning() -> str | None:
+    path = legacy_state_dir()
+    if not _path_exists(path) or path.is_dir():
+        return None
+    return (
+        f"Legacy runtime path {path} is a {_path_kind(path)}, not a directory. "
+        f"Compound-learning runtime state now lives in {state_dir()}. "
+        f"Remove the legacy path or reinstall dependencies into {managed_site_dir()}."
+    )
+
+
+def _result_to_text(result: BootstrapResult) -> str:
+    if result.message:
+        return result.message
+    return f"{result.dependency} dependencies: {result.state}"
+
+
+def _status_exit_code(result: BootstrapResult) -> int:
+    return 0 if result.state in {STATE_READY, STATE_INSTALLING, "started"} else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Compound-learning dependency bootstrap")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    ensure_parser = subparsers.add_parser("ensure", help="Ensure a dependency group is ready")
+    ensure_parser.add_argument("dependency", choices=[CORE, EMBEDDING])
+    ensure_parser.add_argument("--background", action="store_true")
+    ensure_parser.add_argument("--foreground", action="store_true", help=argparse.SUPPRESS)
+    ensure_parser.add_argument("--json", action="store_true")
+    ensure_parser.add_argument("--quiet", action="store_true")
+
+    status_parser = subparsers.add_parser("status", help="Print bootstrap status")
+    status_parser.add_argument("--json", action="store_true")
+
+    args = parser.parse_args(argv)
+
+    if args.command == "status":
+        status = read_status()
+        if args.json:
+            print(json.dumps(status))
+        else:
+            print(json.dumps(status, indent=2))
+        return 0
+
+    wait = not args.background or args.foreground
+    background = args.background and not args.foreground
+    try:
+        result = ensure_dependency(args.dependency, wait=wait, background=background)
+    except BootstrapError as exc:
+        result = BootstrapResult(
+            dependency=args.dependency,
+            state=STATE_FAILED,
+            error=str(exc),
+            message=str(exc),
+            warning=_legacy_path_warning(),
+        )
+
+    if args.json:
+        print(json.dumps(result.to_dict()))
+    elif not args.quiet:
+        print(_result_to_text(result))
+        if result.warning:
+            print(result.warning, file=sys.stderr)
+
+    return _status_exit_code(result)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
