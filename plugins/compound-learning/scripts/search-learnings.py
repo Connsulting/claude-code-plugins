@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """
 Search learnings in SQLite with distance threshold filtering.
 Filters results before outputting to avoid context pollution.

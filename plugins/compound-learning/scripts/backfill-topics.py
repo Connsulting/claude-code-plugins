@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """
 Backfill missing **Topic:** fields in learning markdown files.
 
