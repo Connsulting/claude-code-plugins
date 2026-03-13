@@ -9,7 +9,9 @@ import sys
 import os
 
 # Locate plugin root so lib/ is importable regardless of cwd
-_PLUGIN_ROOT = os.environ.get('CLAUDE_PLUGIN_ROOT', os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PLUGIN_ROOT = os.environ.get(
+    "CLAUDE_PLUGIN_ROOT", os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 sys.path.insert(0, _PLUGIN_ROOT)
 
 import json
@@ -24,17 +26,102 @@ import lib.git_utils as git_utils
 
 # Common stopwords to filter from query keywords
 STOPWORDS = {
-    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
-    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
-    'should', 'may', 'might', 'must', 'shall', 'can', 'need', 'dare',
-    'ought', 'used', 'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by',
-    'from', 'as', 'into', 'through', 'during', 'before', 'after', 'above',
-    'below', 'between', 'under', 'again', 'further', 'then', 'once',
-    'here', 'there', 'when', 'where', 'why', 'how', 'all', 'each', 'few',
-    'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only',
-    'own', 'same', 'so', 'than', 'too', 'very', 'just', 'and', 'but',
-    'if', 'or', 'because', 'until', 'while', 'about', 'against', 'this',
-    'that', 'these', 'those', 'what', 'which', 'who', 'whom', 'its', 'it'
+    "the",
+    "a",
+    "an",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "have",
+    "has",
+    "had",
+    "do",
+    "does",
+    "did",
+    "will",
+    "would",
+    "could",
+    "should",
+    "may",
+    "might",
+    "must",
+    "shall",
+    "can",
+    "need",
+    "dare",
+    "ought",
+    "used",
+    "to",
+    "of",
+    "in",
+    "for",
+    "on",
+    "with",
+    "at",
+    "by",
+    "from",
+    "as",
+    "into",
+    "through",
+    "during",
+    "before",
+    "after",
+    "above",
+    "below",
+    "between",
+    "under",
+    "again",
+    "further",
+    "then",
+    "once",
+    "here",
+    "there",
+    "when",
+    "where",
+    "why",
+    "how",
+    "all",
+    "each",
+    "few",
+    "more",
+    "most",
+    "other",
+    "some",
+    "such",
+    "no",
+    "nor",
+    "not",
+    "only",
+    "own",
+    "same",
+    "so",
+    "than",
+    "too",
+    "very",
+    "just",
+    "and",
+    "but",
+    "if",
+    "or",
+    "because",
+    "until",
+    "while",
+    "about",
+    "against",
+    "this",
+    "that",
+    "these",
+    "those",
+    "what",
+    "which",
+    "who",
+    "whom",
+    "its",
+    "it",
 }
 
 
@@ -50,7 +137,7 @@ def detect_learning_hierarchy(cwd: str, home: str) -> List[str]:
 
     # Resolve the real repo root first (handles worktrees)
     real_root = Path(git_utils.resolve_repo_root(cwd))
-    real_root_learning_dir = real_root / '.projects' / 'learnings'
+    real_root_learning_dir = real_root / ".projects" / "learnings"
     if real_root_learning_dir.exists() and real_root != home_path:
         repo_name = real_root.name
         repos.append(repo_name)
@@ -59,7 +146,7 @@ def detect_learning_hierarchy(cwd: str, home: str) -> List[str]:
     # Walk up from cwd itself for any additional .projects/learnings/ dirs
     current = Path(cwd).resolve()
     while True:
-        learning_dir = current / '.projects' / 'learnings'
+        learning_dir = current / ".projects" / "learnings"
         if learning_dir.exists() and current != home_path:
             repo_name = current.name
             if repo_name not in seen:
@@ -84,22 +171,22 @@ def parse_tag_filters(query: str) -> Tuple[str, Dict[str, Any]]:
     filters: Dict[str, Any] = {}
     cleaned = query
 
-    tag_matches = re.findall(r'\btag:(\w+)', query, re.IGNORECASE)
+    tag_matches = re.findall(r"\btag:(\w+)", query, re.IGNORECASE)
     if tag_matches:
-        filters['tags'] = [t.lower() for t in tag_matches]
-        cleaned = re.sub(r'\btag:\w+\s*', '', cleaned)
+        filters["tags"] = [t.lower() for t in tag_matches]
+        cleaned = re.sub(r"\btag:\w+\s*", "", cleaned)
 
-    cat_match = re.search(r'\bcategory:(\w+)', query, re.IGNORECASE)
+    cat_match = re.search(r"\bcategory:(\w+)", query, re.IGNORECASE)
     if cat_match:
-        filters['category'] = cat_match.group(1).lower()
-        cleaned = re.sub(r'\bcategory:\w+\s*', '', cleaned)
+        filters["category"] = cat_match.group(1).lower()
+        cleaned = re.sub(r"\bcategory:\w+\s*", "", cleaned)
 
     return cleaned.strip(), filters
 
 
 def extract_query_keywords(query: str) -> Set[str]:
     """Extract meaningful keywords from query, removing stopwords."""
-    tokens = re.findall(r'\b\w+\b', query.lower())
+    tokens = re.findall(r"\b\w+\b", query.lower())
     return {t for t in tokens if t not in STOPWORDS and len(t) >= 2}
 
 
@@ -115,14 +202,14 @@ def calculate_keyword_overlap(keywords: Set[str], document: str) -> float:
 def fts5_search(conn, query_text: str, limit: int = 50) -> Set[str]:
     """Return IDs of documents matching FTS5 full-text search."""
     try:
-        tokens = re.findall(r'\b\w+\b', query_text.lower())
+        tokens = re.findall(r"\b\w+\b", query_text.lower())
         meaningful = [t for t in tokens if t not in STOPWORDS and len(t) >= 2]
         if not meaningful:
             return set()
-        fts_query = ' OR '.join(dict.fromkeys(meaningful))
+        fts_query = " OR ".join(dict.fromkeys(meaningful))
         rows = conn.execute(
             "SELECT id FROM fts_learnings WHERE content MATCH ? LIMIT ?",
-            (fts_query, limit)
+            (fts_query, limit),
         ).fetchall()
         return {row[0] for row in rows}
     except Exception as e:
@@ -134,7 +221,7 @@ def hybrid_rerank(
     results: List[Dict[str, Any]],
     query_keywords: Set[str],
     keyword_weight: float = 0.3,
-    fts_ids: Set[str] | None = None
+    fts_ids: Set[str] | None = None,
 ) -> List[Dict[str, Any]]:
     """Re-rank results by combining semantic distance with keyword overlap.
 
@@ -149,17 +236,19 @@ def hybrid_rerank(
     """
     fts_boost = 0.05
     for result in results:
-        overlap = calculate_keyword_overlap(query_keywords, result['document'])
-        result['keyword_overlap'] = round(overlap, 4)
-        result['original_distance'] = result['distance']
-        fts_reduction = fts_boost if (fts_ids and result['id'] in fts_ids) else 0
-        result['fts_match'] = bool(fts_ids and result['id'] in fts_ids)
-        result['distance'] = round(
-            max(0.0, result['distance'] * (1 - keyword_weight * overlap) - fts_reduction),
-            4
+        overlap = calculate_keyword_overlap(query_keywords, result["document"])
+        result["keyword_overlap"] = round(overlap, 4)
+        result["original_distance"] = result["distance"]
+        fts_reduction = fts_boost if (fts_ids and result["id"] in fts_ids) else 0
+        result["fts_match"] = bool(fts_ids and result["id"] in fts_ids)
+        result["distance"] = round(
+            max(
+                0.0, result["distance"] * (1 - keyword_weight * overlap) - fts_reduction
+            ),
+            4,
         )
 
-    return sorted(results, key=lambda x: x['distance'])
+    return sorted(results, key=lambda x: x["distance"])
 
 
 def query_single_keyword(
@@ -172,9 +261,11 @@ def query_single_keyword(
     try:
         conn = db.get_connection(config)
         try:
-            results = db.search(conn, keyword, scope_repos, n_results=query_size, threshold=1.0)
+            results = db.search(
+                conn, keyword, scope_repos, n_results=query_size, threshold=1.0
+            )
             for r in results:
-                r['matched_keyword'] = keyword
+                r["matched_keyword"] = keyword
             return results
         finally:
             conn.close()
@@ -184,18 +275,21 @@ def query_single_keyword(
 
 
 def merge_parallel_results(
-    all_results: List[List[Dict[str, Any]]]
+    all_results: List[List[Dict[str, Any]]],
 ) -> List[Dict[str, Any]]:
     """Merge results from parallel keyword queries, keeping best distance per ID."""
     best_by_id: Dict[str, Dict[str, Any]] = {}
 
     for result_list in all_results:
         for result in result_list:
-            doc_id = result['id']
-            if doc_id not in best_by_id or result['distance'] < best_by_id[doc_id]['distance']:
+            doc_id = result["id"]
+            if (
+                doc_id not in best_by_id
+                or result["distance"] < best_by_id[doc_id]["distance"]
+            ):
                 best_by_id[doc_id] = result
 
-    return sorted(best_by_id.values(), key=lambda x: x['distance'])
+    return sorted(best_by_id.values(), key=lambda x: x["distance"])
 
 
 def search_learnings(
@@ -205,16 +299,20 @@ def search_learnings(
     peek_mode: bool = False,
     exclude_ids: str = "",
     threshold_override: float | None = None,
-    keywords_json: str | None = None
+    keywords_json: str | None = None,
 ) -> None:
     """
     Search learnings with tiered relevance filtering.
     Returns high confidence results (distance < 0.5) and possibly relevant (0.5-0.7).
     """
     config = db.load_config()
-    high_threshold = threshold_override if threshold_override is not None else config['learnings']['highConfidenceThreshold']
-    possible_threshold = config['learnings']['possiblyRelevantThreshold']
-    keyword_weight = config['learnings']['keywordBoostWeight']
+    high_threshold = (
+        threshold_override
+        if threshold_override is not None
+        else config["learnings"]["highConfidenceThreshold"]
+    )
+    possible_threshold = config["learnings"]["possiblyRelevantThreshold"]
+    keyword_weight = config["learnings"]["keywordBoostWeight"]
 
     # Parse keywords from JSON if provided, otherwise use query as single keyword
     if keywords_json:
@@ -228,7 +326,7 @@ def search_learnings(
         keywords = [query] if query else []
 
     if not keywords:
-        print(json.dumps({'status': 'empty', 'message': 'No keywords provided'}))
+        print(json.dumps({"status": "empty", "message": "No keywords provided"}))
         return
 
     # Parse tag/category filters from first keyword (for compatibility)
@@ -242,7 +340,7 @@ def search_learnings(
         query_keywords.update(extract_query_keywords(kw))
 
     cwd = working_dir if working_dir else os.getcwd()
-    home = os.path.expanduser('~')
+    home = os.path.expanduser("~")
 
     # Detect repo hierarchy
     repos = detect_learning_hierarchy(cwd, home)
@@ -251,7 +349,7 @@ def search_learnings(
         # Parse exclusion IDs upfront to determine query size
         exclude_set: Set[str] = set()
         if exclude_ids:
-            exclude_set = set(id.strip() for id in exclude_ids.split(',') if id.strip())
+            exclude_set = set(id.strip() for id in exclude_ids.split(",") if id.strip())
 
         query_size = max_results + len(exclude_set)
 
@@ -275,32 +373,37 @@ def search_learnings(
         # Get FTS5 matches for additional signal
         conn_fts = db.get_connection(config)
         try:
-            fts_matches = fts5_search(conn_fts, ' '.join(keywords))
+            fts_matches = fts5_search(conn_fts, " ".join(keywords))
         finally:
             conn_fts.close()
 
         # Apply hybrid re-ranking (keyword boost + FTS5 signal)
-        reranked_results = hybrid_rerank(raw_results, query_keywords, keyword_weight, fts_ids=fts_matches)
+        reranked_results = hybrid_rerank(
+            raw_results, query_keywords, keyword_weight, fts_ids=fts_matches
+        )
 
         # Discard results with zero keyword overlap (unless they have very high
         # semantic similarity, i.e., distance < 0.25 before keyword adjustment)
         reranked_results = [
-            r for r in reranked_results
-            if r.get('keyword_overlap', 0) > 0 or r.get('original_distance', 1.0) < 0.25
+            r
+            for r in reranked_results
+            if r.get("keyword_overlap", 0) > 0 or r.get("original_distance", 1.0) < 0.25
         ]
 
         # Filter out excluded IDs
         if exclude_set:
-            reranked_results = [r for r in reranked_results if r['id'] not in exclude_set]
+            reranked_results = [
+                r for r in reranked_results if r["id"] not in exclude_set
+            ]
 
         # Split results into tiers based on adjusted distance
         high_confidence: List[Dict[str, Any]] = []
         possibly_relevant: List[Dict[str, Any]] = []
 
         for result in reranked_results:
-            if result['distance'] < high_threshold:
+            if result["distance"] < high_threshold:
                 high_confidence.append(result)
-            elif result['distance'] < possible_threshold:
+            elif result["distance"] < possible_threshold:
                 possibly_relevant.append(result)
 
         # Peek mode: high_confidence first, backfill from possibly_relevant up to max_results
@@ -312,13 +415,13 @@ def search_learnings(
 
             if peek_results:
                 output = {
-                    'status': 'found',
-                    'count': len(peek_results),
-                    'keywords_searched': keywords,
-                    'learnings': peek_results
+                    "status": "found",
+                    "count": len(peek_results),
+                    "keywords_searched": keywords,
+                    "learnings": peek_results,
                 }
             else:
-                output = {'status': 'empty', 'keywords_searched': keywords}
+                output = {"status": "empty", "keywords_searched": keywords}
 
             print(json.dumps(output, indent=2))
             return
@@ -329,56 +432,75 @@ def search_learnings(
 
         if total_found == 0:
             output = {
-                'status': 'no_results',
-                'message': f'No relevant learnings found (searched {candidates_searched} candidates, none met distance < {possible_threshold} threshold)',
-                'query': query,
-                'repos_searched': repos,
-                'high_confidence': [],
-                'possibly_relevant': []
+                "status": "no_results",
+                "message": f"No relevant learnings found (searched {candidates_searched} candidates, none met distance < {possible_threshold} threshold)",
+                "query": query,
+                "repos_searched": repos,
+                "high_confidence": [],
+                "possibly_relevant": [],
             }
         else:
             parts = []
             if high_confidence:
-                parts.append(f'{len(high_confidence)} high confidence')
+                parts.append(f"{len(high_confidence)} high confidence")
             if possibly_relevant:
-                parts.append(f'{len(possibly_relevant)} possibly relevant')
+                parts.append(f"{len(possibly_relevant)} possibly relevant")
             output = {
-                'status': 'success',
-                'message': f'Found {" + ".join(parts)} learning(s)',
-                'query': query,
-                'repos_searched': repos,
-                'high_confidence': high_confidence,
-                'possibly_relevant': possibly_relevant
+                "status": "success",
+                "message": f"Found {' + '.join(parts)} learning(s)",
+                "query": query,
+                "repos_searched": repos,
+                "high_confidence": high_confidence,
+                "possibly_relevant": possibly_relevant,
             }
 
         print(json.dumps(output, indent=2))
 
     except Exception as e:
-        error_output = {
-            'status': 'error',
-            'message': str(e),
-            'query': query
-        }
+        error_output = {"status": "error", "message": str(e), "query": query}
         print(json.dumps(error_output, indent=2))
         sys.exit(1)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description='Search learnings in SQLite')
-    parser.add_argument('query', nargs='?', default='', help='Search query text (ignored if --keywords-json provided)')
-    parser.add_argument('working_dir', nargs='?', default=None, help='Working directory')
-    parser.add_argument('--peek', action='store_true',
-                        help='Peek mode: prefers high confidence results, backfills from possibly_relevant if needed')
-    parser.add_argument('--exclude-ids', type=str, default='',
-                        help='Comma separated learning IDs to exclude from results')
-    parser.add_argument('--threshold', type=float, default=None,
-                        help='Override high confidence threshold (default from config)')
-    parser.add_argument('--max-results', type=int, default=5,
-                        help='Maximum results to return')
-    parser.add_argument('--keywords-json', type=str, default=None,
-                        help='JSON array of keywords to search in parallel (e.g. \'["prompt caching", "TTL"]\')')
+    parser = argparse.ArgumentParser(description="Search learnings in SQLite")
+    parser.add_argument(
+        "query",
+        nargs="?",
+        default="",
+        help="Search query text (ignored if --keywords-json provided)",
+    )
+    parser.add_argument(
+        "working_dir", nargs="?", default=None, help="Working directory"
+    )
+    parser.add_argument(
+        "--peek",
+        action="store_true",
+        help="Peek mode: prefers high confidence results, backfills from possibly_relevant if needed",
+    )
+    parser.add_argument(
+        "--exclude-ids",
+        type=str,
+        default="",
+        help="Comma separated learning IDs to exclude from results",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="Override high confidence threshold (default from config)",
+    )
+    parser.add_argument(
+        "--max-results", type=int, default=5, help="Maximum results to return"
+    )
+    parser.add_argument(
+        "--keywords-json",
+        type=str,
+        default=None,
+        help='JSON array of keywords to search in parallel (e.g. \'["prompt caching", "TTL"]\')',
+    )
 
     args = parser.parse_args()
     search_learnings(
@@ -388,5 +510,5 @@ if __name__ == '__main__':
         peek_mode=args.peek,
         exclude_ids=args.exclude_ids,
         threshold_override=args.threshold,
-        keywords_json=args.keywords_json
+        keywords_json=args.keywords_json,
     )

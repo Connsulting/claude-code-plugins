@@ -69,9 +69,7 @@ def insert_topic_line(content: str, topic: str) -> str:
     return topic_line + "\n" + content
 
 
-def process_file(
-    file_path: Path, dry_run: bool
-) -> tuple[bool, str | None]:
+def process_file(file_path: Path, dry_run: bool) -> tuple[bool, str | None]:
     """Process a single file.
 
     Returns (changed, topic) where changed=True means a topic was added.
@@ -124,9 +122,7 @@ def main() -> None:
         print(f"[ERROR] Directory not found: {learnings_dir}")
         sys.exit(1)
 
-    files = sorted(
-        f for f in learnings_dir.glob("*.md") if f.name != "MANIFEST.md"
-    )
+    files = sorted(f for f in learnings_dir.glob("*.md") if f.name != "MANIFEST.md")
 
     if not files:
         print(f"No .md files found in {learnings_dir}")
@@ -152,7 +148,9 @@ def main() -> None:
         else:
             skipped += 1
 
-    print(f"\nSummary: {changed} files {'would be ' if dry_run else ''}updated, {skipped} already have a topic.")
+    print(
+        f"\nSummary: {changed} files {'would be ' if dry_run else ''}updated, {skipped} already have a topic."
+    )
     if dry_run and changed > 0:
         print("Run with --apply to write changes.")
 
