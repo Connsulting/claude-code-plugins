@@ -167,6 +167,17 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     """)
     conn.commit()
 
+    # Idempotent migration: add hit-count columns
+    for col, col_def in [
+        ('access_count', 'INTEGER DEFAULT 0'),
+        ('last_accessed', 'TEXT'),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE learnings ADD COLUMN {col} {col_def}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
 
 def get_embedding(text: str):
     """Lazy-load sentence-transformers model and return embedding as list."""
@@ -207,8 +218,8 @@ def upsert_document(
     delete_document(conn, doc_id)
 
     conn.execute(
-        """INSERT INTO learnings (id, content, scope, repo, file_path, topic, keywords, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO learnings (id, content, scope, repo, file_path, topic, keywords, created_at, access_count, last_accessed)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             doc_id,
             content,
@@ -218,6 +229,8 @@ def upsert_document(
             metadata.get('topic', 'other'),
             metadata.get('keywords', ''),
             created_at,
+            metadata.get('access_count', 0),
+            metadata.get('last_accessed', None),
         ),
     )
 
@@ -275,7 +288,7 @@ def search(
     rows = conn.execute(
         f"""
         SELECT l.id, l.content, l.scope, l.repo, l.file_path, l.topic, l.keywords,
-               v.distance
+               l.access_count, l.last_accessed, v.distance
         FROM vec_learnings v
         JOIN learnings l ON l.id = v.id
         WHERE v.embedding MATCH ?
@@ -302,6 +315,8 @@ def search(
                 'file_path': row['file_path'],
                 'topic': row['topic'],
                 'keywords': row['keywords'],
+                'access_count': row['access_count'],
+                'last_accessed': row['last_accessed'],
             },
             'distance': round(dist, 4),
         })
@@ -370,6 +385,15 @@ def get_documents_by_ids(
             })
 
     return {'ids': result_ids, 'documents': result_docs, 'metadatas': result_metas}
+
+
+def increment_hit_count(conn: sqlite3.Connection, doc_id: str, timestamp: str) -> None:
+    """Increment access_count by 1 and update last_accessed for a document."""
+    conn.execute(
+        "UPDATE learnings SET access_count = access_count + 1, last_accessed = ? WHERE id = ?",
+        (timestamp, doc_id),
+    )
+    conn.commit()
 
 
 def count_documents(conn: sqlite3.Connection) -> int:

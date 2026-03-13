@@ -320,6 +320,14 @@ def search_learnings(
                 output = {'status': 'empty', 'keywords_searched': keywords}
 
             print(json.dumps(output, indent=2))
+
+            if peek_results:
+                try:
+                    from lib.hit_tracker import record_hits
+                    record_hits(config, peek_results)
+                except Exception as e:
+                    print(f"[WARN] Hit tracking failed: {e}", file=sys.stderr)
+
             return
 
         # Build output
