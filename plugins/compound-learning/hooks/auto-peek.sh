@@ -10,9 +10,9 @@ if [ -z "$CLAUDE_PLUGIN_ROOT" ]; then
 fi
 
 # Setup logging
-LOG_DIR="$HOME/.claude/plugins/compound-learning"
-mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/activity.log"
+STATE_DIR="$HOME/.claude/state/compound-learning"
+mkdir -p "$STATE_DIR"
+LOG_FILE="$STATE_DIR/activity.log"
 
 log_activity() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
@@ -37,11 +37,32 @@ if [ ${#PROMPT} -lt 10 ]; then
   exit 0
 fi
 
+# Keep prompt-submit fast: start heavy embedding bootstrap in the background
+# and skip semantic peek work until the dependency is ready.
+BOOTSTRAP_JSON=$(python3 "${CLAUDE_PLUGIN_ROOT}/lib/bootstrap.py" ensure embedding --background --json 2>/dev/null)
+BOOTSTRAP_STATE=$(echo "$BOOTSTRAP_JSON" | jq -r '.state // empty' 2>/dev/null)
+
+if [ "$BOOTSTRAP_STATE" = "started" ]; then
+  log_activity "[auto-peek] embedding bootstrap started in background; skipping semantic peek"
+  exit 0
+fi
+
+if [ "$BOOTSTRAP_STATE" = "installing" ]; then
+  log_activity "[auto-peek] embedding bootstrap still running; skipping semantic peek"
+  exit 0
+fi
+
+if [ "$BOOTSTRAP_STATE" = "failed" ] || [ -z "$BOOTSTRAP_STATE" ]; then
+  BOOTSTRAP_ERROR=$(echo "$BOOTSTRAP_JSON" | jq -r '.error // .message // "bootstrap status unavailable"' 2>/dev/null)
+  log_activity "[auto-peek] embedding bootstrap unavailable; skipping semantic peek: $BOOTSTRAP_ERROR"
+  exit 0
+fi
+
 # Expand ~ in transcript path
 TRANSCRIPT="${TRANSCRIPT/#\~/$HOME}"
 
 # Session-scoped deduplication via a plain-text state file.
-SESSIONS_DIR="$HOME/.claude/plugins/compound-learning/sessions"
+SESSIONS_DIR="$STATE_DIR/sessions"
 mkdir -p "$SESSIONS_DIR"
 
 # Prune session files older than 24 hours
@@ -144,7 +165,7 @@ rm -f "$ERR_FILE"
 
 # Check if we got results
 if [ $SEARCH_EXIT -ne 0 ]; then
-  echo "[auto-peek] search failed (check ~/.claude/plugins/compound-learning/activity.log)"
+  echo "[auto-peek] search failed (check ~/.claude/state/compound-learning/activity.log)"
   exit 0
 fi
 
