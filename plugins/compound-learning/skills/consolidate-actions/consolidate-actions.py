@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """
 Execute consolidation actions: merge, archive, delete, rescope, get.
 All destructive operations create backups first.
@@ -293,7 +294,7 @@ def action_merge(ids: List[str], name: str, config: Dict[str, Any],
 
         # Build structured merged content
         merged_content = f"# {name.replace('-', ' ').title()}\n\n"
-        merged_content += f"**Type:** pattern\n"
+        merged_content += "**Type:** pattern\n"
         merged_content += f"**Topic:** {merged_topic}\n"
         merged_content += f"**Tags:** {merged_tags}\n\n"
         merged_content += f"*Merged from {len(contents)} learnings on {date_str}*\n\n"
