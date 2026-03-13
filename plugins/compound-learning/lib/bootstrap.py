@@ -67,16 +67,31 @@ class BootstrapResult:
         return data
 
 
+def state_dir_path() -> Path:
+    override = os.environ.get("CLAUDE_PLUGIN_STATE_DIR")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".claude" / "compound-learning"
+
+
 def state_dir() -> Path:
-    path = Path.home() / ".claude" / "plugins" / "compound-learning"
+    path = state_dir_path()
     _ensure_directory(path)
     return path
+
+
+def managed_site_dir_path() -> Path:
+    return state_dir_path() / "site-packages"
 
 
 def managed_site_dir() -> Path:
-    path = state_dir() / "site-packages"
+    path = managed_site_dir_path()
     _ensure_directory(path)
     return path
+
+
+def legacy_managed_site_dir() -> Path:
+    return Path.home() / ".claude" / "plugins" / "compound-learning" / "site-packages"
 
 
 def log_file() -> Path:
@@ -98,15 +113,23 @@ def plugin_root() -> Path:
 def _ensure_directory(path: Path) -> None:
     if path.is_dir():
         return
+    if path.is_symlink() and not path.exists():
+        raise BootstrapError(f"{path} is a broken symlink")
     if path.exists():
         raise BootstrapError(f"{path} exists and is not a directory")
     path.mkdir(parents=True, exist_ok=True)
 
 
 def ensure_managed_site_dir_on_path() -> None:
-    site_dir = str(managed_site_dir())
-    if site_dir not in sys.path:
-        sys.path.insert(0, site_dir)
+    site_dirs = [managed_site_dir_path()]
+    legacy_site_dir = legacy_managed_site_dir()
+    if legacy_site_dir.is_dir() and legacy_site_dir not in site_dirs:
+        site_dirs.append(legacy_site_dir)
+
+    for site_dir in reversed(site_dirs):
+        site_dir_str = str(site_dir)
+        if site_dir_str not in sys.path:
+            sys.path.insert(0, site_dir_str)
 
 
 def log_activity(message: str) -> None:
@@ -388,7 +411,7 @@ def _wait_for_dependency(dependency: str, timeout_seconds: int) -> BootstrapResu
 
 
 def _install_packages(dependency: str, packages: list[str]) -> str:
-    backend_name, install_cmd = _build_install_command(packages)
+    backend_name, install_cmd = _build_install_command(dependency, packages)
     log_activity(
         f"[bootstrap] Installing {dependency} dependencies via {backend_name}: {', '.join(packages)}"
     )
@@ -409,7 +432,7 @@ def _install_packages(dependency: str, packages: list[str]) -> str:
     return backend_name
 
 
-def _build_install_command(packages: list[str]) -> tuple[str, list[str]]:
+def _build_install_command(dependency: str, packages: list[str]) -> tuple[str, list[str]]:
     target_dir = str(managed_site_dir())
 
     if _python_has_pip():
@@ -438,7 +461,7 @@ def _build_install_command(packages: list[str]) -> tuple[str, list[str]]:
 
     raise BootstrapError(
         _manual_install_message(
-            CORE,
+            dependency,
             "Neither pip nor uv is available for automatic dependency bootstrap.",
         )
     )

@@ -23,12 +23,14 @@ On `SessionStart`, the plugin only ensures the lightweight core runtime needed f
 1. Clone or download this plugin to your Claude plugins directory
 2. Core dependencies install automatically on first session start, or install them manually:
 ```bash
-pip install --target ~/.claude/plugins/compound-learning/site-packages pysqlite3-binary sqlite-vec
+pip install --target ~/.claude/compound-learning/site-packages pysqlite3-binary sqlite-vec
 ```
 3. Install embedding dependencies only if you want to pre-warm semantic search/indexing instead of letting the plugin do it lazily:
 ```bash
-pip install --target ~/.claude/plugins/compound-learning/site-packages sentence-transformers
+pip install --target ~/.claude/compound-learning/site-packages sentence-transformers
 ```
+
+Managed dependencies now live under `~/.claude/compound-learning/`. Existing installs under `~/.claude/plugins/compound-learning/site-packages/` are still discovered during the transition, so upgrades do not require an immediate reinstall.
 
 ### Post-Installation
 
@@ -162,7 +164,7 @@ How it works:
 ### Startup Dependency Bootstrap
 
 - `SessionStart` only performs foreground bootstrap for the `core` dependency group (`sqlite-vec` plus SQLite extension loading support).
-- Warm sessions skip the foreground bootstrap when `~/.claude/plugins/compound-learning/bootstrap-status.json` already marks `core` as `ready` and runtime checks still pass.
+- Warm sessions skip the foreground bootstrap when `~/.claude/compound-learning/bootstrap-status.json` already marks `core` as `ready` and runtime checks still pass.
 - Embedding dependencies remain lazy. `auto-peek` can start them in the background, and the first embedding-heavy command will wait only if that runtime is still unavailable.
 
 ## Architecture
@@ -226,9 +228,9 @@ Use topic + context: "authentication JWT refresh" not "implement login feature"
 - Run `/index-learnings` to ensure learnings are indexed
 
 **Bootstrap state is stuck or corrupt:**
-- Remove `~/.claude/plugins/compound-learning/bootstrap-status.json`
-- Optionally clear `~/.claude/plugins/compound-learning/site-packages/` if you want a clean dependency reinstall
+- Remove `~/.claude/compound-learning/bootstrap-status.json`
+- Optionally clear `~/.claude/compound-learning/site-packages/` if you want a clean dependency reinstall
 - Re-run Claude, or run `python3 plugins/compound-learning/lib/bootstrap.py ensure core`
 
 **Hook activity log:**
-- Hook activity is logged to `~/.claude/plugins/compound-learning/activity.log`
+- Hook activity is logged to `~/.claude/compound-learning/activity.log`

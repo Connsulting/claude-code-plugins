@@ -9,7 +9,7 @@ if [ -z "$CLAUDE_PLUGIN_ROOT" ]; then
 fi
 
 # Setup logging
-LOG_DIR="$HOME/.claude/plugins/compound-learning"
+LOG_DIR="$HOME/.claude/compound-learning"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/activity.log"
 

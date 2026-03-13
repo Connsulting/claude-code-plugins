@@ -10,7 +10,8 @@ if [ -z "$CLAUDE_PLUGIN_ROOT" ]; then
 fi
 
 # Setup logging
-LOG_DIR="$HOME/.claude/plugins/compound-learning"
+STATE_DIR="$HOME/.claude/compound-learning"
+LOG_DIR="$STATE_DIR"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/activity.log"
 
@@ -62,7 +63,7 @@ fi
 TRANSCRIPT="${TRANSCRIPT/#\~/$HOME}"
 
 # Session-scoped deduplication via a plain-text state file.
-SESSIONS_DIR="$HOME/.claude/plugins/compound-learning/sessions"
+SESSIONS_DIR="$STATE_DIR/sessions"
 mkdir -p "$SESSIONS_DIR"
 
 # Prune session files older than 24 hours
@@ -165,7 +166,7 @@ rm -f "$ERR_FILE"
 
 # Check if we got results
 if [ $SEARCH_EXIT -ne 0 ]; then
-  echo "[auto-peek] search failed (check ~/.claude/plugins/compound-learning/activity.log)"
+  echo "[auto-peek] search failed (check ~/.claude/compound-learning/activity.log)"
   exit 0
 fi
 
