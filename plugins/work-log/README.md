@@ -1,8 +1,8 @@
 # work-log
 
-Auto-log substantive Claude Code sessions to a Notion Work Log database via Notion MCP.
+Auto-log substantive coding sessions to a Notion Work Log database via Notion MCP.
 
-On session end, a background subprocess evaluates whether the session produced meaningful work. If so, it writes a structured entry to a daily note in Notion, organized by project.
+Supports both Claude Code (via plugin hook) and Codex (via Stop hook). On session end, a background subprocess evaluates whether the session produced meaningful work. If so, it writes a structured entry to a daily note in Notion, organized by project.
 
 ## Setup
 
@@ -92,6 +92,41 @@ Resumed sessions (same session ID) append inside the existing toggle.
 
 Ticket references (JIRA, Linear, GitHub issues) found in the transcript are included in the summary.
 
+## Codex setup
+
+The plugin includes a Codex Stop hook script at `codex/work-log-stop.sh`. This uses the same user config and Notion database as the Claude Code hook, with `cx:` as the session tag prefix.
+
+Since Codex doesn't have a plugin system, setup is manual per machine:
+
+1. Enable the experimental hooks feature: `codex features enable codex_hooks`
+2. Create the scripts directory: `mkdir -p ~/.codex/scripts`
+3. Copy or symlink the script: `ln -sf /path/to/plugins/work-log/codex/work-log-stop.sh ~/.codex/scripts/`
+4. Create `~/.codex/hooks.json`:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/youruser/.codex/scripts/work-log-stop.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+Note: Codex hooks are experimental (added in 0.114.0) and require the `codex_hooks` feature flag. Use absolute paths in the command field (tilde expansion is not supported).
+
+The Codex hook fires per-turn (not per-session), so it uses a local state file at `~/.claude/plugins/work-log/codex-sessions/` to deduplicate. Only the first substantive turn of each session triggers a log entry.
+
+The Codex script reads the most recent session transcript from `~/.codex/sessions/` and spawns `claude -p` in the background to evaluate and write to Notion.
+
 ## Logs
 
-Activity is logged to `~/.claude/plugins/work-log/activity.log`.
+Activity is logged to `~/.claude/plugins/work-log/activity.log`. Codex entries are prefixed with `[codex]`.
