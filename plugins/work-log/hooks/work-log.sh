@@ -22,27 +22,29 @@ if [ -n "$CLAUDE_SUBPROCESS" ]; then
   exit 0
 fi
 
-# Read hook input from stdin
+# Read hook input from stdin (single jq call)
 INPUT=$(cat)
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id')
-TRANSCRIPT=$(echo "$INPUT" | jq -r '.transcript_path')
-CWD=$(echo "$INPUT" | jq -r '.cwd')
+eval "$(echo "$INPUT" | jq -r '@sh "SESSION_ID=\(.session_id) TRANSCRIPT=\(.transcript_path) CWD=\(.cwd)"')"
 
 # Expand ~ in transcript path
 TRANSCRIPT="${TRANSCRIPT/#\~/$HOME}"
 
-# Read config
-CONFIG_FILE="${CLAUDE_PLUGIN_ROOT}/.claude-plugin/config.json"
-DATABASE_ID=$(jq -r '.notion.databaseId' "$CONFIG_FILE")
-MCP_SERVER=$(jq -r '.notion.mcpServerName // "claude_ai_Notion"' "$CONFIG_FILE")
-SOURCE_PREFIX=$(jq -r '.sourcePrefix // "cc"' "$CONFIG_FILE")
-MIN_LINES=$(jq -r '.minTranscriptLines // 40' "$CONFIG_FILE")
-TIMEZONE=$(jq -r '.timezone // "UTC"' "$CONFIG_FILE")
-DEFAULT_PROJECT=$(jq -r '.defaultProject // "personal"' "$CONFIG_FILE")
-PROJECT_PATTERN=$(jq -r '.projectPattern // ".*/git/([^/]+).*"' "$CONFIG_FILE")
+# Quick size check before any config reads
+LINES=$(head -n 50 "$TRANSCRIPT" 2>/dev/null | wc -l)
 
-# Check transcript size
-LINES=$(wc -l < "$TRANSCRIPT" 2>/dev/null || echo "0")
+# Merge user config (survives reinstalls) over bundled defaults
+BUNDLED_CONFIG="${CLAUDE_PLUGIN_ROOT}/.claude-plugin/config.json"
+USER_CONFIG="$LOG_DIR/config.json"
+TEMP_CONFIG=""
+if [ -f "$USER_CONFIG" ]; then
+  TEMP_CONFIG=$(mktemp)
+  jq -s '.[0] * .[1]' "$BUNDLED_CONFIG" "$USER_CONFIG" > "$TEMP_CONFIG"
+  CONFIG_FILE="$TEMP_CONFIG"
+else
+  CONFIG_FILE="$BUNDLED_CONFIG"
+fi
+eval "$(jq -r '@sh "DATABASE_ID=\(.notion.databaseId) MCP_SERVER=\(.notion.mcpServerName // "claude_ai_Notion") SOURCE_PREFIX=\(.sourcePrefix // "cc") MIN_LINES=\(.minTranscriptLines // 40) TIMEZONE=\(.timezone // "UTC") DEFAULT_PROJECT=\(.defaultProject // "personal") PROJECT_PATTERN=\(.projectPattern // ".*/git/([^/]+).*")"' "$CONFIG_FILE")"
+
 if [ "$LINES" -lt "$MIN_LINES" ]; then
   log_activity "SKIP: transcript too short ($LINES lines, minimum $MIN_LINES)"
   exit 0
@@ -60,10 +62,10 @@ if [ -z "$TRANSCRIPT_CONTENT" ]; then
   exit 0
 fi
 
-# Extract project name from cwd using configurable regex pattern
-PROJECT=$(echo "$CWD" | sed -nE "s|${PROJECT_PATTERN}|\1|p" | tr -d '\n\r')
+# Extract project from cwd using configurable pattern (default: */git/{project}/*)
+PROJECT=$(echo "$CWD" | sed -nE "s|${PROJECT_PATTERN}|\1|p")
 
-# Apply project mappings from config (e.g., {"vulns-curietech": "curietech"})
+# Apply project mappings from config
 if [ -n "$PROJECT" ]; then
   MAPPED=$(jq -r --arg p "$PROJECT" '.projectMappings[$p] // empty' "$CONFIG_FILE")
   if [ -n "$MAPPED" ]; then
@@ -71,10 +73,8 @@ if [ -n "$PROJECT" ]; then
   fi
 fi
 
-# Default if pattern didn't match
-if [ -z "$PROJECT" ]; then
-  PROJECT="$DEFAULT_PROJECT"
-fi
+# Default if not in a git/ path
+: "${PROJECT:=$DEFAULT_PROJECT}"
 
 # Compute session tag and timestamp
 SESSION_TAG="${SOURCE_PREFIX}:${SESSION_ID:0:8}"
@@ -83,7 +83,7 @@ TIMESTAMP=$(TZ="$TIMEZONE" date +'%I:%M %p')
 
 # Capture output to log file generation
 OUTPUT_FILE=$(mktemp)
-trap "rm -f $OUTPUT_FILE" EXIT
+trap "rm -f $OUTPUT_FILE $TEMP_CONFIG" EXIT
 
 log_activity "WORK_LOG_START: session=$SESSION_ID project=$PROJECT tag=$SESSION_TAG"
 
@@ -93,78 +93,43 @@ CLAUDE_SUBPROCESS=1 ENABLE_CLAUDEAI_MCP_SERVERS=true claude -p --no-session-pers
   --permission-mode bypassPermissions \
   --allowedTools "Read,ToolSearch,${NOTION_TOOLS}" \
   <<PROMPT_END >"$OUTPUT_FILE" 2>&1
-You are a work log assistant. Your job is to evaluate this Claude Code session and, if substantive, log it to a Notion Work Log database.
+You are a work log assistant. Evaluate this session and, if substantive, log it to Notion.
 
-## Session Details
-- Session ID: ${SESSION_ID}
-- Session Tag: ${SESSION_TAG}
-- Project: ${PROJECT}
-- Today's Date: ${TODAY}
-- Timestamp: ${TIMESTAMP}
-- Working Directory: ${CWD}
+Session Tag: ${SESSION_TAG}
+Project: ${PROJECT}
+Date: ${TODAY}
+Time: ${TIMESTAMP}
+Database ID: ${DATABASE_ID}
 
-## Step 1: Evaluate Substantiveness
+## Evaluate
 
-Read the transcript below. Decide if this session is worth logging. The bar is: "Would this be useful context in a weekly review of what was worked on for this project?"
+Skip trivial sessions (quick lookups, single questions, typos, meta-config). Log sessions with meaningful work (features, fixes, architecture, planning, infra).
 
-Skip (output "SKIP: [reason]" and stop) if:
-- Quick lookups or single-question answers
-- Trivial fixes (typos, formatting)
-- Sessions that didn't produce meaningful work product
-- Meta-sessions about configuring Claude itself (unless significant)
+If not worth logging, output only the word SKIP on a line by itself followed by a brief reason, then stop.
 
-Log if:
-- New features were built or significant code was written
-- Bugs were investigated or fixed
-- Architecture decisions were made
-- Meaningful planning or analysis was done
-- Infrastructure or deployment work was completed
+## Write the summary
 
-## Step 2: Generate Entry
+Focus on outcomes and value delivered, not technical implementation details:
+- What was accomplished? What concrete work product was delivered?
+- Why does it matter for the project? What problem does it solve or what capability does it add?
+- Include specific details: what was built, fixed, or decided. Avoid vague language.
+- If ticket/issue IDs appear in the transcript (JIRA like PROJ-1234, Linear, GitHub #123), include them as references.
 
-If substantive, create a 1-2 sentence summary in this format:
-\`\`\`
-[${TIMESTAMP}] claude-code: {1-2 sentence summary of what was done}
-{1 sentence on why this matters to the project}
-\`\`\`
+Bad: "Refactored the codebase and improved code quality"
+Good: "Built auto-logging plugin that writes session summaries to Notion on session end. Enables automatic work tracking across client projects without manual timekeeping."
 
-## Step 3: Write to Notion
+## Log to Notion
 
-Use the Notion MCP tools to write this entry. Follow these steps exactly:
+1. Search database ${DATABASE_ID} for a page titled "${TODAY}". Create one if missing.
+2. Fetch the page blocks. Look for an H2 "${PROJECT}" and a toggle "${SESSION_TAG}".
+3. If no "${PROJECT}" H2 exists, append one.
+4. If a toggle "${SESSION_TAG}" exists (resumed session), append inside it:
+   [${TIMESTAMP}] claude-code (resumed): {summary}
+5. Otherwise, append a new toggle with label "${SESSION_TAG}" containing:
+   [${TIMESTAMP}] claude-code: {1-2 sentence summary with ticket refs if any}
+   {1 sentence on value to the project}
 
-### 3a. Find today's page
-Search the Work Log database (ID: ${DATABASE_ID}) for a page titled "${TODAY}".
-
-Use the Notion MCP search or database query tool to find it. If no page exists for today, create one with title "${TODAY}" in the database.
-
-### 3b. Read existing blocks
-Get the block children of today's page to check:
-- Is there already a Heading 2 block with text "${PROJECT}"?
-- Is there already a toggle block with label containing "${SESSION_TAG}"?
-
-### 3c. Handle project heading
-If no "${PROJECT}" heading exists, append a Heading 2 block with text "${PROJECT}" to the page.
-
-### 3d. Handle session entry
-
-**If a toggle with "${SESSION_TAG}" already exists** (resumed session):
-Append a paragraph block INSIDE that toggle with:
-\`\`\`
-[${TIMESTAMP}] claude-code (resumed): {summary of additional work}
-\`\`\`
-
-**If no existing toggle for this session:**
-Append a toggle block right after the "${PROJECT}" heading with:
-- Toggle label: ${SESSION_TAG}
-- Toggle content (as a paragraph block inside): the entry text from Step 2
-
-**Important Notion MCP notes:**
-- When appending blocks, append them as children of the page (after the correct heading)
-- Toggle blocks in Notion API use type "toggle" with rich_text for the label and children for content
-- If toggle blocks are not supported by the MCP, use a Heading 3 for the session tag with a paragraph block beneath it as fallback
-- If any Notion operation fails, log the error and exit gracefully. Prefer duplicates over data loss.
-
-## Transcript
+If toggles are unsupported, use H3 + paragraph as fallback. Prefer duplicates over data loss.
 
 <transcript>
 ${TRANSCRIPT_CONTENT}
@@ -176,8 +141,8 @@ EXIT_CODE=$?
 # Log output for debugging
 if [ -f "$OUTPUT_FILE" ]; then
   # Check if subprocess decided to skip
-  if grep -q "^SKIP:" "$OUTPUT_FILE" 2>/dev/null; then
-    REASON=$(grep "^SKIP:" "$OUTPUT_FILE" | head -1)
+  if grep -qm1 "^SKIP" "$OUTPUT_FILE" 2>/dev/null; then
+    REASON=$(grep -m1 "^SKIP" "$OUTPUT_FILE")
     log_activity "WORK_LOG_SKIP: $REASON"
   else
     log_activity "WORK_LOG_END: session=$SESSION_ID exit=$EXIT_CODE"
