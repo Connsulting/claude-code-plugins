@@ -1,0 +1,17 @@
+{
+  "description": "Log substantive Claude Code sessions to Notion Work Log",
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/work-log.sh",
+            "timeout": 300000,
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}

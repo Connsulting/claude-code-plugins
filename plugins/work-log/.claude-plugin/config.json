@@ -1,0 +1,12 @@
+{
+  "notion": {
+    "databaseId": "YOUR_DATABASE_ID_HERE",
+    "mcpServerName": "claude_ai_Notion"
+  },
+  "sourcePrefix": "cc",
+  "minTranscriptLines": 40,
+  "timezone": "UTC",
+  "defaultProject": "personal",
+  "projectPattern": ".*/git/([^/]+).*",
+  "projectMappings": {}
+}

@@ -11,6 +11,12 @@
       "description": "Learning compounding system with ChromaDB-backed knowledge extraction and hierarchical scope search",
       "source": "./plugins/compound-learning",
       "category": "productivity"
+    },
+    {
+      "name": "work-log",
+      "description": "Auto-log substantive Claude Code sessions to Notion Work Log via Notion MCP",
+      "source": "./plugins/work-log",
+      "category": "productivity"
     }
   ]
 }

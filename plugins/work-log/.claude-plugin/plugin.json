@@ -1,0 +1,6 @@
+{
+  "name": "work-log",
+  "version": "0.1.0",
+  "description": "Auto-log substantive Claude Code sessions to Notion Work Log",
+  "keywords": ["work-log", "notion", "session-tracking"]
+}
