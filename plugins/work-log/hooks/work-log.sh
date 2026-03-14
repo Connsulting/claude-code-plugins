@@ -76,6 +76,17 @@ fi
 # Default if not in a git/ path
 : "${PROJECT:=$DEFAULT_PROJECT}"
 
+# Look up session name from sessions-index.json (customTitle from /rename, or summary)
+ENCODED_CWD=$(echo "$CWD" | sed 's|/|-|g')
+SESSIONS_INDEX="$HOME/.claude/projects/${ENCODED_CWD}/sessions-index.json"
+SESSION_NAME=""
+if [ -f "$SESSIONS_INDEX" ]; then
+  SESSION_NAME=$(jq -r --arg id "$SESSION_ID" '
+    .entries[] | select(.sessionId == $id) |
+    .customTitle // .summary // empty
+  ' "$SESSIONS_INDEX" 2>/dev/null | head -1)
+fi
+
 # Compute session tag and timestamp
 SESSION_TAG="${SOURCE_PREFIX}:${SESSION_ID:0:8}"
 TODAY=$(TZ="$TIMEZONE" date +%Y-%m-%d)
@@ -96,6 +107,7 @@ CLAUDE_SUBPROCESS=1 ENABLE_CLAUDEAI_MCP_SERVERS=true claude -p --no-session-pers
 You are a work log assistant. Evaluate this session and, if substantive, log it to Notion.
 
 Session Tag: ${SESSION_TAG}
+Session Name: ${SESSION_NAME:-none}
 Project: ${PROJECT}
 Date: ${TODAY}
 Time: ${TIMESTAMP}
@@ -118,14 +130,23 @@ Focus on outcomes and value delivered, not technical implementation details:
 Bad: "Refactored the codebase and improved code quality"
 Good: "Built auto-logging plugin that writes session summaries to Notion on session end. Enables automatic work tracking across client projects without manual timekeeping."
 
+## Toggle label
+
+The toggle label format is: ${SESSION_TAG} - {Short Name}
+- If Session Name above is not "none", use it as the short name
+- Otherwise, generate a descriptive 3-5 word name from the transcript (e.g., "Notion Work Log Plugin", "Auth Bug Fix", "API Rate Limiting")
+
+When searching for an existing toggle (for resume/dedup), match on "${SESSION_TAG}" as a prefix only. Ignore the name portion after " - ".
+
 ## Log to Notion
 
 1. Search database ${DATABASE_ID} for a page titled "${TODAY}". Create one if missing.
-2. Fetch the page blocks. Look for an H2 "${PROJECT}" and a toggle "${SESSION_TAG}".
+2. Fetch the page blocks. Look for an H2 "${PROJECT}" and a toggle starting with "${SESSION_TAG}".
 3. If no "${PROJECT}" H2 exists, append one.
-4. If a toggle "${SESSION_TAG}" exists (resumed session), append inside it:
-   [${TIMESTAMP}] claude-code (resumed): {summary}
-5. Otherwise, append a new toggle with label "${SESSION_TAG}" containing:
+4. If a toggle starting with "${SESSION_TAG}" exists (resumed session):
+   a. If the toggle label differs from your computed label (e.g., name changed via /rename), update the toggle's title text
+   b. Append inside it: [${TIMESTAMP}] claude-code (resumed): {summary}
+5. Otherwise, append a new toggle with the label from above containing:
    [${TIMESTAMP}] claude-code: {1-2 sentence summary with ticket refs if any}
    {1 sentence on value to the project}
 
