@@ -101,6 +101,7 @@ log_activity "WORK_LOG_START: session=$SESSION_ID project=$PROJECT tag=$SESSION_
 # Use heredoc to pass prompt via stdin (avoids temp files and arg size limits)
 NOTION_TOOLS="mcp__${MCP_SERVER}__notion-search,mcp__${MCP_SERVER}__notion-fetch,mcp__${MCP_SERVER}__notion-create-pages,mcp__${MCP_SERVER}__notion-update-page,mcp__${MCP_SERVER}__notion-create-comment,mcp__${MCP_SERVER}__notion-get-comments"
 CLAUDE_SUBPROCESS=1 ENABLE_CLAUDEAI_MCP_SERVERS=true claude -p --no-session-persistence \
+  --model haiku \
   --permission-mode bypassPermissions \
   --allowedTools "Read,ToolSearch,${NOTION_TOOLS}" \
   <<PROMPT_END >"$OUTPUT_FILE" 2>&1
