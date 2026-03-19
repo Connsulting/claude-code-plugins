@@ -6,15 +6,14 @@ indexing performance, search latency, and compare search configurations.
 All tests are marked slow since they require a fully indexed corpus.
 """
 
-import os
 import statistics
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List
 
 import pytest
 
-from harness_utils import MetricsCollector, compare_metrics, count_indexed, run_search_pipeline
+from harness_utils import MetricsCollector, compare_metrics, count_indexed, match_ids_by_filename, run_search_pipeline
 
 PLUGIN_ROOT = Path(__file__).parent.parent
 
@@ -40,28 +39,6 @@ GROUND_TRUTH: Dict[str, List[str]] = {
     "prometheus alerting": ["prometheus", "promql", "alerting", "alert"],
     "git rebase workflow": ["git", "rebase", "branch", "merge"],
 }
-
-
-def _match_by_filename(
-    results: List[Dict[str, Any]], expected_substrings: List[str]
-) -> Set[str]:
-    """Return IDs of results whose file_path basename contains any expected substring."""
-    matched = set()
-    for r in results:
-        file_path = r.get("metadata", {}).get("file_path", "")
-        basename = os.path.basename(file_path).lower()
-        for substr in expected_substrings:
-            if substr in basename:
-                matched.add(r["id"])
-                break
-    return matched
-
-
-def _expected_ids_for_results(
-    results: List[Dict[str, Any]], expected_substrings: List[str]
-) -> Set[str]:
-    """Build expected ID set from results that match filename patterns."""
-    return _match_by_filename(results, expected_substrings)
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +136,7 @@ def test_ab_threshold_comparison(indexed_corpus: Any) -> None:
             )
             all_results = results["all_results"]
             actual_ids = [r["id"] for r in all_results]
-            expected_ids = _expected_ids_for_results(all_results, expected_subs)
+            expected_ids = match_ids_by_filename(all_results, expected_subs)
             collector.add_result(query, expected_ids, actual_ids)
         collectors[label] = collector
 
@@ -211,7 +188,7 @@ def test_ab_keyword_weight_comparison(indexed_corpus: Any) -> None:
             )
             all_results = results["all_results"]
             actual_ids = [r["id"] for r in all_results]
-            expected_ids = _expected_ids_for_results(all_results, expected_subs)
+            expected_ids = match_ids_by_filename(all_results, expected_subs)
             collector.add_result(query, expected_ids, actual_ids)
         collectors[label] = collector
 
@@ -265,7 +242,7 @@ def test_metrics_collection_summary(indexed_corpus: Any) -> None:
         results = run_search_pipeline(config, conn, query)
         all_results = results["all_results"]
         actual_ids = [r["id"] for r in all_results]
-        expected_ids = _expected_ids_for_results(all_results, expected_subs)
+        expected_ids = match_ids_by_filename(all_results, expected_subs)
         collector.add_result(query, expected_ids, actual_ids)
 
     summary = collector.summary()

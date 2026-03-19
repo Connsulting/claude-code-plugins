@@ -19,14 +19,7 @@ sys.path.insert(0, str(PLUGIN_ROOT))
 
 import lib.db as db
 
-# Import index-learnings.py via spec (hyphen in filename)
-_index_spec = importlib.util.spec_from_file_location(
-    "index_learnings",
-    PLUGIN_ROOT / "skills" / "index-learnings" / "index-learnings.py",
-)
-_index_mod = importlib.util.module_from_spec(_index_spec)
-_index_spec.loader.exec_module(_index_mod)
-index_single_file = _index_mod.index_single_file
+from harness_utils import index_single_file
 
 # Import consolidate-discovery.py via spec (hyphen in filename)
 _consol_spec = importlib.util.spec_from_file_location(

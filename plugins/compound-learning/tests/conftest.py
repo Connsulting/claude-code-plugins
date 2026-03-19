@@ -1,6 +1,5 @@
 """Shared pytest fixtures for compound-learning tests."""
 
-import importlib.util
 import shutil
 import sys
 import time
@@ -14,16 +13,7 @@ sys.path.insert(0, str(PLUGIN_ROOT))
 
 import lib.db as db
 
-from harness_utils import run_search_pipeline
-
-# Import index-learnings.py via spec (hyphen in filename)
-_index_spec = importlib.util.spec_from_file_location(
-    "index_learnings",
-    PLUGIN_ROOT / "skills" / "index-learnings" / "index-learnings.py",
-)
-_index_mod = importlib.util.module_from_spec(_index_spec)
-_index_spec.loader.exec_module(_index_mod)
-index_single_file = _index_mod.index_single_file
+from harness_utils import index_single_file, run_search_pipeline
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -39,10 +29,20 @@ def embedding_model():
 
 @pytest.fixture(scope="session")
 def learning_snapshot(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Copy ~/.projects/learnings/*.md into a temp dir. Returns the temp path."""
+    """Copy ~/.projects/learnings/*.md into a temp dir. Returns the temp path.
+
+    Falls back to bundled sample learnings when the user has no personal learnings.
+    """
     source = Path.home() / ".projects" / "learnings"
-    md_files = list(source.glob("*.md"))
-    assert len(md_files) > 0, f"No .md files found in {source}"
+    md_files = list(source.glob("*.md")) if source.exists() else []
+
+    if not md_files:
+        source = PLUGIN_ROOT / "tests" / "fixtures" / "sample_learnings"
+        md_files = list(source.glob("*.md"))
+
+    assert len(md_files) > 0, (
+        "No learning files found (checked ~/.projects/learnings/ and tests/fixtures/sample_learnings/)"
+    )
 
     dest = tmp_path_factory.mktemp("learnings")
     for f in md_files:

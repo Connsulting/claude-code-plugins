@@ -1,5 +1,6 @@
 """Utility module for compound-learning test harness."""
 
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Set
@@ -10,6 +11,15 @@ sys.path.insert(0, str(PLUGIN_ROOT))
 import importlib.util
 
 import lib.db as db
+
+# Import index-learnings.py via spec (hyphen in filename)
+_index_spec = importlib.util.spec_from_file_location(
+    "index_learnings",
+    PLUGIN_ROOT / "skills" / "index-learnings" / "index-learnings.py",
+)
+_index_mod = importlib.util.module_from_spec(_index_spec)
+_index_spec.loader.exec_module(_index_mod)
+index_single_file = _index_mod.index_single_file
 
 # Import search-learnings.py via spec (hyphen in filename)
 _search_spec = importlib.util.spec_from_file_location(
@@ -22,6 +32,16 @@ _search_spec.loader.exec_module(_search_mod)
 extract_query_keywords = _search_mod.extract_query_keywords
 fts5_search = _search_mod.fts5_search
 hybrid_rerank = _search_mod.hybrid_rerank
+
+
+def match_ids_by_filename(results: List[Dict[str, Any]], patterns: List[str]) -> Set[str]:
+    """Return IDs of results whose file_path basename contains any pattern."""
+    matched: Set[str] = set()
+    for r in results:
+        basename = os.path.basename(r.get("metadata", {}).get("file_path", "")).lower()
+        if any(p.lower() in basename for p in patterns):
+            matched.add(r["id"])
+    return matched
 
 
 class MetricsCollector:

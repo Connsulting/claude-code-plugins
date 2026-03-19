@@ -5,26 +5,9 @@ All tests are marked slow since they depend on the indexed_corpus fixture
 which indexes all learning files from ~/.projects/learnings/.
 """
 
-import os
-from typing import Any, Dict, List, Set
-
 import pytest
 
-from harness_utils import MetricsCollector, run_search_pipeline
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _match_ids_by_pattern(results: List[Dict[str, Any]], patterns: List[str]) -> Set[str]:
-    """Return set of result IDs whose file_path basename contains any pattern."""
-    matched: Set[str] = set()
-    for r in results:
-        basename = os.path.basename(r.get("metadata", {}).get("file_path", "")).lower()
-        if any(p.lower() in basename for p in patterns):
-            matched.add(r["id"])
-    return matched
+from harness_utils import MetricsCollector, match_ids_by_filename, run_search_pipeline
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +33,7 @@ def test_known_query_ground_truth(indexed_corpus, search_fn):
         results = search_fn(config, conn, query)
         all_results = results["all_results"]
 
-        matched_expected = _match_ids_by_pattern(all_results, expected_patterns)
+        matched_expected = match_ids_by_filename(all_results, expected_patterns)
         actual_ids = [r["id"] for r in all_results]
 
         collector.add_result(query, expected_ids=matched_expected, actual_ids=actual_ids)
