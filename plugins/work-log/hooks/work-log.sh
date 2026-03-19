@@ -43,7 +43,7 @@ if [ -f "$USER_CONFIG" ]; then
 else
   CONFIG_FILE="$BUNDLED_CONFIG"
 fi
-eval "$(jq -r '@sh "DATABASE_ID=\(.notion.databaseId) MCP_SERVER=\(.notion.mcpServerName // "claude_ai_Notion") SOURCE_PREFIX=\(.sourcePrefix // "cc") MIN_LINES=\(.minTranscriptLines // 40) TIMEZONE=\(.timezone // "UTC") DEFAULT_PROJECT=\(.defaultProject // "personal") PROJECT_PATTERN=\(.projectPattern // ".*/git/([^/]+).*")"' "$CONFIG_FILE")"
+eval "$(jq -r '@sh "DATABASE_ID=\(.notion.databaseId) MCP_SERVER=\(.notion.mcpServerName // "notion") SOURCE_PREFIX=\(.sourcePrefix // "cc") MIN_LINES=\(.minTranscriptLines // 40) TIMEZONE=\(.timezone // "UTC") DEFAULT_PROJECT=\(.defaultProject // "personal") PROJECT_PATTERN=\(.projectPattern // ".*/git/([^/]+).*")"' "$CONFIG_FILE")"
 
 if [ "$LINES" -lt "$MIN_LINES" ]; then
   log_activity "SKIP: transcript too short ($LINES lines, minimum $MIN_LINES)"
@@ -99,11 +99,10 @@ trap "rm -f $OUTPUT_FILE $TEMP_CONFIG" EXIT
 log_activity "WORK_LOG_START: session=$SESSION_ID project=$PROJECT tag=$SESSION_TAG"
 
 # Use heredoc to pass prompt via stdin (avoids temp files and arg size limits)
-NOTION_TOOLS="mcp__${MCP_SERVER}__notion-search,mcp__${MCP_SERVER}__notion-fetch,mcp__${MCP_SERVER}__notion-create-pages,mcp__${MCP_SERVER}__notion-update-page,mcp__${MCP_SERVER}__notion-create-comment,mcp__${MCP_SERVER}__notion-get-comments"
-CLAUDE_SUBPROCESS=1 ENABLE_CLAUDEAI_MCP_SERVERS=true claude -p --no-session-persistence \
+CLAUDE_SUBPROCESS=1 claude -p --no-session-persistence \
   --model haiku \
   --permission-mode bypassPermissions \
-  --allowedTools "Read,ToolSearch,${NOTION_TOOLS}" \
+  --allowedTools "Read,ToolSearch,mcp__${MCP_SERVER}__*" \
   <<PROMPT_END >"$OUTPUT_FILE" 2>&1
 You are a work log assistant. Evaluate this session and, if substantive, log it to Notion.
 

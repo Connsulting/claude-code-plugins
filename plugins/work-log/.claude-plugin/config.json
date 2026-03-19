@@ -1,7 +1,7 @@
 {
   "notion": {
     "databaseId": "YOUR_DATABASE_ID_HERE",
-    "mcpServerName": "claude_ai_Notion"
+    "mcpServerName": "notion"
   },
   "sourcePrefix": "cc",
   "minTranscriptLines": 40,

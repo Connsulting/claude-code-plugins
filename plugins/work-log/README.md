@@ -35,7 +35,7 @@ All available fields (bundled defaults):
 {
   "notion": {
     "databaseId": "YOUR_DATABASE_ID_HERE",
-    "mcpServerName": "claude_ai_Notion"
+    "mcpServerName": "notion"
   },
   "sourcePrefix": "cc",
   "minTranscriptLines": 40,
@@ -49,7 +49,7 @@ All available fields (bundled defaults):
 | Field | Description | Default |
 |-------|-------------|---------|
 | `notion.databaseId` | Notion database ID for daily notes | (required) |
-| `notion.mcpServerName` | MCP server name for Notion tools | `claude_ai_Notion` |
+| `notion.mcpServerName` | MCP server name for Notion tools | `notion` |
 | `sourcePrefix` | Prefix for session tags (e.g., `cc:a1b2c3d4`) | `cc` |
 | `minTranscriptLines` | Skip sessions shorter than this | `40` |
 | `timezone` | Timezone for timestamps and date boundaries | `UTC` |
