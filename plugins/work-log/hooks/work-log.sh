@@ -101,7 +101,7 @@ log_activity "WORK_LOG_START: session=$SESSION_ID project=$PROJECT tag=$SESSION_
 # Use heredoc to pass prompt via stdin (avoids temp files and arg size limits)
 NOTION_TOOLS="mcp__${MCP_SERVER}__notion-search,mcp__${MCP_SERVER}__notion-fetch,mcp__${MCP_SERVER}__notion-create-pages,mcp__${MCP_SERVER}__notion-update-page,mcp__${MCP_SERVER}__notion-create-comment,mcp__${MCP_SERVER}__notion-get-comments"
 CLAUDE_SUBPROCESS=1 ENABLE_CLAUDEAI_MCP_SERVERS=true claude -p --no-session-persistence \
-  --model haiku \
+  --model sonnet \
   --permission-mode bypassPermissions \
   --allowedTools "Read,ToolSearch,${NOTION_TOOLS}" \
   <<PROMPT_END >"$OUTPUT_FILE" 2>&1
@@ -131,7 +131,15 @@ Focus on outcomes and value delivered, not technical implementation details:
 Bad: "Refactored the codebase and improved code quality"
 Good: "Built auto-logging plugin that writes session summaries to Notion on session end. Enables automatic work tracking across client projects without manual timekeeping."
 
-## Toggle label
+## Toggle format
+
+The Claude.ai Notion MCP uses enhanced Markdown. Toggles use HTML details/summary tags:
+
+<details>
+<summary>TOGGLE LABEL HERE</summary>
+	CONTENT INDENTED WITH TAB
+	SECOND LINE INDENTED WITH TAB
+</details>
 
 The toggle label format is: ${SESSION_TAG} - {Short Name}
 - If Session Name above is not "none", use it as the short name
@@ -142,14 +150,16 @@ When searching for an existing toggle (for resume/dedup), match on "${SESSION_TA
 ## Log to Notion
 
 1. Search database ${DATABASE_ID} for a page titled "${TODAY}". Create one if missing.
-2. Fetch the page blocks. Look for an H2 "${PROJECT}" and a toggle starting with "${SESSION_TAG}".
+2. Fetch the page blocks. Look for an H2 "${PROJECT}" and a toggle (details/summary block) starting with "${SESSION_TAG}".
 3. If no "${PROJECT}" H2 exists, append one.
 4. If a toggle starting with "${SESSION_TAG}" exists (resumed session):
    a. If the toggle label differs from your computed label (e.g., name changed via /rename), update the toggle's title text
    b. Append inside it: [${TIMESTAMP}] claude-code (resumed): {summary}
-5. Otherwise, append a new toggle with the label from above containing:
+5. Otherwise, append a new toggle using the <details><summary> format above containing:
    [${TIMESTAMP}] claude-code: {1-2 sentence summary with ticket refs if any}
    {1 sentence on value to the project}
+
+IMPORTANT: Only write the toggle content to Notion. Do not include your evaluation reasoning, headers like "## Evaluate", or any other meta-commentary in the Notion page content.
 
 If toggles are unsupported, use H3 + paragraph as fallback. Prefer duplicates over data loss.
 
