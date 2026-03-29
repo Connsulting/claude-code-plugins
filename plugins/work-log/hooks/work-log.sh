@@ -114,22 +114,35 @@ Date: ${TODAY}
 Time: ${TIMESTAMP}
 Database ID: ${DATABASE_ID}
 
-## Evaluate
+## Skip criteria
 
-Skip trivial sessions (quick lookups, single questions, typos, meta-config). Log sessions with meaningful work (features, fixes, architecture, planning, infra).
-
-If not worth logging, output only the word SKIP on a line by itself followed by a brief reason, then stop.
+SKIP these sessions (output "SKIP" and a reason, then stop):
+- Routine automation runs (Zapier syncs, auto-management, scheduled tasks, cron triggers)
+- Quick lookups, single questions, typos, dependency bumps, config tweaks
+- Sessions that are entirely tool/agent review cycles with no new decisions
+- Repetitive operational work identical to previous sessions (e.g., the same automation script running again)
 
 ## Write the summary
 
-Focus on outcomes and value delivered, not technical implementation details:
-- What was accomplished? What concrete work product was delivered?
-- Why does it matter for the project? What problem does it solve or what capability does it add?
-- Include specific details: what was built, fixed, or decided. Avoid vague language.
-- If ticket/issue IDs appear in the transcript (JIRA like PROJ-1234, Linear, GitHub #123), include them as references.
+You are writing for a strategic analyst who reviews these notes weekly. They need to understand WHAT happened, WHY it matters, and WHAT is UNRESOLVED. They do not need implementation details.
 
-Bad: "Refactored the codebase and improved code quality"
-Good: "Built auto-logging plugin that writes session summaries to Notion on session end. Enables automatic work tracking across client projects without manual timekeeping."
+For each session note, answer these three questions:
+
+1. WHAT: What was accomplished? Be specific (name the feature, bug, system, or decision) but skip implementation mechanics (no PR numbers, file paths, or code details unless they ARE the point).
+
+2. SO WHAT: Why does this matter beyond the immediate task? Connect to one of:
+   - Client relationship (was this requested? does it change perception? does it demonstrate a capability?)
+   - Systemic issue (does this reveal a pattern, a process gap, or an engineering culture problem?)
+   - Delivery milestone (does this unlock something, complete a phase, or ship to users?)
+   - Strategic thread (does this connect to positioning, a thesis, or cross-client pattern?)
+   If none of these apply, just state the direct project impact.
+
+3. OPEN THREADS (optional): Unresolved questions, follow-ups needed, or things that broke that haven't been fixed. Only include if genuinely unresolved.
+
+Bad example: "Fixed stale useRef bug in opportunity publish button. Updated component to use callback ref pattern for reliable DOM tracking."
+Good example: "Fixed publish button regression reported by RS client. Root cause was a React ref lifecycle issue introduced during the multi-agent review refactor -- worth watching whether the review pipeline is introducing more bugs than it catches."
+
+If ticket/issue IDs appear in the transcript, include them as references.
 
 ## Toggle format
 
@@ -143,25 +156,24 @@ The Claude.ai Notion MCP uses enhanced Markdown. Toggles use HTML details/summar
 
 The toggle label format is: ${SESSION_TAG} - {Short Name}
 - If Session Name above is not "none", use it as the short name
-- Otherwise, generate a descriptive 3-5 word name from the transcript (e.g., "Notion Work Log Plugin", "Auth Bug Fix", "API Rate Limiting")
+- Otherwise, generate a descriptive 3-5 word name from the transcript
 
-When searching for an existing toggle (for resume/dedup), match on "${SESSION_TAG}" as a prefix only. Ignore the name portion after " - ".
+When searching for an existing toggle (for resume/dedup), match on "${SESSION_TAG}" as a prefix only.
 
 ## Log to Notion
 
 1. Search database ${DATABASE_ID} for a page titled "${TODAY}". Create one if missing.
-2. Fetch the page blocks. Look for an H2 "${PROJECT}" and a toggle (details/summary block) starting with "${SESSION_TAG}".
+2. Fetch the page blocks. Look for an H2 "${PROJECT}" and a toggle starting with "${SESSION_TAG}".
 3. If no "${PROJECT}" H2 exists, append one.
 4. If a toggle starting with "${SESSION_TAG}" exists (resumed session):
-   a. If the toggle label differs from your computed label (e.g., name changed via /rename), update the toggle's title text
-   b. Append inside it: [${TIMESTAMP}] claude-code (resumed): {summary}
-5. Otherwise, append a new toggle using the <details><summary> format above containing:
-   [${TIMESTAMP}] claude-code: {1-2 sentence summary with ticket refs if any}
-   {1 sentence on value to the project}
+   a. If the toggle label differs, update the title text
+   b. Append inside it: [${TIMESTAMP}] (resumed): {summary}
+5. Otherwise, append a new toggle containing:
+   [${TIMESTAMP}] {WHAT summary}
+   {SO WHAT context}
+   {OPEN THREADS if any}
 
-IMPORTANT: Only write the toggle content to Notion. Do not include your evaluation reasoning, headers like "## Evaluate", or any other meta-commentary in the Notion page content.
-
-If toggles are unsupported, use H3 + paragraph as fallback. Prefer duplicates over data loss.
+IMPORTANT: Only write the toggle content to Notion. No evaluation reasoning or meta-commentary.
 
 <transcript>
 ${TRANSCRIPT_CONTENT}
