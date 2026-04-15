@@ -125,6 +125,22 @@ def extract_type(content: str) -> str | None:
     return extract_field(content, 'Type')
 
 
+def extract_hits(content: str) -> int:
+    """Extract hit count from **Hits:** field, default 0."""
+    raw = extract_field(content, 'Hits')
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            return 0
+    return 0
+
+
+def extract_last_accessed(content: str) -> str | None:
+    """Extract last accessed date from **Last Accessed:** field."""
+    return extract_field(content, 'Last Accessed')
+
+
 def generate_manifest(manifest_data: Dict[str, List[Dict[str, Any]]], config: Dict[str, Any]) -> None:
     """Generate single manifest file at ~/.projects/learnings/MANIFEST.md"""
     global_dir = Path(config['learnings']['globalDir'])
@@ -209,6 +225,8 @@ def index_single_file(file_path: Path, config: Dict[str, Any]) -> bool:
 
         metadata['topic'] = topic
         metadata['keywords'] = ','.join(keywords)
+        metadata['access_count'] = extract_hits(content)
+        metadata['last_accessed'] = extract_last_accessed(content)
 
         doc_id = hashlib.md5(str(file_path.resolve()).encode()).hexdigest()
         db.upsert_document(conn, doc_id, content, metadata)
@@ -260,6 +278,8 @@ def index_learning_files():
 
             metadata['topic'] = topic
             metadata['keywords'] = ','.join(keywords)
+            metadata['access_count'] = extract_hits(content)
+            metadata['last_accessed'] = extract_last_accessed(content)
 
             doc_id = hashlib.md5(str(file_path.resolve()).encode()).hexdigest()
             db.upsert_document(conn, doc_id, content, metadata)
