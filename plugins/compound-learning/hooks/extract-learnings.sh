@@ -112,11 +112,16 @@ while IFS= read -r file; do
 
   log_activity "  GENERATED: file=$FILENAME title=\"$TITLE\""
 
-  # Index the newly created file into SQLite (non-fatal if unavailable)
+  # Index the newly created file into SQLite (non-fatal if unavailable).
+  # On failure, append to index-failures.log so the next auto-peek surfaces it
+  # to the user — this hook is async and can't echo to the live conversation.
   if [ -f "$INDEX_SCRIPT" ]; then
-    CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" python3 "$INDEX_SCRIPT" --file "$file" >> "$LOG_FILE" 2>&1 \
-      && log_activity "  INDEXED: $FILENAME" \
-      || log_activity "  INDEX_SKIP: indexing failed for $FILENAME"
+    if CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" python3 "$INDEX_SCRIPT" --file "$file" >> "$LOG_FILE" 2>&1; then
+      log_activity "  INDEXED: $FILENAME"
+    else
+      log_activity "  INDEX_SKIP: indexing failed for $FILENAME"
+      echo "$(date '+%Y-%m-%d %H:%M:%S') $FILENAME" >> "$LOG_DIR/index-failures.log"
+    fi
   fi
 done <<< "$NEW_FILES"
 

@@ -23,6 +23,17 @@ if [ -n "$CLAUDE_SUBPROCESS" ]; then
   exit 0
 fi
 
+# Surface indexing failures recorded by extract-learnings.sh. The async indexing
+# hook can't echo to the live conversation, so it appends to this sentinel file
+# and we surface it here on the next prompt — then clear so we don't re-warn.
+INDEX_FAILURE_FLAG="$LOG_DIR/index-failures.log"
+if [ -s "$INDEX_FAILURE_FLAG" ]; then
+  FAIL_COUNT=$(wc -l < "$INDEX_FAILURE_FLAG" | tr -d ' ')
+  FAIL_LATEST=$(tail -1 "$INDEX_FAILURE_FLAG")
+  echo "[auto-peek] HEALTH: $FAIL_COUNT learning file(s) failed to index — most recent: $FAIL_LATEST. Run /compound-learning:index-learnings to retry. (full log: $LOG_FILE)"
+  rm -f "$INDEX_FAILURE_FLAG"
+fi
+
 # Read hook input from stdin
 INPUT=$(cat)
 PROMPT=$(echo "$INPUT" | jq -r '.prompt')
@@ -139,12 +150,21 @@ SEARCH_RESULT=$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/search-learnings.py" \
   --keywords-json "$KEYWORDS_ARRAY" \
   "$CWD" 2>"$ERR_FILE")
 SEARCH_EXIT=$?
-[ -s "$ERR_FILE" ] && log_activity "[auto-peek] search error: $(cat "$ERR_FILE")"
+SEARCH_ERR=""
+if [ -s "$ERR_FILE" ]; then
+  SEARCH_ERR=$(cat "$ERR_FILE")
+  log_activity "[auto-peek] search error: $SEARCH_ERR"
+fi
 rm -f "$ERR_FILE"
 
-# Check if we got results
-if [ $SEARCH_EXIT -ne 0 ]; then
-  echo "[auto-peek] search failed (check ~/.claude/plugins/compound-learning/activity.log)"
+# Surface failures visibly. The search subprocess catches per-keyword exceptions
+# internally and exits 0 with empty results, so non-empty stderr is the canonical
+# signal that something went wrong even when the exit code looks healthy. Without
+# this, env breakage (e.g. transformers/torch version skew) silently presents as
+# "no learnings for X" on every prompt.
+if [ $SEARCH_EXIT -ne 0 ] || [ -n "$SEARCH_ERR" ]; then
+  FIRST_ERR=$(echo "$SEARCH_ERR" | head -1)
+  echo "[auto-peek] ERROR: search broken — ${FIRST_ERR:-exit $SEARCH_EXIT} (full log: $LOG_FILE)"
   exit 0
 fi
 

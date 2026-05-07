@@ -13,11 +13,17 @@ log_activity() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
 }
 
-# Quick check: can we import all required packages?
+# Quick check: can we ACTUALLY import all required packages? find_spec only
+# verifies the module is on disk; env corruption (e.g. transformers/torch
+# version skew) leaves an importable module that raises at import time. Use
+# import_module to catch real breakage so setup re-runs install instead of
+# falsely reporting healthy.
 if python3 -c "
-import importlib.util, sys
+import importlib, sys
 for pkg in ['pysqlite3', 'sqlite_vec', 'sentence_transformers']:
-    if importlib.util.find_spec(pkg) is None:
+    try:
+        importlib.import_module(pkg)
+    except Exception:
         sys.exit(1)
 " 2>/dev/null; then
   exit 0
