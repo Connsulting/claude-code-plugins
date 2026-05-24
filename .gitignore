@@ -4,4 +4,8 @@ __pycache__/
 activity.log
 sessions/
 pinned.md
+auto-consolidate.log
+cron-weekly.log
+review-queue.md
+index-failures.log
 
