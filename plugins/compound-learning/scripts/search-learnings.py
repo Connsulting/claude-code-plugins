@@ -11,6 +11,8 @@ import os
 _PLUGIN_ROOT = os.environ.get('CLAUDE_PLUGIN_ROOT', os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, _PLUGIN_ROOT)
 
+import lib._site_packages  # noqa: F401  -- ensures site-packages on sys.path before third-party imports
+
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed

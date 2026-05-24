@@ -22,6 +22,8 @@ _PLUGIN_ROOT = os.environ.get(
 )
 sys.path.insert(0, _PLUGIN_ROOT)
 
+import lib._site_packages  # noqa: F401  -- ensures site-packages on sys.path before third-party imports
+
 from lib.topic_mapping import infer_topic_from_tags
 
 
