@@ -20,7 +20,7 @@ from typing import Dict, List, Tuple, Any
 
 import lib.db as db
 import lib.git_utils as git_utils
-from lib.topic_mapping import infer_topic_from_tags
+from lib.topic_mapping import infer_topic_from_tags, canonicalize_topic
 
 
 def _rglob_follow_symlinks(root: Path, target: str) -> List[Path]:
@@ -105,10 +105,12 @@ def extract_field(content: str, field: str) -> str | None:
 
 
 def extract_topic(content: str) -> str:
-    """Extract topic from **Topic:** field, fallback to tag-based inference."""
+    """Extract topic from **Topic:** field, canonicalize via slug + alias map,
+    fallback to tag-based inference for files without an explicit topic."""
     topic = extract_field(content, 'Topic')
     if topic:
-        return topic.lower().replace(' ', '-')
+        canonical, _ = canonicalize_topic(topic)
+        return canonical or topic.lower().replace(' ', '-')
     return infer_topic_from_tags(extract_tags(content))
 
 

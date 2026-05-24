@@ -7,6 +7,8 @@ the best matching topic from a list of tags.
 
 from __future__ import annotations
 
+import re
+
 TOPIC_TAG_MAP: dict[str, set[str]] = {
     "kubernetes-infrastructure": {
         "kubernetes", "k8s", "helm", "karpenter", "eks", "kubectl",
@@ -131,6 +133,97 @@ TOPIC_TAG_MAP: dict[str, set[str]] = {
         "project-management", "planning", "roadmap",
     },
 }
+
+
+# Topic aliases: variants -> canonical form. Conservative on purpose: only
+# obvious formatting variants and well-established synonyms. New legitimate
+# topics that don't match here pass through as slug-normalized strings, so
+# the vocabulary stays open.
+TOPIC_ALIASES: dict[str, str] = {
+    # CI/CD formatting variants -> canonical (matches TOPIC_TAG_MAP key)
+    "ci-cd": "cicd",
+    "ci": "cicd",
+    # GitHub Actions stays distinct from generic cicd (tool-specific)
+    "gha": "github-actions",
+    "github-action": "github-actions",
+    # Kubernetes
+    "k8s": "kubernetes-infrastructure",
+    "kubernetes": "kubernetes-infrastructure",
+    "k8s-infrastructure": "kubernetes-infrastructure",
+    # AI / agents
+    "ai-agent": "ai-agents",
+    "agent": "ai-agents",
+    "agents": "ai-agents",
+    "agent-orchestration": "ai-agents",
+    "claude-code": "ai-agents",
+    "llm": "ai-agents",
+    # AWS
+    "amazon-web-services": "aws",
+    # Languages
+    "node": "nodejs",
+    "node-js": "nodejs",
+    "js": "javascript",
+    "ts": "typescript",
+    "py": "python",
+    # Auth
+    "auth": "authentication",
+    "authn": "authentication",
+    # Dependencies
+    "deps": "dependency-management",
+    "dependencies": "dependency-management",
+    "package-management": "dependency-management",
+    "dependency-mgmt": "dependency-management",
+    # Testing
+    "tests": "testing",
+    "test": "testing",
+    "qa": "testing",
+    # Security
+    "sec": "security",
+    "vuln": "security",
+    "vulnerability": "security",
+    "vulnerabilities": "security",
+    # Observability
+    "obs": "observability",
+    "monitoring": "observability",
+    # Database
+    "db": "database",
+    "postgres": "database",
+    "postgresql": "database",
+    # Docs
+    "docs": "documentation",
+}
+
+
+def slug_normalize(topic: str) -> str:
+    """Normalize topic formatting: lowercase, dashes for separators, single-dash collapse."""
+    if not topic:
+        return ""
+    s = topic.lower().strip()
+    # Replace path/list/whitespace separators with dashes
+    s = re.sub(r'[/,\s_]+', '-', s)
+    # Drop characters that aren't alphanumeric or dash
+    s = re.sub(r'[^a-z0-9-]', '', s)
+    # Collapse runs of dashes
+    s = re.sub(r'-+', '-', s)
+    return s.strip('-')
+
+
+def canonicalize_topic(topic: str) -> tuple[str, bool]:
+    """Canonicalize a topic string. Returns (canonical_topic, was_aliased).
+
+    Pipeline:
+    1. slug_normalize formatting (lowercase, dash separators)
+    2. Apply TOPIC_ALIASES if matched (otherwise return slug-normalized as-is)
+
+    Returns the canonical topic plus a bool indicating whether an alias was applied.
+    The 'was_aliased' flag lets callers log/report aliasing without changing behavior.
+    """
+    if not topic:
+        return "", False
+    slug = slug_normalize(topic)
+    if slug in TOPIC_ALIASES:
+        return TOPIC_ALIASES[slug], True
+    return slug, False
 
 
 def infer_topic_from_tags(tags: list[str]) -> str:
