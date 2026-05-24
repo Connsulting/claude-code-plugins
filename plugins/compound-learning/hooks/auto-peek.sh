@@ -172,12 +172,14 @@ SEARCH_RESULT=$(HF_HUB_OFFLINE=1 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/search-l
   --keywords-json "$KEYWORDS_ARRAY" \
   "$CWD" 2>"$ERR_FILE")
 SEARCH_EXIT=$?
-# Filter benign third-party warnings (huggingface_hub / transformers nags) from
-# the stderr stream before treating it as a failure signal. Real exceptions
-# still get raised as multi-line tracebacks with non-Warning prefixes.
+# Filter benign third-party warnings (huggingface_hub / transformers nags) and
+# the multi-line BertModel LOAD REPORT that sentence-transformers prints when
+# loading a cached model. Strip ANSI escapes first so the line patterns match.
+# Real exceptions still get raised as multi-line tracebacks with non-Warning
+# prefixes.
 SEARCH_ERR=""
 if [ -s "$ERR_FILE" ]; then
-  SEARCH_ERR=$(grep -v -E '^(Warning:|/.*\.py:[0-9]+: (User|Future|Deprecation)Warning)' "$ERR_FILE" || true)
+  SEARCH_ERR=$(sed 's/\x1b\[[0-9;]*m//g' "$ERR_FILE" | tr '\r' '\n' | grep -v -E '^[[:space:]]*$|^(Warning:|/.*\.py:[0-9]+: (User|Future|Deprecation)Warning|Loading weights:|.*BertModel LOAD REPORT|Key[[:space:]]+\||[-]+\+[-]+|[a-zA-Z_.]+[[:space:]]+\|[[:space:]]+(UNEXPECTED|MISSING|OK|EXTRA)|Notes:|- (UNEXPECTED|MISSING|OK|EXTRA))' || true)
   [ -n "$SEARCH_ERR" ] && log_activity "[auto-peek] search error: $SEARCH_ERR"
 fi
 rm -f "$ERR_FILE"
