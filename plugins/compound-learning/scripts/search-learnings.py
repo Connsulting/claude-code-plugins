@@ -146,15 +146,46 @@ def hybrid_rerank(
     Returns:
         Results re-sorted by adjusted distance (lower = better)
     """
+    from datetime import datetime, timezone
+    from math import log1p, exp
+
     fts_boost = 0.05
+    # Hit-count and recency boost. Caps at ~0.06 total distance reduction so
+    # popular items get a nudge but never overpower a genuinely better
+    # semantic match. Log-scaled hits saturate at 10; recency uses 30-day exp decay.
+    HIT_SATURATION = log1p(10)
+    HIT_WEIGHT = 0.04
+    RECENCY_HALFLIFE_DAYS = 30
+    RECENCY_WEIGHT = 0.02
+    now = datetime.now(timezone.utc)
+
     for result in results:
         overlap = calculate_keyword_overlap(query_keywords, result['document'])
         result['keyword_overlap'] = round(overlap, 4)
         result['original_distance'] = result['distance']
         fts_reduction = fts_boost if (fts_ids and result['id'] in fts_ids) else 0
         result['fts_match'] = bool(fts_ids and result['id'] in fts_ids)
+
+        meta = result.get('metadata') or {}
+        access_count = meta.get('access_count') or 0
+        last_accessed = meta.get('last_accessed')
+        hit_factor = min(log1p(access_count) / HIT_SATURATION, 1.0) if access_count > 0 else 0.0
+        recency_factor = 0.0
+        if last_accessed:
+            try:
+                la = datetime.fromisoformat(str(last_accessed).replace('Z', '+00:00'))
+                if la.tzinfo is None:
+                    la = la.replace(tzinfo=timezone.utc)
+                days_since = max(0.0, (now - la).total_seconds() / 86400)
+                recency_factor = exp(-days_since / RECENCY_HALFLIFE_DAYS)
+            except (ValueError, TypeError):
+                pass
+        hit_boost = hit_factor * HIT_WEIGHT + recency_factor * RECENCY_WEIGHT
+        result['hit_factor'] = round(hit_factor, 4)
+        result['recency_factor'] = round(recency_factor, 4)
+
         result['distance'] = round(
-            max(0.0, result['distance'] * (1 - keyword_weight * overlap) - fts_reduction),
+            max(0.0, result['distance'] * (1 - keyword_weight * overlap) - fts_reduction - hit_boost),
             4
         )
 
