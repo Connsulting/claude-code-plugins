@@ -75,6 +75,10 @@ find "$SESSIONS_DIR" -name "*.seen" -mmin +1440 -delete 2>/dev/null
 SESSION_ID=$(basename "$TRANSCRIPT" .jsonl)
 SESSION_FILE="$SESSIONS_DIR/${SESSION_ID}.seen"
 
+# Pinned learnings are loaded via CLAUDE.md @import (not injected here) so the
+# agent sees them on every session without paying hook-output overhead. See
+# scripts/build-pinned.py for the generator.
+
 # Read already-seen IDs from the session file
 EXCLUDE_IDS=""
 EXCLUDE_COUNT=0
@@ -157,26 +161,31 @@ log_activity "[auto-peek] keywords extracted: $KEYWORDS_DISPLAY (dedup excluding
 
 # Search with extracted keywords in parallel, exclude seen IDs
 # Each keyword is searched independently and results are merged
+# HF_HUB_OFFLINE=1: the embedding model is already cached locally; this stops
+# huggingface_hub from emitting an "unauthenticated requests" nag to stderr on
+# every invocation, which would otherwise trip the stderr-as-error guard below.
 ERR_FILE=$(mktemp)
-SEARCH_RESULT=$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/search-learnings.py" \
+SEARCH_RESULT=$(HF_HUB_OFFLINE=1 python3 "${CLAUDE_PLUGIN_ROOT}/scripts/search-learnings.py" \
   --peek \
   --max-results 1 \
   --exclude-ids "$EXCLUDE_IDS" \
   --keywords-json "$KEYWORDS_ARRAY" \
   "$CWD" 2>"$ERR_FILE")
 SEARCH_EXIT=$?
+# Filter benign third-party warnings (huggingface_hub / transformers nags) from
+# the stderr stream before treating it as a failure signal. Real exceptions
+# still get raised as multi-line tracebacks with non-Warning prefixes.
 SEARCH_ERR=""
 if [ -s "$ERR_FILE" ]; then
-  SEARCH_ERR=$(cat "$ERR_FILE")
-  log_activity "[auto-peek] search error: $SEARCH_ERR"
+  SEARCH_ERR=$(grep -v -E '^(Warning:|/.*\.py:[0-9]+: (User|Future|Deprecation)Warning)' "$ERR_FILE" || true)
+  [ -n "$SEARCH_ERR" ] && log_activity "[auto-peek] search error: $SEARCH_ERR"
 fi
 rm -f "$ERR_FILE"
 
 # Surface failures visibly. The search subprocess catches per-keyword exceptions
-# internally and exits 0 with empty results, so non-empty stderr is the canonical
-# signal that something went wrong even when the exit code looks healthy. Without
-# this, env breakage (e.g. transformers/torch version skew) silently presents as
-# "no learnings for X" on every prompt.
+# internally and exits 0 with empty results, so non-empty stderr (after filtering
+# benign warnings above) is the canonical signal that something went wrong even
+# when the exit code looks healthy.
 if [ $SEARCH_EXIT -ne 0 ] || [ -n "$SEARCH_ERR" ]; then
   FIRST_ERR=$(echo "$SEARCH_ERR" | head -1)
   echo "[auto-peek] ERROR: search broken — ${FIRST_ERR:-exit $SEARCH_EXIT} (full log: $LOG_FILE)"
