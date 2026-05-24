@@ -65,8 +65,11 @@ def _normalize_h1(content: str) -> str:
     Handles two file shapes:
     - Markdown-first: first non-empty line starts with `# `, use it
     - YAML frontmatter: starts with `---`, find `name:` field or first `# ` after the closing `---`
-    Returns '' if neither pattern matches (which prevents accidental same-H1 matches
-    on files that have no real headline, e.g. two frontmatter-only stubs).
+
+    Returns '' if no proper headline is found. Falling back to first prose
+    line is unsafe: standard learning files start with `**Type:** pattern`
+    boilerplate, which would collide across unrelated files and defeat the
+    H1 gate. classify_cluster() guards empty-H1 clusters to REVIEW.
     """
     lines = content.split('\n', 50)
     if not lines:
@@ -90,9 +93,6 @@ def _normalize_h1(content: str) -> str:
     for line in lines:
         if line.startswith('# '):
             return line[2:].strip().lower()
-        if line.strip() and not line.startswith('#'):
-            # No H1 found; use first prose line as a weak signal
-            return line.strip().lower()
     return ''
 
 
@@ -192,11 +192,23 @@ def classify_cluster(cluster: dict) -> tuple[str, str]:
     if cluster['size'] > MAX_CLUSTER_SIZE_AUTO_MERGE:
         return ('REVIEW', f"cluster size {cluster['size']} > auto-merge cap {MAX_CLUSTER_SIZE_AUTO_MERGE}")
 
+    # Missing files on disk (e.g., ghost embeddings from a partial prior merge
+    # where the row never got cleaned up) should never auto-merge: action_merge
+    # would silently produce an empty-content merged file from absent sources.
+    missing = [m['file'] for m in cluster['members'] if not os.path.exists(m['file_path'])]
+    if missing:
+        return ('REVIEW', f"file(s) missing on disk: {missing[:3]}")
+
     topics = {m['topic_canonical'] for m in cluster['members']}
     if len(topics) > 1:
         return ('REVIEW', f"topics differ after canonicalization: {sorted(topics)}")
 
     h1s = {m['h1'] for m in cluster['members']}
+    # Empty H1 means no proper headline was found in at least one file;
+    # treat as ambiguous and defer to human review rather than relying on
+    # boilerplate-collision matches.
+    if '' in h1s:
+        return ('REVIEW', "at least one member has no detectable H1 headline")
     if len(h1s) > 1:
         return ('REVIEW', f"H1 headings differ: {sorted(h1s)[:3]}")
 

@@ -178,8 +178,14 @@ def hybrid_rerank(
                 la = datetime.fromisoformat(str(last_accessed).replace('Z', '+00:00'))
                 if la.tzinfo is None:
                     la = la.replace(tzinfo=timezone.utc)
-                days_since = max(0.0, (now - la).total_seconds() / 86400)
-                recency_factor = exp(-days_since / RECENCY_HALFLIFE_DAYS)
+                age_seconds = (now - la).total_seconds()
+                # Materially future-dated timestamps are corrupt metadata, not
+                # genuine recent activity; don't reward them.
+                if age_seconds < -300:
+                    recency_factor = 0.0
+                else:
+                    days_since = max(0.0, age_seconds / 86400)
+                    recency_factor = exp(-days_since / RECENCY_HALFLIFE_DAYS)
             except (ValueError, TypeError):
                 pass
         hit_boost = hit_factor * HIT_WEIGHT + recency_factor * RECENCY_WEIGHT
