@@ -31,6 +31,10 @@ fi
 
 log_activity "[setup] Missing Python dependencies, installing..."
 
+# Install torch from CPU-only index first so sentence-transformers does not pull in CUDA wheels.
+# On Linux and macOS, CUDA libraries are dead weight on machines without an NVIDIA GPU.
+pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu 2>>"$LOG_FILE"
+
 # Install all required packages quietly
 if pip install --quiet pysqlite3-binary sqlite-vec sentence-transformers 2>>"$LOG_FILE"; then
   log_activity "[setup] Python dependencies installed successfully"
