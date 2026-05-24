@@ -10,8 +10,17 @@ if [ -z "$CLAUDE_PLUGIN_ROOT" ]; then
 fi
 
 # Setup logging
+# Verify the dir is actually writable — a dangling symlink here will cause mkdir -p
+# to succeed but every subsequent append to fail silently, breaking both logs and
+# session dedup. When that happens, fall back to a temp dir and emit a loud warning.
 LOG_DIR="$HOME/.claude/plugins/compound-learning"
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" 2>/dev/null
+if [ ! -d "$LOG_DIR" ] || [ ! -w "$LOG_DIR" ]; then
+  FALLBACK_LOG_DIR="${TMPDIR:-/tmp}/claude-compound-learning-fallback"
+  mkdir -p "$FALLBACK_LOG_DIR" 2>/dev/null
+  echo "[auto-peek] WARN: primary state dir $LOG_DIR is not writable (check for dangling symlink). Falling back to $FALLBACK_LOG_DIR — session dedup WILL NOT persist."
+  LOG_DIR="$FALLBACK_LOG_DIR"
+fi
 LOG_FILE="$LOG_DIR/activity.log"
 
 log_activity() {
@@ -52,8 +61,12 @@ fi
 TRANSCRIPT="${TRANSCRIPT/#\~/$HOME}"
 
 # Session-scoped deduplication via a plain-text state file.
-SESSIONS_DIR="$HOME/.claude/plugins/compound-learning/sessions"
-mkdir -p "$SESSIONS_DIR"
+# Co-locate under LOG_DIR so the fallback path above keeps sessions and logs together.
+SESSIONS_DIR="$LOG_DIR/sessions"
+mkdir -p "$SESSIONS_DIR" 2>/dev/null
+if [ ! -w "$SESSIONS_DIR" ]; then
+  log_activity "[auto-peek] WARN: sessions dir $SESSIONS_DIR not writable — dedup disabled this invocation"
+fi
 
 # Prune session files older than 24 hours
 find "$SESSIONS_DIR" -name "*.seen" -mmin +1440 -delete 2>/dev/null
@@ -64,8 +77,10 @@ SESSION_FILE="$SESSIONS_DIR/${SESSION_ID}.seen"
 
 # Read already-seen IDs from the session file
 EXCLUDE_IDS=""
+EXCLUDE_COUNT=0
 if [ -f "$SESSION_FILE" ]; then
   EXCLUDE_IDS=$(sort -u "$SESSION_FILE" | tr '\n' ',' | sed 's/,$//')
+  EXCLUDE_COUNT=$(sort -u "$SESSION_FILE" | wc -l)
 fi
 
 # Extract recent conversation context from transcript
@@ -138,14 +153,14 @@ if [ -z "$KEYWORDS_ARRAY" ] || [ "$KEYWORDS_ARRAY" = "null" ] || [ "$KEYWORDS_AR
   exit 0
 fi
 
-log_activity "[auto-peek] keywords extracted: $KEYWORDS_DISPLAY"
+log_activity "[auto-peek] keywords extracted: $KEYWORDS_DISPLAY (dedup excluding $EXCLUDE_COUNT prior IDs)"
 
 # Search with extracted keywords in parallel, exclude seen IDs
 # Each keyword is searched independently and results are merged
 ERR_FILE=$(mktemp)
 SEARCH_RESULT=$(python3 "${CLAUDE_PLUGIN_ROOT}/scripts/search-learnings.py" \
   --peek \
-  --max-results 2 \
+  --max-results 1 \
   --exclude-ids "$EXCLUDE_IDS" \
   --keywords-json "$KEYWORDS_ARRAY" \
   "$CWD" 2>"$ERR_FILE")
@@ -181,9 +196,9 @@ echo "$SEARCH_RESULT" | jq -r '.learnings[].id' 2>/dev/null >> "$SESSION_FILE"
 COUNT=$(echo "$SEARCH_RESULT" | jq -r '.count' 2>/dev/null)
 echo "[auto-peek] $COUNT learning(s) found for: $KEYWORDS_DISPLAY"
 
-# Log search results with details
+# Log search results with details (include distance for threshold tuning)
 log_activity "SEARCH: query='$KEYWORDS_DISPLAY' count=$COUNT"
-echo "$SEARCH_RESULT" | jq -r '.learnings[] | "  file: \(.metadata.file_path | split("/") | .[-1])  title: \(.metadata.summary // .document | split("\n")[0] | .[0:100])  id: \(.id)"' 2>/dev/null | while read -r line; do
+echo "$SEARCH_RESULT" | jq -r '.learnings[] | "  file: \(.metadata.file_path | split("/") | .[-1])  distance: \(.distance // .original_distance // "?")  orig_distance: \(.original_distance // "?")  keyword_overlap: \(.keyword_overlap // "?")  title: \(.metadata.summary // .document | split("\n")[0] | .[0:100])  id: \(.id)"' 2>/dev/null | while read -r line; do
   log_activity "  RESULT: $line"
 done
 
