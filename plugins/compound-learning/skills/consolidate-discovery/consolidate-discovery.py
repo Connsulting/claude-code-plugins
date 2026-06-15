@@ -11,6 +11,8 @@ import os
 _PLUGIN_ROOT = os.environ.get('CLAUDE_PLUGIN_ROOT', os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 sys.path.insert(0, _PLUGIN_ROOT)
 
+import lib._site_packages  # noqa: F401  -- isolated site-packages on sys.path BEFORE lib.db (sqlite_vec); without it this skill fails when invoked with no manual PYTHONPATH
+
 import json
 import argparse
 from typing import Dict, List, Any, Set

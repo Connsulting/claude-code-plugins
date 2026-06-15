@@ -11,6 +11,8 @@ import os
 _PLUGIN_ROOT = os.environ.get('CLAUDE_PLUGIN_ROOT', os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 sys.path.insert(0, _PLUGIN_ROOT)
 
+import lib._site_packages  # noqa: F401  -- put isolated site-packages on sys.path BEFORE lib.db (sqlite_vec); without it the auto-index hook fails ("No module named 'sqlite_vec'") when invoked with no manual PYTHONPATH
+
 import hashlib
 import re
 from pathlib import Path
@@ -143,6 +145,49 @@ def extract_last_accessed(content: str) -> str | None:
     return extract_field(content, 'Last Accessed')
 
 
+_FILENAME_DATE_RE = re.compile(r'(\d{4})-(\d{2})-(\d{2})')
+
+
+def _ymd_to_iso(match: 're.Match') -> str | None:
+    """Build a UTC ISO-8601 timestamp from a (YYYY, MM, DD) regex match."""
+    try:
+        return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)),
+                        tzinfo=timezone.utc).isoformat()
+    except ValueError:
+        return None
+
+
+def extract_created_at(content: str, file_path: Path) -> str | None:
+    """Derive a stable created_at for a learning.
+
+    db.upsert_document does a delete-then-insert and stamps created_at with
+    now() whenever the caller doesn't supply one. Without this, every re-index
+    resets created_at to today, destroying the age signal the weekly demotion
+    pass relies on. Prefer (1) an explicit metadata field, (2) the filename
+    date suffix (the project convention: name-YYYY-MM-DD.md), then (3) the file
+    mtime. Returns an ISO-8601 string, or None to let the DB fall back to now().
+    """
+    for field in ('Created', 'Learned', 'Date'):
+        raw = extract_field(content, field)
+        if raw:
+            m = _FILENAME_DATE_RE.search(raw)
+            if m:
+                iso = _ymd_to_iso(m)
+                if iso:
+                    return iso
+
+    m = _FILENAME_DATE_RE.search(file_path.name)
+    if m:
+        iso = _ymd_to_iso(m)
+        if iso:
+            return iso
+
+    try:
+        return datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc).isoformat()
+    except OSError:
+        return None
+
+
 def generate_manifest(manifest_data: Dict[str, List[Dict[str, Any]]], config: Dict[str, Any]) -> None:
     """Generate single manifest file at ~/.projects/learnings/MANIFEST.md"""
     global_dir = Path(config['learnings']['globalDir'])
@@ -229,6 +274,9 @@ def index_single_file(file_path: Path, config: Dict[str, Any]) -> bool:
         metadata['keywords'] = ','.join(keywords)
         metadata['access_count'] = extract_hits(content)
         metadata['last_accessed'] = extract_last_accessed(content)
+        created_at = extract_created_at(content, file_path)
+        if created_at:
+            metadata['created_at'] = created_at
 
         doc_id = hashlib.md5(str(file_path.resolve()).encode()).hexdigest()
         db.upsert_document(conn, doc_id, content, metadata)
@@ -282,6 +330,9 @@ def index_learning_files():
             metadata['keywords'] = ','.join(keywords)
             metadata['access_count'] = extract_hits(content)
             metadata['last_accessed'] = extract_last_accessed(content)
+            created_at = extract_created_at(content, file_path)
+            if created_at:
+                metadata['created_at'] = created_at
 
             doc_id = hashlib.md5(str(file_path.resolve()).encode()).hexdigest()
             db.upsert_document(conn, doc_id, content, metadata)
