@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 activity.log
+codex-activity.log
 sessions/
 pinned.md
 auto-consolidate.log
