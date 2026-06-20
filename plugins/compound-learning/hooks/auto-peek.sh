@@ -132,10 +132,17 @@ fi
 # Use Haiku to extract search keywords
 # This is fast because: no MCP, no tools, just prompt/response
 # Use timeout to prevent hook from hanging
+# --safe-mode disables CLAUDE.md/AGENTS.md auto-discovery, plugins, hooks, and MCP.
+# Without it, every keyword-extraction call loaded the full global memory (~25k tokens
+# of CLAUDE.md + AGENTS.md + pinned.md) just to extract two keywords, paying cache
+# creation at the 1h ephemeral rate on each fire (~$0.06/call). --safe-mode cuts that
+# to ~$0.011/call (82% less); at hundreds of fires/day across concurrent sessions the
+# loaded-memory tax was the dominant Haiku spend.
 export CLAUDE_SUBPROCESS=1
 ERR_FILE=$(mktemp)
 KEYWORDS_JSON=$(timeout 15 claude -p \
   --no-session-persistence \
+  --safe-mode \
   --model haiku \
   --output-format json \
   --mcp-config "$EMPTY_MCP" \
