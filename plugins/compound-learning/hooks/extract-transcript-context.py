@@ -9,7 +9,38 @@ Output is truncated to a reasonable size for fast Haiku processing.
 """
 
 import json
+import os
 import sys
+
+# Only the last exchange is ever needed (the extractor stops after walking past
+# two user prompts), and the collected text is capped at max_chars anyway. So we
+# never need more than the tail of the transcript. Reading a bounded tail instead
+# of the whole file keeps this hook O(1) in conversation length — large sessions
+# were loading tens of MB into memory on every prompt submission.
+MAX_TAIL_BYTES = 1_048_576  # 1 MiB — comfortably covers many recent exchanges
+
+
+def _read_tail_lines(path: str, max_bytes: int = MAX_TAIL_BYTES) -> list:
+    """Return the last lines of a file, reading at most max_bytes from the end.
+
+    If the file is larger than max_bytes we seek to the tail; the first line of
+    that window is almost certainly a partial JSONL record, so we drop it.
+    """
+    try:
+        size = os.path.getsize(path)
+        with open(path, 'rb') as f:
+            partial = size > max_bytes
+            if partial:
+                f.seek(size - max_bytes)
+            data = f.read()
+    except (FileNotFoundError, PermissionError, OSError):
+        return []
+
+    lines = data.decode('utf-8', errors='ignore').splitlines()
+    if partial and lines:
+        # Drop the leading partial record left by seeking into the middle of a line.
+        lines = lines[1:]
+    return lines
 
 
 def is_real_user_prompt(entry: dict) -> bool:
@@ -23,11 +54,7 @@ def is_real_user_prompt(entry: dict) -> bool:
 
 def extract_context(transcript_path: str, max_chars: int = 3000) -> str:
     """Extract text content from transcript since last user message."""
-    try:
-        with open(transcript_path, 'r') as f:
-            lines = f.readlines()
-    except (FileNotFoundError, PermissionError):
-        return ""
+    lines = _read_tail_lines(transcript_path)
 
     # Parse lines in reverse to find content between last two user prompts
     context_parts = []
