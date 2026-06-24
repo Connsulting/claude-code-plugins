@@ -2,9 +2,8 @@
 # Codex UserPromptSubmit -> compound-learning auto-peek.
 # Reads the Codex hook payload, converts the rollout to a Claude transcript,
 # rewrites transcript_path to the converted file, and delegates to the plugin's
-# auto-peek.sh. The plugin prints relevant learnings to stdout; Codex injects
-# UserPromptSubmit stdout into the model context (verified), so injection works
-# with zero plugin changes.
+# auto-peek.sh. The bridge wraps auto-peek output as Codex UserPromptSubmit
+# hook JSON while preserving the shared Claude hook behavior.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 cl_log "[peek] invoked (CLAUDE_SUBPROCESS='${CLAUDE_SUBPROCESS:-}')"
@@ -28,5 +27,18 @@ cl_convert_rollout "$ROLLOUT" "$CONV"
 # and derives a stable session id from its basename.
 NEWINPUT=$(echo "$INPUT" | jq -c --arg t "$CONV" '.transcript_path = $t')
 
-echo "$NEWINPUT" | bash "$CLAUDE_PLUGIN_ROOT/hooks/auto-peek.sh"
-exit 0
+AUTO_PEEK_OUTPUT=$(echo "$NEWINPUT" | bash "$CLAUDE_PLUGIN_ROOT/hooks/auto-peek.sh")
+AUTO_PEEK_STATUS=$?
+
+if printf '%s' "$AUTO_PEEK_OUTPUT" | grep -q '[^[:space:]]'; then
+  jq -cn --arg additionalContext "$AUTO_PEEK_OUTPUT" '{
+    continue: true,
+    suppressOutput: true,
+    hookSpecificOutput: {
+      hookEventName: "UserPromptSubmit",
+      additionalContext: $additionalContext
+    }
+  }'
+fi
+
+exit "$AUTO_PEEK_STATUS"
