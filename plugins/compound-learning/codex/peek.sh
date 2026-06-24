@@ -8,10 +8,11 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 cl_log "[peek] invoked (CLAUDE_SUBPROCESS='${CLAUDE_SUBPROCESS:-}')"
 
+INPUT=$(cat 2>/dev/null || true)
+
 # Never recurse into ourselves via the keyword-extraction subprocess.
 [ -n "$CLAUDE_SUBPROCESS" ] && exit 0
 
-INPUT=$(cat)
 ROLLOUT=$(echo "$INPUT" | jq -r '.transcript_path // empty')
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 [ -z "$ROLLOUT" ] || [ -z "$SESSION_ID" ] && exit 0

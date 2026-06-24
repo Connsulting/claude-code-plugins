@@ -9,6 +9,8 @@
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 cl_log "[extract] invoked (CLAUDE_SUBPROCESS='${CLAUDE_SUBPROCESS:-}')"
 
+INPUT=$(cat 2>/dev/null || true)
+
 [ -n "$CLAUDE_SUBPROCESS" ] && exit 0
 
 # Floor: skip sessions too short to hold a reusable learning. Matches the
@@ -17,7 +19,6 @@ MIN_MSGS=20
 # Re-extract within a long interactive session only after this many new messages.
 DELTA_MSGS=12
 
-INPUT=$(cat)
 ROLLOUT=$(echo "$INPUT" | jq -r '.transcript_path // empty')
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 [ -z "$ROLLOUT" ] || [ -z "$SESSION_ID" ] && exit 0
