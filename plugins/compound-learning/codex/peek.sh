@@ -28,7 +28,7 @@ cl_convert_rollout "$ROLLOUT" "$CONV"
 # and derives a stable session id from its basename.
 NEWINPUT=$(echo "$INPUT" | jq -c --arg t "$CONV" '.transcript_path = $t')
 
-AUTO_PEEK_OUTPUT=$(echo "$NEWINPUT" | bash "$CLAUDE_PLUGIN_ROOT/hooks/auto-peek.sh")
+AUTO_PEEK_OUTPUT=$(echo "$NEWINPUT" | COMPOUND_LEARNING_KEYWORD_ENGINE=codex bash "$CLAUDE_PLUGIN_ROOT/hooks/auto-peek.sh")
 AUTO_PEEK_STATUS=$?
 
 if printf '%s' "$AUTO_PEEK_OUTPUT" | grep -q '[^[:space:]]'; then

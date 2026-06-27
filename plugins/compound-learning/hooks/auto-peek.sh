@@ -129,7 +129,7 @@ Prompt: $PROMPT
 JSON only: {\"keywords\": [\"keyword1\", \"keyword2\"]}"
 fi
 
-# Use Haiku to extract search keywords
+# Use the configured lightweight engine to extract search keywords
 # This is fast because: no MCP, no tools, just prompt/response
 # Use timeout to prevent hook from hanging
 # --safe-mode disables CLAUDE.md/AGENTS.md auto-discovery, plugins, hooks, and MCP.
@@ -140,23 +140,46 @@ fi
 # loaded-memory tax was the dominant Haiku spend.
 export CLAUDE_SUBPROCESS=1
 ERR_FILE=$(mktemp)
-KEYWORDS_JSON=$(timeout 15 claude -p \
-  --no-session-persistence \
-  --safe-mode \
-  --model haiku \
-  --output-format json \
-  --mcp-config "$EMPTY_MCP" \
-  --strict-mcp-config \
-  "$HAIKU_PROMPT" 2>"$ERR_FILE")
-[ -s "$ERR_FILE" ] && log_activity "[auto-peek] keyword extraction error: $(cat "$ERR_FILE")"
+if [ "${COMPOUND_LEARNING_KEYWORD_ENGINE:-}" = "codex" ]; then
+  KEYWORDS_JSON=$(timeout 15 codex exec \
+    --model gpt-5.4-mini \
+    -c 'model_reasoning_effort="low"' \
+    --ignore-user-config \
+    --ignore-rules \
+    --disable hooks \
+    --ephemeral \
+    --skip-git-repo-check \
+    "$HAIKU_PROMPT" 2>"$ERR_FILE")
+else
+  KEYWORDS_JSON=$(timeout 15 claude -p \
+    --no-session-persistence \
+    --safe-mode \
+    --model haiku \
+    --output-format json \
+    --mcp-config "$EMPTY_MCP" \
+    --strict-mcp-config \
+    "$HAIKU_PROMPT" 2>"$ERR_FILE")
+  [ -s "$ERR_FILE" ] && log_activity "[auto-peek] keyword extraction error: $(cat "$ERR_FILE")"
+fi
 rm -f "$ERR_FILE"
 
-# Parse keywords from Haiku response (handles markdown-wrapped JSON)
+# Parse keywords from keyword engine response (handles markdown-wrapped JSON)
 # Haiku may return: {"result": "```json\n{\"keywords\": [...]}\n```"}
+# Codex may return raw JSON: {"keywords": [...]}
 # Use pure jq to strip markdown fences and parse JSON
 # Limit to first 2 keywords, keep as JSON array for parallel search
-RESULT_FIELD=$(echo "$KEYWORDS_JSON" | jq -r '.result // empty' 2>/dev/null)
-KEYWORDS_ARRAY=$(echo "$KEYWORDS_JSON" | jq -c '.result // empty | gsub("```json"; "") | gsub("```"; "") | fromjson | .keywords // [] | .[0:2]' 2>/dev/null)
+KEYWORDS_ARRAY=$(echo "$KEYWORDS_JSON" | jq -c '
+  if type == "object" and has("keywords") then
+    .keywords // []
+  else
+    .result // empty
+    | gsub("```json"; "")
+    | gsub("```"; "")
+    | fromjson
+    | .keywords // []
+  end
+  | .[0:2]
+' 2>/dev/null)
 KEYWORDS_DISPLAY=$(echo "$KEYWORDS_ARRAY" | jq -r 'join(", ")' 2>/dev/null)
 
 # If no keywords extracted, skip search

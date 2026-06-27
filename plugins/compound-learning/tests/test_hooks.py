@@ -7,6 +7,8 @@ They verify transcript parsing, truncation, and edge case handling.
 
 import importlib.util
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -185,3 +187,129 @@ def test_is_real_user_prompt_assistant_type():
     """Assistant entries are not user prompts."""
     entry = {"type": "assistant", "message": {"content": "response"}}
     assert is_real_user_prompt(entry) is False
+
+
+def test_auto_peek_codex_keyword_engine_uses_codex_exec(tmp_path):
+    """Codex bridge uses codex exec and passes raw keyword JSON to search."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+
+    codex_argv = tmp_path / "codex.argv"
+    claude_argv = tmp_path / "claude.argv"
+    search_keywords = tmp_path / "search-keywords.json"
+
+    python_stub = bin_dir / "python3"
+    python_stub.write_text(
+        """#!/bin/sh
+case "$1" in
+  */rollout-to-transcript.py)
+    exec "$REAL_PYTHON" "$@"
+    ;;
+  */extract-transcript-context.py)
+    exit 0
+    ;;
+  */search-learnings.py)
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "--keywords-json" ]; then
+        shift
+        printf '%s\\n' "$1" > "$SEARCH_KEYWORDS_FILE"
+        break
+      fi
+      shift
+    done
+    printf '%s\\n' '{"status":"none","count":0,"learnings":[]}'
+    exit 0
+    ;;
+esac
+printf 'unexpected python3 call: %s\\n' "$*" >&2
+exit 2
+""",
+        encoding="utf-8",
+    )
+    python_stub.chmod(0o755)
+
+    codex_stub = bin_dir / "codex"
+    codex_stub.write_text(
+        """#!/bin/sh
+printf '%s\\n' "$@" > "$CODEX_ARGV_FILE"
+printf '%s\\n' '{"keywords":["codex hooks"]}'
+""",
+        encoding="utf-8",
+    )
+    codex_stub.chmod(0o755)
+
+    claude_stub = bin_dir / "claude"
+    claude_stub.write_text(
+        """#!/bin/sh
+printf '%s\\n' "$@" > "$CLAUDE_ARGV_FILE"
+printf '%s\\n' '{"result":"{\\"keywords\\":[\\"claude haiku\\"]}"}'
+""",
+        encoding="utf-8",
+    )
+    claude_stub.chmod(0o755)
+
+    rollout = tmp_path / "rollout.jsonl"
+    rollout.write_text(
+        json.dumps(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "How does Codex auto peek work?",
+                        }
+                    ],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    env = {
+        **os.environ,
+        "CODEX_ARGV_FILE": str(codex_argv),
+        "CLAUDE_ARGV_FILE": str(claude_argv),
+        "HOME": str(tmp_path / "home"),
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "REAL_PYTHON": sys.executable,
+        "SEARCH_KEYWORDS_FILE": str(search_keywords),
+    }
+    hook_input = {
+        "prompt": "Find the Codex auto peek keyword extraction behavior",
+        "transcript_path": str(rollout),
+        "session_id": "codex-test-session",
+        "cwd": str(tmp_path),
+    }
+
+    result = subprocess.run(
+        ["bash", str(PLUGIN_ROOT / "codex" / "peek.sh")],
+        input=json.dumps(hook_input),
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert codex_argv.exists(), "expected codex keyword engine to invoke codex"
+    assert not claude_argv.exists(), "codex keyword engine must not invoke claude"
+    assert search_keywords.read_text(encoding="utf-8").strip() == '["codex hooks"]'
+
+    argv = codex_argv.read_text(encoding="utf-8").splitlines()
+    assert argv[0] == "exec"
+    assert "--ignore-user-config" in argv
+    assert "--ignore-rules" in argv
+    assert "--ephemeral" in argv
+    assert "--skip-git-repo-check" in argv
+
+    model_index = argv.index("--model") if "--model" in argv else argv.index("-m")
+    assert argv[model_index + 1] == "gpt-5.4-mini"
+    assert any("reasoning" in arg and "low" in arg for arg in argv)
+    assert (
+        ("--disable" in argv and "hooks" in argv)
+        or any("hooks" in arg and "false" in arg for arg in argv)
+    )
