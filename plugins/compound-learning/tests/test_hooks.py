@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -305,6 +306,147 @@ printf '%s\\n' '{"result":"{\\"keywords\\":[\\"claude haiku\\"]}"}'
     assert "--ignore-rules" in argv
     assert "--ephemeral" in argv
     assert "--skip-git-repo-check" in argv
+
+    model_index = argv.index("--model") if "--model" in argv else argv.index("-m")
+    assert argv[model_index + 1] == "gpt-5.4-mini"
+    assert any("reasoning" in arg and "low" in arg for arg in argv)
+    assert (
+        ("--disable" in argv and "hooks" in argv)
+        or any("hooks" in arg and "false" in arg for arg in argv)
+    )
+
+
+def test_codex_extract_uses_codex_generation_engine(tmp_path):
+    """Codex Stop extraction invokes codex exec instead of claude."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+
+    codex_argv = tmp_path / "codex.argv"
+    codex_env = tmp_path / "codex.env"
+    claude_argv = tmp_path / "claude.argv"
+    setsid_argv = tmp_path / "setsid.argv"
+
+    setsid_stub = bin_dir / "setsid"
+    setsid_stub.write_text(
+        """#!/bin/sh
+printf '%s\\n' "$@" > "$SETSID_ARGV_FILE"
+exec "$@"
+""",
+        encoding="utf-8",
+    )
+    setsid_stub.chmod(0o755)
+
+    codex_stub = bin_dir / "codex"
+    codex_stub.write_text(
+        """#!/bin/sh
+printf '%s\\n' "$@" > "$CODEX_ARGV_FILE"
+printf '%s\\n' "${CLAUDE_SUBPROCESS:-}" > "$CODEX_ENV_FILE"
+cat >/dev/null
+""",
+        encoding="utf-8",
+    )
+    codex_stub.chmod(0o755)
+
+    claude_stub = bin_dir / "claude"
+    claude_stub.write_text(
+        """#!/bin/sh
+printf '%s\\n' "$@" > "$CLAUDE_ARGV_FILE"
+cat >/dev/null
+""",
+        encoding="utf-8",
+    )
+    claude_stub.chmod(0o755)
+
+    rollout = tmp_path / "rollout.jsonl"
+    entries = []
+    for i in range(12):
+        entries.append(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": f"User message {i} about Codex extraction",
+                        }
+                    ],
+                },
+            }
+        )
+        entries.append(
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": f"Assistant response {i} with reusable details",
+                        }
+                    ],
+                },
+            }
+        )
+    rollout.write_text(
+        "".join(json.dumps(entry) + "\n" for entry in entries),
+        encoding="utf-8",
+    )
+
+    home = tmp_path / "home"
+    (home / ".claude" / "plugins" / "compound-learning").mkdir(parents=True)
+
+    env = {
+        **os.environ,
+        "CLAUDE_ARGV_FILE": str(claude_argv),
+        "CODEX_ENV_FILE": str(codex_env),
+        "CODEX_ARGV_FILE": str(codex_argv),
+        "HOME": str(home),
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "SETSID_ARGV_FILE": str(setsid_argv),
+    }
+    hook_input = {
+        "transcript_path": str(rollout),
+        "session_id": "codex-extract-session",
+        "cwd": str(tmp_path),
+    }
+
+    result = subprocess.run(
+        ["bash", str(PLUGIN_ROOT / "codex" / "extract.sh")],
+        input=json.dumps(hook_input),
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    for _ in range(100):
+        if codex_argv.exists() or claude_argv.exists():
+            break
+        time.sleep(0.01)
+
+    assert setsid_argv.exists(), "expected extract wrapper to launch detached job"
+    assert codex_argv.exists(), "expected Codex extraction to invoke codex"
+    assert codex_env.read_text(encoding="utf-8").strip() == "1"
+    assert not claude_argv.exists(), "Codex extraction must not invoke claude"
+
+    argv = codex_argv.read_text(encoding="utf-8").splitlines()
+    assert argv[0] == "exec"
+    assert "--ignore-user-config" in argv
+    assert "--ignore-rules" in argv
+    assert "--ephemeral" in argv
+    assert "--skip-git-repo-check" in argv
+    assert "--sandbox" in argv
+    assert argv[argv.index("--sandbox") + 1] == "workspace-write"
+    assert "-C" in argv
+    assert argv[argv.index("-C") + 1] == str(tmp_path)
+    assert "--add-dir" in argv
+    assert argv[argv.index("--add-dir") + 1] == str(
+        tmp_path / "home" / ".projects" / "learnings"
+    )
 
     model_index = argv.index("--model") if "--model" in argv else argv.index("-m")
     assert argv[model_index + 1] == "gpt-5.4-mini"

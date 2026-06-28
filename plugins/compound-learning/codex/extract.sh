@@ -14,7 +14,7 @@ INPUT=$(cat 2>/dev/null || true)
 [ -n "$CLAUDE_SUBPROCESS" ] && exit 0
 
 # Floor: skip sessions too short to hold a reusable learning. Matches the
-# plugin's own <20-line bail, applied here so we never spawn claude -p for them.
+# plugin's own <20-line bail, applied here so we never spawn generation for them.
 MIN_MSGS=20
 # Re-extract within a long interactive session only after this many new messages.
 DELTA_MSGS=12
@@ -50,12 +50,12 @@ echo "$NEWINPUT" > "$TMPIN"
 
 cl_log "[extract] backgrounding generation session=$SESSION_ID msgs=$COUNT"
 
-# Detach so the generation outlives this `codex exec` process. The plugin's
-# extract-learnings.sh generates via `claude -p` (a Claude subprocess, so it
-# cannot recurse into Codex Stop hooks) and indexes into the shared SQLite DB.
+# Detach so the generation outlives this `codex exec` process. The shared
+# extract-learnings.sh selects Codex generation through the environment flag
+# here, then indexes into the shared SQLite DB.
 # Positional args avoid quoting hazards in interpolated paths; the snapshot dir
 # is cleaned up by the detached job once generation finishes.
-setsid bash -c 'bash "$1" < "$2"; rm -f "$2"; rm -rf "$3"' _ \
+setsid bash -c 'COMPOUND_LEARNING_GENERATION_ENGINE=codex bash "$1" < "$2"; rm -f "$2"; rm -rf "$3"' _ \
   "$CLAUDE_PLUGIN_ROOT/hooks/extract-learnings.sh" "$TMPIN" "$SNAP_DIR" \
   >>"$CL_LOG" 2>&1 < /dev/null &
 

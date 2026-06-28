@@ -5,8 +5,8 @@ CLI) in addition to Claude Code. Codex sessions then both read from and
 contribute to the same learnings corpus and SQLite index the Claude side uses.
 
 The plugin's own scripts (`hooks/auto-peek.sh`, `hooks/extract-learnings.sh`,
-`hooks/setup.sh`) are reused unchanged — these wrappers only adapt Codex's
-runtime to what those scripts expect.
+`hooks/setup.sh`) are reused with small engine selection flags; these wrappers
+adapt Codex's runtime to what those scripts expect.
 
 ## How it maps
 
@@ -69,8 +69,6 @@ under `~/.claude/state/codex-compound-learning/`; a wrapper activity log is at
 
 ## Known limitation
 
-Learning *generation* (and keyword extraction for injection) still shells out to
-`claude` (`claude -p` / `claude --model haiku`). This is cross-engine on purpose
-— a Claude subprocess cannot recurse into Codex `Stop` hooks — but it means a
-Codex session run while the Claude limit is exhausted will no-op extraction
-(logged, harmless). A pure-Codex generator is a possible follow-up.
+Keyword extraction for injection still shells out to the configured lightweight
+engine. Codex extraction now selects `codex exec` for generation and disables
+Codex hooks in that subprocess to prevent recursion.
