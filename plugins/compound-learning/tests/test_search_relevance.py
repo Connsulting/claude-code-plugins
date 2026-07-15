@@ -36,6 +36,8 @@ calculate_keyword_overlap = _search_mod.calculate_keyword_overlap
 extract_query_keywords = _search_mod.extract_query_keywords
 fts5_search = _search_mod.fts5_search
 hybrid_rerank = _search_mod.hybrid_rerank
+load_pinned_sources = _search_mod.load_pinned_sources
+search_learnings = _search_mod.search_learnings
 
 
 # ---------------------------------------------------------------------------
@@ -72,13 +74,13 @@ def tmp_db(tmp_path, embedding_model):
     conn.close()
 
 
-def _insert(conn: Any, doc_id: str, content: str, scope: str = "global") -> None:
+def _insert(conn: Any, doc_id: str, content: str, scope: str = "global", file_path: str = "") -> None:
     """Insert a document through the real indexing pipeline (get_embedding + upsert)."""
     db.upsert_document(
         conn,
         doc_id,
         content,
-        {"scope": scope, "repo": "", "file_path": "", "topic": "other", "keywords": ""},
+        {"scope": scope, "repo": "", "file_path": file_path, "topic": "other", "keywords": ""},
     )
 
 
@@ -475,3 +477,129 @@ def test_peek_mode_respects_new_thresholds(tmp_db):
             assert r["distance"] >= high_conf_cutoff, (
                 "High confidence result appeared after possibly_relevant result in peek mode"
             )
+
+
+# ---------------------------------------------------------------------------
+# Peek mode: no possibly_relevant backfill, pinned learnings excluded
+# ---------------------------------------------------------------------------
+
+def _write_pinned_md(tmp_path, monkeypatch, *sources: str) -> None:
+    """Point the pinned.md path override at a synthetic file listing *sources*."""
+    pinned = tmp_path / "pinned.md"
+    body = ["These learnings are pinned because they have been retrieved frequently.", ""]
+    for src in sources:
+        body.append("## Some Pinned Learning  (100 hits)")
+        body.append(f"_source: {src}_")
+        body.append("")
+    pinned.write_text("\n".join(body), encoding="utf-8")
+    monkeypatch.setenv("COMPOUND_LEARNING_PINNED_MD", str(pinned))
+
+
+def _run_search(config, capsys, query, tmp_path, **kwargs) -> Dict[str, Any]:
+    """Run the real search_learnings entrypoint and parse its JSON stdout."""
+    original_load_config = db.load_config
+    db.load_config = lambda: config
+    try:
+        search_learnings(query, str(tmp_path), **kwargs)
+    finally:
+        db.load_config = original_load_config
+    return json.loads(capsys.readouterr().out)
+
+
+def test_peek_mode_does_not_backfill_from_possibly_relevant(tmp_db, tmp_path, capsys, monkeypatch):
+    """
+    With no high-confidence match available, peek mode must return nothing rather
+    than backfilling from the possibly_relevant tier.
+    """
+    config, conn = tmp_db
+    _insert(conn, *PDF_LEARNING, file_path=str(tmp_path / "pdf-layout.md"))
+    conn.close()
+
+    # A near-zero high-confidence threshold forces every match into possibly_relevant.
+    output = _run_search(
+        config, capsys, "slash command pdf layout", tmp_path,
+        max_results=5, peek_mode=True, threshold_override=0.05,
+    )
+
+    assert output["status"] == "empty", (
+        f"Peek mode backfilled from possibly_relevant: {output}"
+    )
+
+
+def test_peek_mode_returns_high_confidence_result(tmp_db, tmp_path, capsys, monkeypatch):
+    """Peek mode still returns a genuine high-confidence match (no regression)."""
+    config, conn = tmp_db
+    _insert(conn, *PDF_LEARNING, file_path=str(tmp_path / "pdf-layout.md"))
+    _insert(conn, *GRAFANA_LEARNING, file_path=str(tmp_path / "grafana.md"))
+    conn.close()
+
+    output = _run_search(
+        config, capsys, "slash command pdf layout", tmp_path,
+        max_results=5, peek_mode=True, threshold_override=0.9,
+    )
+
+    assert output["status"] == "found"
+    assert PDF_LEARNING[0] in {r["id"] for r in output["learnings"]}
+
+
+def test_peek_mode_excludes_pinned_learning_and_promotes_next(tmp_db, tmp_path, capsys, monkeypatch):
+    """
+    A pinned learning is dropped from peek results and the next non-pinned result
+    takes its slot, proving the filter runs before the max_results slice.
+    """
+    config, conn = tmp_db
+    pdf_file = tmp_path / "pdf-layout.md"
+    command_file = tmp_path / "command-reference.md"
+    _insert(conn, *PDF_LEARNING, file_path=str(pdf_file))
+    _insert(conn, *COMMAND_LEARNING, file_path=str(command_file))
+    conn.close()
+
+    query = "slash command pdf layout"
+
+    # Control: unpinned, the single slot goes to the top-ranked PDF learning.
+    _write_pinned_md(tmp_path, monkeypatch)
+    control = _run_search(
+        config, capsys, query, tmp_path,
+        max_results=1, peek_mode=True, threshold_override=0.9,
+    )
+    assert control["status"] == "found"
+    assert [r["id"] for r in control["learnings"]] == [PDF_LEARNING[0]]
+
+    # Pinned: the slot is taken by the lower-ranked non-pinned learning, not blanked.
+    _write_pinned_md(tmp_path, monkeypatch, "pdf-layout.md")
+    output = _run_search(
+        config, capsys, query, tmp_path,
+        max_results=1, peek_mode=True, threshold_override=0.9,
+    )
+    assert output["status"] == "found", f"Pinned exclusion blanked the slot: {output}"
+    assert [r["id"] for r in output["learnings"]] == [COMMAND_LEARNING[0]]
+
+
+def test_load_pinned_sources_missing_file_returns_empty_set(tmp_path, monkeypatch):
+    """load_pinned_sources must never raise when pinned.md is absent."""
+    monkeypatch.setenv("COMPOUND_LEARNING_PINNED_MD", str(tmp_path / "does-not-exist.md"))
+    assert load_pinned_sources() == set()
+
+
+def test_load_pinned_sources_parses_source_lines(tmp_path, monkeypatch):
+    """load_pinned_sources extracts the basenames from _source:_ lines."""
+    _write_pinned_md(tmp_path, monkeypatch, "pdf-layout.md", "grafana-alerting-2026-01-01.md")
+    assert load_pinned_sources() == {"pdf-layout.md", "grafana-alerting-2026-01-01.md"}
+
+
+def test_non_peek_mode_still_returns_pinned_and_both_tiers(tmp_db, tmp_path, capsys, monkeypatch):
+    """The pinned exclusion is peek-only: manual search still reports both tiers."""
+    config, conn = tmp_db
+    _insert(conn, *PDF_LEARNING, file_path=str(tmp_path / "pdf-layout.md"))
+    _insert(conn, *COMMAND_LEARNING, file_path=str(tmp_path / "command-reference.md"))
+    conn.close()
+
+    _write_pinned_md(tmp_path, monkeypatch, "pdf-layout.md")
+    output = _run_search(config, capsys, "slash command pdf layout", tmp_path, max_results=5)
+
+    assert output["status"] == "success"
+    assert "high_confidence" in output and "possibly_relevant" in output
+    found = {r["id"] for r in output["high_confidence"]} | {r["id"] for r in output["possibly_relevant"]}
+    assert PDF_LEARNING[0] in found, (
+        f"Pinned learning was excluded outside peek mode: {found}"
+    )

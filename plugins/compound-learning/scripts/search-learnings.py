@@ -39,6 +39,33 @@ STOPWORDS = {
 }
 
 
+# Pinned learnings are already loaded into every context via pinned.md, so peek
+# mode must not inject them a second time.
+DEFAULT_PINNED_MD_PATH = '~/.claude/plugins/compound-learning/pinned.md'
+PINNED_SOURCE_RE = re.compile(r'^_source:\s*(.+\.md)_\s*$')
+
+
+def load_pinned_sources() -> Set[str]:
+    """Return the learning file basenames listed in pinned.md.
+
+    Returns an empty set on any read failure: retrieval must keep working when
+    pinned.md is absent or unreadable.
+    """
+    path = os.environ.get('COMPOUND_LEARNING_PINNED_MD') or os.path.expanduser(DEFAULT_PINNED_MD_PATH)
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return set()
+
+    sources: Set[str] = set()
+    for line in lines:
+        match = PINNED_SOURCE_RE.match(line.strip())
+        if match:
+            sources.add(match.group(1).strip())
+    return sources
+
+
 def detect_learning_hierarchy(cwd: str, home: str) -> List[str]:
     """Walk up from cwd to home, collect all dirs with .projects/learnings/.
 
@@ -291,7 +318,11 @@ def search_learnings(
         if exclude_ids:
             exclude_set = set(id.strip() for id in exclude_ids.split(',') if id.strip())
 
-        query_size = max_results + len(exclude_set)
+        # Peek mode discards pinned learnings after retrieval, so the candidate
+        # pool must be wide enough for a non-pinned result to take the freed slot.
+        pinned_sources = load_pinned_sources() if peek_mode else set()
+
+        query_size = max_results + len(exclude_set) + len(pinned_sources)
 
         # Run parallel queries for each keyword; each call opens its own connection
         all_results: List[List[Dict[str, Any]]] = []
@@ -341,12 +372,13 @@ def search_learnings(
             elif result['distance'] < possible_threshold:
                 possibly_relevant.append(result)
 
-        # Peek mode: high_confidence first, backfill from possibly_relevant up to max_results
+        # Peek mode: high confidence only, minus anything already pinned into context.
+        # Pinned exclusion runs before the slice so an excluded item does not consume a slot.
         if peek_mode:
-            peek_results = list(high_confidence[:max_results])
-            if len(peek_results) < max_results and possibly_relevant:
-                remaining = max_results - len(peek_results)
-                peek_results.extend(possibly_relevant[:remaining])
+            peek_results = [
+                r for r in high_confidence
+                if os.path.basename(((r.get('metadata') or {}).get('file_path') or '')) not in pinned_sources
+            ][:max_results]
 
             if peek_results:
                 output = {
@@ -416,7 +448,7 @@ if __name__ == '__main__':
     parser.add_argument('query', nargs='?', default='', help='Search query text (ignored if --keywords-json provided)')
     parser.add_argument('working_dir', nargs='?', default=None, help='Working directory')
     parser.add_argument('--peek', action='store_true',
-                        help='Peek mode: prefers high confidence results, backfills from possibly_relevant if needed')
+                        help='Peek mode: high confidence results only, excluding learnings already pinned into context')
     parser.add_argument('--exclude-ids', type=str, default='',
                         help='Comma separated learning IDs to exclude from results')
     parser.add_argument('--threshold', type=float, default=None,
