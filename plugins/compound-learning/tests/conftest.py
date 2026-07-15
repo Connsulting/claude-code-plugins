@@ -27,6 +27,17 @@ def embedding_model():
     yield
 
 
+def _learning_files(directory: Path) -> list[Path]:
+    """List indexable learning files in *directory*.
+
+    MANIFEST.md is excluded to match the production indexers
+    (skills/index-learnings/index-learnings.py, scripts/backfill-topics.py):
+    it is auto-generated and indexes every learning's topic and tags, so
+    indexing it makes it a high-confidence match for any query.
+    """
+    return [f for f in directory.glob("*.md") if f.name != "MANIFEST.md"]
+
+
 @pytest.fixture(scope="session")
 def learning_snapshot(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Copy ~/.projects/learnings/*.md into a temp dir. Returns the temp path.
@@ -34,11 +45,11 @@ def learning_snapshot(tmp_path_factory: pytest.TempPathFactory) -> Path:
     Falls back to bundled sample learnings when the user has no personal learnings.
     """
     source = Path.home() / ".projects" / "learnings"
-    md_files = list(source.glob("*.md")) if source.exists() else []
+    md_files = _learning_files(source) if source.exists() else []
 
     if not md_files:
         source = PLUGIN_ROOT / "tests" / "fixtures" / "sample_learnings"
-        md_files = list(source.glob("*.md"))
+        md_files = _learning_files(source)
 
     assert len(md_files) > 0, (
         "No learning files found (checked ~/.projects/learnings/ and tests/fixtures/sample_learnings/)"
@@ -89,7 +100,7 @@ def indexed_corpus(
     db_path = str(db_dir / "corpus.db")
     config = _make_config(db_path, str(learning_snapshot), str(db_dir))
 
-    md_files = list(learning_snapshot.glob("*.md"))
+    md_files = _learning_files(learning_snapshot)
     indexed_count = 0
     failed_count = 0
 
