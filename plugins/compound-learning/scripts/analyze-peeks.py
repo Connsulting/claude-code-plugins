@@ -7,7 +7,12 @@ it with the assistant reply that followed and compute:
   - ack_mention: did Claude emit the required one-liner acknowledgment?
   - substantive_use: does the reply engage with learning content beyond the ack?
 
-Run: python3 analyze-peeks.py [days_back] [--verbose]
+Pass --persist to write the per-file usefulness tally into the `peek_usefulness`
+table, which is what build-pinned.py selects on. The write is a FULL REPLACE over
+the scoring window, so a file that stops being useful decays out on the next run
+instead of holding its rank forever.
+
+Run: python3 analyze-peeks.py [days_back] [--verbose] [--persist]
 """
 
 from __future__ import annotations
@@ -17,8 +22,15 @@ import os
 import re
 import sys
 from collections import Counter, defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+
+_PLUGIN_ROOT = os.environ.get(
+    'CLAUDE_PLUGIN_ROOT',
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+)
+sys.path.insert(0, _PLUGIN_ROOT)
 
 PROJECTS = Path.home() / ".claude" / "projects"
 ACK_PATTERNS = [
@@ -111,12 +123,57 @@ def score_reply(peek: dict[str, Any], reply: str) -> dict[str, bool]:
     return {"ack_mention": ack_mention, "filename_hit": filename_hit, "phrase_hit": phrase_hit, "substantive": substantive}
 
 
-def analyze(days_back: int = 30, verbose: bool = False) -> None:
+def persist_usefulness(
+    per_file_seen: Counter[str],
+    per_file_substantive: Counter[str],
+    per_file_ack: Counter[str],
+    per_file_last_substantive: dict[str, str],
+    days_back: int,
+) -> int:
+    """Full-replace the peek_usefulness table with this window's tally.
+
+    Full replace (not upsert) is deliberate: it is what lets a formerly useful
+    learning lose its pinned slot once it stops earning substantive use.
+    """
+    import lib._site_packages  # noqa: F401
+    import lib.db as db
+
+    config = db.load_config()
+    conn = db.get_connection(config)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        conn.execute("DELETE FROM peek_usefulness")
+        conn.executemany(
+            """INSERT INTO peek_usefulness
+               (file_name, injections, substantive, ack_only, last_substantive, window_days, computed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (
+                    os.path.basename(fname),
+                    seen,
+                    per_file_substantive[fname],
+                    per_file_ack[fname],
+                    per_file_last_substantive.get(fname),
+                    days_back,
+                    now_iso,
+                )
+                for fname, seen in per_file_seen.items()
+            ],
+        )
+        conn.commit()
+        return len(per_file_seen)
+    finally:
+        conn.close()
+
+
+def analyze(days_back: int = 30, verbose: bool = False, persist: bool = False) -> None:
     cutoff = 86400 * days_back
     now = os.path.getmtime(PROJECTS) if PROJECTS.exists() else 0
     peeks: list[dict[str, Any]] = []
     per_file_seen: Counter[str] = Counter()
     per_file_substantive: Counter[str] = Counter()
+    per_file_ack: Counter[str] = Counter()
+    per_file_last_substantive: dict[str, str] = {}
     for jsonl in PROJECTS.rglob("*.jsonl"):
         try:
             if now - jsonl.stat().st_mtime > cutoff:
@@ -143,13 +200,26 @@ def analyze(days_back: int = 30, verbose: bool = False) -> None:
             peeks.append(peek)
             for fname, _ in peek["files"]:
                 per_file_seen[fname] += 1
+                if score["ack_mention"]:
+                    per_file_ack[fname] += 1
                 if score["substantive"]:
                     per_file_substantive[fname] += 1
+                    ts = peek.get("timestamp") or ""
+                    if ts > per_file_last_substantive.get(fname, ""):
+                        per_file_last_substantive[fname] = ts
 
     total = len(peeks)
     if not total:
         print("No peek events found.")
         return
+
+    if persist:
+        n = persist_usefulness(
+            per_file_seen, per_file_substantive, per_file_ack,
+            per_file_last_substantive, days_back,
+        )
+        print(f"Persisted usefulness rows for {n} files into peek_usefulness "
+              f"(window {days_back}d, full replace).")
 
     total_chars = sum(p["injected_chars"] for p in peeks)
     ack = sum(1 for p in peeks if p["ack_mention"])
@@ -209,4 +279,5 @@ def analyze(days_back: int = 30, verbose: bool = False) -> None:
 if __name__ == "__main__":
     days = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 30
     verbose = "--verbose" in sys.argv or "-v" in sys.argv
-    analyze(days, verbose)
+    persist = "--persist" in sys.argv
+    analyze(days, verbose, persist)

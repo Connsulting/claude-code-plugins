@@ -587,6 +587,25 @@ def test_load_pinned_sources_parses_source_lines(tmp_path, monkeypatch):
     assert load_pinned_sources() == {"pdf-layout.md", "grafana-alerting-2026-01-01.md"}
 
 
+def test_load_pinned_sources_parses_annotated_source_lines(tmp_path, monkeypatch):
+    """build-pinned.py annotates _source: lines with the usefulness evidence.
+
+    If this stops parsing, pinned entries are auto-peeked a second time and the
+    double-injection feedback loop that inflated hit counts comes back.
+    """
+    pinned = tmp_path / "pinned.md"
+    pinned.write_text(
+        "## Some Title\n"
+        "_source: pdf-layout.md (6 substantive uses / 70 injections, 30d window)_\n"
+        "\nbody\n\n"
+        "## Other\n"
+        "_source: grafana-alerting-2026-01-01.md_\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("COMPOUND_LEARNING_PINNED_MD", str(pinned))
+    assert load_pinned_sources() == {"pdf-layout.md", "grafana-alerting-2026-01-01.md"}
+
+
 def test_non_peek_mode_still_returns_pinned_and_both_tiers(tmp_db, tmp_path, capsys, monkeypatch):
     """The pinned exclusion is peek-only: manual search still reports both tiers."""
     config, conn = tmp_db

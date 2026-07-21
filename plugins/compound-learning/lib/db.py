@@ -51,6 +51,22 @@ def load_config() -> Dict[str, Any]:
             'possiblyRelevantThreshold': 0.55,
             'keywordBoostWeight': 0.65,
         },
+        'pinned': {
+            # Selection is by measured substantive use (peek_usefulness), never
+            # by access_count. See scripts/build-pinned.py.
+            'maxEntries': 6,
+            'tokenBudget': 1400,
+            'maxEntryTokens': 320,
+            # 1 substantive use in a 30d window is inside the noise floor; require 2.
+            'minSubstantive': 2,
+            'windowDays': 30,
+            # File names (basename) never eligible for pinning regardless of score.
+            'denylist': [
+                # Prescribes claude-opus-4-5-20251101 for PDF parsing; wrong model
+                # generation for this environment.
+                'opus-pdf-parsing-2026-01-27.md',
+            ],
+        },
         'consolidation': {
             'duplicateThreshold': 0.25,
             'scopeKeywords': ['security', 'authentication', 'jwt', 'oauth', 'encryption',
@@ -163,6 +179,21 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             id UNINDEXED,
             content,
             tokenize='porter unicode61'
+        );
+
+        -- Usefulness evidence, recomputed in full by analyze-peeks.py --persist.
+        -- One row per learning file name observed in auto-peek injections during
+        -- the scoring window. This is the ONLY selection signal build-pinned.py
+        -- uses; access_count (incremented at injection time) is not evidence that
+        -- anything was read or used.
+        CREATE TABLE IF NOT EXISTS peek_usefulness (
+            file_name TEXT PRIMARY KEY,
+            injections INTEGER NOT NULL DEFAULT 0,
+            substantive INTEGER NOT NULL DEFAULT 0,
+            ack_only INTEGER NOT NULL DEFAULT 0,
+            last_substantive TEXT,
+            window_days INTEGER NOT NULL DEFAULT 30,
+            computed_at TEXT NOT NULL
         );
     """)
     conn.commit()

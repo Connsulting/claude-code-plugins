@@ -5,6 +5,8 @@ activity.log
 codex-activity.log
 sessions/
 pinned.md
+pinned.md.proposed
+pinned-changes.log
 auto-consolidate.log
 cron-weekly.log
 review-queue.md

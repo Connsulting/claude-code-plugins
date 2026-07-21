@@ -42,7 +42,11 @@ STOPWORDS = {
 # Pinned learnings are already loaded into every context via pinned.md, so peek
 # mode must not inject them a second time.
 DEFAULT_PINNED_MD_PATH = '~/.claude/plugins/compound-learning/pinned.md'
-PINNED_SOURCE_RE = re.compile(r'^_source:\s*(.+\.md)_\s*$')
+# Matches both the bare form (`_source: foo.md_`) and the annotated form
+# build-pinned.py emits (`_source: foo.md (2 substantive uses / 5 injections, ...)_`).
+# Keep this tolerant: if it stops matching, pinned entries get auto-peeked a second
+# time and the double-injection feedback loop comes back.
+PINNED_SOURCE_RE = re.compile(r'^_source:\s*(.+?\.md)(?:\s.*)?_\s*$')
 
 
 def load_pinned_sources() -> Set[str]:

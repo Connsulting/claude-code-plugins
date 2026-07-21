@@ -186,6 +186,59 @@ How it works:
 
 The search skill automatically detects which repository you're working in and includes both global and repo-scoped learnings.
 
+## Pinned Learnings
+
+`pinned.md` is loaded into **every** session, so its cost is paid on every session
+start whether or not anything in it is relevant. It is therefore selected on
+measured usefulness and hard-capped.
+
+**The selection rule:** a learning is pinned because transcripts show the model
+actually engaged with it after it was injected -- never because it was retrieved
+often. `access_count` is not a selection input: `lib/hit_tracker.py` increments it
+at *injection* time, before the model has read anything, so it measures embedding
+recall only. (Before 2026-07-15 a pinned entry was also auto-peeked every session,
+so being pinned inflated the very counter that justified the pin.)
+
+The evidence lives in the `peek_usefulness` table:
+
+```bash
+# 1. Score every auto-peek injection against the reply that followed it and
+#    persist the per-file tally. FULL REPLACE over a rolling window, so a
+#    learning that stops being used decays out and can lose its slot.
+python3 scripts/analyze-peeks.py 30 --persist
+
+# 2. Rebuild pinned.md from that evidence (writes a change report to
+#    pinned-changes.log explaining every promotion and every drop).
+python3 scripts/build-pinned.py
+python3 scripts/build-pinned.py --dry-run    # writes pinned.md.proposed instead
+```
+
+Run them in that order: `build-pinned.py` reads only what `--persist` wrote.
+
+Knobs live under `pinned` in config (defaults in `lib/db.py`):
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `maxEntries` | 6 | Hard cap on entries |
+| `tokenBudget` | 1400 | Hard cap on total pinned.md tokens |
+| `maxEntryTokens` | 320 | Per-entry cap; longer bodies truncate at a paragraph boundary |
+| `minSubstantive` | 2 | Substantive uses required to be eligible |
+| `denylist` | see `lib/db.py` | File names never pinned regardless of score (known-stale advice) |
+
+## Corpus Maintenance
+
+- `scripts/dedupe-merged-sections.py` -- `consolidate-actions merge` is non-lossy
+  and concatenates each source under a `## Source:` header, so merging two
+  restatements of one fact produces a file that says it twice. This removes
+  near-verbatim repeats (prose-Jaccard with code fences stripped), keeping the
+  longest representative. Defaults to a report; pass `--apply` to rewrite and
+  reindex. Pairs in the softer `--report-threshold` band are flagged, never cut.
+- Never-retrieved learnings should be archived (not deleted) with
+  `consolidate-actions.py archive`, which moves the file to
+  `~/.projects/archive/learnings/YYYY-MM-DD/` and drops the index rows. Retrieval
+  relevance degrades as the corpus grows, so a shrinking working corpus is the
+  point; the archive keeps it reversible.
+
 ## Recommended CLAUDE.md Configuration
 
 Add this to your global `~/.claude/CLAUDE.md`:
