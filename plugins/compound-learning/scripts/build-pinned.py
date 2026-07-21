@@ -126,6 +126,17 @@ def clean_body(content: str, max_tokens: int, source: str) -> str:
     # Drop a trailing paragraph that is only a heading with nothing under it.
     while kept and kept[-1].strip().startswith('#'):
         kept.pop()
+    if len(kept) <= 1 and (not kept or est_tokens(kept[0]) > max_tokens):
+        # A single paragraph longer than the whole cap: hard-slice it on a word
+        # boundary. Without this the cap is silently unenforced for one-paragraph
+        # learnings, and the total budget can be blown by a single entry.
+        words = text.split()
+        sliced: List[str] = []
+        for word in words:
+            if sliced and est_tokens(' '.join(sliced + [word])) > max_tokens:
+                break
+            sliced.append(word)
+        kept = [' '.join(sliced)]
     truncated = '\n\n'.join(kept).strip()
     return f"{truncated}\n\n_(truncated; full text in {source})_"
 
@@ -208,11 +219,25 @@ def build_pinned(args: argparse.Namespace) -> int:
     denylist = set(pin_cfg.get('denylist', []))
 
     conn = db.get_connection(config)
+    had_evidence = bool(
+        conn.execute("SELECT 1 FROM peek_usefulness LIMIT 1").fetchone()
+    )
     selected, rejected, contenders = select(conn, min_substantive, max_entries, denylist)
     conn.close()
 
     if not selected:
-        print("No learnings with measured substantive use; leaving pinned.md untouched.")
+        # No evidence at all (analyze-peeks never ran, or its DB write failed) is a
+        # broken measurement, not a verdict -- keep the previous file. But fresh
+        # evidence in which nothing qualifies IS a verdict: clear the pins, or a
+        # stale entry keeps its slot until some replacement happens along.
+        if had_evidence and not args.dry_run:
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            args.output.write_text('\n'.join(HEADER).rstrip() + '\n', encoding='utf-8')
+            print("Fresh evidence, but no learning met the usefulness bar; "
+                  f"cleared {args.output}.")
+        else:
+            print("No usefulness evidence; leaving pinned.md untouched "
+                  "(run analyze-peeks.py <days> --persist first).")
         for note in rejected:
             print(f"  rejected: {note}")
         return 0

@@ -21,6 +21,7 @@ import json
 import os
 import re
 import sys
+import time
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -100,6 +101,33 @@ def assistant_text(event: dict[str, Any]) -> str:
     return ""
 
 
+def score_files(peek: dict[str, Any], reply: str) -> dict[str, bool]:
+    """Per-FILE substantive-use verdicts for one peek.
+
+    A peek usually injects several learnings. Crediting all of them whenever the
+    reply engages with any one of them would let an unrelated learning ride a
+    neighbour's usefulness into the pinned set, so each file is judged on its own
+    filename citation and its own headings.
+    """
+    lowered = reply.lower()
+    # The peek prints one `-> file: summary` line and one `[id]\nbody` block per
+    # learning, in the same order, so index-align them when the counts agree.
+    learnings = peek["learnings"] if len(peek["learnings"]) == len(peek["files"]) else []
+    verdicts: dict[str, bool] = {}
+    for i, (fname, _summary) in enumerate(peek["files"]):
+        stem = fname.rsplit("/", 1)[-1].replace(".md", "")
+        hit = bool(stem) and stem.lower() in lowered
+        if not hit and learnings:
+            body = learnings[i][1]
+            for heading in re.findall(r"^#{1,6}\s+(.+)$", body, re.M)[:3]:
+                heading = heading.strip()
+                if len(heading.split()) >= 4 and heading.lower() in lowered:
+                    hit = True
+                    break
+        verdicts[fname] = verdicts.get(fname, False) or hit
+    return verdicts
+
+
 def score_reply(peek: dict[str, Any], reply: str) -> dict[str, bool]:
     ack_mention = any(p.search(reply) for p in ACK_PATTERNS)
     # Substantive use: filename cited (without .md), OR any 4+ word sequence from the
@@ -168,7 +196,11 @@ def persist_usefulness(
 
 def analyze(days_back: int = 30, verbose: bool = False, persist: bool = False) -> None:
     cutoff = 86400 * days_back
-    now = os.path.getmtime(PROJECTS) if PROJECTS.exists() else 0
+    # Anchor the window to wall-clock now. Anchoring to the mtime of PROJECTS
+    # silently widened the window whenever that directory had not gained a direct
+    # child recently, letting months-old transcripts count as "last 30 days" and
+    # defeating decay.
+    now = time.time()
     peeks: list[dict[str, Any]] = []
     per_file_seen: Counter[str] = Counter()
     per_file_substantive: Counter[str] = Counter()
@@ -198,11 +230,12 @@ def analyze(days_back: int = 30, verbose: bool = False, persist: bool = False) -
             peek["reply_chars"] = len(reply_text)
             peek["transcript"] = jsonl.name
             peeks.append(peek)
+            file_verdicts = score_files(peek, reply_text)
             for fname, _ in peek["files"]:
                 per_file_seen[fname] += 1
                 if score["ack_mention"]:
                     per_file_ack[fname] += 1
-                if score["substantive"]:
+                if file_verdicts.get(fname):
                     per_file_substantive[fname] += 1
                     ts = peek.get("timestamp") or ""
                     if ts > per_file_last_substantive.get(fname, ""):
@@ -210,7 +243,14 @@ def analyze(days_back: int = 30, verbose: bool = False, persist: bool = False) -
 
     total = len(peeks)
     if not total:
-        print("No peek events found.")
+        # An empty window is still a measurement: leaving the old tally in place
+        # would let out-of-window evidence read as current on the next build.
+        if persist:
+            persist_usefulness(Counter(), Counter(), Counter(), {}, days_back)
+            print("Persisted an empty usefulness window (0 peek events); "
+                  "peek_usefulness cleared.")
+        else:
+            print("No peek events found.")
         return
 
     if persist:

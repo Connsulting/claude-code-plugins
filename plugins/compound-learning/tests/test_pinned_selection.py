@@ -122,7 +122,8 @@ def test_denylisted_file_is_never_pinned_regardless_of_score(isolated_db, monkey
 
     out = tmp_path / "pinned.md"
     assert bp.build_pinned(_args(out)) == 0
-    assert not out.exists()
+    # Evidence was fresh, so the file is written but holds no denylisted entry.
+    assert "stale-advice.md" not in out.read_text()
 
 
 def test_token_budget_caps_output(isolated_db, monkeypatch, tmp_path):
@@ -201,3 +202,24 @@ def test_min_substantive_floor(isolated_db, monkeypatch, tmp_path, substantive, 
     monkeypatch.setattr(bp.db, "load_config", lambda: config)
     monkeypatch.setattr(bp.db, "get_connection", lambda cfg: _REAL_GET_CONNECTION(config))
     assert bp.build_pinned(_args(tmp_path / "pinned.md", min_substantive=2)) == expected
+
+
+def test_fresh_evidence_with_no_qualifier_clears_pinned(isolated_db, monkeypatch, tmp_path):
+    """Fresh evidence in which nothing qualifies is a verdict, not a broken run."""
+    config, conn = isolated_db
+    _add_learning(conn, "a", "used.md", "Used")
+    _add_usefulness(conn, "used.md", injections=40, substantive=0)
+    monkeypatch.setattr(bp.db, "load_config", lambda: config)
+    monkeypatch.setattr(bp.db, "get_connection", lambda cfg: _REAL_GET_CONNECTION(config))
+
+    out = tmp_path / "pinned.md"
+    out.write_text("## Old Entry\n_source: used.md_\n")
+    assert bp.build_pinned(_args(out)) == 0
+    assert "used.md" not in out.read_text()
+
+
+def test_single_oversized_paragraph_still_respects_entry_cap():
+    """A one-paragraph learning must not blow the per-entry cap."""
+    body = "# T\n\n" + ("word " * 1000)
+    out = bp.clean_body(body, max_tokens=50, source="x.md")
+    assert bp.est_tokens(out) <= 50 + 20  # cap plus the truncation footer

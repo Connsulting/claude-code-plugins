@@ -63,7 +63,13 @@ def split_sections(content: str):
     return preamble, sections
 
 
-def dedupe(sections, threshold: float):
+# Below this many prose tokens, set-based Jaccard is dominated by shared
+# boilerplate: "use git status before deploy" and "use git status after deploy"
+# score 0.67 while meaning the opposite. Short sections are never auto-dropped.
+MIN_TOKENS_TO_DROP = 40
+
+
+def dedupe(sections, threshold: float, min_tokens: int = MIN_TOKENS_TO_DROP):
     """Keep the longest member of each near-duplicate group."""
     kept: list = []
     dropped: list = []
@@ -71,6 +77,8 @@ def dedupe(sections, threshold: float):
         toks = prose_tokens(body)
         match_idx = None
         for i, (_kh, kb, ktoks) in enumerate(kept):
+            if len(toks) < min_tokens or len(ktoks) < min_tokens:
+                continue
             if jaccard(toks, ktoks) >= threshold:
                 match_idx = i
                 break
@@ -93,6 +101,9 @@ def main() -> int:
                         help='Prose-Jaccard at or above which sections are duplicates (default: 0.6)')
     parser.add_argument('--report-threshold', type=float, default=0.4,
                         help='Also report (never touch) pairs at or above this (default: 0.4)')
+    parser.add_argument('--min-tokens', type=int, default=MIN_TOKENS_TO_DROP,
+                        help=f'Both sections must have this many prose tokens before a '
+                             f'drop is allowed (default: {MIN_TOKENS_TO_DROP})')
     parser.add_argument('--apply', action='store_true', help='Rewrite files and reindex')
     parser.add_argument('--dry-run', action='store_true', help='Report only (default)')
     args = parser.parse_args()
@@ -112,7 +123,7 @@ def main() -> int:
         preamble, sections = split_sections(row['content'])
         if len(sections) < 2:
             continue
-        kept, dropped = dedupe(sections, args.threshold)
+        kept, dropped = dedupe(sections, args.threshold, args.min_tokens)
         if dropped:
             changed += 1
             sections_removed += len(dropped)
