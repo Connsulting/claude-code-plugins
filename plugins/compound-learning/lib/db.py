@@ -50,6 +50,13 @@ def load_config() -> Dict[str, Any]:
             'highConfidenceThreshold': 0.40,
             'possiblyRelevantThreshold': 0.55,
             'keywordBoostWeight': 0.65,
+            # Peek-mode ceiling on the RAW embedding distance (pre-rerank). The
+            # keyword/FTS boost re-orders candidates but must not promote a weak
+            # semantic match into an auto-peek injection. Measured over 7 days:
+            # 79% of injections were raw-distance 0.50-0.75 matches the boost had
+            # pushed under highConfidenceThreshold. Gating raw distance < 0.50
+            # keeps genuine matches (~21% of prior volume) and drops the rest.
+            'peekHighConfidenceThreshold': 0.50,
         },
         'pinned': {
             # Selection is by measured substantive use (peek_usefulness), never

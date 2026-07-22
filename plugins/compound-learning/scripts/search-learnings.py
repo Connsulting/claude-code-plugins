@@ -179,19 +179,12 @@ def hybrid_rerank(
     Returns:
         Results re-sorted by adjusted distance (lower = better)
     """
-    from datetime import datetime, timezone
-    from math import log1p, exp
-
     fts_boost = 0.05
-    # Hit-count and recency boost. Caps at ~0.06 total distance reduction so
-    # popular items get a nudge but never overpower a genuinely better
-    # semantic match. Log-scaled hits saturate at 10; recency uses 30-day exp decay.
-    HIT_SATURATION = log1p(10)
-    HIT_WEIGHT = 0.04
-    RECENCY_HALFLIFE_DAYS = 30
-    RECENCY_WEIGHT = 0.02
-    now = datetime.now(timezone.utc)
-
+    # No access_count / recency boost: both were written only at injection time, so
+    # boosting by them re-ranked whatever got injected higher, making it more likely
+    # to be injected again (a self-reinforcing loop, independent of usefulness). Rank
+    # on query relevance only (semantic distance + keyword overlap + FTS). Substantive
+    # use (peek_usefulness.substantive) as a ranking signal is a follow-up.
     for result in results:
         overlap = calculate_keyword_overlap(query_keywords, result['document'])
         result['keyword_overlap'] = round(overlap, 4)
@@ -199,32 +192,8 @@ def hybrid_rerank(
         fts_reduction = fts_boost if (fts_ids and result['id'] in fts_ids) else 0
         result['fts_match'] = bool(fts_ids and result['id'] in fts_ids)
 
-        meta = result.get('metadata') or {}
-        access_count = meta.get('access_count') or 0
-        last_accessed = meta.get('last_accessed')
-        hit_factor = min(log1p(access_count) / HIT_SATURATION, 1.0) if access_count > 0 else 0.0
-        recency_factor = 0.0
-        if last_accessed:
-            try:
-                la = datetime.fromisoformat(str(last_accessed).replace('Z', '+00:00'))
-                if la.tzinfo is None:
-                    la = la.replace(tzinfo=timezone.utc)
-                age_seconds = (now - la).total_seconds()
-                # Materially future-dated timestamps are corrupt metadata, not
-                # genuine recent activity; don't reward them.
-                if age_seconds < -300:
-                    recency_factor = 0.0
-                else:
-                    days_since = max(0.0, age_seconds / 86400)
-                    recency_factor = exp(-days_since / RECENCY_HALFLIFE_DAYS)
-            except (ValueError, TypeError):
-                pass
-        hit_boost = hit_factor * HIT_WEIGHT + recency_factor * RECENCY_WEIGHT
-        result['hit_factor'] = round(hit_factor, 4)
-        result['recency_factor'] = round(recency_factor, 4)
-
         result['distance'] = round(
-            max(0.0, result['distance'] * (1 - keyword_weight * overlap) - fts_reduction - hit_boost),
+            max(0.0, result['distance'] * (1 - keyword_weight * overlap) - fts_reduction),
             4
         )
 
@@ -274,7 +243,8 @@ def search_learnings(
     peek_mode: bool = False,
     exclude_ids: str = "",
     threshold_override: float | None = None,
-    keywords_json: str | None = None
+    keywords_json: str | None = None,
+    peek_threshold_override: float | None = None
 ) -> None:
     """
     Search learnings with tiered relevance filtering.
@@ -283,6 +253,12 @@ def search_learnings(
     config = db.load_config()
     high_threshold = threshold_override if threshold_override is not None else config['learnings']['highConfidenceThreshold']
     possible_threshold = config['learnings']['possiblyRelevantThreshold']
+    # Peek mode gates on the raw (pre-rerank) distance so the keyword/FTS boost
+    # cannot promote a weak semantic match into an injection. Defaults from config.
+    peek_high_threshold = (
+        peek_threshold_override if peek_threshold_override is not None
+        else config['learnings'].get('peekHighConfidenceThreshold', 0.50)
+    )
     keyword_weight = config['learnings']['keywordBoostWeight']
 
     # Parse keywords from JSON if provided, otherwise use query as single keyword
@@ -376,12 +352,14 @@ def search_learnings(
             elif result['distance'] < possible_threshold:
                 possibly_relevant.append(result)
 
-        # Peek mode: high confidence only, minus anything already pinned into context.
-        # Pinned exclusion runs before the slice so an excluded item does not consume a slot.
+        # Peek mode: high confidence only, gated on RAW distance and minus anything
+        # already pinned into context. The raw-distance gate runs before the slice so
+        # a boosted-but-weak match does not consume a slot; pinned exclusion likewise.
         if peek_mode:
             peek_results = [
                 r for r in high_confidence
-                if os.path.basename(((r.get('metadata') or {}).get('file_path') or '')) not in pinned_sources
+                if r.get('original_distance', 1.0) < peek_high_threshold
+                and os.path.basename(((r.get('metadata') or {}).get('file_path') or '')) not in pinned_sources
             ][:max_results]
 
             if peek_results:
@@ -396,13 +374,10 @@ def search_learnings(
 
             print(json.dumps(output, indent=2))
 
-            if peek_results:
-                try:
-                    from lib.hit_tracker import record_hits
-                    record_hits(config, peek_results)
-                except Exception as e:
-                    print(f"[WARN] Hit tracking failed: {e}", file=sys.stderr)
-
+            # Injection is NOT evidence of usefulness: it must not feed access_count
+            # (which hybrid_rerank once boosted, self-reinforcing whatever got injected).
+            # Injections are counted from the activity log into peek_usefulness by
+            # analyze-peeks.py --persist; substantive-use ranking is a follow-up.
             return
 
         # Build output
@@ -457,6 +432,8 @@ if __name__ == '__main__':
                         help='Comma separated learning IDs to exclude from results')
     parser.add_argument('--threshold', type=float, default=None,
                         help='Override high confidence threshold (default from config)')
+    parser.add_argument('--peek-threshold', type=float, default=None,
+                        help='Override peek raw-distance ceiling (default from config)')
     parser.add_argument('--max-results', type=int, default=5,
                         help='Maximum results to return')
     parser.add_argument('--keywords-json', type=str, default=None,
@@ -470,5 +447,6 @@ if __name__ == '__main__':
         peek_mode=args.peek,
         exclude_ids=args.exclude_ids,
         threshold_override=args.threshold,
-        keywords_json=args.keywords_json
+        keywords_json=args.keywords_json,
+        peek_threshold_override=args.peek_threshold
     )

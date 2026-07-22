@@ -556,11 +556,13 @@ def test_peek_mode_excludes_pinned_learning_and_promotes_next(tmp_db, tmp_path, 
 
     query = "slash command pdf layout"
 
+    # peek_threshold_override keeps the raw-distance gate lenient so this test
+    # exercises pinned promotion, not the gate (COMMAND is a weak semantic match).
     # Control: unpinned, the single slot goes to the top-ranked PDF learning.
     _write_pinned_md(tmp_path, monkeypatch)
     control = _run_search(
         config, capsys, query, tmp_path,
-        max_results=1, peek_mode=True, threshold_override=0.9,
+        max_results=1, peek_mode=True, threshold_override=0.9, peek_threshold_override=0.9,
     )
     assert control["status"] == "found"
     assert [r["id"] for r in control["learnings"]] == [PDF_LEARNING[0]]
@@ -569,7 +571,7 @@ def test_peek_mode_excludes_pinned_learning_and_promotes_next(tmp_db, tmp_path, 
     _write_pinned_md(tmp_path, monkeypatch, "pdf-layout.md")
     output = _run_search(
         config, capsys, query, tmp_path,
-        max_results=1, peek_mode=True, threshold_override=0.9,
+        max_results=1, peek_mode=True, threshold_override=0.9, peek_threshold_override=0.9,
     )
     assert output["status"] == "found", f"Pinned exclusion blanked the slot: {output}"
     assert [r["id"] for r in output["learnings"]] == [COMMAND_LEARNING[0]]
@@ -622,3 +624,97 @@ def test_non_peek_mode_still_returns_pinned_and_both_tiers(tmp_db, tmp_path, cap
     assert PDF_LEARNING[0] in found, (
         f"Pinned learning was excluded outside peek mode: {found}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Peek mode: raw-distance gate (keyword/FTS boost must not promote weak matches)
+# ---------------------------------------------------------------------------
+
+def test_peek_mode_gates_on_raw_distance(tmp_db, tmp_path, capsys, monkeypatch):
+    """
+    A result whose keyword boost pushed its reranked distance under the high-confidence
+    threshold, but whose RAW (pre-rerank) distance is a weak semantic match, must be
+    excluded from peek results. COMMAND_LEARNING matches "slash command pdf layout" only
+    on the shared token "command" (raw distance ~0.62), so the boost alone must not inject it.
+    """
+    config, conn = tmp_db
+    _insert(conn, *COMMAND_LEARNING, file_path=str(tmp_path / "command-reference.md"))
+    conn.close()
+
+    query = "slash command pdf layout"
+
+    # Default raw-distance ceiling (0.50): the boosted-but-weak match is dropped.
+    gated = _run_search(
+        config, capsys, query, tmp_path,
+        max_results=5, peek_mode=True, threshold_override=0.9,
+    )
+    assert gated["status"] == "empty", (
+        f"Weak raw-distance match survived the peek gate: {gated}"
+    )
+
+    # Lenient override admits it, proving the gate (not the reranked tier) is what excluded it.
+    admitted = _run_search(
+        config, capsys, query, tmp_path,
+        max_results=5, peek_mode=True, threshold_override=0.9, peek_threshold_override=0.9,
+    )
+    assert admitted["status"] == "found"
+    assert COMMAND_LEARNING[0] in {r["id"] for r in admitted["learnings"]}
+
+
+# ---------------------------------------------------------------------------
+# Injection must not feed ranking: access_count / popularity decoupled
+# ---------------------------------------------------------------------------
+
+def test_peek_mode_does_not_increment_access_count(tmp_db, tmp_path, capsys, monkeypatch):
+    """
+    Auto-peek injecting a learning must NOT increment its access_count. Doing so fed a
+    self-reinforcing loop where injected learnings ranked higher and got injected again.
+    """
+    config, conn = tmp_db
+    _insert(conn, *PDF_LEARNING, file_path=str(tmp_path / "pdf-layout.md"))
+    conn.close()
+
+    output = _run_search(
+        config, capsys, "slash command pdf layout", tmp_path,
+        max_results=5, peek_mode=True, threshold_override=0.9,
+    )
+    assert output["status"] == "found"
+    assert PDF_LEARNING[0] in {r["id"] for r in output["learnings"]}
+
+    check = db.get_connection(config)
+    try:
+        row = check.execute(
+            "SELECT access_count FROM learnings WHERE id = ?", (PDF_LEARNING[0],)
+        ).fetchone()
+    finally:
+        check.close()
+    assert row["access_count"] == 0, (
+        f"Peek injection incremented access_count to {row['access_count']} (should stay 0)"
+    )
+
+
+def test_hybrid_rerank_ignores_access_count_and_recency(tmp_db):
+    """
+    hybrid_rerank must rank on query relevance only. Two candidates with identical raw
+    distance and document must get the identical adjusted distance regardless of
+    access_count or last_accessed, and must carry no hit/recency boost fields.
+    """
+    doc = "identical body text for both candidates"
+    popular = {
+        "id": "popular", "document": doc, "distance": 0.45,
+        "metadata": {"access_count": 500, "last_accessed": "2026-07-22"},
+    }
+    cold = {
+        "id": "cold", "document": doc, "distance": 0.45,
+        "metadata": {"access_count": 0, "last_accessed": None},
+    }
+    reranked = hybrid_rerank([popular, cold], extract_query_keywords("identical body text"), 0.65, fts_ids=set())
+    by_id = {r["id"]: r for r in reranked}
+
+    assert by_id["popular"]["distance"] == by_id["cold"]["distance"], (
+        "access_count/recency changed the reranked distance - the injection loop is back"
+    )
+    for r in reranked:
+        assert "hit_factor" not in r and "recency_factor" not in r, (
+            "hybrid_rerank still computes a popularity boost"
+        )
