@@ -44,6 +44,34 @@ if [ "$LINES" -lt 20 ]; then
   exit 0
 fi
 
+TODAY=$(date +%Y-%m-%d)
+
+# Daily ingestion cap. This hook fires on every SessionEnd and PreCompact, so an
+# active day writes 60-108 rows (measured July 2026) into a corpus where the large
+# majority are never used again. Pruning downstream of an unbounded writer is a
+# treadmill: the 2026-07-21 crawl recovered 1,140 rows and was fully undone in 19
+# days. Capping the writer is the half that was missing.
+#
+# The cap is checked BEFORE transcript extraction and generation, so hitting it
+# also saves the generator tokens rather than just discarding its output.
+# 0 disables the cap.
+MAX_PER_DAY="${COMPOUND_LEARNING_MAX_PER_DAY:-20}"
+LEARNING_DB="${COMPOUND_LEARNING_DB:-$HOME/.claude/compound-learning.db}"
+if [ "$MAX_PER_DAY" -gt 0 ] && [ -f "$LEARNING_DB" ] && command -v sqlite3 >/dev/null 2>&1; then
+  # created_at is stored as ISO8601 with a 'T' separator; compare against the
+  # same shape. Using SQLite's `datetime('now',...)` here would compare 'T'
+  # against ' ' and silently drop every row dated on the boundary day.
+  TODAY_COUNT=$(sqlite3 "$LEARNING_DB" \
+    "SELECT COUNT(*) FROM learnings WHERE created_at >= '${TODAY}T00:00:00';" 2>/dev/null)
+  case "$TODAY_COUNT" in
+    ''|*[!0-9]*) TODAY_COUNT=0 ;;
+  esac
+  if [ "$TODAY_COUNT" -ge "$MAX_PER_DAY" ]; then
+    log_activity "EXTRACT_SKIP: daily cap reached ($TODAY_COUNT/$MAX_PER_DAY for $TODAY)"
+    exit 0
+  fi
+fi
+
 # Extract just user/assistant messages (skip tool calls, file snapshots, metadata)
 # Limit to ~80KB to fit context window with prompt overhead
 MAX_BYTES=80000
@@ -55,7 +83,6 @@ if [ -z "$TRANSCRIPT_CONTENT" ]; then
   exit 0
 fi
 
-TODAY=$(date +%Y-%m-%d)
 GLOBAL_DIR="$HOME/.projects/learnings"
 REPO_DIR="$REPO_ROOT/.projects/learnings"
 
@@ -75,7 +102,23 @@ log_activity "EXTRACT_START: session=$SESSION_ID lines=$LINES"
 
 # Write the prompt once so both generation engines read identical stdin.
 cat >"$PROMPT_FILE" <<PROMPT_END
-Analyze this conversation transcript and extract 0-3 meaningful learnings.
+Analyze this conversation transcript and extract 0-2 meaningful learnings.
+
+Most sessions warrant ZERO. Writing nothing is the common, correct outcome, and
+'none' is a complete answer. Measured over the 30 days to 2026-07-29, under 2% of
+retrieved learnings were ever actually cited in later work, so a marginal entry
+does not sit harmlessly in a corpus -- it gets injected into future sessions and
+displaces something useful.
+
+Extract ONLY if the insight passes all four:
+1. Non-obvious - not something a competent engineer would conclude in five minutes.
+2. Durable - still true next month; not tied to one branch, ticket, or transient state.
+3. Reusable - will plausibly recur in a DIFFERENT task, not just this one.
+4. Not already covered - if it restates an existing learning, skip it.
+
+Do NOT write a learning for: what the task was, what you changed, a summary of the
+session, a bug fixed once, a one-off command that worked, or a restatement of
+documented tool behavior.
 
 IMPORTANT: You MUST create markdown files in the filesystem. Do not just describe what you would write.
 
@@ -83,8 +126,9 @@ For each learning you extract:
 1. Create a markdown file
 2. Path: ${GLOBAL_DIR}/[topic]-${TODAY}.md for global, or ${REPO_DIR}/[topic]-${TODAY}.md for repo-specific
 3. Content must include: # Title, **Type:** (pattern/gotcha/security), **Topic:** (broad category), **Tags:**, ## Problem, ## Solution, ## Why
+4. Keep it under 3,000 characters. Anything injected into future sessions pays its
+   size on every hit; past ~4,000 chars it gets truncated at injection time anyway.
 
-Be selective - only extract genuine reusable insights.
 If nothing worth extracting, just output 'none'.
 
 <transcript>
