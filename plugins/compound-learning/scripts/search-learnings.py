@@ -70,6 +70,66 @@ def load_pinned_sources() -> Set[str]:
     return sources
 
 
+def load_zero_value_sources(config: Dict[str, Any], min_injections: int) -> Set[str]:
+    """Return basenames of learnings that peek has injected without ever being used.
+
+    Reads the rolling `peek_usefulness` window that `analyze-peeks.py --persist`
+    maintains: any file with >= min_injections injections and zero substantive
+    uses has measurably failed to earn its context cost, so peek stops offering
+    it. Retrieval confidence is deliberately not consulted here -- these files
+    score WELL on distance, which is exactly why suppression has to be driven by
+    outcome data instead.
+
+    Returns an empty set when suppression is disabled or the table is missing:
+    retrieval must keep working on a fresh install with no usefulness data yet.
+    """
+    if min_injections <= 0:
+        return set()
+    try:
+        conn = db.get_connection(config)
+    except Exception:
+        return set()
+    try:
+        rows = conn.execute(
+            'SELECT file_name FROM peek_usefulness '
+            'WHERE injections >= ? AND substantive = 0',
+            (min_injections,),
+        ).fetchall()
+        return {r[0] for r in rows if r and r[0]}
+    except Exception:
+        # Missing table on a fresh DB, or a schema older than peek_usefulness.
+        return set()
+    finally:
+        conn.close()
+
+
+def truncate_for_peek(document: str, max_chars: int, file_path: str) -> str:
+    """Cap an injected learning, cutting at the last section or paragraph break.
+
+    Peek injects into every matching session, so a 17K-char learning costs its
+    full size on each hit. Truncating at a structural boundary keeps the head of
+    the file (title, type, and the start of Problem/Solution -- where the actual
+    claim lives) and points at the full file rather than dropping content.
+    """
+    if max_chars <= 0 or len(document) <= max_chars:
+        return document
+
+    window = document[:max_chars]
+    # Prefer a markdown section break, then a paragraph break, but only if the
+    # boundary is late enough that we are not throwing away most of the budget.
+    cut = max(window.rfind('\n## '), window.rfind('\n\n'))
+    if cut < max_chars // 2:
+        cut = max_chars
+    kept = document[:cut].rstrip()
+
+    omitted = len(document) - len(kept)
+    return (
+        f'{kept}\n\n'
+        f'_[truncated for injection: {omitted} of {len(document)} chars omitted. '
+        f'Read {file_path} for the full learning.]_'
+    )
+
+
 def detect_learning_hierarchy(cwd: str, home: str) -> List[str]:
     """Walk up from cwd to home, collect all dirs with .projects/learnings/.
 
@@ -259,6 +319,11 @@ def search_learnings(
         peek_threshold_override if peek_threshold_override is not None
         else config['learnings'].get('peekHighConfidenceThreshold', 0.50)
     )
+    # Outcome-driven peek gates: suppress files measured as never-used, and cap
+    # how much of any single learning becomes resident. Both are peek-only --
+    # an explicit /compound search still returns full, unsuppressed content.
+    peek_zero_value_min = config['learnings'].get('peekZeroValueMinInjections', 10)
+    peek_max_chars = config['learnings'].get('peekMaxInjectedChars', 4000)
     keyword_weight = config['learnings']['keywordBoostWeight']
 
     # Parse keywords from JSON if provided, otherwise use query as single keyword
@@ -301,8 +366,15 @@ def search_learnings(
         # Peek mode discards pinned learnings after retrieval, so the candidate
         # pool must be wide enough for a non-pinned result to take the freed slot.
         pinned_sources = load_pinned_sources() if peek_mode else set()
+        zero_value_sources = (
+            load_zero_value_sources(config, peek_zero_value_min) if peek_mode else set()
+        )
 
-        query_size = max_results + len(exclude_set) + len(pinned_sources)
+        # The candidate pool must cover every post-retrieval exclusion, or a
+        # suppressed file silently costs a slot a good match could have filled.
+        query_size = (
+            max_results + len(exclude_set) + len(pinned_sources) + len(zero_value_sources)
+        )
 
         # Run parallel queries for each keyword; each call opens its own connection
         all_results: List[List[Dict[str, Any]]] = []
@@ -353,14 +425,24 @@ def search_learnings(
                 possibly_relevant.append(result)
 
         # Peek mode: high confidence only, gated on RAW distance and minus anything
-        # already pinned into context. The raw-distance gate runs before the slice so
-        # a boosted-but-weak match does not consume a slot; pinned exclusion likewise.
+        # already pinned into context or measurably never used. Every exclusion runs
+        # BEFORE the slice so a disqualified match does not consume a slot.
         if peek_mode:
             peek_results = [
                 r for r in high_confidence
                 if r.get('original_distance', 1.0) < peek_high_threshold
                 and os.path.basename(((r.get('metadata') or {}).get('file_path') or '')) not in pinned_sources
+                and os.path.basename(((r.get('metadata') or {}).get('file_path') or '')) not in zero_value_sources
             ][:max_results]
+
+            # Cap each surviving learning's injected size. Applied after selection
+            # so truncation never changes which learnings are chosen, only how much
+            # of each becomes resident.
+            for r in peek_results:
+                doc = r.get('document')
+                if isinstance(doc, str):
+                    path = ((r.get('metadata') or {}).get('file_path') or '')
+                    r['document'] = truncate_for_peek(doc, peek_max_chars, path)
 
             if peek_results:
                 output = {

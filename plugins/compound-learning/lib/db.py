@@ -57,6 +57,54 @@ def load_config() -> Dict[str, Any]:
             # pushed under highConfidenceThreshold. Gating raw distance < 0.50
             # keeps genuine matches (~21% of prior volume) and drops the rest.
             'peekHighConfidenceThreshold': 0.50,
+            # Measured-use suppression for peek: a file injected at least this
+            # many times inside the peek_usefulness window with ZERO substantive
+            # uses stops being offered. Same principle build-pinned.py applies to
+            # pinned.md -- rank on measured use, never on retrieval confidence.
+            #
+            # 30 is a statistical floor, not a preference. Substantive use is rare
+            # (base rate 0.886% over the 30d window), so "zero citations" is weak
+            # evidence at low injection counts -- for a perfectly average file,
+            # P(0 citations | 10 injections) = 91%. Suppressing at 10 would drop
+            # 100 files chosen essentially at random. Citations-per-file by
+            # injection bucket, measured 2026-07-29, against what the base rate
+            # predicts:
+            #
+            #   bucket   files   inj   cited files   expected cited
+            #    1-4      923   1665       15            14.7
+            #    5-9      180   1177        9            10.2
+            #   10-29      87   1381        9            11.4
+            #   30-49      12    457        0             3.4
+            #    50+       11    850        1             5.4
+            #
+            # Below 30 the observed and expected columns agree, so there is no
+            # signal to act on. The deficit only appears at 30+, where 23 files
+            # burned 1,307 injections and earned 1 citation against 8.8 expected.
+            # Raise this if false positives show up; do not lower it below 30
+            # without re-running that table.
+            #
+            # Self-healing, because a per-file verdict here is still uncertain:
+            # peek_usefulness is a rolling window recomputed by
+            # `analyze-peeks.py --persist`, so a suppressed file ages out once it
+            # stops being injected and becomes eligible again. Suppression also
+            # only affects peek -- `/compound search` still returns these files in
+            # full. 0 disables suppression entirely.
+            'peekZeroValueMinInjections': 30,
+            # Ceiling on the chars of any single learning injected by peek.
+            # Corpus p50 is 2,095 chars and p90 is 3,216, but the tail runs to
+            # 43,946 -- and the tail is where the merge-bloat lives (186 files
+            # carrying `## Source:` headers average 5,182 chars vs 2,108 for the
+            # rest). Truncation cuts at a section boundary and points at the full
+            # file, so nothing is lost, it just is not resident.
+            #
+            # Unlike the suppression gate above, this needs no per-file verdict --
+            # it never decides WHETHER a learning is useful, only how much of it
+            # is resident, so it carries no false-positive risk. Measured over the
+            # 30d window: 4,000 cuts injected volume 16.42M -> 13.27M chars
+            # (19.2%) across 112 files, and only 4.9% of what it cuts comes from
+            # files that earned a citation. 3,000 cuts 26.6% but starts biting p90.
+            # 0 disables truncation.
+            'peekMaxInjectedChars': 4000,
         },
         'pinned': {
             # Selection is by measured substantive use (peek_usefulness), never
