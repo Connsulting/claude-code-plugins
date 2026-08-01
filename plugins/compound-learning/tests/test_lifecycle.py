@@ -129,9 +129,16 @@ def test_consolidation_discovery_runs_without_error(indexed_corpus):
 # Test 5: Search scope filtering
 # ---------------------------------------------------------------------------
 
-def test_search_scope_filtering(isolated_db):
+def test_search_scope_filtering(isolated_db, tmp_path):
     """Scope filtering: global-only vs repo-scoped searches return correct subsets."""
     config, conn = isolated_db
+
+    # search() matches repo-scoped rows on l.repo_root (an absolute repo root
+    # path), never on the bare `repo` display label. repo_root is derived from
+    # file_path (see lib/db.py _derive_repo_root: everything before the
+    # "/.projects/learnings/" segment), so the repo-scoped docs below need a
+    # file_path that encodes a real root for that derivation to work.
+    repo_root = str(tmp_path / "test-repo")
 
     # Insert 2 global docs
     db.upsert_document(conn, "global-1", "Kubernetes pod scheduling best practices for production clusters", {
@@ -145,16 +152,22 @@ def test_search_scope_filtering(isolated_db):
 
     # Insert 2 repo-scoped docs
     db.upsert_document(conn, "repo-1", "Kubernetes helm chart configuration for test-repo deployment", {
-        "scope": "repo", "repo": "test-repo", "file_path": "",
+        "scope": "repo", "repo": "test-repo", "file_path": f"{repo_root}/.projects/learnings/repo-1.md",
         "topic": "kubernetes-infrastructure", "keywords": "kubernetes,helm",
     })
     db.upsert_document(conn, "repo-2", "Docker compose setup for test-repo local development", {
-        "scope": "repo", "repo": "test-repo", "file_path": "",
+        "scope": "repo", "repo": "test-repo", "file_path": f"{repo_root}/.projects/learnings/repo-2.md",
         "topic": "docker", "keywords": "docker,compose",
     })
 
-    # Global-only search (scope_repos=[])
-    global_results = db.search(conn, "kubernetes docker", scope_repos=[], n_results=10)
+    # repo_root is only ever populated by the recurring backfill migration
+    # that runs in _create_schema on connection open (upsert_document does not
+    # write it). Reopen the connection against the same db file to heal the
+    # rows just inserted, exactly as production does on the next connection.
+    conn = db.get_connection(config)
+
+    # Global-only search (scope_repo_roots=[])
+    global_results = db.search(conn, "kubernetes docker", scope_repo_roots=[], n_results=10)
     global_ids = {r["id"] for r in global_results}
 
     assert "global-1" in global_ids or "global-2" in global_ids, (
@@ -164,7 +177,7 @@ def test_search_scope_filtering(isolated_db):
     assert "repo-2" not in global_ids, "Global-only search should not return repo-scoped docs"
 
     # Search with repo scope
-    scoped_results = db.search(conn, "kubernetes docker", scope_repos=["test-repo"], n_results=10)
+    scoped_results = db.search(conn, "kubernetes docker", scope_repo_roots=[repo_root], n_results=10)
     scoped_ids = {r["id"] for r in scoped_results}
 
     assert len(scoped_ids) >= 1, "Repo-scoped search should return results"

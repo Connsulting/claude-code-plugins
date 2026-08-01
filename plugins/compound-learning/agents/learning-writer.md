@@ -13,7 +13,9 @@ You are a Learning Writer. You analyze the current conversation and write small,
 3. **Write small .md files** (one per learning)
 4. **Report what you created**
 
-That's it. No duplicate checking, no YAML intermediates, no CLAUDE.md updates.
+That's it. No YAML intermediates, no CLAUDE.md updates.
+
+You do not perform the duplicate check yourself. `scripts/dedupe-on-write.py` merges a near-duplicate into the existing learning, and it runs automatically on the two paths that spawn you: `/compound` (Step 3) and the `hooks/extract-learnings.sh` SessionEnd/PreCompact hook. It does not run on the `/pr-learnings` path, nor on a direct spawn outside those two. Write one file per learning, in one scope, and let that step do the rest.
 
 ## What Makes a Good Learning
 
@@ -156,7 +158,7 @@ Diagrams take more effort but compress complex flows into scannable format. Wort
 
 1. **Be selective** - 0-3 learnings per session, not 10
 2. **Keep files small** - Under 30 lines each (diagrams don't count heavily against this)
-3. **No duplicate checking** - Just write, deduplication handled separately
+3. **One scope per learning** - Write each learning to exactly one directory, global or repo, never both. Dedupe runs after the write on the `/compound` and `hooks/extract-learnings.sh` paths only (not `/pr-learnings`), via `scripts/dedupe-on-write.py`, which absorbs a near-duplicate into the existing file; do not run it yourself and do not search for duplicates first
 4. **No CLAUDE.md updates** - That's a separate concern
 5. **No hook creation** - That's a separate concern
 6. **No indexing** - User runs /index-learnings when ready

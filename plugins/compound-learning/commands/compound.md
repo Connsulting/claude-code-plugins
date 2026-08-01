@@ -58,12 +58,24 @@ You have access to the full conversation. Identify 0-3 meaningful learnings and 
 The learning-writer agent:
 - Already sees the full conversation (no need to pass it)
 - Extracts learnings directly (no YAML intermediate)
-- Writes files immediately (no duplicate checking)
+- Writes files immediately, one scope per learning
 - Reports what was created
 
-### Step 3: Report to User
+### Step 3: Dedupe each written file
 
-Pass through the learning-writer's report:
+The learning-writer never checks for duplicates itself, because a prose rule telling it to is the design that already failed. For every path it reports as created, run:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/scripts/dedupe-on-write.py" <path> --json
+```
+
+Read the `action` field. `absorbed` means the content was merged into the existing learning named in `into` and the new file is gone; `kept` means it stands on its own. Anything else, including a non-zero exit, is a fail-open: leave the file alone and carry on.
+
+This runs the same script as the `hooks/extract-learnings.sh` loop but is NOT equivalent to it. There the script is a shell step the model cannot skip; here it is an instruction to a model to run a script, which is the shape `dedupe-on-write.py`'s own docstring names as the design that already failed. So on this path dedupe holds only as far as the instruction is followed, and a near-duplicate survives as its own file until a later consolidation pass whenever it is not.
+
+### Step 4: Report to User
+
+Pass through the learning-writer's report, plus one line per file saying whether it was kept or absorbed:
 
 ```
 Learning Compounded:
@@ -80,7 +92,7 @@ No significant learnings extracted from this session.
 ## What This Command Does NOT Do
 
 To keep token usage minimal:
-- Does NOT check for duplicate learnings
+- Does NOT ask a model to adjudicate duplicates (Step 3 is one vector query, no LLM call)
 - Does NOT update CLAUDE.md
 - Does NOT create hooks
 - Does NOT update agents

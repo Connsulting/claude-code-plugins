@@ -30,6 +30,8 @@ import os
 import socket
 import subprocess
 import sys
+import threading
+import time
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -249,12 +251,23 @@ def test_distinct_learning_is_kept(corpus) -> None:
     )
 
 
-def test_same_day_global_and_repo_duplicate_collapses_to_one(corpus, tmp_path) -> None:
-    """The measured cross-scope failure: both dirs offered in one generation run.
+def test_same_day_global_and_repo_duplicate_is_not_merged_across_scopes(
+    corpus, tmp_path
+) -> None:
+    """The same-day global/repo pair must NOT be collapsed across scopes.
 
-    extract-learnings.sh names GLOBAL_DIR and REPO_DIR in the same prompt, so the
-    generator writes the same learning to both on the same day. Dedupe must
-    collapse the pair regardless of which scope each side landed in.
+    THIS IS A CONFIDENTIALITY TEST, not a dedupe test. Absorption appends the new
+    body verbatim into the target and re-indexes the survivor under the TARGET's
+    scope, so absorbing a repo-scoped learning into a global one promotes one
+    client's repo names, service names and internal identifiers into the global
+    corpus, which auto-peek injects into EVERY other client's session. `db.search`
+    always ORs in `l.scope = 'global'`, so the global copy is offered as the
+    nearest candidate on every repo-scoped write; this test exists to prove the
+    write path refuses it.
+
+    AC2's "stop writing the identical learning to both scopes on the same day" is
+    satisfied by picking ONE scope at write time in the generation prompt, never
+    by merging content across scopes afterwards.
     """
     _config, conn, learnings = corpus
     global_file = learnings / "npm-overrides-bundled-deps-2026-08-01.md"
@@ -271,10 +284,248 @@ def test_same_day_global_and_repo_duplicate_collapses_to_one(corpus, tmp_path) -
 
     assert exit_code == 0, raw
     assert payload is not None, f"expected a JSON verdict on stdout, got: {raw!r}"
-    assert payload.get("action") == "absorbed", payload
-    assert not repo_file.exists()
-    assert db.count_documents(conn) == rows_before
+    assert payload.get("action") == "kept", payload
+    assert "scope" in (payload.get("reason") or ""), (
+        f"the refusal must name the boundary it enforced: {payload!r}"
+    )
+    assert repo_file.exists(), "the repo-scoped learning must survive as its own file"
+    assert repo_file.read_text(encoding="utf-8") == NEAR_DUPLICATE
     survivor = global_file.read_text(encoding="utf-8")
+    assert "NEWFILE-BODY-MARKER" not in survivor, (
+        "repo-scoped content was promoted into the global corpus"
+    )
+    assert survivor == EXISTING
+    assert db.count_documents(conn) == rows_before
+
+
+def test_near_duplicate_in_the_same_repo_is_absorbed(corpus, tmp_path) -> None:
+    """Positive control: the boundary blocks crossings, not same-scope dedupe.
+
+    Without this, refusing every repo-scoped absorb would pass the test above.
+    """
+    _config, conn, _learnings = corpus
+    repo_learnings = tmp_path / "myrepo" / ".projects" / "learnings"
+    repo_learnings.mkdir(parents=True)
+
+    existing = repo_learnings / "npm-overrides-bundled-deps-2026-07-01.md"
+    existing.write_text(EXISTING, encoding="utf-8")
+    _index(conn, "repo-existing", existing, EXISTING, scope="repo", repo="myrepo")
+
+    new = repo_learnings / "npm-overrides-bundled-deps-2026-08-01.md"
+    new.write_text(NEAR_DUPLICATE, encoding="utf-8")
+
+    exit_code, payload, raw = _run_dedupe([str(new), "--json"])
+
+    assert exit_code == 0, raw
+    assert payload is not None, f"expected a JSON verdict on stdout, got: {raw!r}"
+    assert payload.get("action") == "absorbed", payload
+    assert payload.get("into") == str(existing), payload
+    assert not new.exists()
+    survivor = existing.read_text(encoding="utf-8")
+    assert "EXISTING-BODY-MARKER" in survivor
+    assert "NEWFILE-BODY-MARKER" in survivor
+
+
+
+def _load_dedupe_module():
+    """Import the script as an ordinary module, so its functions are callable.
+
+    Loaded under its own name rather than `__main__`, so the `if __name__`
+    guard leaves `main()` alone. The CLI harness above stays the default; this
+    exists for the concurrency test, which needs two threads inside one process
+    and cannot share `sys.argv` and `redirect_stdout` between them.
+    """
+    spec = importlib.util.spec_from_file_location("dedupe_on_write", DEDUPE_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _stray_temp_files(directory: Path):
+    return sorted(p.name for p in directory.iterdir() if p.name.endswith(".tmp"))
+
+
+def test_concurrent_absorbs_into_one_survivor_lose_neither(corpus, monkeypatch) -> None:
+    """Two absorbs racing on one survivor must both land, or neither is safe.
+
+    The hook runs this per generated file and several background jobs write
+    learnings at once on this machine, so two sessions really do select the same
+    survivor concurrently. Unserialized, both read the pre-merge body and the
+    second rename overwrites the first merge -- while the first source file has
+    already been deleted, making that learning unrecoverable from disk and from
+    the corpus at once.
+
+    The interleaving is forced rather than hoped for: the first absorb to reach
+    `os.replace` stalls inside its critical section, which is exactly the window
+    the second absorb has to be excluded from. Remove the lock and this test
+    fails deterministically with one marker missing.
+    """
+    _config, conn, learnings = corpus
+    existing = learnings / "npm-overrides-bundled-deps-2026-07-01.md"
+    existing.write_text(EXISTING, encoding="utf-8")
+    _index(conn, "existing", existing, EXISTING)
+
+    first = learnings / "npm-overrides-bundled-deps-2026-08-01.md"
+    first.write_text(
+        NEAR_DUPLICATE.replace("NEWFILE-BODY-MARKER", "FIRST-BODY-MARKER"),
+        encoding="utf-8",
+    )
+    second = learnings / "npm-overrides-bundled-deps-2026-08-02.md"
+    second.write_text(
+        NEAR_DUPLICATE.replace("NEWFILE-BODY-MARKER", "SECOND-BODY-MARKER"),
+        encoding="utf-8",
+    )
+    rows_before = db.count_documents(conn)
+
+    module = _load_dedupe_module()
+
+    real_replace = os.replace
+    stalled = threading.Lock()
+    already_stalled = []
+
+    def stalling_replace(src, dst):
+        with stalled:
+            mine = not already_stalled
+            already_stalled.append(True)
+        if mine:
+            time.sleep(0.5)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", stalling_replace)
+
+    start = threading.Barrier(2)
+    verdicts = {}
+    failures = {}
+
+    def run(path: Path) -> None:
+        try:
+            start.wait(timeout=10)
+            verdicts[path.name] = module.decide(str(path), 0.88, False)
+        except BaseException as exc:  # a raise here is a lost learning, not a skip
+            failures[path.name] = repr(exc)
+
+    threads = [threading.Thread(target=run, args=(p,)) for p in (first, second)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+
+    assert not failures, failures
+    assert [v.get("action") for v in verdicts.values()] == ["absorbed", "absorbed"], (
+        f"both racing writes must be absorbed, got {verdicts!r}"
+    )
+
+    survivor = existing.read_text(encoding="utf-8")
+    assert "EXISTING-BODY-MARKER" in survivor, "the original body was destroyed"
+    assert "FIRST-BODY-MARKER" in survivor, "one racing merge was overwritten by the other"
+    assert "SECOND-BODY-MARKER" in survivor, "one racing merge was overwritten by the other"
+    assert not first.exists() and not second.exists()
+    assert _stray_temp_files(learnings) == [], (
+        f"a temp file was left behind: {_stray_temp_files(learnings)}"
+    )
+    assert db.count_documents(conn) == rows_before
+    assert "FIRST-BODY-MARKER" in conn.execute(
+        "SELECT content FROM learnings WHERE id = 'existing'"
+    ).fetchone()["content"], "the indexed survivor does not match what is on disk"
+
+
+def test_a_wedged_lock_falls_open_instead_of_blocking_the_write(corpus) -> None:
+    """A stuck holder costs this write its dedupe, never the hook behind it.
+
+    Fail open is the whole failure policy of this script, and a lock is the one
+    thing that can violate it by waiting forever instead of erroring.
+    """
+    _config, conn, learnings = corpus
+    existing = learnings / "npm-overrides-bundled-deps-2026-07-01.md"
+    existing.write_text(EXISTING, encoding="utf-8")
+    _index(conn, "existing", existing, EXISTING)
+
+    new = learnings / "npm-overrides-bundled-deps-2026-08-01.md"
+    new.write_text(NEAR_DUPLICATE, encoding="utf-8")
+
+    module = _load_dedupe_module()
+    module.LOCK_TIMEOUT_SECONDS = 0.2
+
+    with module.survivor_lock(str(existing)) as held:
+        assert held, "harness precondition: the test must own the lock first"
+        verdict = module.decide(str(new), 0.88, False)
+
+    assert verdict.get("action") == "kept", verdict
+    assert new.exists(), "a lock we could not take must never cost the file"
+    assert new.read_text(encoding="utf-8") == NEAR_DUPLICATE
+    assert existing.read_text(encoding="utf-8") == EXISTING
+
+
+def test_source_survives_a_database_failure_after_the_merge_is_written(
+    corpus, monkeypatch
+) -> None:
+    """The content must always exist in a file or a committed row, never neither.
+
+    Removing the source before the reindex made a failing `upsert_document` fatal
+    in a way the fail-open handler could not see: the verdict said `kept`, the
+    hook then tried to index a path that was gone, and the survivor's row still
+    held the pre-merge body -- so the absorbed learning was reachable from
+    nothing.
+    """
+    _config, conn, learnings = corpus
+    existing = learnings / "npm-overrides-bundled-deps-2026-07-01.md"
+    existing.write_text(EXISTING, encoding="utf-8")
+    _index(conn, "existing", existing, EXISTING)
+
+    new = learnings / "npm-overrides-bundled-deps-2026-08-01.md"
+    new.write_text(NEAR_DUPLICATE, encoding="utf-8")
+    rows_before = db.count_documents(conn)
+
+    def exploding_upsert(*_args, **_kwargs):
+        raise RuntimeError("simulated reindex failure")
+
+    monkeypatch.setattr(db, "upsert_document", exploding_upsert)
+
+    exit_code, payload, raw = _run_dedupe([str(new), "--json"])
+
+    assert exit_code == 0, raw
+    assert payload is not None, f"expected a JSON verdict on stdout, got: {raw!r}"
+    assert payload.get("action") == "kept", payload
+    assert new.exists(), "the source was removed before the reindex succeeded"
+    assert new.read_text(encoding="utf-8") == NEAR_DUPLICATE
+    assert "NEWFILE-BODY-MARKER" in existing.read_text(encoding="utf-8")
+    assert "EXISTING-BODY-MARKER" in existing.read_text(encoding="utf-8")
+    assert _stray_temp_files(learnings) == []
+    assert db.count_documents(conn) == rows_before
+
+
+def test_global_dir_inside_a_repo_is_still_global_scope(
+    corpus, tmp_path, monkeypatch
+) -> None:
+    """`learnings.globalDir` decides scope, exactly as the indexer decides it.
+
+    With globalDir pointed at a `.projects/learnings` directory inside another
+    Git repo -- a supported configuration -- the indexer stores those files as
+    global while path-based inference called each new one repo scoped. Every
+    indexed sibling was then refused as a cross-scope match and write-time
+    dedupe silently stopped working for that entire corpus.
+    """
+    _config, conn, _learnings = corpus
+    host_repo_learnings = tmp_path / "hostrepo" / ".projects" / "learnings"
+    host_repo_learnings.mkdir(parents=True)
+    monkeypatch.setenv("LEARNINGS_GLOBAL_DIR", str(host_repo_learnings))
+
+    existing = host_repo_learnings / "npm-overrides-bundled-deps-2026-07-01.md"
+    existing.write_text(EXISTING, encoding="utf-8")
+    # Indexed the way index-learnings.py would index it: under globalDir, so global.
+    _index(conn, "existing", existing, EXISTING, scope="global")
+
+    new = host_repo_learnings / "npm-overrides-bundled-deps-2026-08-01.md"
+    new.write_text(NEAR_DUPLICATE, encoding="utf-8")
+
+    exit_code, payload, raw = _run_dedupe([str(new), "--json"])
+
+    assert exit_code == 0, raw
+    assert payload is not None, f"expected a JSON verdict on stdout, got: {raw!r}"
+    assert payload.get("action") == "absorbed", payload
+    assert payload.get("into") == str(existing), payload
+    assert not new.exists()
+    survivor = existing.read_text(encoding="utf-8")
     assert "EXISTING-BODY-MARKER" in survivor
     assert "NEWFILE-BODY-MARKER" in survivor
 

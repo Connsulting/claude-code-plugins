@@ -72,7 +72,8 @@ def test_grace_protects_recent_rows(isolated_db) -> None:
     _add_row(conn, "old", "/l/old.md", _iso(20), 0)
     _add_row(conn, "new", "/l/new.md", _iso(3), 0)
 
-    ids = {c["id"] for c in ps.find_candidates(conn, 14, None)}
+    ids = {c["id"] for c in ps.find_candidates(
+        conn, 14, None, floor=10, min_age_days=30, pinned=set())}
 
     assert ids == {"old"}
 
@@ -90,7 +91,8 @@ def test_grace_boundary_uses_iso_t_comparison(isolated_db) -> None:
     boundary_day = (datetime.now(timezone.utc) - timedelta(days=14)).date().isoformat()
     _add_row(conn, "boundary", "/l/boundary.md", f"{boundary_day}T00:00:00+00:00", 0)
 
-    ids = {c["id"] for c in ps.find_candidates(conn, 14, None)}
+    ids = {c["id"] for c in ps.find_candidates(
+        conn, 14, None, floor=10, min_age_days=30, pinned=set())}
 
     assert "boundary" in ids
 
@@ -100,7 +102,7 @@ def test_accessed_rows_are_never_candidates(isolated_db) -> None:
     _seed_usefulness(conn, [("x.md", 1, 0)])
     _add_row(conn, "used", "/l/used.md", _iso(90), 3)
 
-    assert ps.find_candidates(conn, 14, None) == []
+    assert ps.find_candidates(conn, 14, None, floor=10, min_age_days=30, pinned=set()) == []
 
 
 def test_substantive_use_protects_a_never_accessed_row(isolated_db) -> None:
@@ -115,7 +117,8 @@ def test_substantive_use_protects_a_never_accessed_row(isolated_db) -> None:
     _add_row(conn, "cited", "/l/cited.md", _iso(90), 0)
     _add_row(conn, "uncited", "/l/uncited.md", _iso(90), 0)
 
-    ids = {c["id"] for c in ps.find_candidates(conn, 14, None)}
+    ids = {c["id"] for c in ps.find_candidates(
+        conn, 14, None, floor=10, min_age_days=30, pinned=set())}
 
     assert ids == {"uncited"}
 
@@ -126,7 +129,7 @@ def test_limit_bounds_the_batch(isolated_db) -> None:
     for i in range(5):
         _add_row(conn, f"r{i}", f"/l/r{i}.md", _iso(30 + i), 0)
 
-    assert len(ps.find_candidates(conn, 14, 2)) == 2
+    assert len(ps.find_candidates(conn, 14, 2, floor=10, min_age_days=30, pinned=set())) == 2
 
 
 def test_usefulness_availability_reported(isolated_db) -> None:
@@ -248,7 +251,8 @@ def test_opportunity_floor_archives_high_injection_zero_substantive(isolated_db)
     _seed_lifetime(conn, [("burner.md", 57, 0)])
     _add_row(conn, "burner", "/l/burner.md", _iso(40), 91)
 
-    ids = {c["id"] for c in ps.find_candidates(conn, 14, None)}
+    ids = {c["id"] for c in ps.find_candidates(
+        conn, 14, None, floor=10, min_age_days=30, pinned=set())}
 
     assert ids == {"burner"}
 
@@ -266,7 +270,8 @@ def test_below_opportunity_floor_is_not_a_candidate(isolated_db) -> None:
     _add_row(conn, "quiet", "/l/quiet.md", _iso(40), 91)
     _add_row(conn, "loud", "/l/loud.md", _iso(40), 91)
 
-    ids = {c["id"] for c in ps.find_candidates(conn, 14, None)}
+    ids = {c["id"] for c in ps.find_candidates(
+        conn, 14, None, floor=10, min_age_days=30, pinned=set())}
 
     assert ids == {"loud"}
 
@@ -285,9 +290,61 @@ def test_lifetime_substantive_protects_across_window_expiry(isolated_db) -> None
     _add_row(conn, "monitoring", "/l/monitoring-patterns.md", _iso(40), 91)
     _add_row(conn, "burner", "/l/burner.md", _iso(40), 91)
 
-    ids = {c["id"] for c in ps.find_candidates(conn, 14, None)}
+    ids = {c["id"] for c in ps.find_candidates(
+        conn, 14, None, floor=10, min_age_days=30, pinned=set())}
 
     assert ids == {"burner"}
+
+
+def test_shared_basename_injections_do_not_make_the_other_row_eligible(
+    isolated_db,
+) -> None:
+    """THE IDENTITY DEFECT TEST.
+
+    `learning_usefulness_lifetime` is keyed on a BASENAME, not on a learning.
+    The same name really does exist under a global scope and a repo scope, and
+    across different client repos. With a basename lookup, the global copy's 40
+    unused injections are read as the repo copy's too, so the opportunity clause
+    fires on a learning that was never injected once -- and the weekly timer
+    archives it unattended and permanently.
+
+    The row carrying the evidence is still eligible; only the row with no
+    evidence of its own is spared. Reverting the lookup to a plain
+    `lifetime.get(name)` makes this fail with both ids selected.
+    """
+    config, conn = isolated_db
+    _seed_usefulness(conn, [("unrelated.md", 1, 0)])
+    _seed_lifetime(conn, [("shared.md", 40, 0)])
+    # access_count > 0 on both, so clause 1 cannot select either and the
+    # assertion is about the opportunity clause alone.
+    _add_row(conn, "global-copy", "/global/learnings/shared.md", _iso(40), 91)
+    _add_row(conn, "repo-copy", "/repo/.projects/learnings/shared.md", _iso(40), 91)
+
+    ids = {c["id"] for c in ps.find_candidates(
+        conn, 14, None, floor=10, min_age_days=30, pinned=set())}
+
+    assert ids == set()
+
+
+def test_unique_basename_still_reaches_the_opportunity_floor(isolated_db) -> None:
+    """The identity guard must not become a blanket retention rule.
+
+    A basename carried by exactly one row is unambiguous evidence, so the
+    opportunity clause still selects it while its same-named-pair neighbours are
+    spared. Widening the guard to skip every row would pass the test above and
+    disable the clause entirely.
+    """
+    config, conn = isolated_db
+    _seed_usefulness(conn, [("unrelated.md", 1, 0)])
+    _seed_lifetime(conn, [("shared.md", 40, 0), ("solo.md", 40, 0)])
+    _add_row(conn, "global-copy", "/global/learnings/shared.md", _iso(40), 91)
+    _add_row(conn, "repo-copy", "/repo/.projects/learnings/shared.md", _iso(40), 91)
+    _add_row(conn, "solo", "/global/learnings/solo.md", _iso(40), 91)
+
+    ids = {c["id"] for c in ps.find_candidates(
+        conn, 14, None, floor=10, min_age_days=30, pinned=set())}
+
+    assert ids == {"solo"}
 
 
 def test_pinned_file_is_never_a_candidate(isolated_db, tmp_path, monkeypatch) -> None:
@@ -310,7 +367,10 @@ def test_pinned_file_is_never_a_candidate(isolated_db, tmp_path, monkeypatch) ->
     _add_row(conn, "pinned", "/l/pinned-entry.md", _iso(40), 91)
     _add_row(conn, "burner", "/l/burner.md", _iso(40), 91)
 
-    ids = {c["id"] for c in ps.find_candidates(conn, 14, None)}
+    # pinned_files() is what main() resolves and hands in, so calling it here
+    # keeps the pinned.md parse under test rather than hardcoding a literal set.
+    ids = {c["id"] for c in ps.find_candidates(
+        conn, 14, None, floor=10, min_age_days=30, pinned=ps.pinned_files())}
 
     assert ids == {"burner"}
 

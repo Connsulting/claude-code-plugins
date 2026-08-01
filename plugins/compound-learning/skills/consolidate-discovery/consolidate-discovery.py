@@ -45,7 +45,7 @@ def find_duplicate_clusters(conn, config: Dict[str, Any], limit: int = 20) -> Li
 
         # Search for similar documents using this doc's content as query
         # All repos in scope since we're comparing across the entire collection
-        similar = db.search(conn, doc_content, scope_repos=[], n_results=min(5, len(all_ids)), threshold=1.0)
+        similar = db.search(conn, doc_content, scope_repo_roots=[], n_results=min(5, len(all_ids)), threshold=1.0)
 
         # Override scope filtering: search returns global-only by default; here we want all docs
         # We re-query using raw vector lookup to avoid scope restriction

@@ -39,35 +39,8 @@ STOPWORDS = {
 }
 
 
-# Pinned learnings are already loaded into every context via pinned.md, so peek
-# mode must not inject them a second time.
-DEFAULT_PINNED_MD_PATH = '~/.claude/plugins/compound-learning/pinned.md'
-# Matches both the bare form (`_source: foo.md_`) and the annotated form
-# build-pinned.py emits (`_source: foo.md (2 substantive uses / 5 injections, ...)_`).
-# Keep this tolerant: if it stops matching, pinned entries get auto-peeked a second
-# time and the double-injection feedback loop comes back.
-PINNED_SOURCE_RE = re.compile(r'^_source:\s*(.+?\.md)(?:\s.*)?_\s*$')
-
-
-def load_pinned_sources() -> Set[str]:
-    """Return the learning file basenames listed in pinned.md.
-
-    Returns an empty set on any read failure: retrieval must keep working when
-    pinned.md is absent or unreadable.
-    """
-    path = os.environ.get('COMPOUND_LEARNING_PINNED_MD') or os.path.expanduser(DEFAULT_PINNED_MD_PATH)
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            lines = f.read().splitlines()
-    except OSError:
-        return set()
-
-    sources: Set[str] = set()
-    for line in lines:
-        match = PINNED_SOURCE_RE.match(line.strip())
-        if match:
-            sources.add(match.group(1).strip())
-    return sources
+# The pinned-source loader lives in lib/db.py: prune-stale.py needs the same
+# set to keep pinned files out of archival, and two copies would drift.
 
 
 def load_zero_value_sources(config: Dict[str, Any], min_injections: int) -> Set[str]:
@@ -130,33 +103,77 @@ def truncate_for_peek(document: str, max_chars: int, file_path: str) -> str:
     )
 
 
-def detect_learning_hierarchy(cwd: str, home: str) -> List[str]:
+def detect_learning_roots(cwd: str, home: str) -> List[str]:
     """Walk up from cwd to home, collect all dirs with .projects/learnings/.
 
+    Returns ABSOLUTE repo roots, never bare directory names. A basename is not
+    an identity: three different repositories across two clients are all named
+    `platform`, and scoping retrieval by the name injected one client's
+    learnings into the other's session. This is the identity half of that fix;
+    db.search matches the value against learnings.repo_root.
+
     Uses worktree-aware repo root resolution so that a worktree CWD produces
-    the same repo name as the main checkout.
+    the same root as the main checkout.
+
+    EVERY discovered directory is canonicalized through `db._derive_repo_root`,
+    the same helper the write side uses, rather than being reported literally.
+    A learnings dir that is not itself the git root (a non-git subdirectory
+    nested in a repo, a `~/wiki`-style tree) is STORED under the resolved root,
+    so reporting the literal one here would query a root no row carries: a
+    silent, fail-closed retrieval outage. Do not re-derive this locally --
+    `dedupe-on-write.repo_root_for` delegates to the same function for the same
+    reason, and a second copy is exactly how the two sides drift apart.
     """
-    repos: List[str] = []
+    roots: List[str] = []
     seen: Set[str] = set()
     home_path = Path(home)
+
+    def canonical_root(directory: Path) -> str:
+        """Root the write side would store for a learning under *directory*, or ''.
+
+        `_derive_repo_root` keys off the '/.projects/learnings/' segment, so it
+        is handed the learnings dir with a trailing separator. It returns ''
+        only when the path is undecidable, in which case the literal directory
+        is the historical answer and is kept.
+
+        The home guard is applied AFTER canonicalization, and that ordering is
+        load-bearing. `_derive_repo_root` walks UP to the nearest git ancestor,
+        so the day a repo exists at `~` (a dotfiles checkout, say) every
+        learnings dir beneath it canonicalizes to `~`, and the caller's
+        pre-canonicalization `!= home_path` test never sees it. A repo scope of
+        `~` matches the repo-scoped rows of every client subtree at once, which
+        is the exact cross-client leak this scoping exists to close. So a
+        canonical root at or above home yields '' -- no repo scope at all, fail
+        closed, never a broader one. `dedupe-on-write.repo_root_for` refuses the
+        same case the same way on the write side, and the two must stay
+        symmetric or the scope query matches zero rows in silence.
+        """
+        learnings_path = str(directory / '.projects' / 'learnings') + os.sep
+        derived = db._derive_repo_root(learnings_path) or str(directory)
+        derived_norm = os.path.normpath(derived)
+        home_norm = os.path.normpath(str(home_path))
+        if derived_norm == home_norm or home_norm.startswith(derived_norm.rstrip(os.sep) + os.sep):
+            return ''
+        return derived
 
     # Resolve the real repo root first (handles worktrees)
     real_root = Path(git_utils.resolve_repo_root(cwd))
     real_root_learning_dir = real_root / '.projects' / 'learnings'
     if real_root_learning_dir.exists() and real_root != home_path:
-        repo_name = real_root.name
-        repos.append(repo_name)
-        seen.add(repo_name)
+        repo_root = canonical_root(real_root)
+        if repo_root:
+            roots.append(repo_root)
+            seen.add(repo_root)
 
     # Walk up from cwd itself for any additional .projects/learnings/ dirs
     current = Path(cwd).resolve()
     while True:
         learning_dir = current / '.projects' / 'learnings'
         if learning_dir.exists() and current != home_path:
-            repo_name = current.name
-            if repo_name not in seen:
-                repos.append(repo_name)
-                seen.add(repo_name)
+            repo_root = canonical_root(current)
+            if repo_root and repo_root not in seen:
+                roots.append(repo_root)
+                seen.add(repo_root)
 
         if current == home_path:
             break
@@ -165,7 +182,7 @@ def detect_learning_hierarchy(cwd: str, home: str) -> List[str]:
 
         current = current.parent
 
-    return repos
+    return roots
 
 
 def parse_tag_filters(query: str) -> Tuple[str, Dict[str, Any]]:
@@ -263,14 +280,14 @@ def hybrid_rerank(
 def query_single_keyword(
     config: Any,
     keyword: str,
-    scope_repos: List[str],
+    scope_repo_roots: List[str],
     query_size: int,
 ) -> List[Dict[str, Any]]:
     """Query SQLite for a single keyword. Opens its own connection (thread-safe)."""
     try:
         conn = db.get_connection(config)
         try:
-            results = db.search(conn, keyword, scope_repos, n_results=query_size, threshold=1.0)
+            results = db.search(conn, keyword, scope_repo_roots, n_results=query_size, threshold=1.0)
             for r in results:
                 r['matched_keyword'] = keyword
             return results
@@ -314,10 +331,13 @@ def search_learnings(
     high_threshold = threshold_override if threshold_override is not None else config['learnings']['highConfidenceThreshold']
     possible_threshold = config['learnings']['possiblyRelevantThreshold']
     # Peek mode gates on the raw (pre-rerank) distance so the keyword/FTS boost
-    # cannot promote a weak semantic match into an injection. Defaults from config.
+    # cannot promote a weak semantic match into an injection. Defaults from
+    # config; the literal here only ever applies if the key is missing, and it
+    # must track the value load_config ships or a dropped key silently loosens
+    # the gate.
     peek_high_threshold = (
         peek_threshold_override if peek_threshold_override is not None
-        else config['learnings'].get('peekHighConfidenceThreshold', 0.50)
+        else config['learnings'].get('peekHighConfidenceThreshold', 0.45)
     )
     # Outcome-driven peek gates: suppress files measured as never-used, and cap
     # how much of any single learning becomes resident. Both are peek-only --
@@ -354,8 +374,8 @@ def search_learnings(
     cwd = working_dir if working_dir else os.getcwd()
     home = os.path.expanduser('~')
 
-    # Detect repo hierarchy
-    repos = detect_learning_hierarchy(cwd, home)
+    # Detect the absolute repo roots in scope for this session
+    repo_roots = detect_learning_roots(cwd, home)
 
     try:
         # Parse exclusion IDs upfront to determine query size
@@ -365,7 +385,7 @@ def search_learnings(
 
         # Peek mode discards pinned learnings after retrieval, so the candidate
         # pool must be wide enough for a non-pinned result to take the freed slot.
-        pinned_sources = load_pinned_sources() if peek_mode else set()
+        pinned_sources = db.load_pinned_sources() if peek_mode else set()
         zero_value_sources = (
             load_zero_value_sources(config, peek_zero_value_min) if peek_mode else set()
         )
@@ -380,7 +400,7 @@ def search_learnings(
         all_results: List[List[Dict[str, Any]]] = []
         with ThreadPoolExecutor(max_workers=min(len(keywords), 8)) as executor:
             futures = {
-                executor.submit(query_single_keyword, config, kw, repos, query_size): kw
+                executor.submit(query_single_keyword, config, kw, repo_roots, query_size): kw
                 for kw in keywords
             }
             for future in as_completed(futures):
@@ -471,7 +491,7 @@ def search_learnings(
                 'status': 'no_results',
                 'message': f'No relevant learnings found (searched {candidates_searched} candidates, none met distance < {possible_threshold} threshold)',
                 'query': query,
-                'repos_searched': repos,
+                'repo_roots_searched': repo_roots,
                 'high_confidence': [],
                 'possibly_relevant': []
             }
@@ -485,7 +505,7 @@ def search_learnings(
                 'status': 'success',
                 'message': f'Found {" + ".join(parts)} learning(s)',
                 'query': query,
-                'repos_searched': repos,
+                'repo_roots_searched': repo_roots,
                 'high_confidence': high_confidence,
                 'possibly_relevant': possibly_relevant
             }

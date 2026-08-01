@@ -7,9 +7,12 @@ Conservative auto-merge criteria (no human in the loop):
   - Same H1 (case-insensitive, slug-compared)
   - All pairwise cosine similarities in the cluster >= AUTO_MERGE_COSINE_THRESHOLD
 
-Lower-confidence clusters (cosine >= REVIEW_FLAG_COSINE_THRESHOLD but failing
-the auto-merge gate) get appended to a review queue file for periodic human
-attention. Nothing is destructive without --apply.
+Clusters are discovered by two independent union signals: cosine similarity, and
+title-slug Jaccard gated by a minimum cosine. Lower-confidence clusters (unioned
+by either signal but failing the auto-merge gate above) get appended to a review
+queue file for periodic human attention. Widening discovery never widens
+auto-merge: the topic/H1/0.92 gates in classify_cluster are unchanged.
+Nothing is destructive without --apply.
 
 Designed to run weekly from cron. Idempotent: re-running surfaces only
 clusters that still exist after prior merges.
@@ -19,6 +22,7 @@ import argparse
 import importlib.util
 import json
 import os
+import re
 import struct
 import sys
 from collections import defaultdict
@@ -41,8 +45,30 @@ from lib.topic_mapping import canonicalize_topic
 # Conservative on purpose: false-positive merges in autonomous mode are
 # harder to undo than queuing a borderline pair for human review.
 AUTO_MERGE_COSINE_THRESHOLD = 0.92
+# Held at 0.85 deliberately, to bound review-queue growth. Lowering it to 0.82
+# was measured and rejected: the npm trio already clusters at 0.85 (as the
+# identical 5-member cluster, via transitivity through two neighbouring files),
+# so 0.82 bought ~33 extra clusters corpus-wide for no discovery benefit on
+# either named trio. The Jaccard arm below is what recovers a real miss.
 REVIEW_FLAG_COSINE_THRESHOLD = 0.85
 MAX_CLUSTER_SIZE_AUTO_MERGE = 5  # safety cap; bigger clusters always go to review
+
+# Second, independent union signal: title-slug Jaccard, gated by a minimum
+# cosine so shared generic title tokens cannot union unrelated files. THIS arm,
+# not the cosine floor, is what does the real work: the teammate trio's pairwise
+# cosines are 0.7313 / 0.7802 / 0.7878, below any cosine floor contemplated
+# here, so without it the trio draws no edge at all and the cluster does not
+# exist. Its min title Jaccard is 0.5000.
+#
+# 0.50, not 0.33, is the Jaccard floor: measured over the 1,434-row global
+# corpus, 0.33 grows the review queue 15 -> 66 clusters while 0.50 grows it
+# 15 -> 43, and both still cluster the two named trios. The queue is read by a
+# human, so bounding its growth beats marginal recall. Consequence recorded on
+# purpose: the npm trio's min Jaccard is 0.3333, so 0.50 rejects two of its
+# three title pairs -- it clusters on the cosine arm instead, as it already did.
+_LEARNINGS_CONFIG = db.load_config().get('learnings', {})
+TITLE_JACCARD_THRESHOLD = _LEARNINGS_CONFIG.get('mergeTitleJaccardThreshold', 0.50)
+JACCARD_MIN_COSINE = _LEARNINGS_CONFIG.get('mergeJaccardMinCosine', 0.70)
 
 DEFAULT_REVIEW_FILE = Path.home() / '.claude' / 'plugins' / 'compound-learning' / 'review-queue.md'
 DEFAULT_LOG_FILE = Path.home() / '.claude' / 'plugins' / 'compound-learning' / 'auto-consolidate.log'
@@ -103,6 +129,29 @@ def _slug_h1_for_name(h1: str) -> str:
     return s[:50] or 'merged-learning'
 
 
+_DATE_SUFFIX_RE = re.compile(r'-\d{4}-\d{2}-\d{2}$')
+
+
+def _title_tokens(file_name: str) -> frozenset:
+    """Token set of a learning basename, with the trailing `-YYYY-MM-DD` dropped.
+
+    Dropping the date is load-bearing, not cosmetic: every learning file name
+    ends in one, so keeping it hands any two files written on the same day three
+    free shared tokens, which is enough to clear TITLE_JACCARD_THRESHOLD on its
+    own and would union every same-day pair in the corpus.
+    """
+    stem = file_name[:-3] if file_name.endswith('.md') else file_name
+    stem = _DATE_SUFFIX_RE.sub('', stem)
+    return frozenset(t for t in stem.lower().split('-') if t)
+
+
+def _title_jaccard(a: frozenset, b: frozenset) -> float:
+    """Jaccard overlap of two title-token sets."""
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
 def find_clusters(conn) -> list[dict]:
     """Load global-scope embeddings, build similarity matrix, return clusters with metadata."""
     try:
@@ -141,9 +190,13 @@ def find_clusters(conn) -> list[dict]:
     # Embeddings come from sentence-transformers normalize=True so dot = cosine
     sim = M @ M.T
 
-    # Union-find over pairs above the review threshold
+    # Union-find over pairs joined by either union signal.
     n = len(M)
     parent = list(range(n))
+    # Precomputed once: n is ~1,400 global rows, so the loop below evaluates
+    # ~1M pairs and re-tokenizing inside it is the difference between seconds
+    # and minutes.
+    token_sets = [_title_tokens(m['file']) for m in meta]
 
     def find(x):
         while parent[x] != x:
@@ -157,8 +210,13 @@ def find_clusters(conn) -> list[dict]:
             parent[ra] = rb
 
     for i in range(n):
+        tokens_i = token_sets[i]
         for j in range(i + 1, n):
-            if sim[i, j] >= REVIEW_FLAG_COSINE_THRESHOLD:
+            s = sim[i, j]
+            if s >= REVIEW_FLAG_COSINE_THRESHOLD:
+                union(i, j)
+            elif (s >= JACCARD_MIN_COSINE
+                  and _title_jaccard(tokens_i, token_sets[j]) >= TITLE_JACCARD_THRESHOLD):
                 union(i, j)
 
     cluster_idxs = defaultdict(list)
@@ -171,16 +229,20 @@ def find_clusters(conn) -> list[dict]:
             continue
         # Compute pairwise sim stats within this cluster
         pair_sims = []
+        pair_jaccards = []
         for a_i, a in enumerate(indices):
             for b in indices[a_i + 1:]:
                 pair_sims.append(float(sim[a, b]))
+                pair_jaccards.append(_title_jaccard(token_sets[a], token_sets[b]))
         min_sim = min(pair_sims) if pair_sims else 1.0
         avg_sim = sum(pair_sims) / len(pair_sims) if pair_sims else 1.0
+        min_jaccard = min(pair_jaccards) if pair_jaccards else 1.0
         clusters.append({
             'members': [meta[i] for i in indices],
             'size': len(indices),
             'min_sim': round(min_sim, 4),
             'avg_sim': round(avg_sim, 4),
+            'min_jaccard': round(min_jaccard, 4),
         })
 
     clusters.sort(key=lambda c: (-c['size'], -c['avg_sim']))
@@ -228,7 +290,8 @@ def write_review_queue(review_clusters: list[tuple[dict, str]], path: Path) -> N
             f.write("(no clusters needed review)\n\n")
             return
         for cluster, reason in review_clusters:
-            f.write(f"### Cluster ({cluster['size']} files, avg_sim={cluster['avg_sim']})\n")
+            f.write(f"### Cluster ({cluster['size']} files, avg_sim={cluster['avg_sim']}, "
+                    f"min_sim={cluster['min_sim']}, min_jaccard={cluster['min_jaccard']})\n")
             f.write(f"_reason: {reason}_\n\n")
             for m in cluster['members']:
                 f.write(f"- `{m['file']}` (topic={m['topic_canonical']!r})\n")

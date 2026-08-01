@@ -398,6 +398,71 @@ def test_cross_scope_repo_learning_not_injected(peek_env, tmp_path) -> None:
     )
 
 
+# --- scope identity: read side must equal write side ------------------------
+
+
+def test_learning_root_matches_the_root_the_writer_stores(tmp_path) -> None:
+    """A learnings dir below the git root must be QUERIED under the stored root.
+
+    `<repo>/sub/.projects/learnings/` is written with `repo_root = <repo>`,
+    because the writer canonicalizes through `db._derive_repo_root`. Reporting
+    the literal `<repo>/sub` at query time asks for a root no row carries, so
+    every learning in that tree becomes unreachable with no error anywhere.
+    Asserted as an equality against the writer's own derivation rather than
+    against a hardcoded path, so the two sides cannot drift apart.
+    """
+    home = (tmp_path / "home").resolve()
+    home.mkdir()
+    repo = (home / "repo").resolve()
+    (repo / ".git").mkdir(parents=True)
+    sub = repo / "sub"
+    learnings = sub / ".projects" / "learnings"
+    learnings.mkdir(parents=True)
+
+    learning_file = learnings / "sub-tree-learning-2026-07-01.md"
+    learning_file.write_text(CACHE_DOC, encoding="utf-8")
+
+    stored_root = db._derive_repo_root(str(learning_file))
+    queried_roots = sl.detect_learning_roots(str(sub), str(home))
+
+    assert stored_root == str(repo), (
+        f"fixture is wrong: the writer should store {repo}, got {stored_root}"
+    )
+    assert queried_roots == [stored_root], (
+        "retrieval must query the root the writer stored; querying "
+        f"{queried_roots} against stored {stored_root} reaches zero rows"
+    )
+
+
+def test_canonical_root_at_home_yields_no_repo_scope(tmp_path) -> None:
+    """A git repo at `~` must not collapse every client subtree into one scope.
+
+    Canonicalization walks UP to the nearest git ancestor, so a dotfiles repo at
+    the home directory makes every client's `.projects/learnings` resolve to
+    `~`. Scoping a session to `~` matches the repo-scoped rows of every other
+    client at once, which is the cross-client leak this scoping closes. Fail
+    closed: no repo scope at all, never a broader one.
+    """
+    home = (tmp_path / "home").resolve()
+    (home / ".git").mkdir(parents=True)
+    client_a = home / "clientA"
+    client_b = home / "clientB"
+    for client in (client_a, client_b):
+        (client / ".projects" / "learnings").mkdir(parents=True)
+
+    roots = sl.detect_learning_roots(str(client_a), str(home))
+
+    assert str(home) not in roots, (
+        f"the home directory must never be a repo scope; got {roots}"
+    )
+    assert not any(str(client_b).startswith(r) for r in roots), (
+        f"a scope covering another client subtree leaked in: {roots}"
+    )
+    assert roots == [], (
+        f"a refused canonical root must yield no scope, not a substitute; got {roots}"
+    )
+
+
 # --- the per-session injection cap ------------------------------------------
 
 

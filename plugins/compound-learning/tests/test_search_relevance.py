@@ -36,7 +36,7 @@ calculate_keyword_overlap = _search_mod.calculate_keyword_overlap
 extract_query_keywords = _search_mod.extract_query_keywords
 fts5_search = _search_mod.fts5_search
 hybrid_rerank = _search_mod.hybrid_rerank
-load_pinned_sources = _search_mod.load_pinned_sources
+load_pinned_sources = db.load_pinned_sources
 search_learnings = _search_mod.search_learnings
 
 
@@ -86,7 +86,7 @@ def _insert(conn: Any, doc_id: str, content: str, scope: str = "global", file_pa
 
 def _search_raw(config: Dict, conn: Any, query: str, n: int = 20) -> List[Dict[str, Any]]:
     """KNN search returning raw results (before reranking)."""
-    return db.search(conn, query, scope_repos=[], n_results=n, threshold=1.0)
+    return db.search(conn, query, scope_repo_roots=[], n_results=n, threshold=1.0)
 
 
 def _full_search(

@@ -146,7 +146,7 @@ def test_search_returns_access_count(tmp_db):
             "last_accessed": "2026-03-10",
         },
     )
-    results = db.search(conn, "unique xylophone content", scope_repos=[], n_results=10, threshold=1.0)
+    results = db.search(conn, "unique xylophone content", scope_repo_roots=[], n_results=10, threshold=1.0)
     matched = [r for r in results if r["id"] == "doc-search-ac"]
     assert len(matched) == 1
     assert matched[0]["metadata"]["access_count"] == 3

@@ -124,7 +124,10 @@ IMPORTANT: You MUST create markdown files in the filesystem. Do not just describ
 
 For each learning you extract:
 1. Create a markdown file
-2. Path: ${GLOBAL_DIR}/[topic]-${TODAY}.md for global, or ${REPO_DIR}/[topic]-${TODAY}.md for repo-specific
+2. Path: ${GLOBAL_DIR}/[topic]-${TODAY}.md for global, or ${REPO_DIR}/[topic]-${TODAY}.md for repo-specific.
+   Pick exactly ONE of those two directories per learning and write the file once.
+   Never write the same learning to both. If it is true outside this repository it
+   is global; otherwise it is repo-specific.
 3. Content must include: # Title, **Type:** (pattern/gotcha/security), **Topic:** (broad category), **Tags:**, ## Problem, ## Solution, ## Why
 4. Keep it under 3,000 characters. Anything injected into future sessions pays its
    size on every hit; past ~4,000 chars it gets truncated at injection time anyway.
@@ -162,6 +165,7 @@ find "$GLOBAL_DIR" "$REPO_DIR" -type f -name "*.md" 2>/dev/null | sort > "$AFTER
 NEW_FILES=$(comm -13 "$BEFORE_FILES" "$AFTER_FILES")
 
 INDEX_SCRIPT="${CLAUDE_PLUGIN_ROOT}/skills/index-learnings/index-learnings.py"
+DEDUPE_SCRIPT="${CLAUDE_PLUGIN_ROOT}/scripts/dedupe-on-write.py"
 FILE_COUNT=0
 
 while IFS= read -r file; do
@@ -174,6 +178,32 @@ while IFS= read -r file; do
   [ -z "$TITLE" ] && TITLE="$FILENAME"
 
   log_activity "  GENERATED: file=$FILENAME title=\"$TITLE\""
+
+  # Write-time dedupe, before indexing. This loop is shell, so unlike a rule in
+  # the generator prompt it cannot be skipped by the model that wrote the file.
+  # On "absorbed" the script has already merged the content into the existing
+  # learning, removed this file, and re-indexed the survivor, so we must skip
+  # indexing a path that no longer exists.
+  #
+  # FAIL OPEN: a non-zero exit, unparseable output, or a missing script all fall
+  # through to the indexing block below, exactly as before this step existed.
+  # A duplicate learning is recoverable; a learning lost to a broken dedupe is not.
+  if [ -f "$DEDUPE_SCRIPT" ]; then
+    DEDUPE_OUT=$(CLAUDE_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT" python3 "$DEDUPE_SCRIPT" "$file" --json 2>>"$LOG_FILE")
+    DEDUPE_STATUS=$?
+    DEDUPE_ACTION=""
+    if [ "$DEDUPE_STATUS" -eq 0 ]; then
+      DEDUPE_ACTION=$(printf '%s' "$DEDUPE_OUT" | jq -r '.action // empty' 2>/dev/null)
+    fi
+    if [ "$DEDUPE_ACTION" = "absorbed" ]; then
+      DEDUPE_TARGET=$(printf '%s' "$DEDUPE_OUT" | jq -r '.into // empty' 2>/dev/null)
+      log_activity "  ABSORBED: $FILENAME -> $DEDUPE_TARGET"
+      continue
+    fi
+    if [ "$DEDUPE_STATUS" -ne 0 ] || [ -z "$DEDUPE_ACTION" ]; then
+      log_activity "  DEDUPE_SKIP: dedupe unavailable for $FILENAME (status=$DEDUPE_STATUS)"
+    fi
+  fi
 
   # Index the newly created file into SQLite (non-fatal if unavailable).
   # On failure, append to index-failures.log so the next auto-peek surfaces it

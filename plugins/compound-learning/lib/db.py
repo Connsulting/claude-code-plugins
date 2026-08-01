@@ -6,10 +6,11 @@ All four Python scripts import from here instead of duplicating database boilerp
 
 import json
 import os
+import re
 import sys
 import threading
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set
 
 try:
     import sqlite3
@@ -56,7 +57,26 @@ def load_config() -> Dict[str, Any]:
             # 79% of injections were raw-distance 0.50-0.75 matches the boost had
             # pushed under highConfidenceThreshold. Gating raw distance < 0.50
             # keeps genuine matches (~21% of prior volume) and drops the rest.
-            'peekHighConfidenceThreshold': 0.50,
+            #
+            # THIS IS A DISTANCE: lower is stricter. Tightened 0.50 -> 0.45
+            # because the 0.50 gate still yields 0.80% substantive use (44 uses
+            # in 5,487 injections over 30d). Re-measured 2026-08-01 by replaying
+            # every `RESULT:` line carrying an orig_distance out of
+            # ~/.claude/plugins/compound-learning/activity.log (n=6,632 over the
+            # last 30d), counting what each ceiling would admit:
+            #
+            #   ceiling   injections   vs today   distinct files
+            #    0.50        2,493        100%         511
+            #    0.45          550         22%          89
+            #    0.40           17          0.7%         6
+            #    0.35            0          0%           0
+            #
+            # 0.40 and below effectively disable peek, so they are not options.
+            # 0.45 is the only meaningful tightening available, and it is a
+            # large one -- roughly a 78% further cut on top of what 0.50 already
+            # removed. Raise back toward 0.50 if genuine matches start going
+            # missing; the numbers above are the table to re-run first.
+            'peekHighConfidenceThreshold': 0.45,
             # Measured-use suppression for peek: a file injected at least this
             # many times inside the peek_usefulness window with ZERO substantive
             # uses stops being offered. Same principle build-pinned.py applies to
@@ -105,6 +125,89 @@ def load_config() -> Dict[str, Any]:
             # files that earned a citation. 3,000 cuts 26.6% but starts biting p90.
             # 0 disables truncation.
             'peekMaxInjectedChars': 4000,
+            # Hard cap on learnings auto-peek may inject across one session.
+            # Measured over the 30d window: 5,487 injections produced 44
+            # substantive uses (0.80%) and 2,228 (41%) drew only an
+            # acknowledgment, so marginal injections late in a long session are
+            # close to pure context cost. This is a stop, not a rate limit --
+            # once hit, nothing else is injected for the session's life. The
+            # per-session ledger is pruned at 24h (hooks/auto-peek.sh), so it
+            # self-heals daily. Log the suppression before tuning this.
+            'peekMaxPerSession': 12,
+            # Age a never-retrieved learning must reach before prune-stale.py
+            # will consider it. Was DEFAULT_GRACE_DAYS in prune-stale.py; the
+            # module constant becomes the fallback only.
+            'pruneGraceDays': 14,
+            # Injections a learning must have accumulated with ZERO substantive
+            # uses before prune-stale.py treats it as measurably not earning its
+            # context cost. Measured on the live corpus: floor 10 selects 93
+            # files; floor 5 selects 239, and the extra 146 are ~96% noise --
+            # "zero citations" is weak evidence at low injection counts against
+            # a 0.886% base rate. prune-stale.py --apply refuses below 5,
+            # because at 0 this clause degenerates to plain `substantive = 0`
+            # and takes the corpus from 2,328 rows to 34.
+            'pruneOpportunityFloor': 10,
+            # Companion age gate for the opportunity-floor clause: a file needs
+            # time in the corpus to accumulate injections at all, so a young
+            # file with few injections is not evidence of anything.
+            'pruneOpportunityMinAgeDays': 30,
+            # Write-time near-duplicate gate (scripts/dedupe-on-write.py).
+            # NOTE THE DIRECTION: this is a cosine SIMILARITY (higher is more
+            # similar), the opposite of every peek*Threshold above, which are
+            # distances.
+            #
+            # THE STORED METRIC IS L2, NOT COSINE. vec_learnings is declared
+            # with no distance metric, so sqlite-vec computes L2, and db.search
+            # halves the raw value at the `dist = float(row['distance']) / 2.0`
+            # line below. For the unit-normalized embeddings this plugin stores,
+            # the cosine is recovered from that halved distance d as:
+            #
+            #     similarity = 1 - 2 * d**2
+            #
+            # It is NOT `1 - d`. scripts/dedupe-on-write.py cosine_from() is the
+            # reference implementation. Worked values, showing how far the wrong
+            # conversion drifts:
+            #
+            #   true cosine   raw L2   d (halved)   1-2d^2   1-d (WRONG)
+            #      0.6000     0.8944     0.4472     0.6000     0.5528
+            #      0.9309     0.3718     0.1859     0.9309     0.8141
+            #      0.1925     1.2708     0.6354     0.1925     0.3646
+            #      0.0000     1.4142     0.7071     0.0000     0.2929
+            #
+            # CALIBRATION IS ALREADY CORRECT. 0.88, and every peek threshold
+            # above, were tuned empirically against the values db.search
+            # actually returns, so shipped behavior is right. Correcting the
+            # metric label above is a documentation fix only. Do NOT re-tune any
+            # number here on the strength of the corrected formula.
+            'writeDedupeCosineThreshold': 0.88,
+            # Title-slug Jaccard floor for the second, independent clustering
+            # signal in scripts/auto-consolidate.py. Also a SIMILARITY.
+            #
+            # Set by the TEAMMATE trio, which is the only cluster that actually
+            # depends on this signal: its minimum pairwise Jaccard is 0.5000,
+            # and its minimum pairwise cosine is 0.7313 -- below any union floor
+            # we would accept, so without the Jaccard arm it draws no edge at
+            # all. The npm trio does NOT need this arm: it already clusters at
+            # cosine floor 0.85 as the identical 5-member cluster. An earlier
+            # 0.33 value was justified by npm's 0.3333 minimum; that reasoning
+            # is superseded, because npm never depended on Jaccard.
+            #
+            # Noise budget decided the operating point. Against a baseline of
+            # 15 clusters: floor 0.85 + Jaccard 0.50 gives 43 clusters (~2.9x),
+            # while floor 0.82 + Jaccard 0.33 gives 74 (~4.9x, an unreadable
+            # review queue). Both trios land in one cluster each and classify
+            # REVIEW either way, and auto_candidates stays 0. At 0.50 the
+            # teammate cluster tightens to exactly the trio with no passengers
+            # and the corpus's largest cluster drops from 11 members to 6.
+            # So the cosine floor stays 0.85 and the Jaccard arm carries the
+            # work.
+            'mergeTitleJaccardThreshold': 0.50,
+            # Cosine-similarity conjunct on that Jaccard arm, so files sharing
+            # only generic title tokens cannot be unioned. Measured: the
+            # teammate trio's weakest pair is 0.7313 and today draws no edge at
+            # all (union floor 0.85), so 0.70 admits it while staying well
+            # clear of the corpus noise floor.
+            'mergeJaccardMinCosine': 0.70,
         },
         'pinned': {
             # Selection is by measured substantive use (peek_usefulness), never
@@ -250,19 +353,213 @@ def _create_schema(conn: sqlite3.Connection) -> None:
             window_days INTEGER NOT NULL DEFAULT 30,
             computed_at TEXT NOT NULL
         );
+
+        -- Lifetime usefulness accumulator. This table is APPEND/ACCUMULATE
+        -- ONLY and is NEVER DELETEd from -- not by an empty window, not by a
+        -- reindex, not by a re-run. analyze-peeks.py --persist folds in only
+        -- the peek events newer than the `watermark` row in
+        -- learning_usefulness_lifetime_meta, so totals grow monotonically and
+        -- overlapping 30-day windows (a weekly job shares ~23 days with the
+        -- previous run) never double-count.
+        --
+        -- The accumulation is ONE-WAY: source transcripts age out of
+        -- ~/.claude/projects at ~31 days, so once an event is folded in it can
+        -- never be recomputed and this table can never be rebuilt from
+        -- scratch. Back the DB up before changing how it is written.
+        --
+        -- peek_usefulness above deliberately keeps FULL-REPLACE semantics:
+        -- build-pinned.py needs that decay so a formerly useful learning can
+        -- lose its pinned slot. Protection (this table) is lifetime while
+        -- eligibility (that table) is windowed; do not point build-pinned.py
+        -- here, and do not give this table replace semantics.
+        CREATE TABLE IF NOT EXISTS learning_usefulness_lifetime (
+            file_name TEXT PRIMARY KEY,
+            injections INTEGER NOT NULL DEFAULT 0,
+            substantive INTEGER NOT NULL DEFAULT 0,
+            ack_only INTEGER NOT NULL DEFAULT 0,
+            last_substantive TEXT,
+            first_seen TEXT NOT NULL,
+            last_updated TEXT NOT NULL
+        );
+
+        -- Holds the `watermark` row: the maximum peek-event timestamp already
+        -- folded into learning_usefulness_lifetime. Also never DELETEd from.
+        -- The counter merge and the watermark advance must commit together, or
+        -- the next run re-folds the same events and double-counts permanently.
+        CREATE TABLE IF NOT EXISTS learning_usefulness_lifetime_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
     """)
     conn.commit()
 
-    # Idempotent migration: add hit-count columns
+    # Idempotent migration: add hit-count columns, then the repo identity column
     for col, col_def in [
         ('access_count', 'INTEGER DEFAULT 0'),
         ('last_accessed', 'TEXT'),
+        ('repo_root', "TEXT NOT NULL DEFAULT ''"),
     ]:
         try:
             conn.execute(f"ALTER TABLE learnings ADD COLUMN {col} {col_def}")
             conn.commit()
         except sqlite3.OperationalError:
             pass  # Column already exists
+
+    # Partial index over exactly the rows the recurring backfill looks for.
+    # Once every row carries a repo_root the index holds zero entries, so the
+    # backfill's SELECT is an empty index probe rather than a full scan of a
+    # multi-hundred-megabyte content table. That scan ran once per
+    # get_connection, and indexers open one connection per file.
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_learnings_repo_root_pending "
+            "ON learnings(id) WHERE scope = 'repo' AND repo_root = ''"
+        )
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+
+    _backfill_repo_roots(conn)
+
+
+# A learning always lives at <repo_root>/.projects/learnings/<basename>.md, so
+# the repo root is recoverable from file_path alone.
+_LEARNINGS_PATH_SEGMENT = '/.projects/learnings/'
+
+# resolve_repo_root walks up the filesystem doing syscalls per level, and a
+# whole corpus usually collapses onto a handful of distinct repo roots, so the
+# same walk repeats thousands of times per reindex. Keyed on the full absolute
+# input path, so two tmp dirs (or two tests) can never share an entry.
+_REPO_ROOT_RESOLVE_CACHE: Dict[str, str] = {}
+
+
+def _resolve_repo_root_cached(root: str) -> str:
+    cached = _REPO_ROOT_RESOLVE_CACHE.get(root)
+    if cached is not None:
+        return cached
+
+    import lib.git_utils as git_utils
+    resolved = git_utils.resolve_repo_root(root) or root
+    _REPO_ROOT_RESOLVE_CACHE[root] = resolved
+    return resolved
+
+
+def _derive_repo_root(file_path: str) -> str:
+    """Repo root implied by a learning's file_path, or '' when undecidable.
+
+    The derived path is passed through git_utils.resolve_repo_root so a
+    learning written from inside a worktree resolves to the same main-checkout
+    root that detect_learning_roots reports at query time. Without that, a
+    worktree-authored learning is stranded under a root nothing ever searches.
+    """
+    if not file_path:
+        return ''
+    idx = file_path.rfind(_LEARNINGS_PATH_SEGMENT)
+    if idx <= 0:
+        return ''
+    root = file_path[:idx]
+
+    try:
+        return _resolve_repo_root_cached(root)
+    except Exception:
+        # Path resolution must never take the schema down; the literal root is
+        # still correct for every non-worktree learning.
+        return root
+
+
+def _backfill_repo_roots(conn: sqlite3.Connection) -> None:
+    """Populate `learnings.repo_root` for repo-scoped rows that still lack it.
+
+    THIS BACKFILL IS RECURRING BY DESIGN. _create_schema runs on every
+    get_connection, and that recurrence is load-bearing: it is the repair pass
+    for every row that reaches the table without a root -- rows written before
+    the migration, and rows from any writer that bypasses upsert_document.
+
+    upsert_document now derives repo_root at write time through the same
+    _derive_repo_root helper, so a freshly written or re-indexed row is
+    scoped-searchable immediately instead of one connection later. That makes
+    this pass find nothing in the normal case; it does NOT make it optional,
+    and it is not a licence to add a guard.
+
+    NEVER add a run-once guard -- no module flag, no sentinel row, no
+    schema-version check. Such a guard still satisfies "no-op on the second
+    run" while making every future repo-scoped learning permanently
+    unreachable: a silent, fail-closed retrieval outage with no error anywhere.
+    The `repo_root = ''` predicate IS the idempotency mechanism and is
+    sufficient -- it matches zero rows once every row is healed, and
+    idx_learnings_repo_root_pending (a partial index over exactly that
+    predicate) makes the healed case an empty index probe rather than a scan
+    of the whole content table.
+
+    Only ever an UPDATE. A row whose file_path has no learnings segment keeps
+    repo_root = '' and is counted and reported, never deleted.
+    """
+    try:
+        cursor = conn.execute(
+            "SELECT id, file_path FROM learnings "
+            "WHERE scope = 'repo' AND repo_root = ''"
+        )
+    except sqlite3.OperationalError:
+        return
+
+    updates = []
+    stranded = 0
+    for row in cursor:
+        root = _derive_repo_root(row[1] or '')
+        if root:
+            updates.append((root, row[0]))
+        else:
+            stranded += 1
+
+    if updates:
+        conn.executemany(
+            "UPDATE learnings SET repo_root = ? WHERE id = ? AND repo_root = ''",
+            updates,
+        )
+        conn.commit()
+
+    if stranded:
+        print(
+            f"[compound-learning] {stranded} repo-scoped learning(s) have a file_path "
+            f"with no '{_LEARNINGS_PATH_SEGMENT}' segment, so no repo root can be "
+            "derived; they stay unreachable by scoped search until their file_path "
+            "is corrected.",
+            file=sys.stderr,
+        )
+
+
+# Pinned learnings are already loaded into every context via pinned.md, so peek
+# mode must not inject them a second time. Shared here rather than in
+# search-learnings.py because prune-stale.py needs the same set to exclude
+# pinned files from archival -- two copies would drift, and drift silently
+# reintroduces the double-injection loop.
+DEFAULT_PINNED_MD_PATH = '~/.claude/plugins/compound-learning/pinned.md'
+# Matches both the bare form (`_source: foo.md_`) and the annotated form
+# build-pinned.py emits (`_source: foo.md (2 substantive uses / 5 injections, ...)_`).
+# Keep this tolerant: if it stops matching, pinned entries get auto-peeked a second
+# time and the double-injection feedback loop comes back.
+PINNED_SOURCE_RE = re.compile(r'^_source:\s*(.+?\.md)(?:\s.*)?_\s*$')
+
+
+def load_pinned_sources() -> Set[str]:
+    """Return the learning file basenames listed in pinned.md.
+
+    Returns an empty set on any read failure: retrieval must keep working when
+    pinned.md is absent or unreadable.
+    """
+    path = os.environ.get('COMPOUND_LEARNING_PINNED_MD') or os.path.expanduser(DEFAULT_PINNED_MD_PATH)
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return set()
+
+    sources: Set[str] = set()
+    for line in lines:
+        match = PINNED_SOURCE_RE.match(line.strip())
+        if match:
+            sources.add(match.group(1).strip())
+    return sources
 
 
 def get_embedding(text: str):
@@ -300,23 +597,34 @@ def upsert_document(
     embedding = get_embedding(content)
     created_at = metadata.get('created_at', datetime.now(timezone.utc).isoformat())
 
+    scope = metadata.get('scope', 'global')
+    file_path = metadata.get('file_path', '')
+
+    # Populate repo_root here rather than leaving it to the next connection's
+    # backfill. Same helper, same derivation, so the two write paths can never
+    # disagree; the backfill stays as the repair pass for rows written before
+    # this and for any writer that bypasses upsert_document. Only repo-scoped
+    # rows carry a root -- search matches global rows on scope alone.
+    repo_root = _derive_repo_root(file_path) if scope == 'repo' else ''
+
     # Delete-then-insert strategy (virtual tables don't support ON CONFLICT cleanly)
     delete_document(conn, doc_id)
 
     conn.execute(
-        """INSERT INTO learnings (id, content, scope, repo, file_path, topic, keywords, created_at, access_count, last_accessed)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        """INSERT INTO learnings (id, content, scope, repo, file_path, topic, keywords, created_at, access_count, last_accessed, repo_root)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             doc_id,
             content,
-            metadata.get('scope', 'global'),
+            scope,
             metadata.get('repo', ''),
-            metadata.get('file_path', ''),
+            file_path,
             metadata.get('topic', 'other'),
             metadata.get('keywords', ''),
             created_at,
             metadata.get('access_count', 0),
             metadata.get('last_accessed', None),
+            repo_root,
         ),
     )
 
@@ -346,7 +654,7 @@ def delete_document(conn: sqlite3.Connection, doc_id: str) -> None:
 def search(
     conn: sqlite3.Connection,
     query_text: str,
-    scope_repos: List[str],
+    scope_repo_roots: List[str],
     n_results: int = 10,
     threshold: float = 1.0,
 ) -> List[Dict[str, Any]]:
@@ -354,23 +662,32 @@ def search(
     KNN vector search filtered by scope, returns list of result dicts.
 
     Each result has: id, document, metadata (dict), distance.
-    scope_repos: list of repo names in scope (global always included).
+    scope_repo_roots: absolute repo roots in scope (global always included).
     """
     import struct
 
     query_emb = get_embedding(query_text)
     embedding_blob = struct.pack(f'{len(query_emb)}f', *query_emb)
 
-    # Build scope WHERE clause
+    # Build scope WHERE clause.
+    #
+    # Matched on repo_root (an absolute path), never on `repo` (a bare
+    # directory name). A basename is not an identity: three different
+    # repositories across two clients are all named `platform`, and matching on
+    # the name injected one client's learnings into the other's session.
+    # `repo` is retained as a display label only.
     scope_conditions = ["l.scope = 'global'"]
     params: List[Any] = []
-    for repo in scope_repos:
-        scope_conditions.append("(l.scope = 'repo' AND l.repo = ?)")
-        params.append(repo)
+    for repo_root in scope_repo_roots:
+        scope_conditions.append("(l.scope = 'repo' AND l.repo_root = ?)")
+        params.append(repo_root)
     scope_sql = ' OR '.join(scope_conditions)
 
-    # KNN query joined with learnings for scope filtering
-    # sqlite-vec returns distance as vec_distance_cosine
+    # KNN query joined with learnings for scope filtering.
+    #
+    # vec_learnings is declared with NO distance metric, so sqlite-vec returns
+    # an L2 distance here, not a cosine distance. See the normalization note
+    # below for how a cosine is recovered from it.
     rows = conn.execute(
         f"""
         SELECT l.id, l.content, l.scope, l.repo, l.file_path, l.topic, l.keywords,
@@ -387,8 +704,15 @@ def search(
 
     results = []
     for row in rows:
-        # sqlite-vec cosine distance is in [0, 2]; normalize to [0, 1] so
-        # existing thresholds (0.5, 0.6, 0.25) work unchanged
+        # L2 distance over unit-normalized embeddings is in [0, 2]; halve it to
+        # [0, 1] so existing thresholds (0.5, 0.6, 0.25) work unchanged.
+        #
+        # The halved value is an L2 distance, not a cosine distance, so
+        # `1 - dist` is NOT a cosine similarity. Recover cosine as
+        # `1 - 2 * dist**2` (reference: scripts/dedupe-on-write.py cosine_from).
+        # Every threshold compared against this value was tuned empirically
+        # against the numbers this line produces, so the calibration is correct
+        # as shipped; do not shift any of them because of the metric label.
         dist = float(row['distance']) / 2.0
         if dist > threshold:
             continue

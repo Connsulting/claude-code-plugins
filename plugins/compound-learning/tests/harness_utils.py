@@ -142,7 +142,7 @@ def run_search_pipeline(
     hi_thresh = high_threshold if high_threshold is not None else config["learnings"]["highConfidenceThreshold"]
     pos_thresh = possible_threshold if possible_threshold is not None else config["learnings"]["possiblyRelevantThreshold"]
 
-    raw = db.search(conn, query, scope_repos=[], n_results=20, threshold=1.0)
+    raw = db.search(conn, query, scope_repo_roots=[], n_results=20, threshold=1.0)
     query_keywords = extract_query_keywords(query)
     fts_matches = fts5_search(conn, query)
     reranked = hybrid_rerank(raw, query_keywords, kw_weight, fts_ids=fts_matches)

@@ -99,6 +99,7 @@ To keep it focused:
 - Does NOT modify the PRs
 - Does NOT post comments back to GitHub
 - Does NOT re-index automatically (run `/index-learnings` separately)
+- Does NOT run the write-time dedupe. Unlike `/compound` Step 3 and the `hooks/extract-learnings.sh` hook, this path writes learning files without invoking `scripts/dedupe-on-write.py`, so a near-duplicate of an existing learning survives as its own file until a later consolidation pass
 - Does NOT validate PR permissions (assumes you have read access)
 
 ## Philosophy

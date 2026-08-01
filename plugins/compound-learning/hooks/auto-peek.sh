@@ -69,11 +69,12 @@ if [ ! -w "$SESSIONS_DIR" ]; then
 fi
 
 # Prune session files older than 24 hours
-find "$SESSIONS_DIR" -name "*.seen" -mmin +1440 -delete 2>/dev/null
+find "$SESSIONS_DIR" \( -name "*.seen" -o -name "*.cap" \) -mmin +1440 -delete 2>/dev/null
 
 # Derive session ID from the transcript filename UUID
 SESSION_ID=$(basename "$TRANSCRIPT" .jsonl)
 SESSION_FILE="$SESSIONS_DIR/${SESSION_ID}.seen"
+SESSION_CAP_FILE="$SESSIONS_DIR/${SESSION_ID}.cap"
 
 # Pinned learnings are loaded via CLAUDE.md @import (not injected here) so the
 # agent sees them on every session without paying hook-output overhead. See
@@ -85,6 +86,55 @@ EXCLUDE_COUNT=0
 if [ -f "$SESSION_FILE" ]; then
   EXCLUDE_IDS=$(sort -u "$SESSION_FILE" | tr '\n' ',' | sed 's/,$//')
   EXCLUDE_COUNT=$(sort -u "$SESSION_FILE" | wc -l)
+fi
+
+# Per-session injection cap. EXCLUDE_COUNT is everything already injected this
+# session, so this is a hard stop rather than a rate limit; the session ledger
+# is pruned at 24h above, so it self-heals daily.
+#
+# The gate sits BEFORE the keyword-extraction subprocess deliberately: gating
+# after it would still pay the per-fire model cost for a result that is then
+# thrown away. Same reasoning as the daily cap in extract-learnings.sh.
+#
+# The cap is config-driven (peekMaxPerSession), with an env override for tests.
+# The literal below is only reached if the config read fails, and it must track
+# the value load_config ships.
+#
+# Resolving it costs a python3 interpreter start (~24ms measured), so the read
+# is skipped and memoized rather than paid on every prompt:
+#   * nothing has been injected yet -> the comparison below cannot fire for any
+#     cap, so the value is never needed and is not resolved at all;
+#   * otherwise the value is read from a per-session memo file and the
+#     interpreter starts at most once per session. The cap is a config constant
+#     that cannot change mid-session, so the memo cannot go stale within one.
+if [ "$EXCLUDE_COUNT" -gt 0 ]; then
+  MAX_PER_SESSION="${COMPOUND_LEARNING_MAX_PER_SESSION:-}"
+  MAX_PER_SESSION_FRESH=0
+  if [ -z "$MAX_PER_SESSION" ] && [ -s "$SESSION_CAP_FILE" ]; then
+    MAX_PER_SESSION=$(cat "$SESSION_CAP_FILE" 2>/dev/null)
+  fi
+  if [ -z "$MAX_PER_SESSION" ]; then
+    MAX_PER_SESSION=$(python3 -c "
+import sys
+sys.path.insert(0, '${CLAUDE_PLUGIN_ROOT}')
+import lib.db as db
+print(db.load_config()['learnings'].get('peekMaxPerSession', 12))
+" 2>/dev/null)
+    MAX_PER_SESSION_FRESH=1
+  fi
+  case "$MAX_PER_SESSION" in
+    ''|*[!0-9]*) MAX_PER_SESSION=12 ;;
+  esac
+  # Memoize the validated value, never the raw read, so a later prompt inherits
+  # the same fallback this one used instead of re-deriving a different one.
+  if [ "$MAX_PER_SESSION_FRESH" -eq 1 ]; then
+    echo "$MAX_PER_SESSION" > "$SESSION_CAP_FILE" 2>/dev/null
+  fi
+
+  if [ "$MAX_PER_SESSION" -gt 0 ] && [ "$EXCLUDE_COUNT" -ge "$MAX_PER_SESSION" ]; then
+    log_activity "[auto-peek] session cap reached: $EXCLUDE_COUNT learning(s) already injected this session (cap $MAX_PER_SESSION); skipping keyword extraction and search"
+    exit 0
+  fi
 fi
 
 # Extract recent conversation context from transcript

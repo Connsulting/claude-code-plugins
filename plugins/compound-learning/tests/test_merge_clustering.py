@@ -188,11 +188,21 @@ def test_jaccard_does_not_union_below_min_cosine(isolated_db, tmp_path) -> None:
 def test_title_slug_tokenizer_drops_trailing_date(isolated_db, tmp_path) -> None:
     """A shared trailing date must not count as title similarity.
 
-    Every learning file name ends in `-YYYY-MM-DD`. If the date survives
-    tokenization, two files written on the same day share three tokens for free:
-    here that would be Jaccard 3/7 = 0.43, over the 0.33 floor, at a cosine of
-    0.75 that clears the min-cosine conjunct -- so every same-day pair in the
-    corpus would union. Behavioural check: these two must NOT cluster.
+    Every learning file name ends in `-YYYY-MM-DD`, so two files written on the
+    same day share three tokens (`2026`, `07`, `21`) for free if the date
+    survives tokenization. The fixture pair is chosen so that the date is the
+    only thing deciding the outcome, straddling the 0.50 mergeTitleJaccard
+    floor:
+
+      * stripped   {alpha, widget} vs {beta}                  -> 0/3 = 0.0000
+      * unstripped {alpha, widget, 2026, 07, 21}
+                   vs {beta, 2026, 07, 21}                    -> 3/6 = 0.5000
+
+    Cosine is 0.75: under the 0.85 cosine union floor, so the cosine arm draws
+    no edge, and over the 0.70 min-cosine conjunct, so the Jaccard arm is the
+    only thing that can. Delete `_DATE_SUFFIX_RE.sub` from `_title_tokens` and
+    the un-stripped 0.5000 clears the floor, these two union, and this test
+    fails. Behavioural check: they must NOT cluster.
     """
     _config, conn = isolated_db
     theta = _angle_for_cosine(0.75)
@@ -205,8 +215,8 @@ def test_title_slug_tokenizer_drops_trailing_date(isolated_db, tmp_path) -> None
     )
     b = _add_doc(
         conn, tmp_path,
-        "beta-gadget-2026-07-21.md",
-        "Beta gadget behaviour", "delegation",
+        "beta-2026-07-21.md",
+        "Beta behaviour", "delegation",
         _planar_vec(0, 1, theta),
     )
 
