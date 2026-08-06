@@ -1,5 +1,5 @@
 {
-  "description": "Auto-extract learnings on session end/compaction, auto-peek on prompt submit",
+  "description": "TEMPORARILY DISABLED 2026-08-06: auto-peek (UserPromptSubmit) and auto-extract (SessionEnd/PreCompact) removed. Restore with: cp hooks.json.enabled-backup hooks.json. Codex-side twins are commented out in ~/.codex/config.toml.",
   "hooks": {
     "SessionStart": [
       {
@@ -8,42 +8,6 @@
             "type": "command",
             "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/setup.sh",
             "timeout": 120000
-          }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/extract-learnings.sh",
-            "timeout": 180000,
-            "async": true
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/auto-peek.sh",
-            "timeout": 15000,
-            "statusMessage": "Checking learnings..."
-          }
-        ]
-      }
-    ],
-    "PreCompact": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/extract-learnings.sh",
-            "timeout": 180000,
-            "async": true
           }
         ]
       }

@@ -1,0 +1,52 @@
+{
+  "description": "Auto-extract learnings on session end/compaction, auto-peek on prompt submit",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/setup.sh",
+            "timeout": 120000
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/extract-learnings.sh",
+            "timeout": 180000,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/auto-peek.sh",
+            "timeout": 15000,
+            "statusMessage": "Checking learnings..."
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/extract-learnings.sh",
+            "timeout": 180000,
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}
