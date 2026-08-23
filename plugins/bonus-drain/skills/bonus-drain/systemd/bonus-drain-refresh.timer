@@ -1,0 +1,13 @@
+[Unit]
+Description=Refresh Bonus Drain usage snapshots every ten minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+RandomizedDelaySec=30s
+AccuracySec=15s
+Persistent=true
+Unit=bonus-drain-refresh.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,173 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openai.example/schemas/bonus-drain-config-v1.json",
+  "title": "Bonus Drain configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "record_command",
+    "adapters",
+    "providers",
+    "plans",
+    "accounts",
+    "limits"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "database": {"type": "string", "minLength": 1},
+    "cache_dir": {"type": "string", "minLength": 1},
+    "record_command": {"$ref": "#/$defs/argv"},
+    "usage_max_age_seconds": {"type": "integer", "minimum": 1},
+    "secret_refs": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/secretRef"}
+    },
+    "adapters": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/adapter"}
+    },
+    "providers": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/provider"}
+    },
+    "plans": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/plan"}
+    },
+    "accounts": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/account"}
+    },
+    "limits": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/limit"}
+    },
+    "viewer": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bind": {"type": "string", "default": "127.0.0.1"},
+        "mutations_enabled": {"type": "boolean", "default": false},
+        "remote": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["auth_secret_ref", "allowed_hosts", "allowed_origins"],
+          "properties": {
+            "auth_secret_ref": {"$ref": "#/$defs/id"},
+            "allowed_hosts": {"type": "array", "items": {"type": "string"}},
+            "allowed_origins": {"type": "array", "items": {"type": "string"}},
+            "https_terminated": {"type": "boolean"}
+          }
+        }
+      }
+    },
+    "pr_exceptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1},
+          "allow_push": {"type": "boolean"},
+          "allow_pr": {"type": "boolean"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+    "argv": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "secretRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "source": {"enum": ["env", "file"]},
+        "name": {"type": "string"},
+        "path": {"type": "string"}
+      },
+      "oneOf": [
+        {"required": ["name"]},
+        {"required": ["path"]}
+      ]
+    },
+    "adapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "argv"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "kind": {"enum": ["agent-router", "usage", "reset", "activation"]},
+        "argv": {"$ref": "#/$defs/argv"},
+        "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600},
+        "max_output_bytes": {"type": "integer", "minimum": 1},
+        "env_allowlist": {"type": "array", "items": {"type": "string"}},
+        "secret_refs": {"type": "object", "additionalProperties": {"$ref": "#/$defs/id"}}
+      }
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "dispatch"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "dispatch": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["adapter_id", "provider"],
+          "properties": {
+            "adapter_id": {"$ref": "#/$defs/id"},
+            "provider": {"type": "string", "minLength": 1}
+          }
+        },
+        "capabilities": {"type": "array", "items": {"$ref": "#/$defs/id"}}
+      }
+    },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "provider_id"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "provider_id": {"$ref": "#/$defs/id"}
+      }
+    },
+    "account": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "provider_id", "plan_id"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "provider_id": {"$ref": "#/$defs/id"},
+        "plan_id": {"$ref": "#/$defs/id"},
+        "usage_adapter_id": {"$ref": "#/$defs/id"},
+        "reset_adapter_id": {"$ref": "#/$defs/id"},
+        "activation_adapter_id": {"$ref": "#/$defs/id"},
+        "secret_refs": {"type": "object", "additionalProperties": {"$ref": "#/$defs/id"}}
+      }
+    },
+    "limit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "plan_id", "window_seconds", "ceiling_percent", "lead_seconds", "batch_size"],
+      "properties": {
+        "id": {"$ref": "#/$defs/id"},
+        "plan_id": {"$ref": "#/$defs/id"},
+        "window_seconds": {"type": "integer", "minimum": 1},
+        "ceiling_percent": {"type": "number", "minimum": 0, "maximum": 100},
+        "lead_seconds": {"type": "integer", "minimum": 1},
+        "batch_size": {"type": "integer", "minimum": 1},
+        "max_percent_per_window": {"type": "number", "minimum": 0, "maximum": 100},
+        "estimated_percent_per_job": {"type": "number", "exclusiveMinimum": 0, "maximum": 100},
+        "pacing_window_seconds": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}

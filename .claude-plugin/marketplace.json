@@ -17,6 +17,12 @@
       "description": "Auto-log substantive Claude Code sessions to Notion Work Log via Notion MCP",
       "source": "./plugins/work-log",
       "category": "productivity"
+    },
+    {
+      "name": "bonus-drain",
+      "description": "Queue and safely dispatch low-priority work against independently paced provider capacity",
+      "source": "./plugins/bonus-drain",
+      "category": "productivity"
     }
   ]
 }

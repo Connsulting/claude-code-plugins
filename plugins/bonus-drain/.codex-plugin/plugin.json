@@ -1,0 +1,32 @@
+{
+  "name": "bonus-drain",
+  "version": "0.1.0",
+  "description": "Queue and safely dispatch low-priority work against independently paced provider capacity.",
+  "author": {
+    "name": "Connsulting"
+  },
+  "keywords": [
+    "automation",
+    "capacity",
+    "scheduling",
+    "sqlite"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Bonus Drain",
+    "shortDescription": "Spend expiring AI capacity on a safe backlog.",
+    "longDescription": "Queue low-priority work, plan against independent provider and account reset windows, and dispatch eligible work through agent-router.",
+    "developerName": "Connsulting",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Add this low-priority task to Bonus Drain.",
+      "Show the Bonus Drain queue and capacity gates.",
+      "Check whether Bonus Drain is ready to run."
+    ],
+    "brandColor": "#6D5BD0"
+  }
+}

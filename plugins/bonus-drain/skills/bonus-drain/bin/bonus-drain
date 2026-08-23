@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+# Source-tree entrypoint; lifecycle.install writes an equivalent versioned stable wrapper.
+set -eu
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH
+exec python3 -m bonus_drain "$@"

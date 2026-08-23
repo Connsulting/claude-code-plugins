@@ -1,0 +1,14 @@
+{
+  "name": "bonus-drain",
+  "version": "0.1.0",
+  "description": "Queue and safely dispatch low-priority work against independently paced provider capacity.",
+  "author": {
+    "name": "Connsulting"
+  },
+  "keywords": [
+    "automation",
+    "capacity",
+    "scheduling",
+    "sqlite"
+  ]
+}

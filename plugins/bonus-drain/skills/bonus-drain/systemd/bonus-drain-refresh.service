@@ -1,0 +1,19 @@
+[Unit]
+Description=Refresh Bonus Drain provider usage cache
+Documentation=file://%h/.local/lib/bonus-drain/current/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=BONUS_DRAIN_CONFIG=%h/.config/bonus-drain/config.json
+ExecStart=/usr/bin/env %h/.local/bin/bonus-drain refresh --json
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native

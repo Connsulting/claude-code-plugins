@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the Bonus Drain scout hourly
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+RandomizedDelaySec=5min
+AccuracySec=1min
+Persistent=true
+Unit=bonus-drain-scout.service
+
+[Install]
+WantedBy=timers.target

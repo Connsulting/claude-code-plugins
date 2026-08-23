@@ -1,0 +1,23 @@
+Read-only verification of the installed Bonus Drain scheduler. Do not modify code,
+configuration, cache, queue state, units, or timers. Do not refresh provider usage.
+
+1. Resolve `${BONUS_DRAIN_BIN:-$HOME/.local/bin/bonus-drain}` and run `doctor --json`,
+   `status --json`, `gates --json`, and `plan --json`. All must select the same validated
+   config and XDG database. Stop and report if lifecycle ownership, config, or an ambiguous
+   claim requires reconciliation.
+2. From cached account snapshots, report freshness, exact reset, gate reason, and planned
+   concrete provider/account independently. Missing or stale data is closed/unknown, never
+   zero usage. Do not invoke any configured usage adapter.
+3. Inspect the current-cycle queue/runs JSON. Confirm no task has more than one accounted
+   launch for an eligibility key, every new launch persists a concrete non-`auto` provider
+   and account, and dispatched work has either a terminal event or an explicit live router
+   job. An ambiguous claim is neither success nor a known failure.
+4. Read `systemctl --user status` and the last ten hours of journal for
+   `bonus-drain-refresh.service` and `bonus-drain-scout.service`. Confirm the timer identities
+   are self-owned, refresh precedes scout, and the observed scout decision matches the cached
+   plan. No dispatch is a valid result when every gate is closed.
+5. Confirm the Bonus-only and combined viewers use the stable CLI/XDG database and normalized
+   cache only. A page request must not run a provider, usage, activation, or refresh command.
+
+Print a concise evidence summary with each provider/account reported separately, any orphan
+or duplicate called out explicitly, and unknown data described as unverified. Then stop.

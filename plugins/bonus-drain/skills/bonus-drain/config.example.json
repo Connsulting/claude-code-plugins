@@ -1,0 +1,115 @@
+{
+  "schema_version": 1,
+  "record_command": [
+    "/usr/local/bin/bonus-drain",
+    "record"
+  ],
+  "usage_max_age_seconds": 3600,
+  "secret_refs": [],
+  "adapters": [
+    {
+      "id": "router",
+      "kind": "agent-router",
+      "argv": [
+        "/usr/local/bin/agent-router"
+      ],
+      "timeout_seconds": 90,
+      "max_output_bytes": 1048576,
+      "env_allowlist": []
+    },
+    {
+      "id": "usage-reader",
+      "kind": "usage",
+      "argv": [
+        "/usr/local/libexec/bonus-drain-usage",
+        "{provider_id}",
+        "{account_id}"
+      ],
+      "timeout_seconds": 30,
+      "max_output_bytes": 65536,
+      "env_allowlist": []
+    },
+    {
+      "id": "reset-reader",
+      "kind": "reset",
+      "argv": [
+        "/usr/local/libexec/bonus-drain-resets",
+        "{provider_id}",
+        "{account_id}"
+      ],
+      "timeout_seconds": 30,
+      "max_output_bytes": 65536,
+      "env_allowlist": []
+    }
+  ],
+  "providers": [
+    {
+      "id": "provider-a",
+      "dispatch": {
+        "adapter_id": "router",
+        "provider": "provider-a"
+      }
+    },
+    {
+      "id": "provider-b",
+      "dispatch": {
+        "adapter_id": "router",
+        "provider": "provider-b"
+      }
+    }
+  ],
+  "plans": [
+    {
+      "id": "plan-a",
+      "provider_id": "provider-a"
+    },
+    {
+      "id": "plan-b",
+      "provider_id": "provider-b"
+    }
+  ],
+  "accounts": [
+    {
+      "id": "account-a",
+      "provider_id": "provider-a",
+      "plan_id": "plan-a",
+      "usage_adapter_id": "usage-reader",
+      "reset_adapter_id": "reset-reader"
+    },
+    {
+      "id": "account-b",
+      "provider_id": "provider-b",
+      "plan_id": "plan-b",
+      "usage_adapter_id": "usage-reader"
+    }
+  ],
+  "limits": [
+    {
+      "id": "plan-a-weekly",
+      "plan_id": "plan-a",
+      "window_seconds": 604800,
+      "ceiling_percent": 98,
+      "lead_seconds": 108000,
+      "batch_size": 6,
+      "max_percent_per_window": 2.5,
+      "estimated_percent_per_job": 0.75,
+      "pacing_window_seconds": 18000
+    },
+    {
+      "id": "plan-b-weekly",
+      "plan_id": "plan-b",
+      "window_seconds": 604800,
+      "ceiling_percent": 98,
+      "lead_seconds": 108000,
+      "batch_size": 6,
+      "max_percent_per_window": 2.5,
+      "estimated_percent_per_job": 0.75,
+      "pacing_window_seconds": 18000
+    }
+  ],
+  "viewer": {
+    "bind": "127.0.0.1",
+    "mutations_enabled": false
+  },
+  "pr_exceptions": []
+}

@@ -1,0 +1,217 @@
+# Bonus Drain
+
+Bonus Drain is a self-contained queue, planner, scout, usage-cache refresher, dispatcher,
+and read-only viewer for opportunistic low-priority work. Provider names, plans, accounts,
+limits, reset windows, usage readers, activation rules, and dispatch bindings are validated
+JSON data. The planner does not contain provider-name branches.
+
+Installing this marketplace plugin only makes its skill available. It does not switch a
+live Bonus Drain installation, enable a systemd unit, migrate a database, change a router,
+or configure Tailscale Serve. Runtime installation also stages files without enabling or
+starting services. Cutover remains an explicit manual operation.
+
+## Dependencies
+
+Required runtime dependencies are:
+
+- Python 3.10 or newer with the standard-library `sqlite3` module;
+- an executable `agent-router`, referenced by an absolute argv in the JSON configuration;
+- one executable usage adapter per account, plus a reset adapter when usage output does not
+  contain resets.
+
+The core runtime has no third-party Python package, `uv`, `bg-schedule`, or
+`codex-bg-thread` dependency. The included compatibility adapters for Claude, Codex, and
+Grok use shell tools such as Bash, `jq`, `curl`, and GNU core utilities as documented in
+their headers; replace them with any executable that implements the adapter JSON contract.
+`ai-token-rotator` is optional and can be configured as an account activation adapter.
+systemd user services are optional. Tailscale is optional and is only used as an
+authenticated HTTPS front end for an explicitly configured remote viewer.
+
+Run `bonus-drain doctor --json` after configuring the runtime. It validates the graph,
+queue, router-only dispatch boundary, and reconciliation state without resolving or
+printing secret values.
+
+## Install or stage
+
+Claude Code marketplace installation:
+
+```text
+/plugin marketplace add Connsulting/claude-code-plugins
+/plugin install bonus-drain@connsulting-plugins
+```
+
+For a local Codex checkout, register this non-default repository marketplace and then add
+the plugin:
+
+```sh
+codex plugin marketplace add /absolute/path/to/claude-code-plugins
+codex plugin add bonus-drain@connsulting-plugins
+```
+
+To stage the stable runtime without activation, run from this plugin directory:
+
+```sh
+cd skills/bonus-drain
+./install.sh
+"${HOME}/.local/bin/bonus-drain" status --json
+```
+
+The helper copies a versioned runtime under `${HOME}/.local/lib/bonus-drain`, creates a
+stable `${HOME}/.local/bin/bonus-drain` wrapper, and installs owned unit templates. It does
+not enable or start a service or timer. Use `./install.sh --home /temporary/home` for a
+disposable staging test.
+
+## Generic configuration
+
+Copy the complete valid skeleton and replace every example executable with an absolute
+path on the target machine:
+
+```sh
+install -d -m 0700 "${XDG_CONFIG_HOME:-$HOME/.config}/bonus-drain"
+install -m 0600 skills/bonus-drain/config.example.json \
+  "${XDG_CONFIG_HOME:-$HOME/.config}/bonus-drain/config.json"
+export BONUS_DRAIN_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/bonus-drain/config.json"
+bonus-drain doctor --json
+```
+
+Provider and account labels are arbitrary data. For example, a configuration can define
+personal and business accounts across Claude, Codex, and Grok without changing core code:
+
+```json
+{
+  "providers": [
+    {"id": "claude", "dispatch": {"adapter_id": "router", "provider": "claude"}},
+    {"id": "codex", "dispatch": {"adapter_id": "router", "provider": "codex"}},
+    {"id": "grok", "dispatch": {"adapter_id": "router", "provider": "grok"}}
+  ],
+  "plans": [
+    {"id": "claude-personal-plan", "provider_id": "claude"},
+    {"id": "claude-business-plan", "provider_id": "claude"},
+    {"id": "codex-personal-plan", "provider_id": "codex"},
+    {"id": "grok-personal-plan", "provider_id": "grok"}
+  ],
+  "accounts": [
+    {"id": "claude-personal", "provider_id": "claude", "plan_id": "claude-personal-plan", "usage_adapter_id": "usage"},
+    {"id": "claude-business", "provider_id": "claude", "plan_id": "claude-business-plan", "usage_adapter_id": "usage", "activation_adapter_id": "account-activator"},
+    {"id": "codex-personal", "provider_id": "codex", "plan_id": "codex-personal-plan", "usage_adapter_id": "usage"},
+    {"id": "grok-personal", "provider_id": "grok", "plan_id": "grok-personal-plan", "usage_adapter_id": "usage"}
+  ]
+}
+```
+
+This is an illustrative fragment; retain the required adapters, limits, record command,
+viewer, and schema version from `config.example.json`. Give each plan its own limits and
+reset data. Bonus Drain keeps those windows independent and dispatches the eligible batch
+whose reset is nearest. Missing, malformed, resetless, or stale usage closes only the
+affected account. The refresher owns provider reads and writes normalized cache; scout,
+planner, and viewer consume cache and do not call provider APIs on page load.
+
+Secrets are references only. Declare an environment-variable or file reference in
+`secret_refs` and map it by ID from an adapter or viewer. Never place a secret value in the
+JSON, an argv, a unit, a log, or the repository. Every launch goes through an explicit
+`agent-router` adapter. Multi-account activation is optional; `ai-token-rotator` is one
+possible activation adapter, not a core dependency.
+
+## Localhost viewer
+
+The schema and example bind the viewer to `127.0.0.1` and disable mutations. After a
+successful refresh has populated cache, start it explicitly:
+
+```sh
+BONUS_DRAIN_CONFIG="${BONUS_DRAIN_CONFIG}" bonus-drain viewer --port 8766
+```
+
+Open `http://127.0.0.1:8766/`. Local mode rejects non-loopback binds. Mutation routes are
+absent by default, and the request path reads SQLite and cached usage only.
+
+## Optional authenticated Tailscale viewer
+
+Keep the viewer bound to `127.0.0.1`. Add a `secret_refs` entry whose source is an external
+environment variable or protected file, and configure `viewer.remote.auth_secret_ref`,
+exact `allowed_hosts`, and exact HTTPS `allowed_origins`. Do not place the credential value
+in JSON. Start the viewer with `--remote`, then configure Tailscale Serve separately:
+
+```sh
+BONUS_DRAIN_CONFIG="${BONUS_DRAIN_CONFIG}" bonus-drain viewer --remote --port 8766
+sudo tailscale serve --bg --https=8766 http://127.0.0.1:8766
+```
+
+The remote viewer requires its own authenticated session, exact Host/Origin checks, secure
+cookies, and CSRF tokens for explicitly enabled mutations. Keep `mutations_enabled` false
+unless the full mutation boundary has been reviewed. Disable the proxy with
+`sudo tailscale serve --https=8766 off`. Never use an unauthenticated `0.0.0.0` listener.
+
+## Test and diagnose
+
+From the marketplace repository root:
+
+```sh
+python3 -m unittest tests.test_bonus_drain_package
+python3 /path/to/plugin-creator/scripts/validate_plugin.py plugins/bonus-drain
+claude plugin validate plugins/bonus-drain --strict
+grok plugin validate plugins/bonus-drain
+```
+
+From a source checkout that contains the regression suites, follow
+`skills/bonus-drain/README.md` for the full Python, shell, distribution, byte-compile, and
+systemd validation commands. For a credential-free smoke test, set `HOME` and every XDG
+directory to a new temporary directory, install with `--home`, use fixture adapters, run
+`doctor`, `plan`, migration `--dry-run`, and the loopback viewer, then uninstall from that
+same temporary home.
+
+## Manual cutover
+
+Read `skills/bonus-drain/MIGRATION.md` completely before touching an existing installation.
+The safe order is:
+
+1. inventory the old DB, writer services, timers, viewer, stable paths, and unit state;
+2. run `bonus-drain migrate --from-db FILE --from-units DIR --destination DIR --dry-run`;
+3. stop and mask every old writer, then prove no process holds the DB, WAL, or SHM open;
+4. create and read back a backup before selecting the new DB;
+5. install and validate the new config, run `doctor`, `refresh`, `gates`, and `plan`;
+6. enable only the refresh timer, observe it, then enable the scout timer;
+7. keep the old writers masked through at least one observed scheduling cycle.
+
+Never run old and new writers against one queue. `migrate --dry-run` is report-only and
+refuses apply or rollback. Markdown/jsonl import is a separate `import-legacy` operation.
+
+## Database backup
+
+Quiesce and mask every writer before copying a SQLite database. Preserve the DB plus any
+`-wal` and `-shm` files, both old and new redacted configs, unit files, enabled/masked-state
+inventories, and installed-version/current-link inventory in a timestamped protected
+directory. Hash the backup, make it read-only, open the copied DB in SQLite read-only mode,
+and record `PRAGMA integrity_check`, schema version, table names, and task/run counts. Do
+not treat an unread backup as a rollback point.
+
+## Rollback
+
+Disable, stop, and mask the new scout and refresh timers and stop the viewer. Prove no new
+writer holds the DB files. Preserve the failed-cutover DB and logs, restore the verified
+DB/config/unit backup with recorded modes and prior unit state, run the old read-only
+checks, then unmask and start only the previously active writers. Prove that exactly one
+writer topology is active before resuming work.
+
+Runtime uninstall is not rollback: it preserves XDG configuration, cache, queue, and
+operator state and refuses modified or unknown owned files.
+
+## Later removal
+
+After rollback or final retirement has been separately completed and verified:
+
+```sh
+systemctl --user disable --now \
+  bonus-drain-scout.timer bonus-drain-refresh.timer bonus-drain-viewer.service
+cd skills/bonus-drain
+./uninstall.sh
+```
+
+The uninstaller removes only hash-verified runtime-owned versions, wrappers, and units. It
+does not remove configuration, cache, database, backups, or other operator state. Remove
+the Claude or Codex marketplace plugin separately only after no runtime process depends on
+the marketplace cache path.
+
+For the runtime contracts and command reference, see
+[`skills/bonus-drain/README.md`](skills/bonus-drain/README.md),
+[`skills/bonus-drain/SECURITY.md`](skills/bonus-drain/SECURITY.md), and
+[`skills/bonus-drain/MIGRATION.md`](skills/bonus-drain/MIGRATION.md).

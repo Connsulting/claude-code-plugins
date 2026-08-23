@@ -49,7 +49,7 @@ INLINE_SECRET_ASSIGNMENT = re.compile(
     ^\s*(?:export\s+)?
     (?:ANTHROPIC_API_KEY|OPENAI_API_KEY|API_KEY|ACCESS_TOKEN|AUTH_TOKEN|PASSWORD|SECRET)
     \s*=\s*
-    (?!\s*(?:\$\{?[A-Z_][A-Z0-9_]*\}?|<[^>]+>|(?:env|secret|keyring)://))
+    (?!\s*(?:\$\{?[A-Z_][A-Z0-9_]*\}?|"?\$\(|<[^>]+>|(?:env|secret|keyring)://|resolve_secret\(|''|""))
     [^\s#]+ 
     """
 )
@@ -176,6 +176,21 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             "distribution manifest include must equal every copied skill file",
         )
 
+        sys.path.insert(0, str(SKILL_ROOT))
+        try:
+            from bonus_drain import lifecycle
+
+            installed_payload = {
+                path.as_posix() for path in lifecycle._runtime_files(SKILL_ROOT)
+            }
+        finally:
+            sys.path.pop(0)
+        self.assertEqual(
+            installed_payload,
+            included,
+            "installer runtime selection must equal the distribution manifest",
+        )
+
         excluded = manifest.get("exclude")
         self.assertIsInstance(excluded, list, "manifest exclude must be a list")
         self.assertEqual(
@@ -243,6 +258,8 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             "skills/bonus-drain/bin/bonus-drain",
             "skills/bonus-drain/install.sh",
             "skills/bonus-drain/uninstall.sh",
+            "skills/bonus-drain/scripts/install.sh",
+            "skills/bonus-drain/scripts/uninstall.sh",
         ):
             mode = (PLUGIN_ROOT / relative_path).stat().st_mode
             self.assertTrue(
@@ -328,19 +345,19 @@ class BonusDrainPackageContractTests(unittest.TestCase):
         example = self.load_json(SKILL_ROOT / "config.example.json")
         viewer = example.get("viewer")
         self.assertIsInstance(viewer, dict, "config example needs a viewer section")
-        self.assertIn(viewer.get("host"), {"127.0.0.1", "localhost"})
-        self.assertIs(viewer.get("allow_mutations"), False)
+        self.assertIn(viewer.get("bind"), {"127.0.0.1", "localhost"})
+        self.assertIs(viewer.get("mutations_enabled"), False)
 
         schema = self.load_json(SKILL_ROOT / "config.schema.json")
         viewer_schema = schema.get("properties", {}).get("viewer", {})
         viewer_properties = viewer_schema.get("properties", {})
         self.assertIn(
-            viewer_properties.get("host", {}).get("default"),
+            viewer_properties.get("bind", {}).get("default"),
             {"127.0.0.1", "localhost"},
             "viewer schema must default to loopback",
         )
         self.assertIs(
-            viewer_properties.get("allow_mutations", {}).get("default"),
+            viewer_properties.get("mutations_enabled", {}).get("default"),
             False,
             "viewer mutations must default off",
         )

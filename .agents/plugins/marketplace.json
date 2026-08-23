@@ -1,0 +1,20 @@
+{
+  "name": "connsulting-plugins",
+  "interface": {
+    "displayName": "Connsulting Plugins"
+  },
+  "plugins": [
+    {
+      "name": "bonus-drain",
+      "source": {
+        "source": "local",
+        "path": "./plugins/bonus-drain"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

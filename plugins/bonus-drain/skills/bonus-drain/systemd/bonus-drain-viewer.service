@@ -1,0 +1,23 @@
+[Unit]
+Description=Loopback Bonus Drain cache and queue viewer
+Documentation=file://%h/.local/lib/bonus-drain/current/SECURITY.md
+After=network.target
+
+[Service]
+Type=simple
+Environment=BONUS_DRAIN_CONFIG=%h/.config/bonus-drain/config.json
+ExecStart=/usr/bin/env %h/.local/bin/bonus-drain viewer --port 8766
+Restart=on-failure
+RestartSec=5s
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

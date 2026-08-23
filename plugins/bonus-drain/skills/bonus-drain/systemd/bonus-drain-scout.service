@@ -1,0 +1,19 @@
+[Unit]
+Description=Plan and dispatch one Bonus Drain scout tick
+Documentation=file://%h/.local/lib/bonus-drain/current/README.md
+After=network-online.target bonus-drain-refresh.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=BONUS_DRAIN_CONFIG=%h/.config/bonus-drain/config.json
+ExecStart=/usr/bin/env %h/.local/bin/bonus-drain scout --json
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectClock=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictSUIDSGID=yes
+SystemCallArchitectures=native
