@@ -50,7 +50,7 @@ INLINE_SECRET_ASSIGNMENT = re.compile(
     (?:ANTHROPIC_API_KEY|OPENAI_API_KEY|API_KEY|ACCESS_TOKEN|AUTH_TOKEN|PASSWORD|SECRET)
     \s*=\s*
     (?!\s*(?:\$\{?[A-Z_][A-Z0-9_]*\}?|"?\$\(|<[^>]+>|(?:env|secret|keyring)://|resolve_secret\(|''|""))
-    [^\s#]+ 
+    [^\s#]+
     """
 )
 
