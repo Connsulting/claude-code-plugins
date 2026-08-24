@@ -137,7 +137,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             self.assertIsInstance(manifest.get("description"), str, manifest_path)
             self.assertTrue(manifest["description"].strip(), manifest_path)
             versions.append(manifest["version"])
-        self.assertEqual(versions, ["0.1.3", "0.1.3"])
+        self.assertEqual(versions, ["0.1.4", "0.1.4"])
 
     def test_packaged_viewer_supports_secretless_read_only_tailnet_proxy(self) -> None:
         example = self.load_json(SKILL_ROOT / "config.example.json")

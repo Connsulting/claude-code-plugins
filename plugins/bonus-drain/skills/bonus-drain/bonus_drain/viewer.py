@@ -110,8 +110,11 @@ class ViewerSnapshot:
     generated_at: int
     accounts: tuple[ViewerAccount, ...]
     tasks: tuple[Any, ...]
+    eligible: tuple[Any, ...]
+    disabled: tuple[Any, ...]
     runs: tuple[Any, ...]
     claims: tuple[Any, ...]
+    inflight: tuple[Any, ...]
 
     def as_dict(self) -> dict[str, Any]:
         return _plain(self)
@@ -155,6 +158,17 @@ def _queue_collection(queue: Any, method: str) -> tuple[Any, ...]:
     return tuple(_plain(item) for item in result)
 
 
+def _queue_call(queue: Any, method: str, *args: Any, **kwargs: Any) -> tuple[Any, ...]:
+    callback = getattr(queue, method, None)
+    if not callable(callback):
+        return ()
+    try:
+        result = callback(*args, **kwargs)
+    except Exception:
+        return ()
+    return tuple(_plain(item) for item in (result or ()))
+
+
 def snapshot(
     cfg: Any,
     queue: Any,
@@ -167,6 +181,7 @@ def snapshot(
     now = int(time.time() if now_epoch is None else now_epoch)
     root = Path(cache_root)
     accounts: list[ViewerAccount] = []
+    future_resets: list[int] = []
     # The config validator has already guaranteed provider/account relationships.
     for account in _get(cfg, "accounts", ()):
         provider_id = str(_get(account, "provider_id"))
@@ -199,12 +214,43 @@ def snapshot(
                 diagnostic=diagnostic,
             )
         )
+        if raw is not None:
+            for reading in raw.get("limits", {}).values():
+                reset = reading.get("resets_at") if isinstance(reading, Mapping) else None
+                if isinstance(reset, (int, float)) and not isinstance(reset, bool) and reset > now:
+                    future_resets.append(int(reset))
+    tasks = _queue_collection(queue, "tasks")
+    cycle = min(future_resets, default=now)
+    eligible_by_id: dict[str, Any] = {}
+    for provider in _get(cfg, "providers", ()):
+        for task in _queue_call(
+            queue,
+            "eligible_tasks",
+            cycle,
+            provider_id=str(_get(provider, "id")),
+            capabilities=_get(provider, "capabilities", ()),
+        ):
+            task_id = str(_get(task, "id", ""))
+            if task_id:
+                eligible_by_id[task_id] = task
+    eligible = tuple(sorted(
+        eligible_by_id.values(),
+        key=lambda task: (
+            int(_get(task, "priority", 99)),
+            _get(task, "kind") == "recurring",
+            str(_get(task, "created_at", "")),
+            str(_get(task, "id", "")),
+        ),
+    ))
     return ViewerSnapshot(
         generated_at=now,
         accounts=tuple(accounts),
-        tasks=_queue_collection(queue, "tasks"),
-        runs=_queue_collection(queue, "runs"),
+        tasks=tasks,
+        eligible=eligible,
+        disabled=tuple(task for task in tasks if not bool(_get(task, "active", False))),
+        runs=_queue_call(queue, "runs", limit=60),
         claims=_queue_collection(queue, "claims"),
+        inflight=_queue_collection(queue, "inflight"),
     )
 
 
@@ -450,22 +496,139 @@ class SecurityPolicy:
         )
 
 
+_VIEWER_CSS = """
+:root{color-scheme:dark;--bg:#0a0a0b;--panel:#101012;--panel2:#141416;--line:rgba(255,255,255,.09);--line2:rgba(255,255,255,.055);--fg:#e9e7e2;--dim:rgba(233,231,226,.66);--dim2:rgba(233,231,226,.48);--acc:#e4a83b;--ok:#68c58c;--warn:#e36d55;--mono:'Geist Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+*{box-sizing:border-box}html,body{margin:0;background:var(--bg)}body{color:var(--fg);font:13px/1.5 var(--mono);-webkit-text-size-adjust:100%}.wrap{max-width:1400px;margin:auto;padding:0 clamp(14px,3vw,30px) 80px}.topbar{position:sticky;top:0;z-index:10;min-height:55px;display:flex;align-items:center;justify-content:space-between;background:var(--bg);border-bottom:1px solid var(--line);margin:0 calc(-1*clamp(14px,3vw,30px));padding:0 clamp(14px,3vw,30px)}.brand,.stamp{font-size:10.5px;letter-spacing:.11em;text-transform:uppercase;color:var(--dim)}.hd{display:flex;align-items:flex-end;justify-content:space-between;gap:18px;flex-wrap:wrap;margin:28px 0 20px}.hd h1{font-size:clamp(23px,4vw,31px);font-weight:500;letter-spacing:-.035em;margin:0}.sub{margin-top:5px;color:var(--dim);font-size:11px;letter-spacing:.04em}.pill{display:flex;align-items:center;gap:9px;padding:8px 12px;border:1px solid rgba(228,168,59,.4);color:var(--acc);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase}.dot{width:7px;height:7px;border-radius:50%;background:currentColor}.summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border:1px solid var(--line);background:var(--panel);margin-bottom:14px}.metric{padding:14px 16px;border-left:1px solid var(--line)}.metric:first-child{border-left:0}.metric b{display:block;font-weight:400;font-size:22px}.metric span{font-size:9.5px;color:var(--dim2);text-transform:uppercase;letter-spacing:.12em}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(245px,1fr));gap:10px}.card{background:var(--panel);border:1px solid var(--line);padding:16px}.cname{display:flex;justify-content:space-between;gap:12px;align-items:center}.engine{font-size:12px;letter-spacing:.08em}.tag{font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--ok);border:1px solid rgba(104,197,140,.35);padding:1px 6px}.tag.unknown{color:var(--warn);border-color:rgba(227,109,85,.4)}.limit{margin-top:15px}.limithead{display:flex;justify-content:space-between;gap:10px;color:var(--dim);font-size:10.5px}.limithead b{font-size:14px;color:var(--fg);font-weight:400}.bar{height:7px;background:rgba(255,255,255,.075);margin-top:7px;overflow:hidden}.fill{height:100%;background:var(--acc)}.reset{margin-top:7px;color:var(--dim2);font-size:10px}.sec{margin-top:28px}.sech{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:9px}.sech h2{font-weight:400;font-size:12px;letter-spacing:.1em;text-transform:uppercase;margin:0}.note{font-size:10px;color:var(--dim2)}.rows{background:var(--panel);border:1px solid var(--line)}.empty{padding:16px;color:var(--dim)}.flight,.run{display:grid;grid-template-columns:minmax(160px,1fr) 120px 110px minmax(180px,1.4fr);gap:14px;padding:10px 14px;border-top:1px solid var(--line2);align-items:baseline}.flight:first-child,.run:first-child{border-top:0}.status{font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:var(--acc)}.status.done{color:var(--ok)}.status.failed{color:var(--warn)}.muted{color:var(--dim2);font-size:10.5px}.bands{border-top:1px solid var(--line)}.band{border:1px solid var(--line);border-top:0;background:var(--panel)}.band>summary{list-style:none;cursor:pointer;padding:10px 14px;color:var(--dim);letter-spacing:.1em;text-transform:uppercase;font-size:10px}.band>summary::-webkit-details-marker{display:none}.band>summary:before{content:'▸';margin-right:9px;color:var(--acc)}.band[open]>summary:before{content:'▾'}.qrow{padding:13px 15px;border-top:1px solid var(--line2)}.qtop{display:flex;justify-content:space-between;gap:15px;align-items:flex-start}.qtitle{font-size:13px}.qmeta{white-space:nowrap;color:var(--dim2);font-size:10px}.qgoal{margin-top:6px;color:var(--dim);font-size:11px;max-width:1050px}.qdetails{margin-top:9px}.qdetails summary{cursor:pointer;color:var(--dim2);font-size:10px}.qdetails pre{white-space:pre-wrap;word-break:break-word;color:var(--dim);background:var(--panel2);border:1px solid var(--line2);padding:10px;font:10.5px/1.45 var(--mono);max-height:230px;overflow:auto}.disabled{opacity:.62}.footer{margin-top:32px;color:var(--dim2);font-size:10px}@media(max-width:760px){.summary{grid-template-columns:repeat(2,1fr)}.metric:nth-child(3){border-left:0;border-top:1px solid var(--line)}.metric:nth-child(4){border-top:1px solid var(--line)}.flight,.run{grid-template-columns:1fr 90px}.flight>*:nth-child(4),.run>*:nth-child(4){grid-column:1/-1}.stamp{display:none}}
+"""
+
+
+def _escape(value: Any) -> str:
+    return html.escape(str(value if value is not None else ""), quote=True)
+
+
+def _relative_time(epoch: Any, now: int) -> str:
+    if not isinstance(epoch, (int, float)) or isinstance(epoch, bool):
+        return "unknown"
+    seconds = int(epoch) - now
+    suffix = "from now" if seconds >= 0 else "ago"
+    seconds = abs(seconds)
+    if seconds < 90:
+        amount = f"{seconds}s"
+    elif seconds < 7200:
+        amount = f"{seconds // 60}m"
+    elif seconds < 172800:
+        amount = f"{seconds // 3600}h"
+    else:
+        amount = f"{seconds // 86400}d {seconds % 86400 // 3600}h"
+    return f"{amount} {suffix}"
+
+
+def _run_epoch(value: Any) -> int | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        from datetime import datetime
+        return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+    except (ValueError, TypeError):
+        return None
+
+
+def _task_rows(tasks: tuple[Any, ...], *, disabled: bool = False) -> str:
+    grouped: dict[int, list[Any]] = {}
+    for task in tasks:
+        grouped.setdefault(int(_get(task, "priority", 9)), []).append(task)
+    if not grouped:
+        return '<div class="empty">none</div>'
+    bands: list[str] = []
+    for priority in sorted(grouped):
+        rows: list[str] = []
+        for task in grouped[priority]:
+            detail_parts = []
+            for label, key in (("Context", "context"), ("Constraints", "constraints"), ("Precondition", "precondition"), ("Done when", "done_when")):
+                value = _get(task, key)
+                if value:
+                    detail_parts.append(f"{label}:\n{value}")
+            detail = "\n\n".join(detail_parts)
+            detail_html = (
+                f'<details class="qdetails"><summary>execution contract</summary><pre>{_escape(detail)}</pre></details>'
+                if detail else ""
+            )
+            rows.append(
+                f'<div class="qrow{" disabled" if disabled else ""}"><div class="qtop">'
+                f'<div><div class="qtitle">{_escape(_get(task, "title") or _get(task, "id"))}</div>'
+                f'<div class="qgoal">{_escape(_get(task, "goal"))}</div></div>'
+                f'<div class="qmeta">{_escape(_get(task, "kind"))} · {_escape(_get(task, "id"))}</div>'
+                f'</div>{detail_html}</div>'
+            )
+        bands.append(
+            f'<details class="band" open><summary>P{priority} · {len(rows)} jobs</summary>{"".join(rows)}</details>'
+        )
+    return '<div class="bands">' + "".join(bands) + "</div>"
+
+
 def _page(data: ViewerSnapshot, csrf: str | None) -> bytes:
-    rows = []
+    now = data.generated_at
+    account_cards: list[str] = []
     for account in data.accounts:
-        state = "fresh" if account.fresh else "closed"
-        rows.append(
-            "<tr><td>" + html.escape(account.provider_id) + "</td><td>" +
-            html.escape(account.account_id) + "</td><td>" + state + "</td></tr>"
+        limits: list[str] = []
+        for limit_id, raw in account.limits.items():
+            reading = raw if isinstance(raw, Mapping) else {}
+            used_raw = reading.get("used_percent")
+            used = float(used_raw) if isinstance(used_raw, (int, float)) and not isinstance(used_raw, bool) else None
+            width = max(0.0, min(100.0, used or 0.0))
+            limits.append(
+                f'<div class="limit"><div class="limithead"><span>{_escape(limit_id)}</span>'
+                f'<b>{"unknown" if used is None else f"{used:.1f}%"}</b></div>'
+                f'<div class="bar"><div class="fill" style="width:{width:.2f}%"></div></div>'
+                f'<div class="reset">resets {_escape(_relative_time(reading.get("resets_at"), now))}</div></div>'
+            )
+        state = "fresh" if account.fresh else "unknown"
+        account_cards.append(
+            f'<div class="card"><div class="cname"><span class="engine">{_escape(account.provider_id)} · {_escape(account.account_id)}</span>'
+            f'<span class="tag{" unknown" if not account.fresh else ""}">{state}</span></div>'
+            f'{"".join(limits) if limits else "<div class=\"empty\">usage unavailable</div>"}</div>'
+        )
+
+    flight_rows = []
+    for event in data.inflight:
+        started = _run_epoch(_get(event, "ts"))
+        flight_rows.append(
+            f'<div class="flight"><span>{_escape(_get(event, "task"))}</span>'
+            f'<span class="status">{_escape(_get(event, "provider_id") or _get(event, "engine") or "dispatch")}</span>'
+            f'<span class="muted">{_escape(_relative_time(started, now))}</span>'
+            f'<span class="muted">{_escape(_get(event, "summary"))}</span></div>'
+        )
+    run_rows = []
+    for event in data.runs[:40]:
+        status = str(_get(event, "status", ""))
+        run_rows.append(
+            f'<div class="run"><span>{_escape(_get(event, "task"))}</span>'
+            f'<span class="status {_escape(status)}">{_escape(status)}</span>'
+            f'<span class="muted">{_escape(_relative_time(_run_epoch(_get(event, "ts")), now))}</span>'
+            f'<span class="muted">{_escape(_get(event, "summary"))}</span></div>'
         )
     csrf_meta = f'<meta name="csrf-token" content="{html.escape(csrf)}">' if csrf else ""
+    state_label = f"draining · {len(data.inflight)} in flight" if data.inflight else "holding · no jobs in flight"
     return (
-        "<!doctype html><html><head><meta charset=utf-8>"
-        "<meta name=viewport content='width=device-width,initial-scale=1'>"
-        + csrf_meta + "<title>Bonus Drain</title></head><body>"
-        "<h1>Bonus Drain</h1><table><thead><tr><th>Provider</th><th>Account</th>"
-        "<th>Cache</th></tr></thead><tbody>" + "".join(rows) +
-        "</tbody></table></body></html>"
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        '<meta http-equiv="refresh" content="60">' + csrf_meta + '<title>Bonus Drain</title>'
+        f'<style>{_VIEWER_CSS}</style></head><body><div class="wrap">'
+        f'<div class="topbar"><span class="brand">background jobs · bonus drain</span><span class="stamp">cache + sqlite only · refresh 60s</span></div>'
+        f'<div class="hd"><div><h1>bonus-drain</h1><div class="sub">independent provider capacity console</div></div>'
+        f'<div class="pill"><span class="dot"></span>{_escape(state_label)}</div></div>'
+        f'<div class="summary"><div class="metric"><b>{len(data.accounts)}</b><span>accounts</span></div>'
+        f'<div class="metric"><b>{len(data.eligible)}</b><span>eligible queue</span></div>'
+        f'<div class="metric"><b>{len(data.inflight)}</b><span>in flight</span></div>'
+        f'<div class="metric"><b>{len(data.runs)}</b><span>recent events</span></div></div>'
+        f'<div class="grid">{"".join(account_cards)}</div>'
+        f'<section class="sec"><div class="sech"><h2>in flight</h2><span class="note">dispatched without a later terminal event</span></div>'
+        f'<div class="rows">{"".join(flight_rows) if flight_rows else "<div class=\"empty\">nothing running</div>"}</div></section>'
+        f'<section class="sec"><div class="sech"><h2>queue</h2><span class="note">eligible now · nearest reset dispatch remains authoritative</span></div>{_task_rows(data.eligible)}</section>'
+        f'<section class="sec"><div class="sech"><h2>run log</h2><span class="note">latest 40 events</span></div><div class="rows">{"".join(run_rows) if run_rows else "<div class=\"empty\">no runs</div>"}</div></section>'
+        f'<section class="sec"><details><summary class="note">disabled jobs · {len(data.disabled)}</summary>{_task_rows(data.disabled, disabled=True)}</details></section>'
+        f'<div class="footer">Generated {_escape(time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(now)))} · viewer requests never call provider APIs</div>'
+        '</div></body></html>'
     ).encode("utf-8")
 
 
