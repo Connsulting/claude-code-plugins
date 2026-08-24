@@ -122,6 +122,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
 
     def test_plugin_manifests_declare_bonus_drain_for_claude_and_codex(self) -> None:
         self.require_plugin()
+        versions = []
         for manifest_path in (
             PLUGIN_ROOT / ".claude-plugin" / "plugin.json",
             PLUGIN_ROOT / ".codex-plugin" / "plugin.json",
@@ -135,6 +136,29 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             )
             self.assertIsInstance(manifest.get("description"), str, manifest_path)
             self.assertTrue(manifest["description"].strip(), manifest_path)
+            versions.append(manifest["version"])
+        self.assertEqual(versions, ["0.1.3", "0.1.3"])
+
+    def test_packaged_viewer_supports_secretless_read_only_tailnet_proxy(self) -> None:
+        example = self.load_json(SKILL_ROOT / "config.example.json")
+        viewer_config = example["viewer"]
+        remote = viewer_config["remote"]
+        self.assertEqual(viewer_config["bind"], "127.0.0.1")
+        self.assertIs(viewer_config["mutations_enabled"], False)
+        self.assertIs(remote["trusted_loopback_proxy"], True)
+        self.assertNotIn("auth_secret_ref", remote)
+
+        sys.path.insert(0, str(SKILL_ROOT))
+        try:
+            from bonus_drain import viewer
+
+            policy = viewer.SecurityPolicy.from_config(viewer_config, remote=True)
+        finally:
+            sys.path.pop(0)
+        host = remote["allowed_hosts"][0]
+        self.assertTrue(policy.authorize_read(None, host))
+        self.assertFalse(policy.authorize_read(None, "untrusted.example"))
+        self.assertFalse(policy.mutations_enabled)
 
     def test_claude_and_codex_marketplaces_point_at_the_plugin_root(self) -> None:
         self.require_plugin()

@@ -66,14 +66,17 @@ The Bonus-only viewer defaults to:
 
 Binding a local-mode viewer to a non-loopback address is rejected.
 
-## Explicit remote mode
+## Explicit external mode
 
-Remote mode is never inferred from the bind address. It requires all of:
+External mode is never inferred from the bind address. It always requires `--remote`, exact
+`allowed_hosts[]`, and exact HTTPS `allowed_origins[]`. It has two deliberately separate
+security profiles.
 
-- `--remote` (or the equivalent explicit service configuration);
+### Application-authenticated mode
+
+This mode additionally requires:
+
 - an external `auth_secret_ref` resolved at startup;
-- exact `allowed_hosts[]` values, including the port when the HTTP Host includes it;
-- exact HTTPS `allowed_origins[]` values;
 - loopback behind Tailscale Serve, or `https_terminated: true` for an intentionally
   non-loopback bind behind a reviewed HTTPS terminator.
 
@@ -91,17 +94,34 @@ failures can temporarily lock out all remote sign-ins; this is intentionally fai
 Mutations remain absent unless `mutations_enabled` is explicitly true. Enabling them does
 not weaken session, CSRF, Host, Origin, HTTPS, body-size, task-ID, or queue-layer checks.
 
+### Trusted loopback proxy mode
+
+Set `trusted_loopback_proxy: true` only when an authenticated local proxy, such as
+tailnet-only Tailscale Serve, is the access boundary. This mode deliberately has no Bonus
+Drain application password or session. Startup fails unless all of these remain true:
+
+- the viewer binds to a loopback address;
+- `mutations_enabled` is false;
+- exact Host and HTTPS Origin allowlists are configured;
+- `auth_secret_ref` is absent.
+
+The listener therefore remains unavailable from the LAN and public network. Tailscale
+authenticates tailnet membership before proxying to loopback. A generic unauthenticated
+port-forward is not an acceptable proxy for this mode.
+
 ### Tailscale Serve example
 
-Keep `bind` as `127.0.0.1`, configure the exact MagicDNS Host/Origin and external auth
-reference, and start the viewer in remote mode. Then front it with HTTPS:
+For a read-only tailnet viewer, keep `bind` as `127.0.0.1`, leave mutations disabled,
+configure `trusted_loopback_proxy: true` plus the exact MagicDNS Host/Origin, and start the
+viewer in remote mode. Then front it with HTTPS:
 
 ```sh
 sudo tailscale serve --bg --https=8766 http://127.0.0.1:8766
 ```
 
-Open `https://EXACT_NODE_NAME:8766/login`; the credential is submitted only to the exact
-configured HTTPS origin. Tailscale Serve must preserve that Host. Disable the proxy with:
+Open `https://EXACT_NODE_NAME:8766/`; Tailscale Serve must preserve that Host. Use the
+application-authenticated profile instead if the proxy is not itself an adequate access
+boundary or if viewer mutations are ever enabled. Disable the proxy with:
 
 ```sh
 sudo tailscale serve --https=8766 off

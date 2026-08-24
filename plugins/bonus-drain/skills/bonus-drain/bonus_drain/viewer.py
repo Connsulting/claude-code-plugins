@@ -1,9 +1,10 @@
-"""Cache/DB-only Bonus Drain viewer with a fail-closed remote mode.
+"""Cache/DB-only Bonus Drain viewer with fail-closed external access.
 
 No request path invokes a usage adapter, provider executable, router, or service
-manager.  Remote access is explicit and authenticated.  Mutating routes are not
-registered unless the operator opts in, and then require a session, CSRF token,
-and exact Host and Origin matches.
+manager. External access is either application-authenticated or explicitly trusted
+behind an authenticated loopback proxy. Mutating routes are not registered unless
+the operator opts in, and then require a session, CSRF token, and exact Host and
+Origin matches.
 """
 
 from __future__ import annotations
@@ -71,6 +72,27 @@ def _loopback(bind: str) -> bool:
         return ip_address(bind).is_loopback
     except ValueError:
         return False
+
+
+def _exact_host(value: Any) -> bool:
+    if not isinstance(value, str) or not value or any(char.isspace() for char in value):
+        return False
+    if any(marker in value for marker in ("/", "*", "@", "?", "#")):
+        return False
+    try:
+        parsed = urlsplit(f"//{value}")
+        port = parsed.port
+    except ValueError:
+        return False
+    return bool(
+        parsed.hostname
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.path
+        and not parsed.query
+        and not parsed.fragment
+        and (port is None or 1 <= port <= 65535)
+    )
 
 
 @dataclass(frozen=True)
@@ -206,6 +228,7 @@ class SecurityPolicy:
     bind: str
     remote: bool
     mutations_enabled: bool
+    trusted_loopback_proxy: bool = False
     allowed_hosts: tuple[str, ...] = ()
     allowed_origins: tuple[str, ...] = ()
     _auth_digest: bytes | None = field(default=None, repr=False)
@@ -237,16 +260,12 @@ class SecurityPolicy:
         if remote_config is None:
             raise SecurityError("remote viewer requires an explicit remote configuration")
         secret_ref = _get(remote_config, "auth_secret_ref")
+        trusted_loopback_proxy = _get(remote_config, "trusted_loopback_proxy", False)
         hosts = tuple(_get(remote_config, "allowed_hosts", ()) or ())
         origins = tuple(_get(remote_config, "allowed_origins", ()) or ())
-        if not isinstance(secret_ref, str) or not secret_ref:
-            raise SecurityError("remote viewer requires auth_secret_ref")
-        if resolve_secret is None:
-            raise SecurityError("remote viewer requires an external secret resolver")
-        secret = resolve_secret(secret_ref)
-        if not isinstance(secret, str) or len(secret) < 12:
-            raise SecurityError("remote viewer authentication secret is unavailable or too short")
-        if not hosts or any(not isinstance(host, str) or not host or "/" in host for host in hosts):
+        if not isinstance(trusted_loopback_proxy, bool):
+            raise SecurityError("trusted_loopback_proxy must be boolean")
+        if not hosts or any(not _exact_host(host) for host in hosts):
             raise SecurityError("remote viewer requires exact allowed_hosts")
         if not origins:
             raise SecurityError("remote viewer requires exact HTTPS allowed_origins")
@@ -257,18 +276,45 @@ class SecurityPolicy:
         for origin in origins:
             try:
                 parsed = urlsplit(origin)
+                parsed_port = parsed.port
             except ValueError as exc:
                 raise SecurityError("remote viewer origin is invalid") from exc
             if parsed.scheme != "https" or not parsed.netloc or parsed.path not in ("", "/"):
                 raise SecurityError("remote viewer origins must be exact HTTPS origins")
-            if parsed.query or parsed.fragment or parsed.username or parsed.password:
+            if (
+                parsed.query or parsed.fragment or parsed.username or parsed.password
+                or any(char.isspace() for char in origin) or "*" in origin
+                or (parsed_port is not None and not 1 <= parsed_port <= 65535)
+            ):
                 raise SecurityError("remote viewer origin is invalid")
-        # Store only a one-way verifier, never the externally resolved credential.
-        digest = hashlib.sha256(secret.encode("utf-8")).digest()
+        mutations_enabled = bool(_get(raw, "mutations_enabled", False))
+        digest = None
+        if trusted_loopback_proxy:
+            if secret_ref is not None:
+                raise SecurityError(
+                    "trusted loopback proxy mode cannot also configure auth_secret_ref"
+                )
+            if not _loopback(bind):
+                raise SecurityError("trusted loopback proxy mode requires a loopback bind")
+            if mutations_enabled:
+                raise SecurityError("trusted loopback proxy mode requires mutations disabled")
+        else:
+            if not isinstance(secret_ref, str) or not secret_ref:
+                raise SecurityError("remote viewer requires auth_secret_ref")
+            if resolve_secret is None:
+                raise SecurityError("remote viewer requires an external secret resolver")
+            secret = resolve_secret(secret_ref)
+            if not isinstance(secret, str) or len(secret) < 12:
+                raise SecurityError(
+                    "remote viewer authentication secret is unavailable or too short"
+                )
+            # Store only a one-way verifier, never the externally resolved credential.
+            digest = hashlib.sha256(secret.encode("utf-8")).digest()
         return cls(
             bind=bind,
             remote=True,
-            mutations_enabled=bool(_get(raw, "mutations_enabled", False)),
+            mutations_enabled=mutations_enabled,
+            trusted_loopback_proxy=trusted_loopback_proxy,
             allowed_hosts=hosts,
             allowed_origins=origins,
             _auth_digest=digest,
@@ -371,6 +417,8 @@ class SecurityPolicy:
     def authorize_read(self, session: Session | None, host: str | None, origin: str | None = None) -> bool:
         if not self.remote:
             return self.host_allowed(host)
+        if self.trusted_loopback_proxy:
+            return self.host_allowed(host) and self.origin_allowed(origin, required=False)
         return (
             session is not None
             and self.host_allowed(host)
@@ -387,7 +435,7 @@ class SecurityPolicy:
         # This predicate proves the request's security properties.  Route registration
         # separately enforces ``mutations_enabled`` so callers can test authentication
         # policy without accidentally turning a mutation surface on.
-        if session is None:
+        if self.trusted_loopback_proxy or session is None:
             return False
         try:
             csrf_matches = bool(csrf_token) and hmac.compare_digest(
@@ -536,7 +584,7 @@ def make_handler(
             if self.path == "/health":
                 self._send(HTTPStatus.OK, b'{"ok":true}')
                 return
-            if self.path == "/login" and policy.remote:
+            if self.path == "/login" and policy.remote and not policy.trusted_loopback_proxy:
                 if not policy.host_allowed(self.headers.get("Host")):
                     self._send(HTTPStatus.FORBIDDEN, b'{"error":"host rejected"}')
                     return
@@ -562,7 +610,7 @@ def make_handler(
 
         def do_POST(self) -> None:
             # Session establishment is the only POST available when mutations are off.
-            if self.path == "/session" and policy.remote:
+            if self.path == "/session" and policy.remote and not policy.trusted_loopback_proxy:
                 if not policy.host_allowed(self.headers.get("Host")) or not policy.origin_allowed(
                     self.headers.get("Origin"), required=True
                 ):

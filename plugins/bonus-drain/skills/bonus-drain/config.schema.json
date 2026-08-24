@@ -52,9 +52,17 @@
         "remote": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["auth_secret_ref", "allowed_hosts", "allowed_origins"],
+          "required": ["allowed_hosts", "allowed_origins"],
+          "oneOf": [
+            {"required": ["auth_secret_ref"]},
+            {
+              "required": ["trusted_loopback_proxy"],
+              "properties": {"trusted_loopback_proxy": {"const": true}}
+            }
+          ],
           "properties": {
             "auth_secret_ref": {"$ref": "#/$defs/id"},
+            "trusted_loopback_proxy": {"type": "boolean", "default": false},
             "allowed_hosts": {"type": "array", "items": {"type": "string"}},
             "allowed_origins": {"type": "array", "items": {"type": "string"}},
             "https_terminated": {"type": "boolean"}

@@ -155,22 +155,25 @@ BONUS_DRAIN_CONFIG="${BONUS_DRAIN_CONFIG}" bonus-drain viewer --port 8766
 Open `http://127.0.0.1:8766/`. Local mode rejects non-loopback binds. Mutation routes are
 absent by default, and the request path reads SQLite and cached usage only.
 
-## Optional authenticated Tailscale viewer
+## Optional Tailscale viewer
 
-Keep the viewer bound to `127.0.0.1`. Add a `secret_refs` entry whose source is an external
-environment variable or protected file, and configure `viewer.remote.auth_secret_ref`,
-exact `allowed_hosts`, and exact HTTPS `allowed_origins`. Do not place the credential value
-in JSON. Start the viewer with `--remote`, then configure Tailscale Serve separately:
+Keep the viewer bound to `127.0.0.1`, configure exact `allowed_hosts` and HTTPS
+`allowed_origins`, and start it with `--remote`. For a read-only tailnet viewer, set
+`trusted_loopback_proxy: true`; Tailscale membership is then the access boundary and no
+separate Bonus Drain secret or login is used. Startup refuses this profile if the bind is
+not loopback or mutations are enabled. Configure Tailscale Serve separately:
 
 ```sh
 BONUS_DRAIN_CONFIG="${BONUS_DRAIN_CONFIG}" bonus-drain viewer --remote --port 8766
 sudo tailscale serve --bg --https=8766 http://127.0.0.1:8766
 ```
 
-The remote viewer requires its own authenticated session, exact Host/Origin checks, secure
-cookies, and CSRF tokens for explicitly enabled mutations. Keep `mutations_enabled` false
-unless the full mutation boundary has been reviewed. Disable the proxy with
-`sudo tailscale serve --https=8766 off`. Never use an unauthenticated `0.0.0.0` listener.
+If the proxy is not itself an adequate access boundary, use the application-authenticated
+profile instead: add an external environment-variable or protected-file `secret_refs`
+entry and configure `viewer.remote.auth_secret_ref`. That profile uses secure sessions and
+requires CSRF tokens for explicitly enabled mutations. Never put the secret value in JSON,
+use an unauthenticated generic port-forward, or bind an unauthenticated `0.0.0.0` listener.
+Disable the proxy with `sudo tailscale serve --https=8766 off`.
 
 ## Test and diagnose
 

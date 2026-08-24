@@ -11,8 +11,10 @@ import os
 import re
 import stat
 from dataclasses import dataclass, field
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any, Iterable, Mapping, MutableMapping, Sequence
+from urllib.parse import urlsplit
 
 
 class ConfigError(ValueError):
@@ -64,6 +66,38 @@ def default_cache_dir(environ: Mapping[str, str] | None = None) -> Path:
     env = os.environ if environ is None else environ
     home = Path(env.get("HOME", str(Path.home()))).expanduser()
     return _xdg_home(env, "XDG_CACHE_HOME", home / ".cache") / "bonus-drain"
+
+
+def _loopback(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    if value.lower() == "localhost":
+        return True
+    try:
+        return ip_address(value).is_loopback
+    except ValueError:
+        return False
+
+
+def _exact_host(value: Any) -> bool:
+    if not isinstance(value, str) or not value or any(char.isspace() for char in value):
+        return False
+    if any(marker in value for marker in ("/", "*", "@", "?", "#")):
+        return False
+    try:
+        parsed = urlsplit(f"//{value}")
+        port = parsed.port
+    except ValueError:
+        return False
+    return bool(
+        parsed.hostname
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.path
+        and not parsed.query
+        and not parsed.fragment
+        and (port is None or 1 <= port <= 65535)
+    )
 
 
 @dataclass(frozen=True)
@@ -575,11 +609,52 @@ def validate_config(
     if remote is not None:
         remote_map = _require_mapping(remote, "viewer.remote")
         _reject_unknown(remote_map, {
-            "auth_secret_ref", "allowed_hosts", "allowed_origins", "https_terminated",
+            "auth_secret_ref", "trusted_loopback_proxy", "allowed_hosts",
+            "allowed_origins", "https_terminated",
         }, "viewer.remote")
         auth_ref = remote_map.get("auth_secret_ref")
         if auth_ref is not None and auth_ref not in secret_ids:
             raise ConfigError(f"viewer.remote.auth_secret_ref references missing-ref {auth_ref}")
+        trusted = remote_map.get("trusted_loopback_proxy", False)
+        if not isinstance(trusted, bool):
+            raise ConfigError("viewer.remote.trusted_loopback_proxy must be boolean")
+        hosts = remote_map.get("allowed_hosts")
+        origins = remote_map.get("allowed_origins")
+        if not isinstance(hosts, list) or not hosts or any(not _exact_host(host) for host in hosts):
+            raise ConfigError("viewer.remote.allowed_hosts must contain exact hosts")
+        if not isinstance(origins, list) or not origins:
+            raise ConfigError("viewer.remote.allowed_origins must contain exact HTTPS origins")
+        for origin in origins:
+            if not isinstance(origin, str):
+                raise ConfigError("viewer.remote.allowed_origins must contain exact HTTPS origins")
+            try:
+                parsed = urlsplit(origin)
+                parsed_port = parsed.port
+            except ValueError as exc:
+                raise ConfigError(
+                    "viewer.remote.allowed_origins must contain exact HTTPS origins"
+                ) from exc
+            if (
+                parsed.scheme != "https" or not parsed.netloc or parsed.path not in ("", "/")
+                or parsed.query or parsed.fragment or parsed.username or parsed.password
+                or any(char.isspace() for char in origin)
+                or "*" in origin
+                or (parsed_port is not None and not 1 <= parsed_port <= 65535)
+            ):
+                raise ConfigError("viewer.remote.allowed_origins must contain exact HTTPS origins")
+        if trusted:
+            if auth_ref is not None:
+                raise ConfigError(
+                    "viewer.remote trusted loopback proxy cannot also use auth_secret_ref"
+                )
+            if not _loopback(viewer.get("bind", "127.0.0.1")):
+                raise ConfigError("viewer.remote trusted loopback proxy requires loopback bind")
+            if viewer.get("mutations_enabled", False) is not False:
+                raise ConfigError("viewer.remote trusted loopback proxy requires mutations disabled")
+        elif not isinstance(auth_ref, str) or not auth_ref:
+            raise ConfigError(
+                "viewer.remote requires auth_secret_ref unless trusted_loopback_proxy is true"
+            )
 
     pr_exceptions: list[Mapping[str, Any]] = []
     for index, item in enumerate(_require_list(data.get("pr_exceptions", []), "pr_exceptions")):

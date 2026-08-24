@@ -151,6 +151,14 @@
       "estimated_percent_per_job": 0.75, "pacing_window_seconds": 18000
     }
   ],
-  "viewer": {"bind": "127.0.0.1", "mutations_enabled": false},
+  "viewer": {
+    "bind": "127.0.0.1",
+    "mutations_enabled": false,
+    "remote": {
+      "trusted_loopback_proxy": true,
+      "allowed_hosts": ["bonus-drain-node.example.ts.net:8766"],
+      "allowed_origins": ["https://bonus-drain-node.example.ts.net:8766"]
+    }
+  },
   "pr_exceptions": []
 }

@@ -32,7 +32,8 @@ with the required capability.
   let `doctor` report whether its executable is present.
 - systemd user services only if hourly scout and ten-minute refresh timers are wanted.
 - Tailscale Serve or another authenticated HTTPS terminator only if the viewer is used
-  remotely.
+  remotely. A read-only, loopback-only viewer may trust a tailnet-authenticated proxy and
+  require no separate application secret.
 
 There is no runtime dependency on `uv`, `bg-schedule`, `codex-bg-thread`, a provider CLI,
 or a shell evaluator. Provider-specific readers may have their own documented external
@@ -78,8 +79,9 @@ The configuration graph is versioned and uses IDs for all relationships:
   shell interpolation, dangling references, duplicate IDs, and direct-provider dispatch
   are rejected.
 - `pr_exceptions[]` is the only place to grant repository-specific push behavior.
-- `viewer` defaults to loopback and no mutations. See [SECURITY.md](SECURITY.md) before
-  enabling any remote mode.
+- `viewer` defaults to loopback and no mutations. Remote access is config-selected as either
+  application-authenticated or a secretless trusted loopback proxy with mutations forced
+  off. See [SECURITY.md](SECURITY.md) before enabling either mode.
 
 After installation, expand the operator home and replace every illustrative
 `/ABSOLUTE/PATH/TO` prefix in `config.example.json`. Adapter executables should use the
