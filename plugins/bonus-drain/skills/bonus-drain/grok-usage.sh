@@ -75,14 +75,12 @@ disk_source_ts=""
 
 event=""
 if [ -r "$log_path" ]; then
-  while IFS= read -r line; do
-    candidate="$(jq -c 'objects | select(.msg == "billing: fetched credits config")' \
-      <<<"$line" 2>/dev/null)" || candidate=""
-    if [ -n "$candidate" ]; then
-      event="$candidate"
-      break
-    fi
-  done < <(tac -- "$log_path")
+  # Filter text before parsing JSON. Running jq once per unrelated log line made a modest
+  # long-lived Grok log exceed the refresh timeout even though the billing event was valid.
+  event="$(tac -- "$log_path" | grep -m 1 -E \
+    '"msg"[[:space:]]*:[[:space:]]*"billing: fetched credits config"' || true)"
+  event="$(jq -c 'objects | select(.msg == "billing: fetched credits config")' \
+    <<<"$event" 2>/dev/null)" || event=""
 fi
 
 if [ -n "$event" ]; then
