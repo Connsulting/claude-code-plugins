@@ -1,7 +1,7 @@
 # Bonus Drain
 
 Bonus Drain is a self-contained queue, planner, scout, usage-cache refresher, dispatcher,
-and read-only viewer for opportunistic low-priority work. Provider names, plans, accounts,
+and viewer for opportunistic low-priority work. Provider names, plans, accounts,
 limits, reset windows, usage readers, activation rules, and dispatch bindings are validated
 JSON data. The planner does not contain provider-name branches.
 
@@ -155,6 +155,22 @@ BONUS_DRAIN_CONFIG="${BONUS_DRAIN_CONFIG}" bonus-drain viewer --port 8766
 Open `http://127.0.0.1:8766/`. Local mode rejects non-loopback binds. Mutation routes are
 absent by default, and the request path reads SQLite and cached usage only.
 
+The installed `bonus-drain-viewer.service` intentionally runs the literal original combined
+jobs server and embedded UI instead of that generic viewer. It preserves the original
+scheduled tab, rotation timeline, drain order, account cards, enable/disable controls, Force
+buttons, and run log. Its queue mutations and Force actions route through the installed
+plugin wrappers and migrated XDG database. Start it only after the runtime and config are
+validated:
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now bonus-drain-viewer.service
+```
+
+The compatibility UI remains loopback-only and retains its original named provider lanes.
+The project to derive those lanes and controls from arbitrary JSON providers is documented in
+[`skills/bonus-drain/VIEWER_FOLLOW_UP.md`](skills/bonus-drain/VIEWER_FOLLOW_UP.md).
+
 ## Optional Tailscale viewer
 
 Keep the viewer bound to `127.0.0.1`, configure exact `allowed_hosts` and HTTPS
@@ -174,6 +190,11 @@ entry and configure `viewer.remote.auth_secret_ref`. That profile uses secure se
 requires CSRF tokens for explicitly enabled mutations. Never put the secret value in JSON,
 use an unauthenticated generic port-forward, or bind an unauthenticated `0.0.0.0` listener.
 Disable the proxy with `sudo tailscale serve --https=8766 off`.
+
+For the original compatibility viewer service, the authenticated tailnet plus its loopback
+listener is the access boundary; it has no separate Bonus Drain secret. Its original Force
+controls remain available through the same Tailscale URL. Do not expose that service through
+a public or unauthenticated proxy.
 
 ## Test and diagnose
 

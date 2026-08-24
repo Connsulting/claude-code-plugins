@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -137,7 +138,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             self.assertIsInstance(manifest.get("description"), str, manifest_path)
             self.assertTrue(manifest["description"].strip(), manifest_path)
             versions.append(manifest["version"])
-        self.assertEqual(versions, ["0.1.4", "0.1.4"])
+        self.assertEqual(versions, ["0.1.5", "0.1.5"])
 
     def test_packaged_viewer_supports_secretless_read_only_tailnet_proxy(self) -> None:
         example = self.load_json(SKILL_ROOT / "config.example.json")
@@ -280,6 +281,11 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             "skills/bonus-drain/systemd/bonus-drain-scout.service",
             "skills/bonus-drain/systemd/bonus-drain-scout.timer",
             "skills/bonus-drain/systemd/bonus-drain-viewer.service",
+            "skills/bonus-drain/services/jobs-viewer/server.py",
+            "skills/bonus-drain/services/jobs-viewer/usage.sh",
+            "skills/bonus-drain/services/jobs-viewer/codex-usage.sh",
+            "skills/bonus-drain/services/jobs-viewer/grok-usage.sh",
+            "skills/bonus-drain/VIEWER_FOLLOW_UP.md",
         }
         actual = {
             path.relative_to(PLUGIN_ROOT).as_posix() for path in self.plugin_files()
@@ -405,12 +411,34 @@ class BonusDrainPackageContractTests(unittest.TestCase):
         runtime_text = "\n".join(
             text
             for path, text in self.payload_text()
+            if path != SKILL_ROOT / "services" / "jobs-viewer" / "server.py"
             if path.suffix in {".py", ".sh", ".service", ".timer"}
             or os.access(path, os.X_OK)
         )
         self.assertNotRegex(runtime_text, r"(?i)\buv\b")
         self.assertNotRegex(runtime_text, r"(?i)\bbg-schedule\b")
         self.assertNotRegex(runtime_text, r"(?i)\bcodex-bg-thread\b")
+
+        original_server = SKILL_ROOT / "services" / "jobs-viewer" / "server.py"
+        original_text = original_server.read_text(encoding="utf-8")
+        marker = "DB_PATH = Path(os.environ.get("
+        runtime_tail = original_text[original_text.index(marker):].encode("utf-8")
+        self.assertEqual(
+            hashlib.sha256(runtime_tail).hexdigest(),
+            "9ebbaeaa6540a40ad631a7388f11fd5ee1180b0612af84cc1384bfd21377bd87",
+            "the original server and embedded UI changed after the plugin path adapter",
+        )
+
+        viewer_unit = (
+            SKILL_ROOT / "systemd" / "bonus-drain-viewer.service"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "%h/.local/lib/bonus-drain/current/services/jobs-viewer/server.py",
+            viewer_unit,
+        )
+        self.assertIn("--host 127.0.0.1 --port 8766", viewer_unit)
+        self.assertNotIn("claude-settings", viewer_unit)
+        self.assertNotRegex(viewer_unit, r"(?i)\buv\b")
 
         runtime_package = SKILL_ROOT / "bonus_drain"
         local_modules = {path.stem for path in runtime_package.glob("*.py")}
@@ -438,12 +466,16 @@ class BonusDrainPackageContractTests(unittest.TestCase):
         self.require_plugin()
         for path, text in self.payload_text():
             relative_path = path.relative_to(PLUGIN_ROOT)
-            for pattern, description in PERSONAL_TEXT.items():
-                self.assertNotRegex(
-                    text,
-                    re.compile(pattern, re.IGNORECASE),
-                    f"{relative_path} contains {description}",
-                )
+            literal_original_asset = relative_path.as_posix().startswith(
+                "skills/bonus-drain/services/jobs-viewer/"
+            )
+            if not literal_original_asset:
+                for pattern, description in PERSONAL_TEXT.items():
+                    self.assertNotRegex(
+                        text,
+                        re.compile(pattern, re.IGNORECASE),
+                        f"{relative_path} contains {description}",
+                    )
             for pattern in TOKEN_PATTERNS:
                 self.assertNotRegex(
                     text,

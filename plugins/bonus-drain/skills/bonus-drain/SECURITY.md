@@ -51,9 +51,20 @@ requirement.
 
 ## Viewer defaults
 
-The Bonus-only viewer and combined jobs viewer read persisted cache and SQLite only. They do
-not run usage readers, activation commands, router classification, or refresh subprocesses
-in an HTTP request.
+The generic Bonus-only viewer reads persisted cache and SQLite only. It does not run usage
+readers, activation commands, router classification, or refresh subprocesses in an HTTP
+request.
+
+The installed service template currently runs the copied original combined jobs viewer to
+preserve its UI exactly. Its request handlers also read only disk cache and SQLite, while its
+historical background thread refreshes the copied legacy collectors. Unlike the generic
+viewer, it retains the original queue activation and force-run POST endpoints and does not
+consume the generic viewer's session policy. It must remain bound to `127.0.0.1` and be used
+only directly on the host or through tailnet-authenticated Tailscale Serve. It emits no CORS
+headers and its UI uses JSON POSTs, but this compatibility surface is not approved for a LAN,
+public reverse proxy, or unauthenticated port-forward. The migration to fully config-derived
+controls and the generic security policy is tracked in
+[VIEWER_FOLLOW_UP.md](VIEWER_FOLLOW_UP.md).
 
 The Bonus-only viewer defaults to:
 

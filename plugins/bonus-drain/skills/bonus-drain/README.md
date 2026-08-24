@@ -83,6 +83,15 @@ The configuration graph is versioned and uses IDs for all relationships:
   application-authenticated or a secretless trusted loopback proxy with mutations forced
   off. See [SECURITY.md](SECURITY.md) before enabling either mode.
 
+The installed `bonus-drain-viewer.service` is a compatibility exception: it runs the literal
+original combined jobs server and embedded UI from
+`services/jobs-viewer/server.py`. That UI retains its original enable/disable and force-run
+controls and its original named Claude/Codex/Grok presentation. It still binds only
+`127.0.0.1`; use it only locally or behind tailnet-authenticated Tailscale Serve. The generic,
+config-derived viewer remains available through `bonus-drain viewer`, but is not the service
+template used for this UI-preserving cutover. See [VIEWER_FOLLOW_UP.md](VIEWER_FOLLOW_UP.md)
+for the intentionally deferred config-driven UI work.
+
 After installation, expand the operator home and replace every illustrative
 `/ABSOLUTE/PATH/TO` prefix in `config.example.json`. Adapter executables should use the
 stable `.../.local/lib/bonus-drain/current` path, never a marketplace cache path. The
@@ -158,8 +167,10 @@ systemctl --user enable --now bonus-drain-refresh.timer bonus-drain-scout.timer
 systemctl --user list-timers 'bonus-drain-*'
 ```
 
-The refresher is the only component that runs usage adapters. Scout, `gates`, `plan`, the
-Bonus-only viewer, and the combined jobs viewer read normalized cache and SQLite only.
+The generic refresher is the only component that runs configured usage adapters. Scout,
+`gates`, `plan`, and the generic `bonus-drain viewer` read normalized cache and SQLite only.
+The original compatibility jobs viewer keeps its historical background collector thread;
+HTTP request handlers themselves only read its disk cache and SQLite.
 
 Useful read-only checks:
 
