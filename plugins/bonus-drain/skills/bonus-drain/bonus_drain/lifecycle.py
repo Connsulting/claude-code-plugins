@@ -236,13 +236,23 @@ def _write_atomic(path: Path, value: bytes, mode: int) -> None:
             pass
 
 
-def _refuse_foreign(path: Path, expected: bytes | None = None) -> None:
+def _refuse_foreign(
+    path: Path,
+    expected: bytes | None = None,
+    *,
+    previously_owned_sha256: str | None = None,
+) -> None:
     if path.is_symlink():
         raise OwnershipError(f"refusing to replace symlink: {path}")
     if not path.exists():
         return
-    if not path.is_file() or expected is None or path.read_bytes() != expected:
+    if not path.is_file() or expected is None:
         raise OwnershipError(f"refusing to replace unowned path: {path}")
+    if path.read_bytes() == expected:
+        return
+    if previously_owned_sha256 is not None and _sha256(path) == previously_owned_sha256:
+        return
+    raise OwnershipError(f"refusing to replace unowned path: {path}")
 
 
 def install(source: str | Path, home: str | Path | None = None, *, version: str | None = None) -> InstalledPaths:
@@ -265,9 +275,25 @@ def install(source: str | Path, home: str | Path | None = None, *, version: str 
             raise LifecycleError(f"source is missing safe systemd template: {source_unit}")
         unit_payloads[unit_dir / name] = source_unit.read_bytes()
 
-    _refuse_foreign(wrapper, wrapper_bytes)
+    previous_install: Mapping[str, Any] = {}
+    if (lib / _INSTALL_NAME).exists():
+        previous_install = _install_record(lib)
+    previous_wrapper = previous_install.get("wrapper", {})
+    previous_units = previous_install.get("units", {})
+    wrapper_hash = (
+        previous_wrapper.get("sha256") if isinstance(previous_wrapper, Mapping) else None
+    )
+    if not isinstance(previous_units, Mapping):
+        previous_units = {}
+
+    _refuse_foreign(wrapper, wrapper_bytes, previously_owned_sha256=wrapper_hash)
     for path, payload in unit_payloads.items():
-        _refuse_foreign(path, payload)
+        owned_hash = previous_units.get(str(path))
+        _refuse_foreign(
+            path,
+            payload,
+            previously_owned_sha256=owned_hash if isinstance(owned_hash, str) else None,
+        )
     if current.exists() and not current.is_symlink():
         raise OwnershipError(f"refusing non-symlink current path: {current}")
     if current.is_symlink():
