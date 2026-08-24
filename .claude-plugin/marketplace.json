@@ -23,6 +23,12 @@
       "description": "Queue and safely dispatch low-priority work against independently paced provider capacity",
       "source": "./plugins/bonus-drain",
       "category": "productivity"
+    },
+    {
+      "name": "big-plan",
+      "description": "Serve Markdown plans as a commentable, phone-friendly review UI",
+      "source": "./plugins/big-plan",
+      "category": "productivity"
     }
   ]
 }

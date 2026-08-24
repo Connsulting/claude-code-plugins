@@ -1,0 +1,1286 @@
+:root {
+  --bg: #0c0c0a;
+  --fg: #e9e7e1;
+  --muted: #928f86;
+  --border: #302e29;
+  --accent: #f2b63f;
+  --rail-bg: #121210;
+  --comment-bg: #281c2c;
+  --comment-border: #75516f;
+  --code-bg: #171714;
+  --shadow: none;
+  --ok: #83bd8d;
+  --ok-bg: rgba(131,189,141,0.14);
+  --warn: #f2b63f;
+  --warn-bg: rgba(242,182,63,0.14);
+  --info: #a8a3d8;
+  --info-bg: rgba(168,163,216,0.14);
+  --danger: #df857b;
+  --danger-bg: rgba(223,133,123,0.14);
+  --important: #c296bc;
+  --important-bg: rgba(194,150,188,0.14);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font: 13.5px/1.75 "IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  background: var(--bg);
+  color: var(--fg);
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr) 320px;
+  grid-template-rows: 48px 1fr;
+  grid-template-areas:
+    "top top top"
+    "toc content comments";
+  min-height: 100vh;
+}
+body.index { grid-template-columns: 1fr; grid-template-areas: "top" "content"; }
+.index-summary { color: var(--muted); margin: 0 0 14px; }
+.updated { color: var(--muted); font-size: 11px; margin-left: 8px; }
+.pagination { display: flex; align-items: center; gap: 12px; margin-top: 18px; color: var(--muted); }
+.page-link { color: var(--accent); text-decoration: none; }
+.page-link.disabled { color: var(--muted); cursor: default; }
+
+.topbar {
+  grid-area: top;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px;
+  background: var(--rail-bg);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 50;
+}
+.topbar .home-link {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 13px;
+}
+.topbar .page-title {
+  font-size: 13px;
+  margin: 0;
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.topbar .root-path { color: var(--muted); font-size: 11px; }
+.topbar button {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 4px 10px;
+  border-radius: 2px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.topbar button:hover { background: var(--bg); }
+.topbar .md-download, .topbar .md-raw {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 4px 10px;
+  border-radius: 2px;
+  font-size: 11px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.topbar .md-download:hover, .topbar .md-raw:hover { background: var(--bg); }
+.topbar .md-copy, .topbar .md-raw, .topbar .md-download, .topbar .pdf-download, .topbar .send-feedback {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.topbar .pdf-download {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 4px 10px;
+  border-radius: 2px;
+  font-size: 11px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.topbar .pdf-download:hover { background: var(--bg); }
+.topbar .md-copy svg, .topbar .md-raw svg, .topbar .md-download svg, .topbar .send-feedback svg { flex: none; }
+/* Hard cap so the transient "<session name> ✓" flash can never wrap the topbar. */
+.topbar .send-feedback { max-width: 26ch; }
+.topbar .send-feedback .sf-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Accented because it is the only topbar control that spends anything. */
+.topbar .send-feedback:not([disabled]) { border-color: var(--accent); color: var(--accent); }
+.topbar .send-feedback:not([disabled]):hover { background: var(--accent); color: white; }
+.topbar .send-feedback[disabled] { opacity: 0.45; cursor: default; }
+.topbar .send-feedback.flash {
+  background: var(--accent); color: white; border-color: var(--accent);
+}
+.topbar .send-feedback.err { border-color: var(--danger, #c0392b); color: var(--danger, #c0392b); }
+.toc-toggle, .comments-toggle { display: none; }
+.topbar-hint {
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.topbar-hint kbd {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 10px;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+/* -- Answered threads (agent replied, waiting on the reviewer) -- */
+.answers-bar { display: none; align-items: center; gap: 8px; }
+body[data-has-answers="true"] .answers-bar { display: inline-flex; }
+.answers-count {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--info);
+  background: transparent;
+  padding: 2px 8px;
+  border: 1px solid var(--info);
+  border-radius: 2px;
+  white-space: nowrap;
+  cursor: pointer;
+  font-family: inherit;
+}
+.answers-count:hover { background: var(--info-bg); }
+.answers-count:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* -- Change highlights (diff since last review) -- */
+.changes-bar { display: none; align-items: center; gap: 8px; }
+body[data-has-changes="true"] .changes-bar { display: inline-flex; }
+.changes-count {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--warn);
+  padding: 2px 8px;
+  border: 1px solid var(--warn);
+  border-radius: 2px;
+  white-space: nowrap;
+}
+[data-changed] {
+  border-radius: 4px;
+  padding-left: 10px;
+  transition: background 0.15s ease;
+}
+[data-changed="added"] { background: var(--ok-bg); box-shadow: inset 3px 0 0 var(--ok); }
+[data-changed="changed"] { background: var(--warn-bg); box-shadow: inset 3px 0 0 var(--warn); }
+summary [data-changed] { display: inline-block; }
+body.changes-hidden [data-changed] {
+  background: transparent;
+  box-shadow: none;
+  padding-left: 0;
+}
+/* Table diffs color the whole row, not individual cells, and drop the left
+   accent bar so a changed row reads as a flat green or amber fill. Cells are
+   anchored blocks, so the diff engine marks individual cells; :has lifts that
+   to the row (:has is already relied on elsewhere in this file). */
+.content td[data-changed], .content th[data-changed] {
+  background: transparent;
+  box-shadow: none;
+}
+.content tr:has([data-changed="added"]) > td,
+.content tr:has([data-changed="added"]) > th { background: var(--ok-bg); }
+.content tr:has([data-changed="changed"]) > td,
+.content tr:has([data-changed="changed"]) > th { background: var(--warn-bg); }
+body.changes-hidden .content tr:has([data-changed]) > td,
+body.changes-hidden .content tr:has([data-changed]) > th { background: transparent; }
+
+.toc-rail {
+  grid-area: toc;
+  background: var(--rail-bg);
+  border-right: 1px solid var(--border);
+  padding: 16px 10px;
+  overflow-y: auto;
+  position: sticky;
+  top: 48px;
+  height: calc(100vh - 48px);
+}
+.toc-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+.toc ol { list-style: none; padding: 0; margin: 0; }
+.toc li { margin: 4px 0; }
+.toc li a {
+  color: var(--fg);
+  text-decoration: none;
+  font-size: 11px;
+  display: block;
+  padding: 2px 6px;
+  border-radius: 2px;
+}
+.toc li a:hover { background: var(--bg); color: var(--accent); }
+.toc-h3 a { padding-left: 18px; color: var(--muted); font-size: 10px; }
+
+.content {
+  grid-area: content;
+  padding: 24px 32px 80px;
+  max-width: 860px;
+  width: 100%;
+  margin: 0 auto;
+  overflow-wrap: break-word;
+  /* Grid items default to min-width: auto, which lets a non-wrapping child
+     (a <pre> code block, whose min-content is its longest line) stretch the
+     whole content column past the viewport. min-width: 0 lets it stay at
+     viewport width so the pre's own overflow-x: auto scrolls instead. */
+  min-width: 0;
+}
+.content h1 { font-family: system-ui, sans-serif; font-size: 28px; margin: 0 0 16px; line-height: 1.25; letter-spacing: -0.02em; }
+.content h2 { font-family: system-ui, sans-serif; font-size: 19px; margin: 0; line-height: 1.3; letter-spacing: -0.01em; }
+.content h3 { font-size: 14px; margin: 18px 0 6px; }
+.content h4 { font-size: 13px; margin: 14px 0 4px; }
+.content p { margin: 8px 0 12px; }
+.content ul, .content ol { padding-left: 24px; margin: 8px 0 12px; }
+.content li { margin: 3px 0; }
+.content code {
+  background: var(--code-bg);
+  padding: 1px 5px;
+  border-radius: 2px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.9em;
+}
+.content pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  padding: 12px 14px;
+  border-radius: 2px;
+  overflow-x: auto;
+  font-size: 13px;
+}
+.content pre code { background: none; padding: 0; }
+.code-block { position: relative; }
+.code-copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  color: var(--muted);
+  background: var(--rail-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.code-block:hover .code-copy,
+.code-copy:focus { opacity: 1; }
+.code-copy:hover { color: var(--fg); }
+.code-copy.flash { color: #2f7d32; border-color: #2f7d32; opacity: 1; }
+.table-scroll { overflow-x: auto; max-width: 100%; }
+.content table { border-collapse: collapse; margin: 12px 0; width: 100%; }
+.content th, .content td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
+.content th { background: var(--rail-bg); }
+/* Header cells are click-to-sort. Keep them selectable (no user-select: none)
+   so header text stays commentable. The sort direction is drawn as a CSS caret
+   so no text node is injected into the th (which would shift comment offsets).
+   var(--muted) is theme-aware, so the caret follows light/dark automatically. */
+.content thead th { cursor: pointer; }
+.content thead th.sort-asc::after,
+.content thead th.sort-desc::after {
+  content: "";
+  display: inline-block;
+  margin-left: 6px;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+}
+.content thead th.sort-asc::after { border-bottom: 5px solid var(--muted); }
+.content thead th.sort-desc::after { border-top: 5px solid var(--muted); }
+.content blockquote {
+  margin: 12px 0;
+  padding: 4px 16px;
+  border-left: 2px solid var(--accent);
+  color: var(--muted);
+}
+
+/* GitHub-style callouts. render.py tags a blockquote whose first paragraph began
+   with [!NOTE] / [!TIP] / [!IMPORTANT] / [!WARNING] / [!CAUTION] with
+   class="callout callout-<kind>" and strips the marker token. Each kind reuses a
+   tint pair (fg accent + faint bg) that is defined for both light and dark. */
+.content blockquote.callout {
+  border-left-width: 4px;
+  border-radius: 0 2px 2px 0;
+  color: var(--fg);
+  padding: 8px 16px;
+}
+.content blockquote.callout > :first-child { margin-top: 0; }
+.content blockquote.callout > :last-child { margin-bottom: 0; }
+.content blockquote.callout::before {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+.content blockquote.callout-note {
+  border-left-color: var(--info);
+  background: var(--info-bg);
+}
+.content blockquote.callout-note::before { content: "Note"; color: var(--info); }
+.content blockquote.callout-tip {
+  border-left-color: var(--ok);
+  background: var(--ok-bg);
+}
+.content blockquote.callout-tip::before { content: "Tip"; color: var(--ok); }
+.content blockquote.callout-important {
+  border-left-color: var(--important);
+  background: var(--important-bg);
+}
+.content blockquote.callout-important::before { content: "Important"; color: var(--important); }
+.content blockquote.callout-warning {
+  border-left-color: var(--warn);
+  background: var(--warn-bg);
+}
+.content blockquote.callout-warning::before { content: "Warning"; color: var(--warn); }
+.content blockquote.callout-caution {
+  border-left-color: var(--danger);
+  background: var(--danger-bg);
+}
+.content blockquote.callout-caution::before { content: "Caution"; color: var(--danger); }
+
+.content a { color: var(--accent); }
+.content hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
+
+/* Mermaid diagrams. Before mermaid runs, <pre class="mermaid"> shows raw text
+   styled like a normal code block so the pre-render flash is not jarring; after
+   render mermaid replaces the content with an inline SVG which is centered and
+   allowed to scroll horizontally on narrow screens. */
+.mermaid {
+  margin: 16px 0;
+  text-align: center;
+  overflow-x: auto;
+  max-width: 100%;
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 12px 14px;
+  font-size: 13px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  white-space: pre;
+}
+.mermaid[data-processed="true"] {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-family: inherit;
+  white-space: normal;
+}
+.mermaid svg { max-width: 100%; height: auto; }
+.mermaid.mermaid-error {
+  text-align: left;
+  border-color: var(--del, #c0392b);
+}
+
+details.section {
+  position: relative;
+  margin: 18px 0 12px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+details.section[open] { padding-bottom: 8px; }
+details.section > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 4px 76px 4px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+details.section > summary::-webkit-details-marker { display: none; }
+details.section > summary::before {
+  content: "v";
+  display: inline-block;
+  width: 12px;
+  font-size: 11px;
+  color: var(--muted);
+  transition: transform 0.15s;
+  font-family: ui-monospace, monospace;
+}
+details.section:not([open]) > summary::before { transform: rotate(-90deg); }
+details.section > summary h2 {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.section-comment-button {
+  position: absolute;
+  top: 12px;
+  right: 0;
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  color: var(--muted);
+  background: transparent;
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+.section-comment-button:hover,
+.section-comment-button:focus-visible {
+  border-color: var(--accent);
+  color: var(--fg);
+}
+.section-body { padding: 4px 0 0 20px; }
+
+.anchor-link {
+  color: var(--muted);
+  text-decoration: none;
+  font-weight: 400;
+  margin-right: 6px;
+  opacity: 0;
+  transition: opacity 0.15s;
+  font-family: ui-monospace, monospace;
+}
+h1:hover .anchor-link,
+h2:hover .anchor-link,
+h3:hover .anchor-link,
+h4:hover .anchor-link,
+h5:hover .anchor-link,
+h6:hover .anchor-link { opacity: 1; }
+
+.comments-inline {
+  margin: 6px 0 10px;
+  border-left: 2px solid var(--comment-border);
+  padding: 4px 0 4px 12px;
+}
+.comment {
+  background: var(--comment-bg);
+  border: 1px solid var(--comment-border);
+  border-radius: 2px;
+  padding: 6px 10px;
+  margin: 4px 0;
+  font-size: 14px;
+}
+.comment-meta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+.comment-body { white-space: pre-wrap; word-wrap: break-word; }
+.comment-quote {
+  font-size: 12px;
+  font-style: italic;
+  color: var(--muted);
+  border-left: 2px solid var(--comment-border);
+  padding-left: 8px;
+  margin-bottom: 4px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+/* Span comments: an inline text selection re-highlighted on reload. Clicking a
+   mark reveals its comment. */
+mark.comment-highlight {
+  background: var(--comment-bg);
+  box-shadow: inset 0 -1px 0 var(--comment-border);
+  border-radius: 2px;
+  cursor: pointer;
+  color: inherit;
+}
+mark.comment-highlight:hover { background: var(--comment-border); }
+mark.comment-highlight.flash { background: var(--accent); color: #fff; }
+
+/* Floating toolbar shown above an active text selection: a Comment button plus
+   the reaction emoji. The single entry point for both commenting and reacting. */
+.selection-toolbar {
+  position: fixed;
+  z-index: 60;
+  display: none;
+  gap: 4px;
+  align-items: center;
+  padding: 4px;
+  background: var(--rail-bg);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  box-shadow: var(--shadow);
+}
+.selection-toolbar.show { display: flex; }
+.selection-toolbar .sel-comment {
+  padding: 4px 12px;
+  font-size: 12px;
+  font-family: inherit;
+  font-weight: 600;
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  cursor: pointer;
+}
+.selection-toolbar .sel-comment:hover { background: var(--comment-bg); }
+.selection-toolbar .sel-react {
+  min-width: 28px;
+  padding: 4px 6px;
+  font-size: 14px;
+  font-family: inherit;
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  cursor: pointer;
+}
+.selection-toolbar .sel-react:hover { background: var(--comment-bg); }
+
+/* Popover anchored to a clicked span-comment highlight. */
+.comment-popover {
+  position: fixed;
+  z-index: 61;
+  max-width: 280px;
+  padding: 8px 10px;
+  background: var(--comment-bg);
+  border: 1px solid var(--comment-border);
+  border-radius: 2px;
+  box-shadow: var(--shadow);
+  font-size: 13px;
+  color: var(--fg);
+}
+.comment-popover .comment-popover-body { white-space: pre-wrap; word-wrap: break-word; }
+.comment-popover .comment-popover-delete {
+  margin-top: 6px;
+  background: transparent;
+  border: 1px solid var(--comment-border);
+  color: var(--muted);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 2px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.comment-popover .comment-popover-delete:hover { color: var(--fg); background: var(--bg); }
+
+.comments-rail {
+  grid-area: comments;
+  background: var(--rail-bg);
+  border-left: 1px solid var(--border);
+  padding: 16px 10px 80px;
+  overflow-y: auto;
+  position: sticky;
+  top: 48px;
+  height: calc(100vh - 48px);
+}
+.comments-rail h2 { font-size: 10px; margin: 0 0 8px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); }
+.comments-rail .comments-empty { color: var(--muted); font-size: 13px; font-style: italic; }
+.comments-rail .anchor-group { margin-bottom: 14px; }
+.comments-rail .anchor-group h3 {
+  font-size: 11px;
+  text-transform: none;
+  color: var(--muted);
+  margin: 0 0 4px;
+  font-weight: 600;
+}
+.comments-rail .anchor-group h3 a { color: var(--muted); text-decoration: none; }
+.comments-rail .anchor-group h3 a:hover { color: var(--accent); }
+
+dialog {
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  padding: 20px;
+  background: var(--bg);
+  color: var(--fg);
+  width: min(90vw, 500px);
+  box-shadow: 0 16px 48px rgba(0,0,0,0.5);
+}
+dialog::backdrop { background: rgba(0,0,0,0.4); }
+dialog h3 { margin: 0 0 8px; }
+dialog .anchor-label { color: var(--muted); font-size: 13px; margin-bottom: 12px; }
+dialog .anchor-label code { background: var(--code-bg); padding: 1px 4px; border-radius: 3px; }
+dialog label { display: block; margin: 10px 0; font-size: 13px; color: var(--muted); }
+dialog input, dialog textarea {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  font: inherit;
+  background: var(--bg);
+  color: var(--fg);
+}
+dialog textarea { font-family: ui-monospace, monospace; font-size: 13px; resize: vertical; }
+dialog .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+dialog button {
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+  font: inherit;
+}
+dialog button[value="submit"] { background: var(--accent); color: white; border-color: var(--accent); }
+
+.plan-list { list-style: none; padding: 0; }
+.plan-list li {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.plan-list li a { color: var(--fg); text-decoration: none; flex: 1; font-family: ui-monospace, monospace; font-size: 14px; }
+.plan-list li a:hover { color: var(--accent); }
+.plan-list .size { color: var(--muted); font-size: 11px; }
+.plan-list .badge {
+  background: var(--comment-border);
+  color: var(--bg);
+  border-radius: 10px;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 600;
+}
+/* Sits beside the open count: those threads have an answer waiting to be read. */
+.plan-list .badge.answered {
+  background: transparent;
+  color: var(--info);
+  border: 1px solid var(--info);
+  margin-left: 6px;
+}
+
+/* Reactions render INSIDE the anchored block, on the same line as the content,
+   so the chip cluster sits at the end of the text without taking a new row. */
+.reactions-row {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: 6px;
+  vertical-align: baseline;
+}
+.reaction-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 6px;
+  background: var(--comment-bg);
+  border: 1px solid var(--comment-border);
+  border-radius: 2px;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  font-family: inherit;
+  color: var(--fg);
+}
+.reaction-chip:hover {
+  background: var(--bg);
+  border-color: var(--accent);
+}
+.reaction-chip:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+.comment.reaction {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 13px;
+  padding: 3px 8px;
+  margin: 2px 4px 2px 0;
+}
+.comment.decision .comment-body strong { color: var(--accent); }
+.comment.status .comment-body { font-style: italic; }
+.comment.flash { background: var(--accent); color: white; }
+
+.comment-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.comment-delete {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 2px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.comment-delete:hover {
+  background: var(--comment-bg);
+  border-color: var(--comment-border);
+  color: var(--fg);
+}
+.comment-delete:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* -- Threads: agent answers and reviewer follow-ups on one comment -- */
+.comment-reply {
+  margin-left: auto;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  padding: 4px 6px;
+  border-radius: 2px;
+  cursor: pointer;
+  font-family: inherit;
+}
+/* Delete already claims margin-left:auto to sit at the far right. When both are
+   present Reply takes the auto and Delete just follows it. */
+.comment-reply + .comment-delete { margin-left: 0; }
+.comment-reply:hover {
+  background: var(--comment-bg);
+  border-color: var(--comment-border);
+  color: var(--fg);
+}
+.comment-reply:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* An answered thread is still OPEN -- it is waiting on the reviewer, not done.
+   Tinted rather than dimmed, so it reads as "something to look at". */
+.comment[data-answered="true"] {
+  border-color: var(--info);
+  box-shadow: inset 3px 0 0 var(--info);
+}
+.replies {
+  margin-top: 6px;
+  border-top: 1px solid var(--comment-border);
+  padding-top: 4px;
+}
+.reply {
+  padding: 5px 0 5px 8px;
+  border-left: 2px solid var(--border);
+  margin: 4px 0;
+}
+.reply.agent { border-left-color: var(--info); }
+.reply.reviewer { border-left-color: var(--accent); }
+.reply-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+.reply-who { font-weight: 600; }
+.reply.agent .reply-who { color: var(--info); }
+.reply.reviewer .reply-who { color: var(--accent); }
+.reply-body {
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+.reply-form { margin-top: 8px; }
+.reply-form textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: inherit;
+  font-size: 14px;
+  padding: 6px 8px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--comment-border);
+  border-radius: 2px;
+  resize: vertical;
+}
+.reply-form textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.reply-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 6px;
+}
+.reply-form-actions button {
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+}
+.reply-form-actions .reply-send {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.reply-form-actions button:disabled { opacity: 0.5; cursor: default; }
+
+.page-footer {
+  margin-top: 32px;
+  padding: 16px 0 40px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.copy-feedback {
+  background: var(--rail-bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  padding: 8px 16px;
+  border-radius: 2px;
+  cursor: pointer;
+  font-size: 14px;
+  font-family: inherit;
+}
+.copy-feedback:hover { background: var(--bg); border-color: var(--accent); }
+.copy-feedback.flash { background: var(--accent); color: white; border-color: var(--accent); }
+
+.decide-card {
+  margin: 14px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  border-radius: 2px;
+  background: var(--rail-bg);
+  box-shadow: var(--shadow);
+}
+.decide-header {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto auto;
+  gap: 0 8px;
+  margin-bottom: 8px;
+}
+.decide-kind {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  grid-column: 1;
+}
+.decide-q {
+  font-size: 15px;
+  font-weight: 600;
+  grid-column: 1;
+}
+.decide-saved {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+  color: var(--accent);
+  font-size: 12px;
+  font-style: italic;
+}
+.decide-options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.decide-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  min-height: 36px;
+}
+.decide-option:hover { background: var(--bg); }
+.decide-option input[type=radio],
+.decide-option input[type=checkbox] {
+  margin-top: 3px;
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+}
+
+/* "Other..." escape hatch on every decide card */
+.decide-other-row .decide-option-text {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+}
+.decide-other-label {
+  font-style: italic;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.decide-other-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+}
+.decide-other-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+/* Task checkboxes derived from `- [ ]` / `- [x]` markdown */
+.task-marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 1.5px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg);
+  cursor: pointer;
+  vertical-align: text-bottom;
+  margin-right: 6px;
+  transition: background 0.1s, border-color 0.1s;
+  position: relative;
+  flex-shrink: 0;
+}
+.task-marker:hover { border-color: var(--accent); }
+.task-marker[data-state="done"] {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.task-marker[data-state="done"]::after {
+  content: "";
+  position: absolute;
+  width: 5px;
+  height: 9px;
+  border: solid white;
+  border-width: 0 2px 2px 0;
+  transform: translateY(-1px) rotate(45deg);
+}
+.content li:has(> .task-marker[data-state="done"]) {
+  color: var(--muted);
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+/* Don't strike out inline comment/reaction content that sits inside a done task. */
+.content li:has(> .task-marker[data-state="done"]) .comments-inline,
+.content li:has(> .task-marker[data-state="done"]) .reactions-row,
+.content li:has(> .task-marker[data-state="done"]) .reaction-chip,
+.content li:has(> .task-marker[data-state="done"]) .comment,
+.content li:has(> .task-marker[data-state="done"]) .anchor-actions {
+  text-decoration: none;
+  color: var(--fg);
+}
+.content li:has(> .task-marker) { list-style: none; margin-left: -20px; }
+
+/* Comparison grid — raw HTML convention. Use markdown="1" on .compare-col to
+   keep markdown rendering inside columns. */
+.compare {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin: 16px 0;
+}
+.compare-col {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 14px;
+  background: var(--rail-bg);
+}
+.compare-col > :first-child { margin-top: 0; }
+.compare-col > :last-child { margin-bottom: 0; }
+.compare-col h3, .compare-col h4 { margin-top: 0; }
+
+@media (max-width: 900px) {
+  /* Safety net against horizontal overflow. clip (not hidden) so sticky rails
+     keep working. */
+  html, body { overflow-x: clip; }
+  body {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "top"
+      "content";
+  }
+  /* The topbar can't fit every child on a phone even wrapped, and overflow-x:
+     clip cuts the last one. Hide Copy/Download (desktop niceties) and keep
+     Raw: a phone is where downloading a .md is the least convenient. */
+  .topbar { flex-wrap: wrap; row-gap: 6px; gap: 8px; padding: 0 10px; }
+  .topbar .md-copy, .topbar .md-download { display: none; }
+  .topbar .md-raw { display: inline-flex; }
+  /* Send stays: the phone is where the comments get written, so it is the one
+     round-trip action that is phone-critical rather than a desktop nicety. */
+  .topbar .send-feedback { display: inline-flex; }
+  /* Same reason: the phone is where an answer gets read, and the chip is the
+     only way to find one without scrolling the whole plan. */
+  body[data-has-answers="true"] .answers-bar { display: inline-flex; }
+  .toc-toggle, .comments-toggle { flex: 0 0 auto; white-space: nowrap; }
+  .section-body { padding-left: 8px; }
+  .content ul, .content ol { padding-left: 16px; }
+  /* Task-list items pull left to align the marker with the text; match the
+     reduced list padding so they net to zero instead of poking past the edge. */
+  .content li:has(> .task-marker) { margin-left: -16px; }
+  /* Defensive: no wide child may force the page wider than the viewport. */
+  .content pre, .content table, .content img, .content svg,
+  .content canvas, .content .mermaid, .content .table-scroll { max-width: 100%; }
+  .toc-rail, .comments-rail {
+    position: fixed;
+    top: 48px;
+    height: calc(100vh - 48px);
+    width: 80vw;
+    max-width: 320px;
+    z-index: 40;
+    transform: translateX(-100%);
+    transition: transform 0.2s;
+    box-shadow: var(--shadow);
+  }
+  .toc-rail { left: 0; }
+  .comments-rail { right: 0; transform: translateX(100%); border-left: 1px solid var(--border); border-right: none; }
+  .toc-rail.open { transform: translateX(0); }
+  .comments-rail.open { transform: translateX(0); }
+  .toc-toggle, .comments-toggle { display: inline-block; }
+  .content { padding: 12px 10px 80px; overflow-wrap: anywhere; }
+  .anchor-link { opacity: 1; }
+  .topbar .page-title { font-size: 13px; }
+  .topbar button { font-size: 11px; padding: 4px 8px; }
+  /* Larger tap targets on phones */
+  .selection-toolbar .sel-react { min-width: 32px; font-size: 16px; padding: 4px 8px; }
+  .task-marker { width: 22px; height: 22px; margin-right: 8px; }
+  .decide-option { min-height: 44px; }
+  .decide-option input { width: 22px; height: 22px; }
+  .topbar-hint { display: none; }
+}
+
+@media print {
+  @page { margin: 16mm; }
+  body {
+    display: block;
+    min-height: 0;
+    background: white;
+    color: black;
+    font-size: 10pt;
+  }
+  .topbar, .toc-rail, .comments-rail, .page-footer,
+  .section-comment-button, .anchor-link, .comment-thread,
+  .changes-bar, .answers-bar, .reply-form, dialog, .selection-toolbar { display: none !important; }
+  .content { max-width: none; padding: 0; }
+  .section-body { display: block !important; }
+  .section { break-inside: avoid; }
+  a { color: inherit; text-decoration: none; }
+  pre, blockquote, table { break-inside: avoid; }
+  .table-scroll { overflow: visible; }
+}
+
+/* -- Keyboard navigation focus highlight -- */
+.kb-focused {
+  position: relative;
+  background: var(--rail-bg);
+  border-radius: 4px;
+  box-shadow: -3px 0 0 0 var(--accent);
+  transition: background 0.1s;
+}
+/* Heading elements: the box-shadow covers the existing anchor-link space nicely. */
+h1.kb-focused, h2.kb-focused, h3.kb-focused, h4.kb-focused, h5.kb-focused, h6.kb-focused {
+  padding-left: 6px;
+  margin-left: -6px;
+}
+li.kb-focused, p.kb-focused, blockquote.kb-focused {
+  padding-left: 6px;
+  margin-left: -6px;
+}
+.decide-card.kb-focused {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* -- Help dialog -- */
+#help-dialog {
+  width: min(90vw, 640px);
+}
+#help-dialog h3 { margin: 0 0 16px; }
+#help-dialog h4 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin: 0 0 8px;
+}
+.help-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 18px;
+  margin-bottom: 12px;
+}
+.help-grid section dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  font-size: 13px;
+  align-items: baseline;
+}
+.help-grid section dt {
+  white-space: nowrap;
+}
+.help-grid section dd {
+  margin: 0;
+  color: var(--muted);
+}
+.help-grid kbd,
+#add-comment-dialog kbd {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--code-bg);
+  color: var(--fg);
+  line-height: 1;
+  white-space: nowrap;
+}
+#add-comment-dialog kbd { font-size: 10px; padding: 1px 4px; background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.3); }
+
+/* ===========================================================================
+   Diff view (?view=diff): GitHub-style collapsed unified diff of the raw
+   markdown, baseline -> current, with per-hunk "reviewed" (accept) buttons.
+   =========================================================================== */
+:root {
+  --del: #c0392b;
+  --del-bg: rgba(192,57,43,0.10);
+  --add-bg: rgba(58,157,93,0.12);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --del: #e06c64;
+    --del-bg: rgba(224,108,100,0.14);
+    --add-bg: rgba(95,196,131,0.14);
+  }
+}
+
+/* topbar bits shared by the rendered, diff, and raw views */
+.changes-difflink, .diff-doclink, .raw-doclink {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 12px;
+  border: 1px solid var(--accent);
+  padding: 3px 9px;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+.changes-difflink:hover, .diff-doclink:hover, .raw-doclink:hover { background: var(--accent); color: #fff; }
+.diff-summary { flex: 1; color: var(--muted); font-size: 13px; font-family: ui-monospace, monospace; }
+.diff-summary .add-stat { color: var(--ok); font-weight: 600; }
+.diff-summary .del-stat { color: var(--del); font-weight: 600; }
+
+body.diff-page, body.raw-page { grid-template-columns: 1fr; grid-template-areas: "top" "content"; }
+.diff-content, .raw-content { max-width: 1000px; padding: 20px 24px 80px; }
+.raw-markdown {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 4;
+  line-height: 1.55;
+}
+.diff-empty {
+  color: var(--muted);
+  padding: 40px 0;
+  text-align: center;
+  font-size: 15px;
+}
+
+.diff-hunk {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin: 14px 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+.diff-hunk-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--rail-bg);
+  border-bottom: 1px solid var(--border);
+  padding: 5px 10px;
+}
+.diff-hunk-range {
+  flex: 1;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  color: var(--muted);
+}
+.hunk-reviewed {
+  background: var(--ok);
+  color: #fff;
+  border: none;
+  padding: 3px 12px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.hunk-reviewed:hover { filter: brightness(1.08); }
+.hunk-reviewed:disabled { opacity: 0.5; cursor: default; }
+
+.diff-row {
+  display: flex;
+  align-items: flex-start;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.diff-row .ln {
+  flex: 0 0 auto;
+  width: 42px;
+  padding: 0 6px;
+  text-align: right;
+  color: var(--muted);
+  opacity: 0.6;
+  user-select: none;
+  border-right: 1px solid var(--border);
+}
+.diff-row .sign {
+  flex: 0 0 auto;
+  width: 18px;
+  text-align: center;
+  user-select: none;
+  color: var(--muted);
+}
+.diff-row .diff-code {
+  flex: 1 1 auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 0 8px;
+  background: none;
+}
+.diff-row.add { background: var(--add-bg); }
+.diff-row.add .sign { color: var(--ok); }
+.diff-row.del { background: var(--del-bg); }
+.diff-row.del .sign { color: var(--del); }
+.diff-row.del .diff-code { text-decoration: none; }
+
+.diff-gap { border-top: 1px dashed var(--border); border-bottom: 1px dashed var(--border); }
+.diff-expand {
+  width: 100%;
+  text-align: left;
+  background: var(--rail-bg);
+  border: none;
+  color: var(--accent);
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  font-family: ui-monospace, monospace;
+}
+.diff-expand:hover { text-decoration: underline; }
+.diff-expand.expanded { color: var(--muted); }
+.diff-gap-lines { background: var(--bg); }
+.diff-gap-lines .diff-row { opacity: 0.7; }
+
+/* word-level (intra-line) highlight inside +/- rows */
+:root { --add-wd: rgba(58,157,93,0.34); --del-wd: rgba(192,57,43,0.30); }
+@media (prefers-color-scheme: dark) {
+  :root { --add-wd: rgba(95,196,131,0.40); --del-wd: rgba(224,108,100,0.38); }
+}
+.diff-code .wd {
+  border-radius: 2px;
+  padding: 0 1px;
+  font-weight: 600;
+}
+.diff-row.add .diff-code .wd { background: var(--add-wd); }
+.diff-row.del .diff-code .wd { background: var(--del-wd); }

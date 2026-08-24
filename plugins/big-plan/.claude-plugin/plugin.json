@@ -1,0 +1,14 @@
+{
+  "name": "big-plan",
+  "version": "0.1.0",
+  "description": "Serve Markdown plans as the Big Plan commentable review UI.",
+  "author": {
+    "name": "Connsulting"
+  },
+  "keywords": [
+    "planning",
+    "markdown",
+    "review",
+    "tailscale"
+  ]
+}

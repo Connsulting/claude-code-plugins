@@ -1,0 +1,80 @@
+#!/bin/sh
+# Stable launcher installed at ~/.local/bin/big-plan.
+set -eu
+
+runtime_dir=${BIG_PLAN_RUNTIME_DIR:-"$HOME/.local/lib/big-plan/current"}
+server="$runtime_dir/server.py"
+
+if [ ! -f "$server" ]; then
+    echo "big-plan: runtime not installed at $runtime_dir" >&2
+    exit 1
+fi
+
+if [ -n "${BIG_PLAN_UV_BIN:-}" ]; then
+    uv_bin=$BIG_PLAN_UV_BIN
+    if [ ! -x "$uv_bin" ]; then
+        echo "big-plan: BIG_PLAN_UV_BIN is not executable: $uv_bin" >&2
+        exit 1
+    fi
+elif uv_bin=$(command -v uv 2>/dev/null) && [ -x "$uv_bin" ]; then
+    :
+elif [ -x "$HOME/.local/bin/uv" ]; then
+    uv_bin="$HOME/.local/bin/uv"
+else
+    echo "big-plan: uv was not found; set BIG_PLAN_UV_BIN or install uv at $HOME/.local/bin/uv" >&2
+    exit 1
+fi
+
+case "$uv_bin" in
+    /*) ;;
+    *)
+        uv_dir=$(CDPATH= cd -- "$(dirname -- "$uv_bin")" && pwd)
+        uv_bin="$uv_dir/$(basename -- "$uv_bin")"
+        ;;
+esac
+
+# Explicit arguments expose the original server CLI unchanged.
+if [ "$#" -gt 0 ]; then
+    exec "$uv_bin" run "$server" "$@"
+fi
+
+root=${BIG_PLAN_ROOT:-"$HOME/git"}
+port=${BIG_PLAN_PORT:-8765}
+index_filter=${BIG_PLAN_FILTER:-plans}
+
+if [ -n "${BIG_PLAN_HOST:-}" ]; then
+    host=$BIG_PLAN_HOST
+else
+    host=127.0.0.1
+    if command -v tailscale >/dev/null 2>&1 \
+        && command -v timeout >/dev/null 2>&1 \
+        && command -v python3 >/dev/null 2>&1; then
+        if tailscale_json=$(timeout 5s tailscale status --json 2>/dev/null) \
+            && tailscale_ip=$(printf '%s' "$tailscale_json" | python3 -c '
+import ipaddress
+import json
+import sys
+
+status = json.load(sys.stdin)
+self_node = status.get("Self") or {}
+if status.get("BackendState") != "Running" or not str(self_node.get("DNSName") or "").rstrip("."):
+    raise SystemExit(1)
+for value in self_node.get("TailscaleIPs") or []:
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        continue
+    if address.version == 4:
+        print(address)
+        raise SystemExit(0)
+raise SystemExit(1)
+' 2>/dev/null); then
+            # A healthy Tailscale IPv4 proves this is a tailnet-connected host.
+            # Listen on localhost as well as the tailnet so callbacks and an
+            # existing Tailscale Serve proxy continue to work.
+            host=0.0.0.0
+        fi
+    fi
+fi
+
+exec "$uv_bin" run "$server" "$root" --host "$host" --port "$port" --filter "$index_filter"

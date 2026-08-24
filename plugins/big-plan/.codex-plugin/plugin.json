@@ -1,0 +1,32 @@
+{
+  "name": "big-plan",
+  "version": "0.1.0",
+  "description": "Serve Markdown plans as the Big Plan commentable review UI.",
+  "author": {
+    "name": "Connsulting"
+  },
+  "keywords": [
+    "planning",
+    "markdown",
+    "review",
+    "tailscale"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Big Plan",
+    "shortDescription": "Review and discuss Markdown plans from any device.",
+    "longDescription": "Author plans in a repository, publish them to the unchanged Big Plan review UI, collect anchored feedback, and send it back to the authoring session.",
+    "developerName": "Connsulting",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Create a Big Plan for this project.",
+      "Publish this plan for review.",
+      "Help me address the feedback on this Big Plan."
+    ],
+    "brandColor": "#6D5BD0"
+  }
+}
