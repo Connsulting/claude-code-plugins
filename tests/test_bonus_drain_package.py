@@ -225,6 +225,9 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             "skills/bonus-drain/config.example.json",
             "skills/bonus-drain/distribution-manifest.json",
             "skills/bonus-drain/bin/bonus-drain",
+            "skills/bonus-drain/bin/bonus-drain-account-usage",
+            "skills/bonus-drain/bin/bonus-drain-grok-usage",
+            "skills/bonus-drain/bin/bonus-drain-account-activation",
             "skills/bonus-drain/install.sh",
             "skills/bonus-drain/uninstall.sh",
             "skills/bonus-drain/bonus_drain/__init__.py",
@@ -256,6 +259,9 @@ class BonusDrainPackageContractTests(unittest.TestCase):
 
         for relative_path in (
             "skills/bonus-drain/bin/bonus-drain",
+            "skills/bonus-drain/bin/bonus-drain-account-usage",
+            "skills/bonus-drain/bin/bonus-drain-grok-usage",
+            "skills/bonus-drain/bin/bonus-drain-account-activation",
             "skills/bonus-drain/install.sh",
             "skills/bonus-drain/uninstall.sh",
             "skills/bonus-drain/scripts/install.sh",
@@ -266,6 +272,52 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                 mode & stat.S_IXUSR,
                 f"{relative_path} must be executable for a standalone install",
             )
+
+    def test_packaged_adapters_are_manifest_owned_and_configuration_is_explicit(self) -> None:
+        _manifest, included = self.distribution_manifest()
+        adapter_paths = {
+            "bin/bonus-drain-account-usage",
+            "bin/bonus-drain-grok-usage",
+            "bin/bonus-drain-account-activation",
+        }
+        self.assertTrue(
+            adapter_paths <= included,
+            f"distribution manifest does not own adapters: {sorted(adapter_paths - included)}",
+        )
+        for relative in adapter_paths:
+            path = SKILL_ROOT / relative
+            self.require_file(path)
+            self.assertTrue(os.access(path, os.X_OK), f"{relative} must retain executable mode")
+
+        wrappers = {
+            name: (SKILL_ROOT / name).read_text(encoding="utf-8")
+            for name in ("usage.sh", "codex-usage.sh", "grok-usage.sh")
+        }
+        for name, text in wrappers.items():
+            with self.subTest(wrapper=name):
+                self.assertNotIn("--legacy-index", text)
+                self.assertNotIn("LEGACY_INDEX", text)
+
+        example = self.load_json(SKILL_ROOT / "config.example.json")
+        adapter_argv = {
+            adapter["id"]: adapter.get("argv", [])
+            for adapter in example.get("adapters", [])
+            if isinstance(adapter, dict) and isinstance(adapter.get("id"), str)
+        }
+        flattened = "\n".join(
+            "\0".join(str(token) for token in argv)
+            for argv in adapter_argv.values()
+        )
+        for executable in sorted(adapter_paths):
+            self.assertIn(
+                executable.removeprefix("bin/"),
+                flattened,
+                f"example config must demonstrate shipped {executable}",
+            )
+        self.assertNotIn("/usr/local/libexec/bonus-drain", flattened)
+        self.assertIn("{provider_id}", flattened)
+        self.assertIn("{account_id}", flattened)
+        self.assertIn("{action}", flattened)
 
     def test_shipped_runtime_has_only_stdlib_dependencies_and_no_legacy_dispatchers(self) -> None:
         self.require_plugin()
