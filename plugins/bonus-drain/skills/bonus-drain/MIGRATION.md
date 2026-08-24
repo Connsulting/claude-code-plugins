@@ -43,6 +43,12 @@ approved open-file/process inventory tooling and record the output. If any write
 stop here and reconcile it. Do not copy a live WAL database and do not point the new runtime
 at it.
 
+Queue inventory taken earlier is advisory only. Tasks can be added while preparation is in
+progress, so query task/run/status counts again immediately before quiescence and take the
+authoritative migration snapshot only after all old writers and viewers are stopped. Compare
+the quiesced source counts with both the verified backup and destination DB before enabling
+any new writer. This last snapshot is what includes late-added jobs.
+
 ## 3. Back up
 
 Create a timestamped directory on the same trusted host. Preserve modes and copy:
@@ -73,6 +79,20 @@ With old writers masked and the backup verified:
 7. Enable only `bonus-drain-refresh.timer`. Observe one successful refresh, then enable
    `bonus-drain-scout.timer`.
 8. Keep old writer units masked through at least one observed scheduling cycle.
+
+For an existing SQLite queue, copy the quiesced database into the separate XDG state path;
+never repoint the new runtime at an old hard link. Run `bonus-drain init` only against that
+copy so additive columns and claims are created without rewriting task or run identity. Verify
+task/run/status counts before and after initialization. Migrated `claude_only` and recognized
+legacy-exclusive model rows remain restricted to providers declaring the reserved
+`legacy-exclusive` capability in JSON.
+
+Initialization also creates the additive `activation_leases` table. It does not synthesize a
+lease for historical rows. Before enabling scout, `doctor` must report no ambiguous claim or
+incomplete activation transition, and every multi-account provider must validate with a
+verified activator on each account. A terminal record releases the last external account PIN
+before its DB transaction commits; release failure preserves the claim/lease for manual
+reconciliation. Back up this table with the rest of the queue for both cutover and rollback.
 
 Do not enable the viewer until its local or remote mode has been reviewed against
 [SECURITY.md](SECURITY.md).

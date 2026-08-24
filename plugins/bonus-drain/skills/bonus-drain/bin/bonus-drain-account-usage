@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""Normalize one configured account snapshot into the Bonus Drain usage contract."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Mapping
+
+
+class AdapterError(RuntimeError):
+    """Configured input cannot produce a trustworthy capacity reading."""
+
+
+def _epoch(value: Any, label: str) -> int:
+    if isinstance(value, bool):
+        raise AdapterError(f"{label} must be an epoch or ISO timestamp")
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            try:
+                return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+            except ValueError as exc:
+                raise AdapterError(f"{label} must be an epoch or ISO timestamp") from exc
+    raise AdapterError(f"{label} must be an epoch or ISO timestamp")
+
+
+def _percentage(value: Any, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise AdapterError(f"{label} must be a number")
+    result = float(value)
+    if not math.isfinite(result) or result < 0 or result > 100:
+        raise AdapterError(f"{label} must be between 0 and 100")
+    return result
+
+
+def _mapping(value: Any, label: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise AdapterError(f"{label} must be an object")
+    return value
+
+
+def _parse_maps(values: list[str]) -> list[tuple[str, str]]:
+    if not values:
+        raise AdapterError("at least one --map SOURCE_WINDOW=LIMIT_ID is required")
+    mappings: list[tuple[str, str]] = []
+    source_windows: set[str] = set()
+    limit_ids: set[str] = set()
+    for value in values:
+        source, separator, limit_id = value.partition("=")
+        if not separator or not source or not limit_id:
+            raise AdapterError("--map must be SOURCE_WINDOW=LIMIT_ID")
+        if source in source_windows:
+            raise AdapterError(f"duplicate source window: {source}")
+        if limit_id in limit_ids:
+            raise AdapterError(f"duplicate destination limit: {limit_id}")
+        source_windows.add(source)
+        limit_ids.add(limit_id)
+        mappings.append((source, limit_id))
+    return mappings
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--provider", required=True)
+    parser.add_argument("--account", required=True)
+    parser.add_argument("--snapshot", required=True, type=Path)
+    parser.add_argument("--source-label", required=True)
+    parser.add_argument("--map", action="append", default=[])
+    parser.add_argument("--max-age", required=True, type=int)
+    parser.add_argument("--now", type=int)
+    return parser
+
+
+def main() -> int:
+    args = _parser().parse_args()
+    if args.max_age < 1:
+        raise AdapterError("--max-age must be positive")
+    now = int(time.time()) if args.now is None else args.now
+    try:
+        raw = json.loads(args.snapshot.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise AdapterError(f"cannot read configured snapshot: {exc}") from exc
+    snapshot = _mapping(raw, "snapshot")
+
+    for key, expected in (("provider_id", args.provider), ("account_id", args.account)):
+        present = snapshot.get(key)
+        if present is not None and present != expected:
+            raise AdapterError(f"snapshot {key} mismatch")
+    present_label = snapshot.get("source_label")
+    if present_label is not None and present_label != args.source_label:
+        raise AdapterError("snapshot source label mismatch")
+
+    captured_at = _epoch(snapshot.get("captured_at"), "captured_at")
+    if captured_at > now + 300:
+        raise AdapterError("snapshot timestamp is in the future")
+    if now - captured_at > args.max_age:
+        raise AdapterError("snapshot is stale")
+
+    limits: dict[str, dict[str, float | int]] = {}
+    for source_window, limit_id in _parse_maps(args.map):
+        reading = _mapping(snapshot.get(source_window), f"source window {source_window}")
+        used = reading.get("utilization", reading.get("used_percent"))
+        reset = _epoch(reading.get("resets_at"), f"source window {source_window} resets_at")
+        if reset <= now:
+            raise AdapterError(f"source window {source_window} reset is not in the future")
+        limits[limit_id] = {
+            "used_percent": _percentage(used, f"source window {source_window} utilization"),
+            "resets_at": reset,
+        }
+
+    json.dump(
+        {
+            "provider_id": args.provider,
+            "account_id": args.account,
+            "captured_at": captured_at,
+            "limits": limits,
+        },
+        sys.stdout,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except AdapterError as exc:
+        print(f"bonus-drain-account-usage: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc

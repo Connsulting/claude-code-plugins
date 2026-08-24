@@ -12,10 +12,42 @@ than `agent-router`. Adapter subprocesses use argv arrays with `shell=False`, an
 environment, time and output caps, and redacted diagnostics. Cache replacement is atomic,
 mode `0600`, and only a coherent normalized record replaces the last good value.
 
+The account-snapshot adapter reads exactly one configured file and validates explicit
+provider, account, source-label, source-window, destination-limit, and freshness values. The
+Grok normalizer invokes only one absolute collector with the literal `--direct-collect` flag,
+never the generic usage command, so configured collection cannot recurse.
+
+The optional activation adapter accepts no credentials. PIN and active-label paths must be
+absolute and may not traverse symlinks. Activation writes a mode-0600 pin atomically, invokes
+an optional rotator with `shell=False` and a minimal environment, verifies the requested label
+when configured, and restores/removes its pin on failure. Release removes only a pin whose
+current contents still match that adapter's literal label. Account identity mismatches and
+successful-but-unswitched rotations fail closed.
+
+Activation and release serialize on a private per-PIN lock. Label reads use no-follow file
+descriptors and accept only bounded regular files. Collector and rotator subprocesses start
+in isolated process groups; timeout kills the group, including descendants. Activation never
+receives unrelated account secret references.
+
+Multi-account providers require a verified activation adapter on every account. A durable
+SQLite lease is created only for a matching dispatch claim. Committed `activating` and
+`releasing` transition states bracket external PIN changes; an interrupted side effect remains
+durable, blocks dispatch, and is reported for reconciliation. Same-account holders share one
+active lease, cross-account switches are rejected, ambiguous outcomes retain their lease, and
+only the last terminal holder releases. Terminal recording and lease deletion commit only after
+a verified release; a failure leaves the `releasing` marker instead of silently unlocking.
+
+Normalized usage responses must explicitly state provider ID, account ID, and capture time.
+Direct Grok collection is configuration-limited to one account identity, and an omitted usage
+percentage is unknown capacity. File secret references are opened without following symlinks
+and must be current-user-owned mode-0600 regular files no larger than 65536 bytes; diagnostics
+report only validity, never content.
+
 Claims are made transactionally before routing. A known launch failure releases the claim;
 a terminal record closes it; requeue removes the matching terminal rows and claim in one
-transaction. An ambiguous router response keeps the claim closed to prevent a duplicate but
-immediately releases account activation. `doctor` reports the reconciliation requirement.
+transaction. An ambiguous router response or timeout keeps both the claim and runtime account
+lease closed to prevent a duplicate or account switch. `doctor` reports the reconciliation
+requirement.
 
 ## Viewer defaults
 

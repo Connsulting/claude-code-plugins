@@ -16,20 +16,21 @@ Required runtime dependencies are:
 
 - Python 3.10 or newer with the standard-library `sqlite3` module;
 - an executable `agent-router`, referenced by an absolute argv in the JSON configuration;
-- one executable usage adapter per account, plus a reset adapter when usage output does not
-  contain resets.
+- one executable usage adapter per account, reporting every configured limit and reset in one
+  coherent normalized response.
 
 The core runtime has no third-party Python package, `uv`, `bg-schedule`, or
-`codex-bg-thread` dependency. The included compatibility adapters for Claude, Codex, and
-Grok use shell tools such as Bash, `jq`, `curl`, and GNU core utilities as documented in
-their headers; replace them with any executable that implements the adapter JSON contract.
+`codex-bg-thread` dependency. The included account-snapshot, Grok-normalization, and
+activation adapters use only Python's standard library. The direct Grok collector uses
+Bash, `jq`, `curl`, and GNU utilities as documented in its header; replace any provider-edge
+adapter with an executable that implements the normalized JSON contract.
 `ai-token-rotator` is optional and can be configured as an account activation adapter.
 systemd user services are optional. Tailscale is optional and is only used as an
 authenticated HTTPS front end for an explicitly configured remote viewer.
 
 Run `bonus-drain doctor --json` after configuring the runtime. It validates the graph,
-queue, router-only dispatch boundary, and reconciliation state without resolving or
-printing secret values.
+queue, router-only dispatch boundary, reconciliation state, and file-secret ownership/mode
+without printing secret values.
 
 ## Install or stage
 
@@ -80,7 +81,7 @@ personal and business accounts across Claude, Codex, and Grok without changing c
 ```json
 {
   "providers": [
-    {"id": "claude", "dispatch": {"adapter_id": "router", "provider": "claude"}},
+    {"id": "claude", "dispatch": {"adapter_id": "router", "provider": "claude"}, "capabilities": ["legacy-exclusive"]},
     {"id": "codex", "dispatch": {"adapter_id": "router", "provider": "codex"}},
     {"id": "grok", "dispatch": {"adapter_id": "router", "provider": "grok"}}
   ],
@@ -91,9 +92,9 @@ personal and business accounts across Claude, Codex, and Grok without changing c
     {"id": "grok-personal-plan", "provider_id": "grok"}
   ],
   "accounts": [
-    {"id": "claude-personal", "provider_id": "claude", "plan_id": "claude-personal-plan", "usage_adapter_id": "usage"},
+    {"id": "claude-personal", "provider_id": "claude", "plan_id": "claude-personal-plan", "usage_adapter_id": "usage", "activation_adapter_id": "claude-personal-activator"},
     {"id": "claude-business", "provider_id": "claude", "plan_id": "claude-business-plan", "usage_adapter_id": "usage", "activation_adapter_id": "account-activator"},
-    {"id": "codex-personal", "provider_id": "codex", "plan_id": "codex-personal-plan", "usage_adapter_id": "usage"},
+    {"id": "codex-personal", "provider_id": "codex", "plan_id": "codex-personal-plan", "usage_adapter_id": "usage", "activation_adapter_id": "codex-personal-activator"},
     {"id": "grok-personal", "provider_id": "grok", "plan_id": "grok-personal-plan", "usage_adapter_id": "usage"}
   ]
 }
@@ -105,6 +106,36 @@ reset data. Bonus Drain keeps those windows independent and dispatches the eligi
 whose reset is nearest. Missing, malformed, resetless, or stale usage closes only the
 affected account. The refresher owns provider reads and writes normalized cache; scout,
 planner, and viewer consume cache and do not call provider APIs on page load.
+
+The shipped example uses the stable installed `.../.local/lib/bonus-drain/current` path and
+explicit provider, account, source-label, snapshot, and limit IDs. Replace every
+`/ABSOLUTE/PATH/TO` prefix with an absolute path for the target host. The snapshot adapter
+reads one account file and can map multiple windows in one call. The Grok adapter invokes
+the collector's dedicated direct mode so generic configuration cannot recurse. The optional
+activation adapter atomically pins a literal account label, sanitizes the rotator environment,
+verifies a configured active-label file, rolls back failed switches, and releases only its
+matching pin.
+
+The reserved `legacy-exclusive` capability preserves migrated `claude_only` and recognized
+legacy-exclusive model rows without hard-coding a provider name. Declare it only on providers
+that can run those tasks. Explicit provider allowlists and required capabilities remain
+independent.
+
+Every account of a multi-account provider must use the shipped verified activation form with
+a literal expected account, PIN path, and active-label proof. Claims hold durable SQLite
+activation leases: same-account launches share one switch, cross-account launches wait,
+ambiguous outcomes retain the lease, and the last terminal record releases it. A failed
+release rolls back terminal bookkeeping and is reported for reconciliation.
+
+Scout reserves actual compatible task IDs in nearest-reset order, preventing a portable task
+from consuming two provider slots while preserving exclusive work for a capable provider.
+Normalized usage requires explicit provider/account identity and capture time. Missing Grok
+utilization stays unknown. Source and installed wrappers ignore caller `PYTHONPATH`/cwd
+packages; timed-out collector and rotator process groups are terminated with descendants.
+
+File-backed secret references must be current-user-owned, non-symlink regular files with mode
+`0600` and a maximum size of 65536 bytes. Activation does not inherit unrelated account usage
+secret bindings.
 
 Secrets are references only. Declare an environment-variable or file reference in
 `secret_refs` and map it by ID from an adapter or viewer. Never place a secret value in the
@@ -167,7 +198,8 @@ The safe order is:
 1. inventory the old DB, writer services, timers, viewer, stable paths, and unit state;
 2. run `bonus-drain migrate --from-db FILE --from-units DIR --destination DIR --dry-run`;
 3. stop and mask every old writer, then prove no process holds the DB, WAL, or SHM open;
-4. create and read back a backup before selecting the new DB;
+4. after quiescence, re-count the queue so late-added jobs are included, then create and read
+   back the authoritative backup before selecting the new DB;
 5. install and validate the new config, run `doctor`, `refresh`, `gates`, and `plan`;
 6. enable only the refresh timer, observe it, then enable the scout timer;
 7. keep the old writers masked through at least one observed scheduling cycle.

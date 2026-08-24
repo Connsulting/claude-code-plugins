@@ -39,7 +39,7 @@ UNIT_NAMES = (
 _OWNED_NAME = ".bonus-drain-owned.json"
 _INSTALL_NAME = ".bonus-drain-install.json"
 _WRAPPER_MARKER = "# managed-by: bonus-drain lifecycle v1"
-_DEFAULT_VERSION = "0.1.0"
+_DEFAULT_VERSION = "0.1.1"
 @dataclass(frozen=True)
 class InstalledPaths:
     version: str
@@ -207,9 +207,14 @@ def _wrapper_text(lib: Path) -> str:
 {_WRAPPER_MARKER}
 set -eu
 BONUS_DRAIN_CURRENT={json.dumps(str(lib / 'current'))}
-export PYTHONPATH="$BONUS_DRAIN_CURRENT${{PYTHONPATH:+:$PYTHONPATH}}"
 export PYTHONDONTWRITEBYTECODE=1
-exec python3 -m bonus_drain "$@"
+exec python3 -I -B -c '
+import runpy
+import sys
+runtime = sys.argv.pop(1)
+sys.path.insert(0, runtime)
+runpy.run_module("bonus_drain", run_name="__main__")
+' "$BONUS_DRAIN_CURRENT" "$@"
 """
 
 
@@ -429,6 +434,20 @@ def doctor(
         required_checks.add("database_parent")
         if not checks["database_parent"]:
             diagnostics.append(f"database parent is missing or unsafe: {database.parent}")
+
+        from . import config as config_module
+
+        for ref in cfg.secret_refs:
+            if ref.source != "file":
+                continue
+            check_name = f"secret:file:{ref.id}"
+            try:
+                config_module.resolve_secret(ref)
+                checks[check_name] = True
+            except config_module.ConfigError as exc:
+                checks[check_name] = False
+                diagnostics.append(f"file secret reference {ref.id}: {exc}")
+            required_checks.add(check_name)
 
         for adapter in cfg.adapters:
             if adapter.kind not in {"agent-router", "usage", "reset", "activation"}:

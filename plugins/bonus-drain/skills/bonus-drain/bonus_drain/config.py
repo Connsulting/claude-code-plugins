@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, MutableMapping, Sequence
@@ -95,6 +96,7 @@ class ProviderConfig:
     id: str
     dispatch: DispatchBinding
     capabilities: frozenset[str] = frozenset()
+    account_mode: str = "multi"
 
 
 @dataclass(frozen=True)
@@ -394,7 +396,7 @@ def validate_config(
 
     providers: list[ProviderConfig] = []
     for index, row in enumerate(provider_rows):
-        _reject_unknown(row, {"id", "dispatch", "capabilities"}, f"providers[{index}]")
+        _reject_unknown(row, {"id", "dispatch", "capabilities", "account_mode"}, f"providers[{index}]")
         item_id = _identifier(row.get("id"), f"providers[{index}].id")
         dispatch = _require_mapping(row.get("dispatch"), f"providers[{index}].dispatch")
         _reject_unknown(dispatch, {"adapter_id", "provider"}, f"providers[{index}].dispatch")
@@ -405,7 +407,10 @@ def validate_config(
         router_provider = _string(dispatch.get("provider", item_id), f"providers[{index}].dispatch.provider")
         capabilities_raw = _require_list(row.get("capabilities", []), f"providers[{index}].capabilities")
         capabilities = frozenset(_identifier(value, f"providers[{index}].capabilities") for value in capabilities_raw)
-        providers.append(ProviderConfig(item_id, DispatchBinding(adapter_id, router_provider), capabilities))
+        account_mode = _string(row.get("account_mode", "multi"), f"providers[{index}].account_mode")
+        if account_mode not in {"single", "multi"}:
+            raise ConfigError(f"providers[{index}].account_mode must be single or multi")
+        providers.append(ProviderConfig(item_id, DispatchBinding(adapter_id, router_provider), capabilities, account_mode))
     provider_ids = {provider.id for provider in providers}
 
     plans: list[PlanConfig] = []
@@ -461,6 +466,75 @@ def validate_config(
                 secret_refs=_ref_map(row.get("secret_refs"), f"accounts[{index}].secret_refs", secret_ids),
             )
         )
+
+    accounts_by_provider: dict[str, list[AccountConfig]] = {}
+    for account in accounts:
+        accounts_by_provider.setdefault(account.provider_id, []).append(account)
+
+    def adapter_option(adapter: AdapterConfig, option: str) -> str | None:
+        try:
+            index = adapter.argv.index(option)
+        except ValueError:
+            return None
+        return adapter.argv[index + 1] if index + 1 < len(adapter.argv) else None
+
+    for provider_id, provider_accounts in accounts_by_provider.items():
+        provider = next(item for item in providers if item.id == provider_id)
+        if provider.account_mode == "single" and len(provider_accounts) != 1:
+            raise ConfigError(f"single-account provider {provider_id} requires exactly one configured account identity")
+        if len(provider_accounts) < 2:
+            continue
+        activation_domains: set[tuple[str | None, str | None, str | None]] = set()
+        for account in provider_accounts:
+            if not account.activation_adapter_id:
+                raise ConfigError(
+                    f"multi-account provider {provider_id} requires activation for every account"
+                )
+            adapter = adapter_by_id[account.activation_adapter_id]
+            verified = (
+                Path(adapter.argv[0]).name == "bonus-drain-account-activation"
+                and adapter_option(adapter, "--action") == "{action}"
+                and adapter_option(adapter, "--account") == "{account_id}"
+                and adapter_option(adapter, "--expected-account") == account.id
+                and adapter_option(adapter, "--pin-file") is not None
+                and adapter_option(adapter, "--active-path") is not None
+            )
+            if not verified:
+                raise ConfigError(
+                    f"multi-account provider {provider_id} account {account.id} requires a verified activation adapter with active-account proof"
+                )
+            activation_domains.add((
+                adapter_option(adapter, "--pin-file"),
+                adapter_option(adapter, "--active-path"),
+                adapter_option(adapter, "--rotate"),
+            ))
+        if len(activation_domains) != 1:
+            raise ConfigError(
+                f"multi-account provider {provider_id} activation adapters must share one PIN, active proof, and rotator domain"
+            )
+
+    direct_grok_providers: set[str] = set()
+    for account in accounts:
+        if not account.usage_adapter_id:
+            continue
+        adapter = adapter_by_id[account.usage_adapter_id]
+        if Path(adapter.argv[0]).name == "bonus-drain-grok-usage":
+            direct_grok_providers.add(account.provider_id)
+            nested_timeout = adapter_option(adapter, "--timeout")
+            try:
+                nested_seconds = float(nested_timeout) if nested_timeout is not None else None
+            except ValueError as exc:
+                raise ConfigError(f"direct Grok adapter {adapter.id} has an invalid nested timeout") from exc
+            if nested_seconds is None or nested_seconds >= adapter.timeout_seconds:
+                raise ConfigError(
+                    f"direct Grok adapter {adapter.id} nested timeout must be shorter than its outer adapter timeout"
+                )
+    for provider_id in direct_grok_providers:
+        provider = next(item for item in providers if item.id == provider_id)
+        if provider.account_mode != "single" or len(accounts_by_provider.get(provider_id, ())) != 1:
+            raise ConfigError(
+                f"direct Grok provider {provider_id} must declare single account mode and exactly one configured account identity"
+            )
 
     limits: list[LimitConfig] = []
     for index, row in enumerate(limit_rows):
@@ -602,7 +676,30 @@ def resolve_secret(ref: SecretRef, *, environ: Mapping[str, str] | None = None) 
             raise ConfigError(f"secret reference {ref.id} environment variable is unavailable")
         return value
     assert ref.path is not None
+    path = ref.path
     try:
-        return ref.path.read_text(encoding="utf-8").rstrip("\r\n")
-    except OSError as exc:
-        raise ConfigError(f"secret reference {ref.id} file is unavailable") from exc
+        metadata = path.lstat()
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ConfigError(f"secret reference {ref.id} path is a symlink, not a safe regular file")
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ConfigError(f"secret reference {ref.id} must be a regular file")
+            if metadata.st_uid != os.getuid():
+                raise ConfigError(f"secret reference {ref.id} file is not owned by the current user")
+            if stat.S_IMODE(metadata.st_mode) != 0o600:
+                raise ConfigError(f"secret reference {ref.id} file mode must be private 0600")
+            if metadata.st_size > 65_536:
+                raise ConfigError(f"secret reference {ref.id} file size exceeds 65536 bytes")
+            payload = os.read(descriptor, 65_537)
+        finally:
+            os.close(descriptor)
+        if len(payload) > 65_536:
+            raise ConfigError(f"secret reference {ref.id} file is too large")
+        return payload.decode("utf-8").rstrip("\r\n")
+    except ConfigError:
+        raise
+    except (OSError, UnicodeError) as exc:
+        raise ConfigError(f"secret reference {ref.id} file is unavailable or invalid") from exc

@@ -100,11 +100,17 @@ def normalize_snapshot(
                 )
         raise AdapterFailure("usage adapter returned a non-object")
 
-    provider_id = raw.get("provider_id", account.provider_id)
-    account_id = raw.get("account_id", account.id)
+    if "provider_id" not in raw:
+        raise AdapterFailure("usage adapter omitted provider_id")
+    if "account_id" not in raw:
+        raise AdapterFailure("usage adapter omitted account_id")
+    if "captured_at" not in raw:
+        raise AdapterFailure("usage adapter omitted captured_at")
+    provider_id = raw.get("provider_id")
+    account_id = raw.get("account_id")
     if provider_id != account.provider_id or account_id != account.id:
         raise AdapterFailure("usage adapter identity mismatch")
-    captured_at = _epoch(raw.get("captured_at", now_epoch), "captured_at")
+    captured_at = _epoch(raw.get("captured_at"), "captured_at")
     raw_limits = raw.get("limits")
     if not isinstance(raw_limits, Mapping):
         raise AdapterFailure("usage adapter omitted limits")

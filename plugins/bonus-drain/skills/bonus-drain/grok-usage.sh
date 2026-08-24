@@ -5,9 +5,32 @@ set -uo pipefail
 _GROK_USAGE_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=skills/bonus-drain/config.sh
 source "$_GROK_USAGE_HERE/config.sh"
-if [ -r "${BONUS_DRAIN_CONFIG:-}" ]; then
+direct_collect=0
+if [ "${1:-}" = "--direct-collect" ]; then
+  direct_collect=1
+  shift
+fi
+if [ "$direct_collect" -eq 0 ] && [ -r "${BONUS_DRAIN_CONFIG:-}" ]; then
+  provider=""
+  account=""
+  previous=""
+  for token in "$@"; do
+    case "$previous" in
+      provider) provider="$token" ;;
+      account) account="$token" ;;
+    esac
+    previous=""
+    case "$token" in
+      --provider) previous="provider" ;;
+      --account) previous="account" ;;
+    esac
+  done
+  if [ -z "$provider" ] || [ -z "$account" ]; then
+    echo "grok-usage.sh requires explicit --provider ID and --account ID" >&2
+    exit 2
+  fi
   exec "$BONUS_DRAIN_BIN" usage --config "$BONUS_DRAIN_CONFIG" \
-    --legacy-index "${BONUS_GROK_USAGE_LEGACY_INDEX:-2}" --legacy-json "$@"
+    --legacy-json "$@"
 fi
 
 log_path="${GROK_USAGE_LOG:-$HOME/.grok/logs/unified.jsonl}"
@@ -147,7 +170,9 @@ if [ -n "$access_token" ] && [ "$clock_valid" -eq 1 ]; then
           if jq -e 'has("creditUsagePercent")' <<<"$billing_config" >/dev/null 2>&1; then
             direct_percent="$(jq -c '.creditUsagePercent' <<<"$billing_config")"
           else
-            direct_percent=0
+            # Absence is unknown capacity, never proof of zero utilization. The normalizer
+            # rejects null and leaves the account fail-closed until the provider reports it.
+            direct_percent=null
           fi
           billing_valid=1
         fi

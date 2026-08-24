@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+"""Safely pin, rotate, verify, and release one configured account label."""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import os
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+class AdapterError(RuntimeError):
+    """Activation could not prove the requested account state."""
+
+
+_SAFE_ENV = {
+    "HOME", "LANG", "LC_ALL", "PATH", "SSL_CERT_DIR", "SSL_CERT_FILE", "TMPDIR",
+    "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME",
+}
+_LABEL_FILE_LIMIT = 4096
+
+
+def _validate_path(path: Path, label: str) -> Path:
+    path = path.expanduser()
+    if not path.is_absolute():
+        raise AdapterError(f"{label} must be an absolute path")
+    current = Path(path.anchor)
+    for index, component in enumerate(path.parts[1:]):
+        current /= component
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(metadata.st_mode):
+            raise AdapterError(f"{label} contains a symlink")
+        if index < len(path.parts[1:]) - 1 and not stat.S_ISDIR(metadata.st_mode):
+            raise AdapterError(f"{label} parent is not a directory")
+    return path
+
+
+def _ensure_parent(path: Path) -> None:
+    parent = _validate_path(path.parent, "pin parent")
+    current = Path(parent.anchor)
+    for component in parent.parts[1:]:
+        current /= component
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            try:
+                os.mkdir(current, 0o700)
+            except FileExistsError:
+                pass
+            metadata = current.lstat()
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+            raise AdapterError("pin parent became unsafe")
+
+
+def _open_regular(path: Path, *, write: bool = False) -> int:
+    flags = (os.O_RDWR if write else os.O_RDONLY) | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise AdapterError(f"cannot open safe label file: {exc}") from exc
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > _LABEL_FILE_LIMIT:
+        os.close(descriptor)
+        raise AdapterError("label file must be a bounded regular file")
+    return descriptor
+
+
+def _read_bytes(path: Path, label: str) -> bytes:
+    _validate_path(path, label)
+    descriptor = _open_regular(path)
+    try:
+        value = os.read(descriptor, _LABEL_FILE_LIMIT + 1)
+    finally:
+        os.close(descriptor)
+    if len(value) > _LABEL_FILE_LIMIT:
+        raise AdapterError(f"{label} exceeds {_LABEL_FILE_LIMIT} bytes")
+    return value
+
+
+def _read_label(path: Path, label: str) -> str:
+    try:
+        value = _read_bytes(path, label).decode("utf-8").strip()
+    except UnicodeError as exc:
+        raise AdapterError(f"{label} is not UTF-8") from exc
+    if not value or any(character in value for character in "\r\n\x00"):
+        raise AdapterError(f"{label} must contain one label")
+    return value
+
+
+def _atomic_write(path: Path, value: bytes) -> None:
+    _validate_path(path, "pin path")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            descriptor = -1
+            stream.write(value)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _validate_path(path, "pin path")
+        os.replace(temporary, path)
+        path.chmod(0o600)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _run_rotator(executable: Path, arguments: list[str], timeout: float) -> None:
+    executable = _validate_path(executable, "rotate executable")
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise AdapterError("rotate executable is missing, unsafe, or not executable")
+    child_env = {name: os.environ[name] for name in _SAFE_ENV if name in os.environ}
+    try:
+        process = subprocess.Popen(
+            [str(executable), *arguments],
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=child_env,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise AdapterError(f"rotate subprocess could not execute: {exc}") from exc
+    try:
+        return_code = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+        raise AdapterError("rotate subprocess timeout") from exc
+    if return_code != 0:
+        raise AdapterError(f"rotate subprocess exited {return_code}")
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--action", required=True, choices=("activate", "release"))
+    parser.add_argument("--account", required=True)
+    parser.add_argument("--expected-account", required=True)
+    parser.add_argument("--label", required=True)
+    parser.add_argument("--pin-file", required=True, type=Path)
+    parser.add_argument("--rotate", type=Path)
+    parser.add_argument("--rotate-arg", action="append", default=[])
+    parser.add_argument("--active-path", type=Path)
+    parser.add_argument("--timeout", type=float, default=30)
+    return parser
+
+
+def main() -> int:
+    args = _parser().parse_args()
+    if args.account != args.expected_account:
+        raise AdapterError("account identity mismatch")
+    if not args.label or args.label.strip() != args.label or any(
+        character in args.label for character in "\r\n\x00"
+    ):
+        raise AdapterError("label must be one non-empty line")
+    if args.timeout <= 0:
+        raise AdapterError("timeout must be positive")
+
+    pin = _validate_path(args.pin_file, "pin path")
+    if args.active_path is not None:
+        _validate_path(args.active_path, "active account path")
+    if args.rotate is not None:
+        _validate_path(args.rotate, "rotate executable")
+    _ensure_parent(pin)
+
+    lock_path = pin.parent / f".{pin.name}.lock"
+    lock_flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        lock_descriptor = os.open(lock_path, lock_flags, 0o600)
+    except OSError as exc:
+        raise AdapterError(f"cannot open activation lock: {exc}") from exc
+    try:
+        metadata = os.fstat(lock_descriptor)
+        if not stat.S_ISREG(metadata.st_mode):
+            raise AdapterError("activation lock is not a regular file")
+        os.fchmod(lock_descriptor, 0o600)
+        fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+        _validate_path(pin, "pin path")
+
+        if args.action == "release":
+            if not pin.exists():
+                return 0
+            if _read_label(pin, "pin path") != args.label:
+                raise AdapterError("refusing to release a pin owned by another label")
+            pin.unlink()
+            return 0
+
+        previous = _read_bytes(pin, "pin path") if pin.exists() else None
+        _atomic_write(pin, (args.label + "\n").encode("utf-8"))
+        try:
+            if args.rotate is not None:
+                _run_rotator(args.rotate, args.rotate_arg, args.timeout)
+            if args.active_path is not None and _read_label(
+                args.active_path, "active account path",
+            ) != args.label:
+                raise AdapterError("requested account did not become active")
+        except Exception:
+            if previous is None:
+                try:
+                    if pin.exists() and not pin.is_symlink():
+                        pin.unlink()
+                except OSError:
+                    pass
+            else:
+                _atomic_write(pin, previous)
+            raise
+        return 0
+    finally:
+        try:
+            fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_descriptor)
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except AdapterError as exc:
+        print(f"bonus-drain-account-activation: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc

@@ -2,6 +2,10 @@
 # Source-tree entrypoint; lifecycle.install writes an equivalent versioned stable wrapper.
 set -eu
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}"
-export PYTHONPATH
-exec python3 -m bonus_drain "$@"
+exec python3 -I -B -c '
+import runpy
+import sys
+runtime = sys.argv.pop(1)
+sys.path.insert(0, runtime)
+runpy.run_module("bonus_drain", run_name="__main__")
+' "$HERE" "$@"

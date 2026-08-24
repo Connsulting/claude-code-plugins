@@ -11,17 +11,22 @@ the router is queried with a dry run, Bonus Drain validates the result, then cla
 launches once with a concrete provider and account. Missing, malformed, resetless, or
 stale cache data closes only the affected account. Leaving work queued is expected.
 
+Scout reserves concrete compatible task IDs in nearest-reset order before dispatch. A task
+can occupy only one batch per tick, so a portable task consumed by an earlier reset cannot
+also consume a later provider slot, while exclusive work remains available to a provider
+with the required capability.
+
 ## Requirements
 
 - Python 3.10 or newer with the standard `sqlite3` module.
 - An executable `agent-router` configured as the dispatch adapter.
-- One executable usage adapter for each account. It may report reset timestamps with usage,
-  or the account may select a separate reset adapter. Adapters receive only validated argv,
-  an allowlisted environment, a timeout, and an output limit.
-- The shipped legacy Claude/Codex/Grok adapter examples are optional compatibility assets:
-  they require Bash, `jq`, `curl`, and GNU `date`, `find`, `sort`, `tail`, and `tac` where
-  their comments indicate. A generic installation may replace them with any executable
-  adapter that emits the documented JSON contract.
+- One executable usage adapter for each account. The shipped stdlib-only
+  `bonus-drain-account-usage` reads one explicitly named account snapshot and can map one or
+  more source windows to configured limit IDs. `bonus-drain-grok-usage` invokes the shipped
+  Grok collector in direct-collection mode and normalizes one configured weekly limit.
+- The optional Grok collector requires Bash, `jq`, `curl`, and GNU `date`/`tac`. The historical
+  shell wrappers remain compatibility assets, but configured calls require explicit provider
+  and account IDs; positional account selection is not supported by the standalone runtime.
 - Optional activation adapters for installations that switch among accounts.
 - `ai-token-rotator` is not required; when used, configure it as an activation adapter and
   let `doctor` report whether its executable is present.
@@ -66,7 +71,8 @@ The configuration graph is versioned and uses IDs for all relationships:
 
 - `adapters[]` declares argv arrays for `agent-router`, usage, optional separate reset,
   and optional activation adapters.
-- `providers[]` binds a provider ID to the router adapter and its router-facing name.
+- `providers[]` binds a provider ID to the router adapter and its router-facing name;
+  `account_mode: single` explicitly constrains providers backed by one global identity.
 - `plans[]`, `accounts[]`, and `limits[]` describe independent capacity windows.
 - `secret_refs[]` names externally injected values. Credential-shaped inline fields,
   shell interpolation, dangling references, duplicate IDs, and direct-provider dispatch
@@ -74,6 +80,48 @@ The configuration graph is versioned and uses IDs for all relationships:
 - `pr_exceptions[]` is the only place to grant repository-specific push behavior.
 - `viewer` defaults to loopback and no mutations. See [SECURITY.md](SECURITY.md) before
   enabling any remote mode.
+
+After installation, expand the operator home and replace every illustrative
+`/ABSOLUTE/PATH/TO` prefix in `config.example.json`. Adapter executables should use the
+stable `.../.local/lib/bonus-drain/current` path, never a marketplace cache path. The
+`agent-router` and account-store paths are host-owned dependencies and must also be absolute.
+
+The example shows four plans across three provider labels, account snapshots for personal
+and business plans, direct Grok collection, and optional rotator-backed activation. These
+labels are examples only. Add one usage adapter per account so its snapshot path, source
+label, source-window mapping, provider ID, account ID, and limit IDs are all literal or safe
+`{provider_id}`/`{account_id}` substitutions. The snapshot adapter requires a fresh
+`captured_at`, validates any embedded provider/account/source label, and emits all mapped
+limits atomically; omitted, null, stale, or mismatched data fails that account closed.
+
+Providers that are allowed to run migrated `claude_only` tasks or legacy-exclusive model
+rows must explicitly declare the reserved `legacy-exclusive` capability. The name is a
+compatibility semantic, not a provider identity: any configured provider may declare it.
+Explicit `allowed_providers` and `required_capabilities` continue to apply independently.
+
+The optional `bonus-drain-account-activation` adapter takes a literal expected account ID,
+rotator label, absolute PIN path, optional rotator executable, and optional active-label
+file. It atomically writes a mode-0600 pin, runs the rotator without a shell or inherited
+credential environment, verifies the active label when configured, rolls back a failed
+switch, and releases only its own matching label.
+
+Every account of a provider with more than one configured account must use the shipped,
+verified activation adapter form with a literal expected account and one shared PIN,
+active-label, and rotator domain. Dispatch claims acquire durable SQLite activation leases.
+Committed `activating` and `releasing` states bracket external PIN changes. Concurrent
+launches on one account share the proven activation; a different account is blocked until
+every holder is terminal. Ambiguous router outcomes retain both claim and lease. The last
+terminal record commits a `releasing` marker before removing the PIN and commits its terminal
+row afterward; an interruption leaves durable reconciliation evidence.
+
+Normalized usage always includes explicit `provider_id`, `account_id`, and `captured_at`.
+The shipped direct Grok collector is bound to one configured account adapter. If Grok omits
+its utilization percentage, capacity stays unknown and the account closes; omission is never
+converted to zero usage.
+
+File-backed secret references must be current-user-owned, non-symlink regular files with
+mode `0600` and size at most 65536 bytes. `doctor` validates those properties without printing
+the value. Activation adapters do not inherit account usage-secret bindings.
 
 Do not put a credential value in JSON, a unit file, an argv, or a repository. Supply the
 named external secret to the service environment or credential manager at runtime. Config
@@ -140,6 +188,20 @@ Provider adapter integration should use fixture executables and a disposable DB/
 Proof must include a failed sibling refresh retaining its last good cache, a stale account
 closing independently, one atomic claim under a race, and no adapter call from a viewer or
 scout request path.
+
+The normalized usage adapter contract is:
+
+```json
+{"provider_id":"provider-a","account_id":"account-a","captured_at":1800000000,"limits":{"plan-a-weekly":{"used_percent":42.5,"resets_at":1800007200}}}
+```
+
+Every limit configured for the account plan must be present in one coherent response. The
+refresh service is the only intended caller; viewer requests never execute these adapters.
+
+The source and installed wrappers start Python in isolated mode, insert only their owned
+runtime path, and ignore caller `PYTHONPATH` and cwd packages. Collector and rotator timeouts
+terminate their isolated process groups so descendants cannot survive a failed refresh or
+activation.
 
 ## Migration and removal
 

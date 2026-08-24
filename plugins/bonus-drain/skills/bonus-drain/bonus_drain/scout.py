@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -71,31 +71,117 @@ def run_once(
     queue.initialize()
     snapshots = read_all(config, cache_root, now_epoch=now)
     anchor = _cycle_anchor(config, snapshots, now)
-    eligible = queue.count_eligible(anchor)
-    plan = build_plan(config, snapshots, eligible_count=eligible, now_epoch=now)
+    availability: dict[tuple[str, str], int] = {}
+    for account in config.accounts:
+        provider = config.provider(account.provider_id)
+        availability[(account.provider_id, account.id)] = queue.count_eligible(
+            anchor,
+            provider_id=provider.id,
+            capabilities=provider.capabilities,
+        )
+    plan = build_plan(config, snapshots, eligible_count=availability, now_epoch=now)
     dispatched: list[DispatchResult] = []
     previews: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
-    previewed: set[str] = set()
+    allocations: dict[tuple[str, str], list[Any]] = {}
+
+    # Build a capacity-expanded bipartite graph and find an augmenting-path matching. Processing
+    # tasks in queue order preserves priority, while reassignment prevents a flexible task from
+    # occupying the only slot capable of running constrained work. Batch slots remain ordered by
+    # reset, so dispatch still runs nearest-reset-first after identities are reserved globally.
+    task_by_id: dict[str, Any] = {}
+    task_order: list[str] = []
+    task_slots: dict[str, list[int]] = {}
+    slots: list[int] = []
+    slot_batch: dict[int, int] = {}
+    for batch_index, batch in enumerate(plan.batches):
+        provider = config.provider(batch.provider_id)
+        candidates = list(queue.eligible_tasks(
+            batch.resets_at,
+            provider_id=provider.id,
+            capabilities=provider.capabilities,
+        ))
+        batch_slots: list[int] = []
+        for _index in range(batch.batch_size):
+            slot = len(slots)
+            slots.append(slot)
+            slot_batch[slot] = batch_index
+            batch_slots.append(slot)
+        for task in candidates:
+            if task.id not in task_by_id:
+                task_by_id[task.id] = task
+                task_order.append(task.id)
+            task_slots.setdefault(task.id, []).extend(batch_slots)
+
+    slot_task: dict[int, str] = {}
+
+    def augment(task_id: str, seen_slots: set[int], seen_tasks: set[str]) -> bool:
+        if task_id in seen_tasks:
+            return False
+        seen_tasks.add(task_id)
+        for slot in task_slots.get(task_id, ()):
+            if slot in seen_slots:
+                continue
+            seen_slots.add(slot)
+            incumbent = slot_task.get(slot)
+            if incumbent is None or augment(incumbent, seen_slots, seen_tasks):
+                slot_task[slot] = task_id
+                return True
+        return False
+
+    for task_id in task_order:
+        augment(task_id, set(), set())
+
+    for batch_index, batch in enumerate(plan.batches):
+        selected = [
+            task_by_id[slot_task[slot]]
+            for slot in slots
+            if slot_batch[slot] == batch_index and slot in slot_task
+        ]
+        allocations[(batch.provider_id, batch.account_id)] = selected
+
+    adjusted_batches = tuple(
+        replace(
+            batch,
+            batch_size=len(allocations[(batch.provider_id, batch.account_id)]),
+        )
+        for batch in plan.batches
+        if allocations[(batch.provider_id, batch.account_id)]
+    )
+    adjusted_by_account = {
+        (batch.provider_id, batch.account_id): batch for batch in adjusted_batches
+    }
+    adjusted_closed = dict(plan.closed)
+    adjusted_gates = []
+    for gate in plan.gates:
+        key = (gate.provider_id, gate.account_id)
+        adjusted = adjusted_by_account.get(key)
+        if gate.open and adjusted is None:
+            adjusted_closed[key] = "no compatible unallocated tasks remain"
+            adjusted_gates.append(replace(
+                gate, open=False, reason=adjusted_closed[key], batch_size=0,
+            ))
+        elif adjusted is not None:
+            adjusted_gates.append(replace(gate, batch_size=adjusted.batch_size))
+        else:
+            adjusted_gates.append(gate)
+    plan = PlanResult(
+        adjusted_batches,
+        adjusted_closed,
+        tuple(adjusted_gates),
+        plan.generated_at,
+    )
 
     for batch in plan.batches:  # already nearest-reset-first
-        provider = config.provider(batch.provider_id)
-        cycle = batch.resets_at
-        tasks = queue.eligible_tasks(
-            cycle, provider_id=provider.id, capabilities=provider.capabilities,
-            limit=batch.batch_size,
-        )
+        tasks = allocations[(batch.provider_id, batch.account_id)]
         if dry_run:
             for task in tasks:
-                if task.id in previewed:
-                    continue
                 previews.append({
                     "task_id": task.id,
                     "provider_id": batch.provider_id,
                     "account_id": batch.account_id,
                     "eligibility_key": batch.eligibility_key,
                 })
-                previewed.add(task.id)
             continue
         for task in tasks:
             try:
@@ -107,8 +193,9 @@ def run_once(
                 ))
             except AmbiguousDispatch as exc:
                 errors.append({"task_id": task.id, "kind": "ambiguous", "message": str(exc)})
-                # The activation has been released but the task remains claimed. Continue with
-                # unrelated tasks/accounts; doctor will require explicit reconciliation.
+                # The claim and durable activation lease remain fail-closed because the job may
+                # exist. Continue with compatible work on the same account only; doctor requires
+                # explicit reconciliation before an account switch.
             except Exception as exc:
                 errors.append({"task_id": task.id, "kind": "failed", "message": str(exc)})
 

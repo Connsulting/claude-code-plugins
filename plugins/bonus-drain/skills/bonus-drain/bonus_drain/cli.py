@@ -172,9 +172,6 @@ def _account_records(cfg: config_module.RuntimeConfig, args: argparse.Namespace)
         if getattr(args, "account", None) and account.id != args.account:
             continue
         result.append(records[(account.provider_id, account.id)])
-    legacy_index = getattr(args, "legacy_index", None)
-    if legacy_index is not None and not getattr(args, "provider", None) and not getattr(args, "account", None):
-        return result[legacy_index:legacy_index + 1]
     return result
 
 
@@ -219,14 +216,27 @@ def _command(args: argparse.Namespace) -> int:
         _json([task.legacy_contract_dict() for task in queue.contract_tasks(args.id, args.title)])
         return 0
     if command == "record":
-        _cfg, queue = _queue(args)
+        cfg, queue = _queue(args)
         if args.eligibility_key is None and args.cycle is None:
             raise CLIError("record requires --eligibility-key or --cycle")
         key = args.eligibility_key or f"legacy/{args.cycle}"
+        claim = queue.claim_for(args.task, key)
+        account_id = args.account_id or (claim.account_id if claim else None)
+        release_activation = None
+        if args.status in db.TERMINAL_STATUSES and account_id:
+            try:
+                account = cfg.account(account_id)
+            except config_module.ConfigError:
+                account = None
+            if account is not None and account.activation_adapter_id:
+                release_activation = lambda: dispatcher._activation(
+                    cfg, account, "release", None,
+                )
         event = queue.record(
             args.task, key, status=args.status, provider_id=args.provider_id or args.engine,
-            account_id=args.account_id, kind=args.kind, cycle=args.cycle, ts=args.ts,
+            account_id=account_id, kind=args.kind, cycle=args.cycle, ts=args.ts,
             branch=args.branch, summary=args.summary, router_job_id=args.router_job_id,
+            release_activation=release_activation,
         )
         _json({"run": event.to_dict()}) if args.json else print(f"recorded: {args.task} {args.status}")
         return 0
@@ -551,7 +561,7 @@ def build_parser() -> argparse.ArgumentParser:
         item = sub.add_parser(name); _add_common(item); _add_json(item); item.add_argument("--now", type=int)
     usage_parser = sub.add_parser("usage"); _add_common(usage_parser, database=False); _add_json(usage_parser)
     usage_parser.add_argument("--provider"); usage_parser.add_argument("--account"); usage_parser.add_argument("--now", type=int)
-    usage_parser.add_argument("--legacy-index", type=int); usage_parser.add_argument("--legacy-line", action="store_true"); usage_parser.add_argument("--legacy-json", action="store_true")
+    usage_parser.add_argument("--legacy-line", action="store_true"); usage_parser.add_argument("--legacy-json", action="store_true")
     refresh = sub.add_parser("refresh"); _add_common(refresh, database=False); _add_json(refresh); refresh.add_argument("--now", type=int)
     scout_parser = sub.add_parser("scout"); _add_common(scout_parser); _add_json(scout_parser); scout_parser.add_argument("--now", type=int); scout_parser.add_argument("--dry-run", action="store_true")
 

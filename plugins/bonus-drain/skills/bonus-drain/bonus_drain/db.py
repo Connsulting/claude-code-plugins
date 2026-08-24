@@ -6,11 +6,12 @@ import json
 import os
 import re
 import sqlite3
+import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping
 
 
 class QueueError(RuntimeError):
@@ -19,6 +20,7 @@ class QueueError(RuntimeError):
 
 VALID_STATUSES = frozenset({"dispatched", "done", "skipped", "failed"})
 TERMINAL_STATUSES = frozenset({"done", "skipped", "failed"})
+LEGACY_EXCLUSIVE_CAPABILITY = "legacy-exclusive"
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
@@ -65,12 +67,18 @@ def _json_tuple(value: Any) -> tuple[str, ...]:
     return tuple(str(item) for item in parsed)
 
 
-def _legacy_exclusive_model(model: str | None) -> bool:
+def legacy_exclusive_model(model: str | None) -> bool:
     """Compatibility classification; the generic planner never calls this helper."""
 
     if not model:
         return False
     return model.startswith("claude-") or model in {"opus", "sonnet", "haiku", "fable"} or "[1m]" in model
+
+
+def task_requires_legacy_exclusive(task: "Task") -> bool:
+    """Return whether a migrated compatibility row needs the reserved capability."""
+
+    return task.claude_only or legacy_exclusive_model(task.model)
 
 
 @dataclass(frozen=True)
@@ -168,6 +176,19 @@ class Claim:
 
 
 @dataclass(frozen=True)
+class ActivationLease:
+    task_id: str
+    eligibility_key: str
+    provider_id: str
+    account_id: str
+    state: str
+    acquired_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class DoctorReport:
     ok: bool
     reconciliation_required: tuple[str, ...]
@@ -258,12 +279,25 @@ class QueueDB:
               PRIMARY KEY(task_id, eligibility_key),
               FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS activation_leases (
+              task_id TEXT NOT NULL,
+              eligibility_key TEXT NOT NULL,
+              provider_id TEXT NOT NULL,
+              account_id TEXT NOT NULL,
+              state TEXT NOT NULL CHECK (state IN ('activating','active','releasing')),
+              acquired_at TEXT NOT NULL,
+              PRIMARY KEY(task_id, eligibility_key),
+              FOREIGN KEY(task_id, eligibility_key)
+                REFERENCES dispatch_claims(task_id, eligibility_key) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS schema_migrations (
               version INTEGER PRIMARY KEY,
               applied_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_runs_eligibility ON runs(task, eligibility_key);
             CREATE INDEX IF NOT EXISTS idx_claims_task ON dispatch_claims(task_id);
+            CREATE INDEX IF NOT EXISTS idx_activation_provider_account
+              ON activation_leases(provider_id, account_id);
             """
         )
 
@@ -366,9 +400,13 @@ class QueueDB:
 
     @staticmethod
     def _provider_compatible(task: Task, provider_id: str | None, capabilities: Iterable[str] = ()) -> bool:
+        capability_set = set(capabilities)
         if provider_id and task.allowed_providers and provider_id not in task.allowed_providers:
             return False
-        return set(task.required_capabilities).issubset(set(capabilities))
+        if provider_id and task_requires_legacy_exclusive(task):
+            if LEGACY_EXCLUSIVE_CAPABILITY not in capability_set:
+                return False
+        return set(task.required_capabilities).issubset(capability_set)
 
     @staticmethod
     def _eligible_in_connection(connection: sqlite3.Connection, task: Task, cycle: int) -> bool:
@@ -404,7 +442,7 @@ class QueueDB:
                 task = self._task_from_row(row)
                 if task_id and task.id != task_id:
                     continue
-                exclusive = task.claude_only or _legacy_exclusive_model(task.model)
+                exclusive = task_requires_legacy_exclusive(task)
                 if portable_only and exclusive:
                     continue
                 if exclusive_only and not exclusive:
@@ -415,7 +453,7 @@ class QueueDB:
                     candidates.append(task)
         if claude_priority:
             candidates.sort(key=lambda task: (
-                not (task.claude_only or _legacy_exclusive_model(task.model)), task.priority,
+                not task_requires_legacy_exclusive(task), task.priority,
                 task.kind == "recurring", task.created_at, task.id,
             ))
         else:
@@ -453,10 +491,97 @@ class QueueDB:
         except sqlite3.IntegrityError:
             return False
 
+    def acquire_activation(
+        self,
+        task_id: str,
+        eligibility_key: str,
+        provider_id: str,
+        account_id: str,
+        activate: Callable[[], None],
+    ) -> bool:
+        """Acquire one durable claim-scoped activation lease with a two-phase transition."""
+
+        self.initialize()
+        deadline = time.monotonic() + self.timeout_seconds
+        while True:
+            wait_for_activation = False
+            try:
+                with self._transaction() as connection:
+                    claim = connection.execute(
+                        """SELECT provider_id,account_id FROM dispatch_claims
+                             WHERE task_id=? AND eligibility_key=?""",
+                        (task_id, eligibility_key),
+                    ).fetchone()
+                    if claim is None or claim["provider_id"] != provider_id or claim["account_id"] != account_id:
+                        raise QueueError("activation lease requires the matching dispatch claim")
+                    existing = connection.execute(
+                        """SELECT account_id,state FROM activation_leases
+                             WHERE provider_id=? ORDER BY acquired_at,task_id""",
+                        (provider_id,),
+                    ).fetchall()
+                    if any(row["account_id"] != account_id for row in existing):
+                        raise QueueError(
+                            f"provider {provider_id} is leased to a different account"
+                        )
+                    if any(row["state"] != "active" for row in existing):
+                        # A same-account peer may be completing the committed activating phase.
+                        # Wait briefly for it rather than failing a concurrent compatible launch.
+                        wait_for_activation = all(row["state"] == "activating" for row in existing)
+                        if not wait_for_activation:
+                            raise QueueError(f"provider {provider_id} activation is incomplete")
+                    else:
+                        state = "active" if existing else "activating"
+                        connection.execute(
+                            """INSERT INTO activation_leases(
+                                 task_id,eligibility_key,provider_id,account_id,state,acquired_at
+                               ) VALUES(?,?,?,?,?,?)""",
+                            (task_id, eligibility_key, provider_id, account_id, state, utc_now()),
+                        )
+                        needs_activation = not existing
+            except sqlite3.IntegrityError as exc:
+                raise QueueError("activation lease already exists") from exc
+            if not wait_for_activation:
+                break
+            if time.monotonic() >= deadline:
+                raise QueueError(f"provider {provider_id} activation is incomplete")
+            time.sleep(0.02)
+        if not needs_activation:
+            return False
+
+        # The incomplete state commits before the external effect. A crash, adapter failure, or
+        # later DB failure therefore leaves durable evidence that blocks all provider dispatches
+        # until an operator reconciles the account state.
+        activate()
+        with self._transaction() as connection:
+            cursor = connection.execute(
+                """UPDATE activation_leases SET state='active'
+                     WHERE task_id=? AND eligibility_key=? AND state='activating'""",
+                (task_id, eligibility_key),
+            )
+            if cursor.rowcount != 1:
+                raise QueueError("activation transition requires reconciliation")
+        return True
+
+    def activation_leases(self, *, provider_id: str | None = None) -> list[ActivationLease]:
+        self.initialize()
+        where = "" if provider_id is None else " WHERE provider_id=?"
+        parameters: tuple[Any, ...] = () if provider_id is None else (provider_id,)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM activation_leases{where} ORDER BY acquired_at,task_id",
+                parameters,
+            ).fetchall()
+        return [ActivationLease(**dict(row)) for row in rows]
+
     def release_claim(self, task_id: str, eligibility_key: str, *, reason: str | None = None) -> bool:
         del reason
         self.initialize()
         with self._transaction() as connection:
+            if connection.execute(
+                "SELECT 1 FROM activation_leases WHERE task_id=? AND eligibility_key=?",
+                (task_id, eligibility_key),
+            ).fetchone():
+                raise QueueError("cannot release a claim while its activation lease is held")
             cursor = connection.execute(
                 "DELETE FROM dispatch_claims WHERE task_id=? AND eligibility_key=?", (task_id, eligibility_key),
             )
@@ -500,6 +625,7 @@ class QueueDB:
         cycle: int | None = None, ts: str | None = None, branch: str | None = None,
         summary: str | None = None, router_job_id: str | None = None,
         timestamp: str | None = None,
+        release_activation: Callable[[], None] | None = None,
     ) -> RunEvent:
         if status not in VALID_STATUSES:
             raise QueueError(f"invalid run status: {status}")
@@ -507,35 +633,99 @@ class QueueDB:
             raise QueueError("run provider_id must be concrete, never auto")
         self.initialize()
         resolved_cycle = int(cycle if cycle is not None else cycle_from_key(eligibility_key))
-        with self._transaction() as connection:
+        resolved_kind: str | None = None
+        needs_release = False
+
+        def resolve(connection: sqlite3.Connection) -> None:
+            nonlocal resolved_kind, provider_id, account_id
             task_row = connection.execute("SELECT kind FROM tasks WHERE id=?", (task_id,)).fetchone()
             resolved_kind = kind or (task_row["kind"] if task_row else None)
             if resolved_kind not in {"oneoff", "recurring"}:
                 raise QueueError("record kind must be oneoff or recurring")
-            if provider_id is None and eligibility_key:
+            if eligibility_key:
                 claim_row = connection.execute(
-                    "SELECT provider_id,account_id FROM dispatch_claims WHERE task_id=? AND eligibility_key=?",
+                    """SELECT provider_id,account_id FROM dispatch_claims
+                         WHERE task_id=? AND eligibility_key=?""",
                     (task_id, eligibility_key),
                 ).fetchone()
-                if claim_row:
+                if provider_id is None and claim_row:
                     provider_id = claim_row["provider_id"]
                     account_id = account_id or claim_row["account_id"]
+
+        def finalize(connection: sqlite3.Connection, *, lease_state: str | None = None) -> sqlite3.Row:
+            if lease_state is not None:
+                cursor = connection.execute(
+                    """DELETE FROM activation_leases
+                         WHERE task_id=? AND eligibility_key=? AND state=?""",
+                    (task_id, eligibility_key, lease_state),
+                )
+                if cursor.rowcount != 1:
+                    raise QueueError("activation release transition requires reconciliation")
             cursor = connection.execute(
-                """INSERT INTO runs(
-                     task,kind,cycle,eligibility_key,status,ts,branch,summary,engine,
-                     provider_id,account_id,router_job_id
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (task_id, resolved_kind, resolved_cycle, eligibility_key, status, ts or timestamp or utc_now(),
-                 branch, summary, provider_id, provider_id, account_id, router_job_id),
-            )
+                    """INSERT INTO runs(
+                         task,kind,cycle,eligibility_key,status,ts,branch,summary,engine,
+                         provider_id,account_id,router_job_id
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (task_id, resolved_kind, resolved_cycle, eligibility_key, status, ts or timestamp or utc_now(),
+                     branch, summary, provider_id, provider_id, account_id, router_job_id),
+                )
             if status in TERMINAL_STATUSES:
                 if eligibility_key is None:
+                    if connection.execute(
+                        "SELECT 1 FROM activation_leases WHERE task_id=?", (task_id,),
+                    ).fetchone():
+                        raise QueueError("terminal lease release requires an eligibility key")
                     connection.execute("DELETE FROM dispatch_claims WHERE task_id=?", (task_id,))
                 else:
                     connection.execute(
                         "DELETE FROM dispatch_claims WHERE task_id=? AND eligibility_key=?", (task_id, eligibility_key),
                     )
-            row = connection.execute("SELECT * FROM runs WHERE rowid_pk=?", (cursor.lastrowid,)).fetchone()
+            result = connection.execute("SELECT * FROM runs WHERE rowid_pk=?", (cursor.lastrowid,)).fetchone()
+            assert result is not None
+            return result
+
+        with self._transaction() as connection:
+            resolve(connection)
+            lease = None
+            if status in TERMINAL_STATUSES and eligibility_key:
+                lease = connection.execute(
+                    """SELECT provider_id,account_id,state FROM activation_leases
+                         WHERE task_id=? AND eligibility_key=?""",
+                    (task_id, eligibility_key),
+                ).fetchone()
+            if lease:
+                holders = int(connection.execute(
+                    """SELECT COUNT(*) FROM activation_leases
+                         WHERE provider_id=? AND account_id=?""",
+                    (lease["provider_id"], lease["account_id"]),
+                ).fetchone()[0])
+                if holders == 1:
+                    if release_activation is None:
+                        raise QueueError("last activation lease requires a verified release callback")
+                    if lease["state"] != "active":
+                        raise QueueError("incomplete activation lease requires reconciliation")
+                    cursor = connection.execute(
+                        """UPDATE activation_leases SET state='releasing'
+                             WHERE task_id=? AND eligibility_key=? AND state='active'""",
+                        (task_id, eligibility_key),
+                    )
+                    if cursor.rowcount != 1:
+                        raise QueueError("activation release transition requires reconciliation")
+                    needs_release = True
+                    row = None
+                else:
+                    if lease["state"] != "active":
+                        raise QueueError("incomplete activation lease requires reconciliation")
+                    row = finalize(connection, lease_state="active")
+            else:
+                row = finalize(connection)
+
+        if needs_release:
+            assert release_activation is not None
+            release_activation()
+            with self._transaction() as connection:
+                resolve(connection)
+                row = finalize(connection, lease_state="releasing")
         assert row is not None
         return self._run_from_row(row)
 
@@ -646,6 +836,7 @@ class QueueDB:
             "database": str(self.path), "cycle": int(cycle),
             "tasks": [task.to_dict() for task in self.tasks()],
             "claims": [claim.to_dict() for claim in self.claims()],
+            "activation_leases": [lease.to_dict() for lease in self.activation_leases()],
             "runs": [event.to_dict() for event in self.runs(limit=run_limit)],
         }
 
@@ -656,7 +847,22 @@ def doctor(queue: QueueDB) -> DoctorReport:
     try:
         queue.initialize()
         ambiguous = tuple(claim.task_id for claim in queue.claims(state="ambiguous"))
+        leases = queue.activation_leases()
+        dispatched = {
+            (event.task, event.eligibility_key)
+            for event in queue.runs()
+            if event.status == "dispatched" and event.eligibility_key is not None
+        }
+        incomplete = tuple(lease.task_id for lease in leases if lease.state != "active")
+        active_orphan = tuple(
+            lease.task_id for lease in leases
+            if lease.state == "active"
+            and (lease.task_id, lease.eligibility_key) not in dispatched
+        )
     except (OSError, sqlite3.Error, QueueError) as exc:
         return DoctorReport(False, (), (f"database unavailable: {exc}",))
-    diagnostics = ("ambiguous router outcomes require explicit reconciliation",) if ambiguous else ()
-    return DoctorReport(not ambiguous, ambiguous, diagnostics)
+    reconciliation = tuple(dict.fromkeys((*ambiguous, *incomplete, *active_orphan)))
+    diagnostics = (
+        "ambiguous router outcomes or incomplete activation transitions require explicit reconciliation",
+    ) if reconciliation else ()
+    return DoctorReport(not reconciliation, reconciliation, diagnostics)

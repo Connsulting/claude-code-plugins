@@ -127,7 +127,8 @@
             "provider": {"type": "string", "minLength": 1}
           }
         },
-        "capabilities": {"type": "array", "items": {"$ref": "#/$defs/id"}}
+        "capabilities": {"type": "array", "items": {"$ref": "#/$defs/id"}},
+        "account_mode": {"type": "string", "enum": ["single", "multi"], "default": "multi"}
       }
     },
     "plan": {

@@ -5,8 +5,11 @@ from __future__ import annotations
 import json
 import os
 import re
+import selectors
+import signal
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -16,6 +19,76 @@ from .config import AdapterConfig, RuntimeConfig
 
 class AdapterError(RuntimeError):
     """Adapter execution failed with a redacted diagnostic."""
+
+
+class ProcessOutputLimit(RuntimeError):
+    """A child exceeded its configured output budget and was terminated."""
+
+
+def run_bounded_process(
+    argv: list[str], *, timeout: float, max_output_bytes: int,
+    env: Mapping[str, str],
+) -> subprocess.CompletedProcess[bytes]:
+    """Run one process group with streaming output caps and deterministic teardown."""
+
+    process = subprocess.Popen(
+        argv, shell=False, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=dict(env), start_new_session=True,
+    )
+    assert process.stdout is not None and process.stderr is not None
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+    buffers: dict[str, bytearray] = {"stdout": bytearray(), "stderr": bytearray()}
+    deadline = time.monotonic() + timeout
+
+    def terminate_group() -> None:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                terminate_group()
+                raise subprocess.TimeoutExpired(argv, timeout)
+            events = selector.select(remaining)
+            if not events:
+                continue
+            for key, _mask in events:
+                chunk = os.read(key.fileobj.fileno(), 65_536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                buffer = buffers[key.data]
+                buffer.extend(chunk)
+                if len(buffer) > max_output_bytes:
+                    terminate_group()
+                    raise ProcessOutputLimit(
+                        f"process output exceeded {max_output_bytes} bytes"
+                    )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            terminate_group()
+            raise subprocess.TimeoutExpired(argv, timeout)
+        try:
+            returncode = process.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            terminate_group()
+            raise subprocess.TimeoutExpired(argv, timeout) from None
+        return subprocess.CompletedProcess(
+            argv, returncode, bytes(buffers["stdout"]), bytes(buffers["stderr"]),
+        )
+    finally:
+        selector.close()
+        if process.poll() is None:
+            terminate_group()
+        process.stdout.close()
+        process.stderr.close()
 
 
 _SAFE_BASE_ENV = {
@@ -51,7 +124,7 @@ def _secrets(
     refs = {ref.id: ref for ref in config.secret_refs}
     bindings = dict(adapter.secret_refs)
     account_id = variables.get("account_id")
-    if account_id:
+    if account_id and adapter.kind in {"usage", "reset"}:
         try:
             account = config.account(account_id)
         except config_module.ConfigError:
@@ -123,23 +196,16 @@ def execute_adapter(
                 raise AdapterError(f"adapter {adapter.id} has an unresolved argv placeholder")
             argv.append(value)
         try:
-            completed = subprocess.run(
-                argv,
-                shell=False,
-                check=False,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=adapter.timeout_seconds,
-                env=child_env,
+            completed = run_bounded_process(
+                argv, timeout=adapter.timeout_seconds,
+                max_output_bytes=adapter.max_output_bytes, env=child_env,
             )
         except subprocess.TimeoutExpired as exc:
             raise AdapterError(f"adapter {adapter.id} exceeded {adapter.timeout_seconds:g}s timeout") from exc
+        except ProcessOutputLimit as exc:
+            raise AdapterError(f"adapter {adapter.id} output exceeded {adapter.max_output_bytes} bytes") from exc
         except OSError as exc:
             raise AdapterError(f"adapter {adapter.id} could not execute: {exc}") from exc
-
-        if len(completed.stdout) > adapter.max_output_bytes or len(completed.stderr) > adapter.max_output_bytes:
-            raise AdapterError(f"adapter {adapter.id} output exceeded {adapter.max_output_bytes} bytes")
         stdout = completed.stdout.decode("utf-8", errors="replace")
         stderr = completed.stderr.decode("utf-8", errors="replace")
         secrets = list(secret_values.values())

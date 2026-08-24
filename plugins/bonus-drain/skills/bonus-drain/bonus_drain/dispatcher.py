@@ -16,7 +16,14 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .config import AccountConfig, AdapterConfig, ConfigError, ProviderConfig, RuntimeConfig
-from .db import QueueDB, QueueError, Task, cycle_from_key
+from .db import (
+    LEGACY_EXCLUSIVE_CAPABILITY,
+    QueueDB,
+    QueueError,
+    Task,
+    cycle_from_key,
+    task_requires_legacy_exclusive,
+)
 
 
 class DispatchError(RuntimeError):
@@ -37,6 +44,10 @@ class KnownDispatchFailure(DispatchError):
 
 class AmbiguousDispatch(DispatchError):
     """The router response cannot prove whether a launch occurred."""
+
+
+class ActivationUnavailable(DispatchError):
+    """Another durable account lease currently owns this provider."""
 
 
 _MCP_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -66,6 +77,9 @@ class DispatchResult:
 
 def provider_compatible(task: Task, provider: ProviderConfig) -> bool:
     if task.allowed_providers and provider.id not in task.allowed_providers:
+        return False
+    if task_requires_legacy_exclusive(task) and \
+       LEGACY_EXCLUSIVE_CAPABILITY not in provider.capabilities:
         return False
     return set(task.required_capabilities).issubset(provider.capabilities)
 
@@ -397,16 +411,22 @@ def _subprocess_call(
     adapter: AdapterConfig,
     **_kwargs: Any,
 ) -> Mapping[str, Any]:
+    from .adapters import ProcessOutputLimit, run_bounded_process
+
     try:
-        completed = subprocess.run(
-            list(argv), shell=False, check=False, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
-            timeout=adapter.timeout_seconds, env=_safe_environment(adapter),
+        completed = run_bounded_process(
+            list(argv), timeout=adapter.timeout_seconds,
+            max_output_bytes=adapter.max_output_bytes,
+            env=_safe_environment(adapter),
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except subprocess.TimeoutExpired as exc:
+        raise AmbiguousDispatch(
+            f"agent-router timed out after {adapter.timeout_seconds:g}s; launch state is unknown"
+        ) from exc
+    except ProcessOutputLimit as exc:
+        raise AmbiguousDispatch("agent-router output exceeded configured limit; launch state is unknown") from exc
+    except OSError as exc:
         raise KnownDispatchFailure(str(exc)) from exc
-    if len(completed.stdout) > adapter.max_output_bytes or len(completed.stderr) > adapter.max_output_bytes:
-        raise KnownDispatchFailure("agent-router output exceeded configured limit")
     stdout = completed.stdout.decode("utf-8", errors="replace")
     stderr = completed.stderr.decode("utf-8", errors="replace")
     if completed.returncode != 0:
@@ -542,9 +562,44 @@ def dispatch(
         raise AlreadyClaimed(f"task is no longer eligible: {task.id}")
 
     activated = False
+    lease_managed = bool(
+        account is not None
+        and account.activation_adapter_id is not None
+        and activation_call is None
+    )
+
+    def release_lease() -> None:
+        _activation(config, account, "release", None)
+
     try:
-        _activation(config, account, "activate", activation_call)
-        activated = account is not None and (activation_call is not None or account.activation_adapter_id is not None)
+        if lease_managed:
+            assert account is not None
+            try:
+                queue.acquire_activation(
+                    task.id,
+                    eligibility_key,
+                    provider.id,
+                    account.id,
+                    lambda: _activation(config, account, "activate", None),
+                )
+            except Exception as exc:
+                incomplete = any(
+                    lease.task_id == task.id and lease.eligibility_key == eligibility_key
+                    for lease in queue.activation_leases(provider_id=provider.id)
+                )
+                if incomplete:
+                    queue.mark_ambiguous(
+                        task.id, eligibility_key,
+                        detail=f"account activation requires reconciliation: {str(exc)[:500]}",
+                    )
+                    raise AmbiguousDispatch(
+                        "account activation outcome is incomplete and requires reconciliation"
+                    ) from exc
+                raise ActivationUnavailable(str(exc)) from exc
+            activated = True
+        else:
+            _activation(config, account, "activate", activation_call)
+            activated = account is not None and activation_call is not None
         prompt = render_prompt(config, task, eligibility_key, provider.id, account_id)
         adapter = config.adapter(provider.dispatch.adapter_id)
         launch_argv = list(adapter.argv) + [
@@ -574,14 +629,20 @@ def dispatch(
         claim = queue.claim_for(task.id, eligibility_key)
         if claim is not None and claim.state == "claimed":
             queue.mark_ambiguous(task.id, eligibility_key, detail=str(exc))
-        if activated or activation_call is not None:
+        # Runtime adapter leases remain durable after an ambiguous launch: the task stays
+        # non-dispatchable and the active account cannot be switched out from under a job that
+        # may exist. Injected test/operator callbacks retain their historical eager release.
+        if activation_call is not None and activated:
             try:
                 _activation(config, account, "release", activation_call)
             except DispatchError:
                 pass
         raise
+    except ActivationUnavailable:
+        queue.release_claim(task.id, eligibility_key, reason="activation unavailable")
+        raise
     except (KnownDispatchFailure, DispatchError, OSError, subprocess.SubprocessError) as exc:
-        if activated or activation_call is not None:
+        if activation_call is not None and activated:
             try:
                 _activation(config, account, "release", activation_call)
             except DispatchError:
@@ -590,14 +651,18 @@ def dispatch(
             queue.record(
                 task.id, eligibility_key, status="failed", provider_id=provider.id,
                 account_id=account_id, summary=f"known launch failure: {str(exc)[:500]}",
+                release_activation=release_lease if lease_managed else None,
             )
         except Exception:
-            queue.release_claim(task.id, eligibility_key, reason="known launch failure")
+            try:
+                queue.release_claim(task.id, eligibility_key, reason="known launch failure")
+            except QueueError:
+                pass
         raise KnownDispatchFailure(str(exc)) from exc
     except Exception as exc:
         # A callback exception is a positive pre-launch failure unless it explicitly declared
         # ambiguity.  Release both activation and claim via the terminal failed record.
-        if activated or activation_call is not None:
+        if activation_call is not None and activated:
             try:
                 _activation(config, account, "release", activation_call)
             except DispatchError:
@@ -606,9 +671,13 @@ def dispatch(
             queue.record(
                 task.id, eligibility_key, status="failed", provider_id=provider.id,
                 account_id=account_id, summary=f"known launch failure: {str(exc)[:500]}",
+                release_activation=release_lease if lease_managed else None,
             )
         except Exception:
-            queue.release_claim(task.id, eligibility_key, reason="known launch failure")
+            try:
+                queue.release_claim(task.id, eligibility_key, reason="known launch failure")
+            except QueueError:
+                pass
         raise KnownDispatchFailure(str(exc)) from exc
 
 

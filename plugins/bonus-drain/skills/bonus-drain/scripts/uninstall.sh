@@ -14,13 +14,13 @@ elif [ "$#" -ne 0 ]; then
     exit 2
 fi
 
-PYTHONPATH="$skill_root${PYTHONPATH:+:$PYTHONPATH}" \
-python3 - "$target_home" <<'PY'
+python3 -I -B - "$skill_root" "$target_home" <<'PY'
 import json
 import sys
+sys.path.insert(0, sys.argv[1])
 from bonus_drain import lifecycle
 
-removed = lifecycle.uninstall(sys.argv[1])
+removed = lifecycle.uninstall(sys.argv[2])
 print(json.dumps({"removed": [str(path) for path in removed], "state_preserved": True},
                  sort_keys=True, separators=(",", ":")))
 PY

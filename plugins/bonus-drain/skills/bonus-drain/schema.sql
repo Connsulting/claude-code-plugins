@@ -53,6 +53,18 @@ CREATE TABLE IF NOT EXISTS dispatch_claims (
   FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS activation_leases (
+  task_id         TEXT NOT NULL,
+  eligibility_key TEXT NOT NULL,
+  provider_id     TEXT NOT NULL,
+  account_id      TEXT NOT NULL,
+  state           TEXT NOT NULL CHECK (state IN ('activating','active','releasing')),
+  acquired_at     TEXT NOT NULL,
+  PRIMARY KEY (task_id, eligibility_key),
+  FOREIGN KEY (task_id, eligibility_key)
+    REFERENCES dispatch_claims(task_id, eligibility_key) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version    INTEGER PRIMARY KEY,
   applied_at TEXT NOT NULL
@@ -61,3 +73,5 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(task);
 CREATE INDEX IF NOT EXISTS idx_runs_cycle ON runs(cycle);
 CREATE INDEX IF NOT EXISTS idx_claims_task ON dispatch_claims(task_id);
+CREATE INDEX IF NOT EXISTS idx_activation_provider_account
+  ON activation_leases(provider_id, account_id);

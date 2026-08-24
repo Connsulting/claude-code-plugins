@@ -29,8 +29,26 @@ _CODEX_USAGE_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=skills/bonus-drain/config.sh
 source "$_CODEX_USAGE_HERE/config.sh"
 if [ -r "${BONUS_DRAIN_CONFIG:-}" ]; then
+  provider=""
+  account=""
+  previous=""
+  for token in "$@"; do
+    case "$previous" in
+      provider) provider="$token" ;;
+      account) account="$token" ;;
+    esac
+    previous=""
+    case "$token" in
+      --provider) previous="provider" ;;
+      --account) previous="account" ;;
+    esac
+  done
+  if [ -z "$provider" ] || [ -z "$account" ]; then
+    echo "codex-usage.sh requires explicit --provider ID and --account ID" >&2
+    exit 2
+  fi
   exec "$BONUS_DRAIN_BIN" usage --config "$BONUS_DRAIN_CONFIG" \
-    --legacy-index "${BONUS_CODEX_USAGE_LEGACY_INDEX:-1}" --legacy-line "$@"
+    --legacy-line "$@"
 fi
 
 SESS_DIR="${CODEX_SESSIONS_DIR:-$HOME/.codex/sessions}"

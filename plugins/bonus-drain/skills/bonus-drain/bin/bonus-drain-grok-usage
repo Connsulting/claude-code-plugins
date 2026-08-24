@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""Collect Grok usage directly and normalize one configured weekly limit."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import os
+import signal
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Mapping
+
+
+class AdapterError(RuntimeError):
+    """The direct collector did not provide a trustworthy capacity reading."""
+
+
+_SAFE_ENV = {
+    "HOME", "LANG", "LC_ALL", "PATH", "SSL_CERT_DIR", "SSL_CERT_FILE", "TMPDIR",
+    "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME",
+}
+
+
+def _epoch(value: Any, label: str) -> int:
+    if isinstance(value, bool):
+        raise AdapterError(f"{label} must be an epoch or ISO timestamp")
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            try:
+                return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
+            except ValueError as exc:
+                raise AdapterError(f"{label} must be an epoch or ISO timestamp") from exc
+    raise AdapterError(f"{label} must be an epoch or ISO timestamp")
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--provider", required=True)
+    parser.add_argument("--account", required=True)
+    parser.add_argument("--collector", required=True, type=Path)
+    parser.add_argument("--limit", required=True)
+    parser.add_argument("--max-age", required=True, type=int)
+    parser.add_argument("--timeout", required=True, type=float)
+    parser.add_argument("--now", type=int)
+    return parser
+
+
+def _percentage(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise AdapterError("weekly_percent must be a number")
+    result = float(value)
+    if not math.isfinite(result) or result < 0 or result > 100:
+        raise AdapterError("weekly_percent must be between 0 and 100")
+    return result
+
+
+def main() -> int:
+    args = _parser().parse_args()
+    if args.max_age < 1 or args.timeout <= 0:
+        raise AdapterError("max age and timeout must be positive")
+    collector = args.collector.expanduser()
+    if not collector.is_absolute():
+        raise AdapterError("collector path must be absolute")
+    try:
+        if collector.resolve(strict=False) == Path(__file__).resolve():
+            raise AdapterError("collector cannot be this adapter")
+    except OSError as exc:
+        raise AdapterError(f"cannot resolve collector: {exc}") from exc
+    if not collector.is_file() or not os.access(collector, os.X_OK):
+        raise AdapterError("collector is missing or not executable")
+
+    child_env = {name: os.environ[name] for name in _SAFE_ENV if name in os.environ}
+    try:
+        process = subprocess.Popen(
+            [str(collector), "--direct-collect"],
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=child_env,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise AdapterError(f"collector could not execute: {exc}") from exc
+    try:
+        stdout, stderr = process.communicate(timeout=args.timeout)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate()
+        raise AdapterError("collector timeout") from exc
+    if process.returncode != 0:
+        raise AdapterError(f"collector exited {process.returncode}")
+    if len(stdout) > 65_536 or len(stderr) > 65_536:
+        raise AdapterError("collector output exceeded 65536 bytes")
+    try:
+        raw = json.loads(stdout.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise AdapterError("collector returned invalid JSON") from exc
+    if not isinstance(raw, Mapping):
+        raise AdapterError("collector returned a non-object")
+
+    now = int(time.time()) if args.now is None else args.now
+    captured_at = _epoch(raw.get("source_ts"), "source_ts")
+    if captured_at > now + 300:
+        raise AdapterError("collector timestamp is in the future")
+    if now - captured_at > args.max_age:
+        raise AdapterError("collector reading is stale")
+    reset = _epoch(raw.get("weekly_reset"), "weekly_reset")
+    if reset <= now:
+        raise AdapterError("weekly_reset must be in the future")
+
+    json.dump(
+        {
+            "provider_id": args.provider,
+            "account_id": args.account,
+            "captured_at": captured_at,
+            "limits": {
+                args.limit: {
+                    "used_percent": _percentage(raw.get("weekly_percent")),
+                    "resets_at": reset,
+                }
+            },
+        },
+        sys.stdout,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except AdapterError as exc:
+        print(f"bonus-drain-grok-usage: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
