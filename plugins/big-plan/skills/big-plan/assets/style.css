@@ -35,6 +35,14 @@ body {
   min-height: 100vh;
 }
 body.index { grid-template-columns: 1fr; grid-template-areas: "top" "content"; }
+/* Sidebar controls are intentionally always available: on a broad display they
+   let a reviewer focus on the plan, and at half-screen width they reveal the
+   auto-hidden drawers. */
+body.sidebar-toc-closed { grid-template-columns: 0 minmax(0, 1fr) 320px; }
+body.sidebar-comments-closed { grid-template-columns: 240px minmax(0, 1fr) 0; }
+body.sidebar-toc-closed.sidebar-comments-closed { grid-template-columns: 0 minmax(0, 1fr) 0; }
+body.sidebar-toc-closed .toc-rail,
+body.sidebar-comments-closed .comments-rail { display: none; }
 .index-summary { color: var(--muted); margin: 0 0 14px; }
 .updated { color: var(--muted); font-size: 11px; margin-left: 8px; }
 .pagination { display: flex; align-items: center; gap: 12px; margin-top: 18px; color: var(--muted); }
@@ -122,7 +130,24 @@ body.index { grid-template-columns: 1fr; grid-template-areas: "top" "content"; }
   background: var(--accent); color: white; border-color: var(--accent);
 }
 .topbar .send-feedback.err { border-color: var(--danger, #c0392b); color: var(--danger, #c0392b); }
-.toc-toggle, .comments-toggle { display: none; }
+.sidebar-handle {
+  position: fixed;
+  top: 50%;
+  z-index: 60;
+  width: 20px;
+  height: 42px;
+  padding: 0;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  background: var(--rail-bg);
+  font: 22px/1 system-ui, sans-serif;
+  cursor: pointer;
+}
+.sidebar-handle:hover, .sidebar-handle:focus { color: var(--fg); background: var(--bg); }
+.toc-toggle { left: 240px; border-left: 0; border-radius: 0 4px 4px 0; }
+.comments-toggle { right: 320px; border-right: 0; border-radius: 4px 0 0 4px; }
+body.sidebar-toc-closed .toc-toggle { left: 0; }
+body.sidebar-comments-closed .comments-toggle { right: 0; }
 .topbar-hint {
   color: var(--muted);
   font-size: 10px;
@@ -988,15 +1013,22 @@ dialog button[value="submit"] { background: var(--accent); color: white; border-
 .compare-col > :last-child { margin-bottom: 0; }
 .compare-col h3, .compare-col h4 { margin-top: 0; }
 
-@media (max-width: 900px) {
+/* Half a conventional desktop screen leaves too little room for a readable plan
+   between both 240/320px rails. Treat it as a drawer layout, just like phone. */
+@media (max-width: 1200px) {
   /* Safety net against horizontal overflow. clip (not hidden) so sticky rails
      keep working. */
   html, body { overflow-x: clip; }
-  body {
-    grid-template-columns: 1fr;
+  /* Rails use actual grid columns here. They begin closed at half-screen width
+     and opening one narrows the plan instead of drawing over it. */
+  body,
+  body.sidebar-toc-closed,
+  body.sidebar-comments-closed,
+  body.sidebar-toc-closed.sidebar-comments-closed {
+    grid-template-columns: 0 minmax(0, 1fr) 0;
     grid-template-areas:
-      "top"
-      "content";
+      "top top top"
+      "toc content comments";
   }
   /* The topbar can't fit every child on a phone even wrapped, and overflow-x:
      clip cuts the last one. Hide Copy/Download (desktop niceties) and keep
@@ -1010,7 +1042,6 @@ dialog button[value="submit"] { background: var(--accent); color: white; border-
   /* Same reason: the phone is where an answer gets read, and the chip is the
      only way to find one without scrolling the whole plan. */
   body[data-has-answers="true"] .answers-bar { display: inline-flex; }
-  .toc-toggle, .comments-toggle { flex: 0 0 auto; white-space: nowrap; }
   .section-body { padding-left: 8px; }
   .content ul, .content ol { padding-left: 16px; }
   /* Task-list items pull left to align the marker with the text; match the
@@ -1020,21 +1051,23 @@ dialog button[value="submit"] { background: var(--accent); color: white; border-
   .content pre, .content table, .content img, .content svg,
   .content canvas, .content .mermaid, .content .table-scroll { max-width: 100%; }
   .toc-rail, .comments-rail {
-    position: fixed;
-    top: 48px;
-    height: calc(100vh - 48px);
-    width: 80vw;
-    max-width: 320px;
-    z-index: 40;
-    transform: translateX(-100%);
-    transition: transform 0.2s;
-    box-shadow: var(--shadow);
+    display: none;
+    position: sticky;
+    width: auto;
+    max-width: none;
+    transform: none;
+    transition: none;
+    box-shadow: none;
   }
-  .toc-rail { left: 0; }
-  .comments-rail { right: 0; transform: translateX(100%); border-left: 1px solid var(--border); border-right: none; }
-  .toc-rail.open { transform: translateX(0); }
-  .comments-rail.open { transform: translateX(0); }
-  .toc-toggle, .comments-toggle { display: inline-block; }
+  .comments-rail { border-left: 1px solid var(--border); border-right: none; }
+  body.sidebar-toc-open { grid-template-columns: 240px minmax(0, 1fr) 0; }
+  body.sidebar-comments-open { grid-template-columns: 0 minmax(0, 1fr) 320px; }
+  body.sidebar-toc-open.sidebar-comments-open { grid-template-columns: 240px minmax(0, 1fr) 320px; }
+  body.sidebar-toc-open .toc-rail, body.sidebar-comments-open .comments-rail { display: block; }
+  .toc-toggle { left: 0; }
+  .comments-toggle { right: 0; }
+  body.sidebar-toc-open .toc-toggle { left: 240px; }
+  body.sidebar-comments-open .comments-toggle { right: 320px; }
   .content { padding: 12px 10px 80px; overflow-wrap: anywhere; }
   .anchor-link { opacity: 1; }
   .topbar .page-title { font-size: 13px; }
@@ -1056,7 +1089,7 @@ dialog button[value="submit"] { background: var(--accent); color: white; border-
     color: black;
     font-size: 10pt;
   }
-  .topbar, .toc-rail, .comments-rail, .page-footer,
+  .topbar, .toc-rail, .comments-rail, .sidebar-handle, .page-footer,
   .section-comment-button, .anchor-link, .comment-thread,
   .changes-bar, .answers-bar, .reply-form, dialog, .selection-toolbar { display: none !important; }
   .content { max-width: none; padding: 0; }

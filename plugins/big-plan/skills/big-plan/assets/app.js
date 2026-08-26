@@ -20,20 +20,87 @@
     return p.split("/").map(encodeURIComponent).join("/");
   }
 
-  // -- Drawer toggles (mobile) --
+  // -- Sidebar toggles --
+  // Wide plans keep both rails visible by default; at half-screen width they
+  // start tucked away. Once a reviewer chooses a state, retain that choice for
+  // this browser session so inline comments can be the only comments they see.
   const tocToggle = document.querySelector(".toc-toggle");
   const commentsToggle = document.querySelector(".comments-toggle");
   const tocRail = document.querySelector(".toc-rail");
   const commentsRail = document.querySelector(".comments-rail");
-  if (tocToggle && tocRail) {
-    tocToggle.addEventListener("click", () => tocRail.classList.toggle("open"));
+  const SIDEBAR_BREAKPOINT = 1200;
+  const sidebarPrefs = {
+    toc: "big-plan.sidebar.toc",
+    comments: "big-plan.sidebar.comments",
+  };
+
+  function readSidebarPref(name) {
+    try {
+      const value = sessionStorage.getItem(sidebarPrefs[name]);
+      return value === "open" || value === "closed" ? value : null;
+    } catch (_) {
+      return null;
+    }
   }
-  if (commentsToggle && commentsRail) {
-    commentsToggle.addEventListener("click", () => commentsRail.classList.toggle("open"));
+
+  function writeSidebarPref(name, value) {
+    try { sessionStorage.setItem(sidebarPrefs[name], value); } catch (_) { /* unavailable */ }
   }
+
+  function sidebarIsOpen(name) {
+    const pref = readSidebarPref(name);
+    return pref ? pref === "open" : !window.matchMedia(`(max-width: ${SIDEBAR_BREAKPOINT}px)`).matches;
+  }
+
+  function updateSidebarToggle(name, open) {
+    const toggle = name === "toc" ? tocToggle : commentsToggle;
+    if (!toggle) return;
+    toggle.setAttribute("aria-expanded", String(open));
+    const label = open
+      ? (name === "toc" ? "Hide table of contents" : "Hide comments panel")
+      : (name === "toc" ? "Show table of contents" : "Show comments panel");
+    toggle.setAttribute("aria-label", label);
+    toggle.title = label;
+    // The control is a small tab on the rail edge, so the chevron points into
+    // the direction the rail will move when clicked.
+    toggle.textContent = name === "toc" ? (open ? "‹" : "›") : (open ? "›" : "‹");
+  }
+
+  function setSidebarOpen(name, open, persist = true) {
+    document.body.classList.toggle(`sidebar-${name}-open`, open);
+    document.body.classList.toggle(`sidebar-${name}-closed`, !open);
+    updateSidebarToggle(name, open);
+    if (persist) writeSidebarPref(name, open ? "open" : "closed");
+  }
+
+  function toggleSidebar(name) { setSidebarOpen(name, !sidebarIsOpen(name)); }
+
+  function restoreSidebar(name) {
+    const pref = readSidebarPref(name);
+    if (pref) {
+      setSidebarOpen(name, pref === "open", false);
+    } else {
+      // Leave the layout to CSS until the reviewer makes a choice, so crossing
+      // the half-screen breakpoint automatically tucks both rails away.
+      document.body.classList.remove(`sidebar-${name}-open`, `sidebar-${name}-closed`);
+      updateSidebarToggle(name, sidebarIsOpen(name));
+    }
+  }
+
+  restoreSidebar("toc");
+  restoreSidebar("comments");
+  window.matchMedia(`(max-width: ${SIDEBAR_BREAKPOINT}px)`).addEventListener("change", () => {
+    ["toc", "comments"].forEach((name) => {
+      if (!readSidebarPref(name)) updateSidebarToggle(name, sidebarIsOpen(name));
+    });
+  });
+  if (tocToggle && tocRail) tocToggle.addEventListener("click", () => toggleSidebar("toc"));
+  if (commentsToggle && commentsRail) commentsToggle.addEventListener("click", () => toggleSidebar("comments"));
   document.querySelectorAll(".toc a").forEach((a) => {
     a.addEventListener("click", () => {
-      if (tocRail) tocRail.classList.remove("open");
+      if (tocRail && window.matchMedia(`(max-width: ${SIDEBAR_BREAKPOINT}px)`).matches) {
+        setSidebarOpen("toc", false);
+      }
     });
   });
 
@@ -317,7 +384,7 @@
       // The rail is a drawer on a phone, so a rail target has to be opened
       // before scrolling to it means anything.
       if (commentsRail && commentsRail.contains(target)) {
-        commentsRail.classList.add("open");
+        setSidebarOpen("comments", true);
       }
       let parent = target.closest("details");
       while (parent) {
@@ -1557,9 +1624,9 @@
     else helpDialog.showModal();
   }
 
-  // -- Drawer helpers (work on desktop too via these shortcuts) --
-  function toggleTocRail() { if (tocRail) tocRail.classList.toggle("open"); }
-  function toggleCommentsRail() { if (commentsRail) commentsRail.classList.toggle("open"); }
+  // -- Sidebar helpers (work on desktop too via these shortcuts) --
+  function toggleTocRail() { if (tocRail) toggleSidebar("toc"); }
+  function toggleCommentsRail() { if (commentsRail) toggleSidebar("comments"); }
 
   // -- Global keydown router --
   // Ignore keystrokes when the user is typing in a form field, EXCEPT for
@@ -1575,12 +1642,12 @@
   document.addEventListener("keydown", (e) => {
     // Form-field-safe keys (always handled even when editing).
     if (e.key === "Escape") {
-      // Cascade: native <dialog> closes itself, but explicitly handle drawers
+      // Cascade: native <dialog> closes itself, but explicitly handle sidebars
       // and block focus after that.
       if (helpDialog && helpDialog.open) { helpDialog.close(); return; }
       if (dialog && dialog.open) return; // native dialog handles Escape
-      if (tocRail && tocRail.classList.contains("open")) { tocRail.classList.remove("open"); return; }
-      if (commentsRail && commentsRail.classList.contains("open")) { commentsRail.classList.remove("open"); return; }
+      if (tocRail && sidebarIsOpen("toc")) { setSidebarOpen("toc", false); return; }
+      if (commentsRail && sidebarIsOpen("comments")) { setSidebarOpen("comments", false); return; }
       if (KB.el) { KB.clear(); return; }
       return;
     }

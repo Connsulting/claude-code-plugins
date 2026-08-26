@@ -18,6 +18,7 @@ SPEC = importlib.util.spec_from_file_location("big_plan_server", SERVER_PATH)
 assert SPEC and SPEC.loader
 server = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(server)
+import render
 
 
 class ListMarkdownTest(unittest.TestCase):
@@ -57,6 +58,16 @@ class ListMarkdownTest(unittest.TestCase):
                 any("node_modules" in path.parts for path in visited),
                 f"ignored tree was traversed: {visited}",
             )
+
+
+class SidebarControlsTest(unittest.TestCase):
+    def test_plan_chrome_has_persistent_sidebar_controls(self) -> None:
+        page = render.render_html("# Plan\n\n## Section\n\nText", "Plan", {})
+
+        self.assertIn('class="toc-toggle sidebar-handle" aria-controls="toc-rail"', page)
+        self.assertIn('class="comments-toggle sidebar-handle" aria-controls="comments-rail"', page)
+        self.assertIn('<aside class="toc-rail" id="toc-rail"', page)
+        self.assertIn('<aside class="comments-rail" id="comments-rail"', page)
 
 
 if __name__ == "__main__":
