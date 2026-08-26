@@ -251,35 +251,44 @@ def is_readme(p: Path) -> bool:
     return p.name.lower() in {"readme.md", "readme.markdown"}
 
 
+def _ignore_index_directory(name: str) -> bool:
+    """Return whether an index walk must prune this directory entirely."""
+    return (
+        name.startswith(".git")
+        or name in {"node_modules", ".claude", ".venv", "venv"}
+    )
+
+
 def list_markdown(root: Path) -> list[Path]:
     files: list[Path] = []
-    for p in root.rglob("*.md"):
-        # Universal exclusions
-        if any(part.startswith(".git") for part in p.parts):
-            continue
-        if "node_modules" in p.parts:
-            continue
-        if any(part == ".claude" for part in p.parts):
-            continue
-        if any(part == ".venv" or part == "venv" for part in p.parts):
-            continue
-        # A .projects directory is a workspace, not an automatic publication
-        # channel. Keep drafts out of the shared index until their author has
-        # explicitly promoted them.
-        if not is_promoted(p):
-            continue
+    for directory, names, filenames in os.walk(root):
+        # Prune ignored trees before descending. Filtering paths produced by
+        # Path.rglob still traverses every node_modules and .git worktree first,
+        # which made the index take more than ten seconds and retain hundreds
+        # of megabytes on a large development checkout.
+        names[:] = [name for name in names if not _ignore_index_directory(name)]
+        parent = Path(directory)
+        for filename in filenames:
+            if not filename.endswith(".md"):
+                continue
+            p = parent / filename
+            # A .projects directory is a workspace, not an automatic
+            # publication channel. Keep drafts out of the shared index until
+            # their author has explicitly promoted them.
+            if not is_promoted(p):
+                continue
 
-        # Filter mode
-        if INDEX_FILTER == "all":
-            files.append(p)
-        elif INDEX_FILTER == "plans":
-            if is_plan_file(p):
+            # Filter mode
+            if INDEX_FILTER == "all":
                 files.append(p)
-        elif INDEX_FILTER == "readmes":
-            if is_plan_file(p) or is_readme(p):
+            elif INDEX_FILTER == "plans":
+                if is_plan_file(p):
+                    files.append(p)
+            elif INDEX_FILTER == "readmes":
+                if is_plan_file(p) or is_readme(p):
+                    files.append(p)
+            else:
                 files.append(p)
-        else:
-            files.append(p)
     # The index is a recent-work queue, rather than a filesystem browser.
     # Newest first makes the handful of plans the reviewer is actively reviewing
     # immediately reachable; pagination keeps the rendered page bounded.

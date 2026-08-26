@@ -1,7 +1,7 @@
 """Route plan feedback back to the agent session that authored the plan.
 
 Provenance lives beside the plan in a `<plan>.md.session` sidecar. The name
-deliberately does not end in `.md`, so the index (`rglob("*.md")`), agentic
+deliberately does not end in `.md`, so the Markdown index scan, agentic
 markdown search, and direct GETs all ignore it -- the same trick `.md.snapshot`
 already uses.
 

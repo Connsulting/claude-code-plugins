@@ -1130,27 +1130,27 @@ TEMPLATE = """<!DOCTYPE html>
     <button class="changes-toggle" aria-label="Show or hide change highlights">Hide Changes</button>
     <button class="changes-dismiss" aria-label="Mark changes as reviewed" title="Clear the baseline so the doc reads clean again">Reviewed All</button>
   </span>
-  <button class="toc-toggle" aria-label="Toggle table of contents">Sections</button>
-  <button class="comments-toggle" aria-label="Toggle comments panel">Comments</button>
   <button class="md-copy" aria-label="Copy full markdown" title="Copy the entire plan markdown to the clipboard"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M3.5 10.5h-1a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1h7a1 1 0 0 1 1 1v1"/></svg>Copy</button>
   <a class="md-raw" href="?view=raw" title="View the plan as raw markdown"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5.5 3.5 1.5 8l4 4.5M10.5 3.5l4 4.5-4 4.5"/></svg>Raw</a>
   <a class="md-download" href="/raw/{relative_path}" download title="Download the entire plan markdown"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 1.5v8m0 0L5 6.5m3 3 3-3"/><path d="M2.5 11v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2"/></svg>Download</a>
   <a class="pdf-download" href="/pdf/{relative_path}" download title="Download the rendered plan as a PDF">PDF</a>
   <button class="send-feedback" aria-label="Send feedback to the authoring session" title="Send all open feedback to the session that wrote this plan" disabled><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 1.5 7.3 8.7"/><path d="M14.5 1.5 10 14.5l-2.7-5.8L1.5 6z"/></svg><span class="sf-label">Send</span></button>
 </header>
-<aside class="toc-rail" aria-label="Table of contents">
+<aside class="toc-rail" id="toc-rail" aria-label="Table of contents">
 {toc}
 </aside>
+<button class="toc-toggle sidebar-handle" aria-controls="toc-rail" aria-expanded="true" aria-label="Hide table of contents" title="Hide sections">&#x2039;</button>
 <main class="content">
 {body}
 <footer class="page-footer">
   <button class="copy-feedback" aria-label="Copy feedback round-trip prompt" title="Copy all open feedback as a prompt for the next session">Copy Feedback as Prompt</button>
 </footer>
 </main>
-<aside class="comments-rail" aria-label="Comments">
+<aside class="comments-rail" id="comments-rail" aria-label="Comments">
   <h2>Comments</h2>
   <div class="comments-list" id="comments-list"></div>
 </aside>
+<button class="comments-toggle sidebar-handle" aria-controls="comments-rail" aria-expanded="true" aria-label="Hide comments panel" title="Hide comments">&#x203a;</button>
 <dialog id="add-comment-dialog">
   <form method="dialog" id="add-comment-form">
     <h3>Add comment</h3>
