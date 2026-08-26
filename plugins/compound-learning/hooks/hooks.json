@@ -1,16 +1,4 @@
 {
-  "description": "TEMPORARILY DISABLED 2026-08-06: auto-peek (UserPromptSubmit) and auto-extract (SessionEnd/PreCompact) removed. Restore with: cp hooks.json.enabled-backup hooks.json. Codex-side twins are commented out in ~/.codex/config.toml.",
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/setup.sh",
-            "timeout": 120000
-          }
-        ]
-      }
-    ]
-  }
+  "description": "Compound-learning hooks are temporarily disabled. Automatic peek and extraction were paused on 2026-08-06; the SessionStart bootstrap was paused on 2026-08-14 because it installed a 4.6 GB CUDA PyTorch stack on CPU-only hosts. Restore only the bootstrap from hooks.json.bootstrap-backup, or restore all hooks from hooks.json.enabled-backup.",
+  "hooks": {}
 }

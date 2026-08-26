@@ -7,7 +7,7 @@ A learning compounding system for Claude Code that extracts and indexes knowledg
 - Python 3.x with pip
 - GitHub CLI (`gh`) - optional, required for `/pr-learnings`
 
-Python dependencies (`pysqlite3-binary`, `sqlite-vec`, `sentence-transformers`) are auto-installed on session start via the `SessionStart` hook.
+Automatic hooks are currently paused. Install the Python dependencies (`pysqlite3-binary`, `sqlite-vec`, `sentence-transformers`) on demand by running `bash hooks/setup.sh` from the plugin directory.
 
 ## Installation
 
@@ -21,9 +21,9 @@ Python dependencies (`pysqlite3-binary`, `sqlite-vec`, `sentence-transformers`) 
 ### Manual Installation
 
 1. Clone or download this plugin to your Claude plugins directory
-2. Python dependencies install automatically on first session start, or install manually:
+2. Install the Python dependencies:
 ```bash
-pip install pysqlite3-binary sqlite-vec sentence-transformers
+bash hooks/setup.sh
 ```
 
 ### Post-Installation

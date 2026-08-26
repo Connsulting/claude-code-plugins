@@ -1,0 +1,16 @@
+{
+  "description": "Bootstrap-only fallback while automatic peek and extraction remain disabled. Restore all hooks from hooks.json.enabled-backup.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/setup.sh",
+            "timeout": 120000
+          }
+        ]
+      }
+    ]
+  }
+}
