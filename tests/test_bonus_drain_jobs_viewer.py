@@ -60,10 +60,10 @@ class JobsViewerContractTests(unittest.TestCase):
 
     def test_existing_ui_is_preserved_without_login_or_generic_viewer_copy(self) -> None:
         expected_frontend_hashes = {
-            "CSS": "ab728f01b90b90bfcdeae4016570cc42f5e794bbfc94bd6b3a9f92301202260c",
-            "ICON_SPRITE": "4047ba712de5e325d2254175a247c83237121a30e359c31661efee0bf27e477b",
+            "CSS": "1aa4a685d0645366bcf5e0a82733abd7c6d3940466e9cb23219d57d5b888c002",
+            "ICON_SPRITE": "7c5f372d21654d5980b50830bb48a53a6aa94ec9440dc34e88301d5d44f72199",
             "SCRIPT": "c3012ef3517b75f04b0b3b928194cbb9c77765dba7ffa8960f0f1f438af7e324",
-            "PAGE": "f59a05ce3b80f6ee47c9d58974777d3076ef7b94e9a10ed32e0dfd81d88d7523",
+            "PAGE": "d736c4f06db4fe65e6d15f1bcdf661dccee8971694d7be352226fdf83797bbda",
         }
         self.assertEqual(
             {
@@ -221,14 +221,19 @@ class JobsViewerContractTests(unittest.TestCase):
         unexpected = '<img src=x onerror=alert(1)>'
         remaining = [
             {
-                "id": "medium-job", "title": "Medium upcoming", "kind": "oneoff",
-                "priority": 2, "cadence": None, "cwd": "/tmp/medium", "goal": "medium goal",
-                "engine_class": "codex-ok", "last_ts": None, "size": "medium",
+                "id": "medium-job", "title": "Medium upcoming", "kind": "recurring",
+                "priority": 2, "cadence": "weekly", "cwd": "/tmp/medium", "goal": "medium goal",
+                "engine_class": "codex-ok", "last_ts": "2026-08-23T12:00:00Z", "size": "medium",
             },
             {
                 "id": "legacy-job", "title": "Legacy upcoming", "kind": "oneoff",
                 "priority": 2, "cadence": None, "cwd": "/tmp/legacy", "goal": "legacy goal",
-                "engine_class": "codex-ok", "last_ts": None, "size": None,
+                "engine_class": "codex-ok", "last_ts": "2026-08-24T12:00:00Z", "size": None,
+            },
+            {
+                "id": "new-recurring", "title": "New recurring", "kind": "recurring",
+                "priority": 2, "cadence": "weekly", "cwd": "/tmp/scheduled", "goal": "new goal",
+                "engine_class": "claude-only", "last_ts": None, "size": "small",
             },
             {
                 "id": "unexpected-job", "title": "Unexpected upcoming", "kind": "oneoff",
@@ -267,6 +272,10 @@ class JobsViewerContractTests(unittest.TestCase):
             ),
             mock.patch.object(self.viewer, "_rotation", return_value=""),
             mock.patch.object(self.viewer, "get_dispatch_times", return_value=[]),
+            mock.patch.object(
+                self.viewer.time, "time",
+                return_value=self.viewer._iso_epoch("2026-08-26T12:00:00Z"),
+            ),
         ):
             body = self.viewer.render_bonus_body()
 
@@ -281,21 +290,43 @@ class JobsViewerContractTests(unittest.TestCase):
             self.assertGreater(end, position)
             return body[start:end]
 
-        self.assertIn("size medium", upcoming_row("Medium upcoming"))
-        self.assertIn("size unknown", upcoming_row("Legacy upcoming"))
-        self.assertIn(
-            "size &lt;img src=x onerror=alert(1)&gt;",
-            upcoming_row("Unexpected upcoming"),
-        )
+        def metadata(row: str) -> str:
+            start = row.index('<div class="qmeta">')
+            return row[start:row.index("</div>", start)]
+
+        medium = upcoming_row("Medium upcoming")
+        self.assertLess(medium.index('class="qmeta"'), medium.index('class="qsub"'))
+        self.assertIn('aria-label="medium size estimate"', medium)
+        self.assertEqual(medium.count('class="on"'), 3)
+        medium_meta = metadata(medium)
+        self.assertNotIn('href="#i-auto"', medium_meta)
+        self.assertNotIn('href="#i-claude"', medium_meta)
+        self.assertIn('class="qrepo" title="/tmp/medium">medium</span>', medium)
+        self.assertIn('href="#i-calendar"', medium)
+        self.assertIn('class="qmeta-label">3d</span>', medium)
+        self.assertNotIn(">ran 3d ago<", medium)
+        self.assertLess(medium_meta.index('href="#i-calendar"'), medium_meta.index('class="qrepo"'))
+
+        legacy = upcoming_row("Legacy upcoming")
+        self.assertIn('aria-label="unknown size estimate"', legacy)
+        self.assertIn('class="qmeta-label">unknown</span>', legacy)
+        self.assertNotIn('href="#i-calendar"', legacy)
+        self.assertNotIn("never run", legacy)
+
+        new_recurring = upcoming_row("New recurring")
+        self.assertIn('href="#i-calendar"', new_recurring)
+        self.assertIn('class="qmeta-label">N/A</span>', new_recurring)
+        self.assertIn('aria-label="Recurring · never run"', new_recurring)
+
+        self.assertIn('aria-label="unknown size estimate"', upcoming_row("Unexpected upcoming"))
         self.assertNotIn(unexpected, body)
 
         run_start = body.index("<span>run log</span>")
         disabled_start = body.index("<span><i class=\"caret\"></i>disabled")
         history_section = body[run_start:disabled_start]
         disabled_section = body[disabled_start:body.index("<footer>", disabled_start)]
-        self.assertNotIn("size tiny", history_section)
-        self.assertNotIn("size huge", disabled_section)
-        self.assertNotIn("size unknown", disabled_section)
+        self.assertNotIn("size estimate", history_section)
+        self.assertNotIn("size estimate", disabled_section)
 
 
 if __name__ == "__main__":

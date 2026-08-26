@@ -942,9 +942,7 @@ STATUS_COLORS = {
     "done": "var(--ok)", "dispatched": "var(--acc)", "failed": "var(--warn)",
     "skipped": "var(--dim)",
 }
-ENGINE_LABEL = {
-    "claude-only": "Claude-only", "codex-ok": "Job", "grok-ok": "Job",
-}
+SIZE_LEVEL = {"tiny": 1, "small": 2, "medium": 3, "large": 4, "huge": 5}
 PRI_TINT = {0: "var(--warn)", 1: "var(--acc)", 2: "var(--fg)", 3: "var(--dim)", 4: "var(--dim)"}
 
 
@@ -965,8 +963,14 @@ _GROK_SYMBOL = (
     '<path d="M9.27 15.29l7.978-5.897c.391-.29.95-.177 1.137.272.98 2.369.542 5.215-1.41 7.169-1.951 1.954-4.667 2.382-7.149 1.406l-2.711 1.257c3.889 2.661 8.611 2.003 11.562-.953 2.341-2.344 3.066-5.539 2.388-8.42l.006.007c-.983-4.232.242-5.924 2.75-9.383.06-.082.12-.164.179-.248l-3.301 3.305v-.01L9.267 15.292M7.623 16.723c-2.792-2.67-2.31-6.801.071-9.184 1.761-1.763 4.647-2.483 7.166-1.425l2.705-1.25a7.808 7.808 0 00-1.829-1A8.975 8.975 0 005.984 5.83c-2.533 2.536-3.33 6.436-1.962 9.764 1.022 2.487-.653 4.246-2.34 6.022-.599.63-1.199 1.259-1.682 1.925l7.62-6.815"></path>'
     '</symbol>'
 )
+_CALENDAR_SYMBOL = (
+    '<symbol id="i-calendar" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" '
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+    '<rect x="4" y="5.5" width="16" height="14" rx="2"></rect>'
+    '<path d="M8 3.5v4M16 3.5v4M4 10h16"></path></g></symbol>'
+)
 ICON_SPRITE = ICON_SPRITE.replace(
-    '<symbol id="i-auto"', _GROK_SYMBOL + '<symbol id="i-auto"', 1,
+    '<symbol id="i-auto"', _GROK_SYMBOL + _CALENDAR_SYMBOL + '<symbol id="i-auto"', 1,
 )
 
 
@@ -986,10 +990,32 @@ def busy_button(inner: str) -> str:
     return inner + ico("spin", "spin")
 
 
-def engine_badge(engine_class: str) -> str:
-    """The queue row's job-class chip without exposing a provider-specific internal label."""
-    eng = "claude" if engine_class == "claude-only" else "auto"
-    return f'<span class="ebadge">{ico(eng)}{esc(ENGINE_LABEL[engine_class])}</span>'
+def size_badge(size: str | None) -> str:
+    """Five-block capacity mark, with a visible fallback for legacy NULL rows."""
+    label = size if size in SIZE_LEVEL else "unknown"
+    level = SIZE_LEVEL.get(label, 0)
+    blocks = "".join(
+        f'<i class="{"on" if n <= level else ""}"></i>' for n in range(1, 6)
+    )
+    unknown = '<span class="qmeta-label">unknown</span>' if level == 0 else ""
+    return (f'<span class="qmeta-icon qsize" role="img" '
+            f'aria-label="{esc(label)} size estimate" title="{esc(label)} size estimate">'
+            f'<span class="sizeblocks" aria-hidden="true">{blocks}</span>{unknown}</span>')
+
+
+def schedule_badge(kind: str, last_ts: str | None) -> str:
+    """Recurring jobs show their last-run age; one-offs need no recurrence mark."""
+    if kind != "recurring":
+        return ""
+    if last_ts:
+        age = rel_time(last_ts)
+        short = age.removesuffix(" ago")
+        label = f"Recurring · last ran {age}"
+    else:
+        short = "N/A"
+        label = "Recurring · never run"
+    return (f'<span class="qmeta-icon" aria-label="{esc(label)}" title="{esc(label)}">'
+            f'{ico("calendar")}<span class="qmeta-label">{esc(short)}</span></span>')
 
 
 def _run_buttons(t: dict) -> str:
@@ -1657,22 +1683,18 @@ def render_bonus_body() -> str:
                 rows.append(f"""
           <div class="band"><span class="bpri" style="--c:{PRI_TINT.get(pri, "var(--dim)")}">P{esc(pri)}</span>
             <span class="brule"></span><span class="bcount">{n} task{"" if n == 1 else "s"}</span></div>""")
-            kind = "recurring" if t["kind"] == "recurring" else "one-off"
-            cad = f' · {esc(t["cadence"])}' if t.get("cadence") else ""
             cwd = esc(Path(t.get("cwd", "")).name or t.get("cwd", ""))
             goal = t.get("goal", "") or ""
             goal_short = goal if len(goal) <= 170 else goal[:170] + "…"
-            last = f'ran {rel_time(t["last_ts"])}' if t.get("last_ts") else "never run"
             rows.append(f"""
           <div class="qrow">
             <span class="qn">{i}</span>
             <div class="qmain">
               <div class="qtitle">{esc(t["title"])}</div>
+              <div class="qmeta">{size_badge(t.get("size"))}
+                {schedule_badge(t["kind"], t.get("last_ts"))}
+                <span class="qrepo" title="{esc(t.get("cwd", ""))}">{cwd}</span></div>
               <div class="qsub" title="{esc(goal)}">{esc(goal_short)}</div>
-              <div class="qmeta"><span>{kind}{cad}</span>
-                {engine_badge(t["engine_class"])}
-                <span>size {esc(t.get("size") or "unknown")}</span>
-                <span title="{esc(t.get("cwd", ""))}">{cwd}</span><span>{last}</span></div>
             </div>
             <div class="qact">{_run_buttons(t)}
               <button class="task-toggle ionly" data-task-id="{esc(t["id"])}" data-active="0"
@@ -2161,8 +2183,16 @@ footer{margin:34px 0 0;font-size:10.5px;color:var(--dim2);letter-spacing:.04em}
 .qn{width:20px;font-size:11.5px;color:var(--dim2);padding-top:1px;flex:none}
 .qmain{flex:1 1 300px;min-width:0}
 .qtitle{font-size:13.5px;line-height:1.35}
-.qsub{font-size:11.5px;color:var(--dim2);margin-top:5px;line-height:1.5;text-wrap:pretty}
-.qmeta{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:10.5px;color:var(--dim2)}
+.qsub{font-size:11.5px;color:var(--dim2);margin-top:8px;line-height:1.5;text-wrap:pretty}
+.qmeta{display:flex;gap:13px;align-items:center;flex-wrap:wrap;margin-top:5px;min-height:20px;
+  font-size:11px;color:var(--dim2)}
+.qmeta-icon{display:inline-flex;align-items:center;gap:5px;line-height:1;color:var(--dim)}
+.qmeta-icon .ico{width:18px;height:18px;margin-right:0;color:var(--fg);opacity:.82}
+.qmeta-label{font-variant-numeric:tabular-nums}
+.qrepo{color:var(--dim);font-size:11px}
+.sizeblocks{display:inline-flex;align-items:center;gap:2px;height:14px}
+.sizeblocks i{display:block;width:5px;height:10px;background:currentColor;opacity:.22}
+.sizeblocks i.on{opacity:.9}
 .qact{display:flex;gap:5px;flex-wrap:wrap;align-items:center}
 .runset{display:inline-flex;gap:5px;align-items:center;white-space:nowrap}
 .runlbl{font-size:9.5px;letter-spacing:.10em;text-transform:uppercase;color:var(--dim2)}
