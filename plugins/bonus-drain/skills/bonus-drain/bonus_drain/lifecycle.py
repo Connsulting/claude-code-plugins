@@ -39,7 +39,7 @@ UNIT_NAMES = (
 _OWNED_NAME = ".bonus-drain-owned.json"
 _INSTALL_NAME = ".bonus-drain-install.json"
 _WRAPPER_MARKER = "# managed-by: bonus-drain lifecycle v1"
-_DEFAULT_VERSION = "0.1.5"
+_DEFAULT_VERSION = "0.2.0"
 @dataclass(frozen=True)
 class InstalledPaths:
     version: str

@@ -25,8 +25,8 @@ activation adapters use only Python's standard library. The direct Grok collecto
 Bash, `jq`, `curl`, and GNU utilities as documented in its header; replace any provider-edge
 adapter with an executable that implements the normalized JSON contract.
 `ai-token-rotator` is optional and can be configured as an account activation adapter.
-systemd user services are optional. Tailscale is optional and is only used as an
-authenticated HTTPS front end for an explicitly configured remote viewer.
+systemd user services are optional. For the explicitly configured remote viewer, tailnet-only
+Tailscale Serve is the sole access boundary, including for explicitly enabled mutations.
 
 Run `bonus-drain doctor --json` after configuring the runtime. It validates the graph,
 queue, router-only dispatch boundary, reconciliation state, and file-secret ownership/mode
@@ -107,6 +107,11 @@ whose reset is nearest. Missing, malformed, resetless, or stale usage closes onl
 affected account. The refresher owns provider reads and writes normalized cache; scout,
 planner, and viewer consume cache and do not call provider APIs on page load.
 
+The JSON graph owns the configured runtime database and cache. `BONUS_DB` is deprecated
+queue-only compatibility for graph-free legacy commands; it cannot retarget configured
+viewer, refresh, scout, planner, or dispatch state. A graph command rejects a differing
+`--database` value.
+
 The shipped example uses the stable installed `.../.local/lib/bonus-drain/current` path and
 explicit provider, account, source-label, snapshot, and limit IDs. Replace every
 `/ABSOLUTE/PATH/TO` prefix with an absolute path for the target host. The snapshot adapter
@@ -124,8 +129,14 @@ independent.
 Every account of a multi-account provider must use the shipped verified activation form with
 a literal expected account, PIN path, and active-label proof. Claims hold durable SQLite
 activation leases: same-account launches share one switch, cross-account launches wait,
-ambiguous outcomes retain the lease, and the last terminal record releases it. A failed
-release rolls back terminal bookkeeping and is reported for reconciliation.
+ambiguous outcomes retain both claim and lease, and only the last terminal record can release
+the lease after verified external release. A failed or interrupted release remains durable and
+requires explicit reconciliation; it must never be treated as immediately released.
+
+CLI `auto` classification is a non-launching `agent-router --dry-run` before a claim, so its
+uncertainty is retry-safe. Once a concrete launch has been attempted, timeout, malformed
+output, missing job identity, or bookkeeping uncertainty is ambiguous: no caller retries it,
+and the claim and applicable activation lease stay fail-closed until reconciliation.
 
 Scout reserves actual compatible task IDs in nearest-reset order, preventing a portable task
 from consuming two provider slots while preserving exclusive work for a capable provider.
@@ -138,63 +149,50 @@ File-backed secret references must be current-user-owned, non-symlink regular fi
 secret bindings.
 
 Secrets are references only. Declare an environment-variable or file reference in
-`secret_refs` and map it by ID from an adapter or viewer. Never place a secret value in the
+`secret_refs` and map it by ID from an adapter. Never place a secret value in the
 JSON, an argv, a unit, a log, or the repository. Every launch goes through an explicit
 `agent-router` adapter. Multi-account activation is optional; `ai-token-rotator` is one
 possible activation adapter, not a core dependency.
 
-## Localhost viewer
+## Viewer
 
-The schema and example bind the viewer to `127.0.0.1` and disable mutations. After a
-successful refresh has populated cache, start it explicitly:
+Bonus Drain ships the established two-tab background-jobs viewer: the Bonus Drain console
+and scheduled systemd jobs. Its HTML and interactions are preserved from the standalone
+viewer while Force dispatch now delegates to the shared router-only kickoff service.
 
 ```sh
 BONUS_DRAIN_CONFIG="${BONUS_DRAIN_CONFIG}" bonus-drain viewer --port 8766
 ```
 
-Open `http://127.0.0.1:8766/`. Local mode rejects non-loopback binds. Mutation routes are
-absent by default, and the request path reads SQLite and cached usage only.
-
-The installed `bonus-drain-viewer.service` intentionally runs the literal original combined
-jobs server and embedded UI instead of that generic viewer. It preserves the original
-scheduled tab, rotation timeline, drain order, account cards, enable/disable controls, Force
-buttons, and run log. Its queue mutations and Force actions route through the installed
-plugin wrappers and migrated XDG database. Start it only after the runtime and config are
-validated:
-
-```sh
-systemctl --user daemon-reload
-systemctl --user enable --now bonus-drain-viewer.service
-```
-
-The compatibility UI remains loopback-only and retains its original named provider lanes.
-The project to derive those lanes and controls from arbitrary JSON providers is documented in
-[`skills/bonus-drain/VIEWER_FOLLOW_UP.md`](skills/bonus-drain/VIEWER_FOLLOW_UP.md).
-
-## Optional Tailscale viewer
-
-Keep the viewer bound to `127.0.0.1`, configure exact `allowed_hosts` and HTTPS
-`allowed_origins`, and start it with `--remote`. For a read-only tailnet viewer, set
-`trusted_loopback_proxy: true`; Tailscale membership is then the access boundary and no
-separate Bonus Drain secret or login is used. Startup refuses this profile if the bind is
-not loopback or mutations are enabled. Configure Tailscale Serve separately:
+The installed `bonus-drain-viewer.service` binds the viewer to loopback on port 8766 and has
+`Wants=` and `After=` dependencies on `bonus-drain-refresh.timer`:
 
 ```sh
 BONUS_DRAIN_CONFIG="${BONUS_DRAIN_CONFIG}" bonus-drain viewer --remote --port 8766
-sudo tailscale serve --bg --https=8766 http://127.0.0.1:8766
 ```
 
-If the proxy is not itself an adequate access boundary, use the application-authenticated
-profile instead: add an external environment-variable or protected-file `secret_refs`
-entry and configure `viewer.remote.auth_secret_ref`. That profile uses secure sessions and
-requires CSRF tokens for explicitly enabled mutations. Never put the secret value in JSON,
-use an unauthenticated generic port-forward, or bind an unauthenticated `0.0.0.0` listener.
-Disable the proxy with `sudo tailscale serve --https=8766 off`.
+The dependency ensures refresh is scheduled before the viewer, not that cache is already
+fresh. Page rendering reads cached usage, SQLite, and local systemd timer metadata. It does
+not call provider APIs from a request.
 
-For the original compatibility viewer service, the authenticated tailnet plus its loopback
-listener is the access boundary; it has no separate Bonus Drain secret. Its original Force
-controls remain available through the same Tailscale URL. Do not expose that service through
-a public or unauthenticated proxy.
+Force is never automatic and bypasses pacing only. It still requires an active compatible
+task and an atomic claim. Concrete-provider and `auto` buttons both use the shared
+`kick_task` service; `auto` asks `agent-router` to classify before the one launch.
+
+### Tailscale access boundary
+
+The viewer has no application authentication, password, login route, session, or viewer
+secret. The shipped profile binds only to loopback and trusts tailnet-only Tailscale Serve as
+the access boundary. Every tailnet member able to reach the exact viewer URL is an operator.
+
+Remote configuration requires `trusted_loopback_proxy: true`, exact `allowed_hosts`, exact
+HTTPS `allowed_origins`, and explicit `mutations_enabled: true` for controls. The backend
+accepts mutations only from the exact same-origin page using JSON, without changing the
+existing frontend or creating a cookie or identity session.
+
+Do not expose the loopback listener through a generic port-forward or public proxy. See
+[`skills/bonus-drain/SECURITY.md`](skills/bonus-drain/SECURITY.md) for the exact profile
+requirements.
 
 ## Test and diagnose
 
@@ -209,23 +207,29 @@ grok plugin validate plugins/bonus-drain
 
 From a source checkout that contains the regression suites, follow
 `skills/bonus-drain/README.md` for the full Python, shell, distribution, byte-compile, and
-systemd validation commands. For a credential-free smoke test, set `HOME` and every XDG
-directory to a new temporary directory, install with `--home`, use fixture adapters, run
-`doctor`, `plan`, migration `--dry-run`, and the loopback viewer, then uninstall from that
-same temporary home.
+systemd validation commands. Verify the unit separately with exact unit text and
+`systemd-analyze verify`. The disposable browser E2E loads the frozen frontend through the
+real HTTP handler; HTTP contracts separately prove exact Host/HTTPS Origin, JSON-only
+mutations, body limits, and router-only delegation. These do not prove systemd, product TLS,
+or Tailscale. For a credential-free smoke test, set `HOME`
+and every XDG directory to a new temporary directory, install with `--home`, use fixture
+adapters, run `doctor`, `plan`, migration `--dry-run`, and the loopback viewer, then
+uninstall from that same temporary home.
 
 ## Manual cutover
 
 Read `skills/bonus-drain/MIGRATION.md` completely before touching an existing installation.
 The safe order is:
 
-1. inventory the old DB, writer services, timers, viewer, stable paths, and unit state;
+1. inventory the old DB, writer services, timers, viewer profile/HTTPS proxy mapping, stable
+   paths, and unit state;
 2. run `bonus-drain migrate --from-db FILE --from-units DIR --destination DIR --dry-run`;
 3. stop and mask every old writer, then prove no process holds the DB, WAL, or SHM open;
 4. after quiescence, re-count the queue so late-added jobs are included, then create and read
    back the authoritative backup before selecting the new DB;
 5. install and validate the new config, run `doctor`, `refresh`, `gates`, and `plan`;
-6. enable only the refresh timer, observe it, then enable the scout timer;
+6. enable only the refresh timer, observe it, then enable the scout timer; enable the remote
+   viewer only after its tailnet-only trusted-proxy profile has been reviewed;
 7. keep the old writers masked through at least one observed scheduling cycle.
 
 Never run old and new writers against one queue. `migrate --dry-run` is report-only and

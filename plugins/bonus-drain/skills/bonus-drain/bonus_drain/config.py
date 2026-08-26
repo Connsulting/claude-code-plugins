@@ -37,7 +37,6 @@ _SECRET_KEY_RE = re.compile(
     re.IGNORECASE,
 )
 _REFERENCE_KEYS = {
-    "auth_secret_ref",
     "secret_ref",
     "secret_refs",
 }
@@ -598,7 +597,9 @@ def validate_config(
         )
 
     record_command = _argv(data.get("record_command"), "record_command", base)
-    database_value = env.get("BONUS_DB") or data.get("database")
+    # The JSON graph owns its database. BONUS_DB remains only in minimal_config for
+    # deprecated queue-only compatibility and must never retarget a configured runtime.
+    database_value = data.get("database")
     database = _safe_path(database_value, "database", base) if database_value else default_state_dir(env) / "queue.db"
     cache_value = data.get("cache_dir")
     cache_dir = _safe_path(cache_value, "cache_dir", base) if cache_value else default_cache_dir(env)
@@ -609,12 +610,9 @@ def validate_config(
     if remote is not None:
         remote_map = _require_mapping(remote, "viewer.remote")
         _reject_unknown(remote_map, {
-            "auth_secret_ref", "trusted_loopback_proxy", "allowed_hosts",
+            "trusted_loopback_proxy", "allowed_hosts",
             "allowed_origins", "https_terminated",
         }, "viewer.remote")
-        auth_ref = remote_map.get("auth_secret_ref")
-        if auth_ref is not None and auth_ref not in secret_ids:
-            raise ConfigError(f"viewer.remote.auth_secret_ref references missing-ref {auth_ref}")
         trusted = remote_map.get("trusted_loopback_proxy", False)
         if not isinstance(trusted, bool):
             raise ConfigError("viewer.remote.trusted_loopback_proxy must be boolean")
@@ -642,19 +640,10 @@ def validate_config(
                 or (parsed_port is not None and not 1 <= parsed_port <= 65535)
             ):
                 raise ConfigError("viewer.remote.allowed_origins must contain exact HTTPS origins")
-        if trusted:
-            if auth_ref is not None:
-                raise ConfigError(
-                    "viewer.remote trusted loopback proxy cannot also use auth_secret_ref"
-                )
-            if not _loopback(viewer.get("bind", "127.0.0.1")):
-                raise ConfigError("viewer.remote trusted loopback proxy requires loopback bind")
-            if viewer.get("mutations_enabled", False) is not False:
-                raise ConfigError("viewer.remote trusted loopback proxy requires mutations disabled")
-        elif not isinstance(auth_ref, str) or not auth_ref:
-            raise ConfigError(
-                "viewer.remote requires auth_secret_ref unless trusted_loopback_proxy is true"
-            )
+        if trusted is not True:
+            raise ConfigError("viewer.remote requires trusted_loopback_proxy=true")
+        if not _loopback(viewer.get("bind", "127.0.0.1")):
+            raise ConfigError("viewer.remote trusted loopback proxy requires loopback bind")
 
     pr_exceptions: list[Mapping[str, Any]] = []
     for index, item in enumerate(_require_list(data.get("pr_exceptions", []), "pr_exceptions")):
@@ -719,6 +708,7 @@ def minimal_config(
 
     This is deliberately unavailable to planner/dispatch callers; it exists so historical
     ``bonusdb.sh init/add/status`` invocations do not require a provider configuration.
+    ``BONUS_DB`` is a deprecated compatibility fallback on this graph-free path only.
     """
 
     env = os.environ if environ is None else environ

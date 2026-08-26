@@ -31,9 +31,8 @@ with the required capability.
 - `ai-token-rotator` is not required; when used, configure it as an activation adapter and
   let `doctor` report whether its executable is present.
 - systemd user services only if hourly scout and ten-minute refresh timers are wanted.
-- Tailscale Serve or another authenticated HTTPS terminator only if the viewer is used
-  remotely. A read-only, loopback-only viewer may trust a tailnet-authenticated proxy and
-  require no separate application secret.
+- Tailnet-only Tailscale Serve if the viewer is used remotely. Tailscale is the viewer's only
+  access boundary; Bonus Drain adds no password or identity session.
 
 There is no runtime dependency on `uv`, `bg-schedule`, `codex-bg-thread`, a provider CLI,
 or a shell evaluator. Provider-specific readers may have their own documented external
@@ -52,9 +51,10 @@ The defaults follow XDG and can be changed by their standard XDG environment var
 | active version | `~/.local/lib/bonus-drain/current` |
 | stable command | `~/.local/bin/bonus-drain` |
 
-`BONUS_DB` and `BONUSDB` remain compatibility exports. They resolve to the same
-config-selected database and stable command as `BONUS_DRAIN_BIN`; they are not alternate
-state locations.
+The JSON graph owns a configured runtime's database and cache. `BONUS_DB` (and `BONUSDB`) is
+deprecated queue-only compatibility for graph-free legacy commands; it cannot retarget the
+viewer, refresher, scout, planner, or dispatch graph. A graph command rejects a divergent
+`--database` value.
 
 ## Configuration
 
@@ -79,18 +79,13 @@ The configuration graph is versioned and uses IDs for all relationships:
   shell interpolation, dangling references, duplicate IDs, and direct-provider dispatch
   are rejected.
 - `pr_exceptions[]` is the only place to grant repository-specific push behavior.
-- `viewer` defaults to loopback and no mutations. Remote access is config-selected as either
-  application-authenticated or a secretless trusted loopback proxy with mutations forced
-  off. See [SECURITY.md](SECURITY.md) before enabling either mode.
+- `viewer` binds to loopback. Remote access requires a secretless trusted loopback proxy,
+  exact Host/HTTPS Origin values, and an explicit mutations flag. See
+  [SECURITY.md](SECURITY.md).
 
-The installed `bonus-drain-viewer.service` is a compatibility exception: it runs the literal
-original combined jobs server and embedded UI from
-`services/jobs-viewer/server.py`. That UI retains its original enable/disable and force-run
-controls and its original named Claude/Codex/Grok presentation. It still binds only
-`127.0.0.1`; use it only locally or behind tailnet-authenticated Tailscale Serve. The generic,
-config-derived viewer remains available through `bonus-drain viewer`, but is not the service
-template used for this UI-preserving cutover. See [VIEWER_FOLLOW_UP.md](VIEWER_FOLLOW_UP.md)
-for the intentionally deferred config-driven UI work.
+The installed viewer preserves the existing `background jobs` frontend unchanged, including
+the Bonus Drain and scheduled tabs. Its Force buttons delegate to the shared router-only kickoff service.
+There is no application-auth configuration or login flow.
 
 After installation, expand the operator home and replace every illustrative
 `/ABSOLUTE/PATH/TO` prefix in `config.example.json`. Adapter executables should use the
@@ -123,7 +118,13 @@ Committed `activating` and `releasing` states bracket external PIN changes. Conc
 launches on one account share the proven activation; a different account is blocked until
 every holder is terminal. Ambiguous router outcomes retain both claim and lease. The last
 terminal record commits a `releasing` marker before removing the PIN and commits its terminal
-row afterward; an interruption leaves durable reconciliation evidence.
+row afterward; an interruption leaves durable reconciliation evidence. An ambiguous outcome
+never relinquishes its activation lease immediately.
+
+CLI `auto` is a non-launching, pre-claim `agent-router --dry-run`; its uncertainty is
+retry-safe. After a concrete router launch has been attempted, any uncertainty is
+post-launch ambiguity: the claim and activation lease remain fail-closed until explicit
+reconciliation and no caller retries automatically.
 
 Normalized usage always includes explicit `provider_id`, `account_id`, and `captured_at`.
 The shipped direct Grok collector is bound to one configured account adapter. If Grok omits
@@ -167,10 +168,21 @@ systemctl --user enable --now bonus-drain-refresh.timer bonus-drain-scout.timer
 systemctl --user list-timers 'bonus-drain-*'
 ```
 
-The generic refresher is the only component that runs configured usage adapters. Scout,
-`gates`, `plan`, and the generic `bonus-drain viewer` read normalized cache and SQLite only.
-The original compatibility jobs viewer keeps its historical background collector thread;
-HTTP request handlers themselves only read its disk cache and SQLite.
+The refresher is the only component that runs configured usage adapters. Scout, `gates`,
+`plan`, and viewer requests read normalized cache and SQLite only. The viewer's gated,
+nearest-reset drain summary represents this tick's paced scout allocation. Its remaining
+queue is the complete eligible provider/capability inventory, so stale or closed cache gates
+do not hide concrete Force targets. Force is manual and bypasses pacing only; it still checks
+active state, compatibility, atomic claims, and the configured `agent-router` path.
+
+To run the remote service after its profile is reviewed:
+
+```sh
+systemctl --user enable --now bonus-drain-viewer.service
+```
+
+The service waits for the refresh timer to be scheduled, not for a fresh cache. Missing or
+stale cache must still close the automated drain summary.
 
 Useful read-only checks:
 
@@ -196,6 +208,13 @@ python3 -m compileall -q bonus_drain
 BONUS_DRAIN_CONFIG=config.example.json bin/bonus-drain doctor --json
 systemd-analyze verify systemd/*.service systemd/*.timer
 ```
+
+Treat static unit verification, HTTP boundary verification, and browser verification as
+separate evidence. Exact unit text plus `systemd-analyze verify` proves the direct viewer
+server command and refresh-timer ordering. HTTP contracts prove exact Host/HTTPS Origin,
+JSON-only mutations, body limits, and router-only delegation. A disposable Chrome test loads
+the frozen frontend through the real handler and proves the controls render without a login;
+it does not exercise systemd, product TLS, or Tailscale.
 
 Provider adapter integration should use fixture executables and a disposable DB/cache.
 Proof must include a failed sibling refresh retaining its last good cache, a stale account
@@ -228,8 +247,8 @@ There are two separate operations:
   apply and rollback.
 
 Read [MIGRATION.md](MIGRATION.md) for the required stop/mask, writer proof, backup,
-manual apply, verification, and rollback sequence. Do not run old and new writers against
-one queue.
+manual apply, viewer-profile inventory, verification, and rollback sequence. Do not run old
+and new writers against one queue.
 
 To remove runtime-owned files while preserving config, DB, cache, and operator state:
 

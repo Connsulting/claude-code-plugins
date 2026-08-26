@@ -1,6 +1,6 @@
 ---
 name: bonus-drain
-description: Manage and run a low-priority bonus backlog funded only by independently configured provider capacity that would otherwise expire. Use for "bonus background task", "add to bonus backlog", "drain leftover tokens", "if there are tokens spare do this", or "kick bonus work now". Add mode validates autonomy and queues work; run performs one cache-gated scout tick; kick force-dispatches a bounded count while preserving claims and router-only launch. Not for urgent or interactive work.
+description: Manage and run a low-priority bonus backlog funded only by independently configured provider capacity that would otherwise expire. Use for "bonus background task", "add to bonus backlog", "drain leftover tokens", "if there are tokens spare do this", or "kick bonus work now". Add mode validates autonomy and queues work; run performs one cache-gated scout tick; manual dispatch preserves claims and router-only launch. Not for urgent or interactive work.
 ---
 
 # Bonus Drain
@@ -24,11 +24,14 @@ source private helper functions or invent a second DB path.
    launch and `codex-bg-thread` are forbidden.
 5. `auto` classifies in a router dry run only. Validate the result, claim the task, and launch
    once with a concrete provider/account. Never persist `auto` or a null provider.
-6. Claim `(task_id, eligibility_key)` transactionally before activation/routing. Known launch
-   failure releases it. Terminal record closes it. Ambiguity holds it for reconciliation and
-   releases activation immediately.
+6. Classifier uncertainty is pre-claim and retry-safe because `agent-router --dry-run` is
+   non-launching. Claim `(task_id, eligibility_key)` before concrete activation/routing.
+   Known-not-launched failure releases it; a post-launch ambiguity holds the claim and any
+   activation lease fail-closed for reconciliation. Never claim activation releases
+   immediately after ambiguity.
 7. Use the resolved executable record command embedded in the dispatched prompt. It must
-   point to the stable CLI and the same database shown by `BONUS_DB`.
+   point to the stable CLI and the JSON graph's database. `BONUS_DB` is deprecated queue-only
+   compatibility and cannot retarget the configured graph.
 8. No publish, merge, credential change, production mutation, contract/schema/ADR change, or
    other externally consequential action is implied by being bonus work. The task contract
    must grant it explicitly.
@@ -90,15 +93,19 @@ bonus-drain scout --json
 Do not loop to empty the queue. systemd owns later ticks. A zero-dispatch result with explicit
 closed reasons is successful operation.
 
-## Mode: kick
+## Mode: manual dispatch
 
-`kick N` is a bounded manual bypass of capacity pacing, not of queue safety. Keep normal
-eligibility, compatibility, atomic claim, concrete router launch, account release, and
-terminal-record contracts. Refuse non-positive or unbounded counts. Do not classify in a
-scout; a manual auto request may classify immediately before its one concrete launch.
+Manual dispatch is a one-task bypass of capacity pacing, not of queue safety. Keep normal
+eligibility, compatibility, atomic claim, concrete router launch, activation-lease, and
+terminal-record contracts. CLI `auto` may classify immediately before its one concrete launch;
+the viewer never accepts `auto`. Do not loop or retry ambiguous launches.
 
-Use the stable CLI's `kick`/manual-dispatch command shown by `bonus-drain --help`; never call
-a provider command or a legacy monitor directly.
+Use the stable CLI's shared dispatch path; never call a provider command or a legacy monitor
+directly:
+
+```sh
+bonus-drain dispatch TASK_ID [PROVIDER_ID_OR_auto] --json
+```
 
 ## Terminal contract
 
@@ -118,7 +125,10 @@ the matching terminal history and claim atomically; it is not an automatic retry
 
 - Ten-minute cache refresh: `bonus-drain-refresh.timer`.
 - Hourly scout: `bonus-drain-scout.timer`.
-- Optional viewer: loopback/read-only by default; see `SECURITY.md` before remote use.
+- Optional viewer: the established two-tab background-jobs UI. Force is manual and delegates
+  only to the shared `kick_task` to `agent-router` path. Tailscale Serve is the sole access
+  boundary; there is no application login. Exact Host/HTTPS Origin and JSON-only checks
+  protect browser mutations; see `SECURITY.md` before remote use.
 - Install/status/doctor/removal: see `README.md`.
 - DB/unit cutover and rollback: dry-run report plus the manual procedure in `MIGRATION.md`.
 - Legacy markdown/jsonl: separate `bonus-drain import-legacy` only.

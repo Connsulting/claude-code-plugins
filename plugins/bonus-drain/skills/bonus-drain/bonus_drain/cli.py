@@ -5,15 +5,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import runpy
 import sys
 import time
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from . import __version__
 from . import config as config_module
 from . import db, dispatcher, planner, scout, usage
+from .kick import kick_task
 
 
 class CLIError(RuntimeError):
@@ -70,17 +72,23 @@ def _load_config(args: argparse.Namespace, *, graph_required: bool) -> config_mo
     path = _config_path(args)
     if path is not None and path.is_file():
         cfg = config_module.load_config(path)
+        configured_graph = True
     elif graph_required:
         raise CLIError(f"configuration is required: {path or config_module.default_config_path()}")
     else:
         cfg = config_module.minimal_config(database=getattr(args, "database", None))
+        configured_graph = False
     database = getattr(args, "database", None)
-    if database:
-        # A command-line DB override is for compatibility/recovery and must remain the same
-        # object graph otherwise.  RuntimeConfig is immutable, so reconstruct only this field.
-        values = dict(cfg.__dict__)
-        values["database"] = Path(database).expanduser().resolve(strict=False)
-        cfg = config_module.RuntimeConfig(**values)
+    if database and configured_graph and graph_required:
+        requested = Path(database).expanduser().resolve(strict=False)
+        authoritative = cfg.database.expanduser().resolve(strict=False)
+        if requested != authoritative:
+            raise CLIError(
+                "--database is deprecated for configured commands and must match "
+                f"config database {authoritative}"
+            )
+    elif database and configured_graph:
+        cfg = replace(cfg, database=Path(database).expanduser().resolve(strict=False))
     return cfg
 
 
@@ -337,12 +345,9 @@ def _command(args: argparse.Namespace) -> int:
         return 0 if not report.errors else 1
     if command in {"dispatch", "run-now"}:
         cfg, queue = _queue(args, graph_required=True)
-        now = _now(args)
-        provider_id = args.provider
-        key = getattr(args, "eligibility_key", None) or f"manual/manual/{db.hour_round(now + 604800)}"
-        result = dispatcher.dispatch(
-            cfg, queue, task_id=args.task, eligibility_key=key,
-            requested_provider=provider_id,
+        result = kick_task(
+            cfg, queue, task_id=args.task, requested_provider=args.provider,
+            eligibility_key=getattr(args, "eligibility_key", None), now_epoch=_now(args),
         )
         _json({"dispatch": result.to_dict()}) if args.json else print(result.job_id)
         return 0
@@ -436,13 +441,19 @@ def _command(args: argparse.Namespace) -> int:
         _json(result) if args.json else print("installed" if result.ok else "not ready")
         return 0 if result.ok else 1
     if command == "viewer":
-        from . import viewer
         cfg, queue = _queue(args, graph_required=True)
-        policy = viewer.SecurityPolicy.from_config(
-            cfg.viewer, remote=args.remote,
-            resolve_secret=lambda ref: _resolve_secret(cfg, ref),
-        )
-        viewer.serve(cfg, queue, cfg.usage_cache_dir, policy, port=args.port)
+        del queue
+        if cfg.source_path is not None:
+            os.environ["BONUS_DRAIN_CONFIG"] = str(cfg.source_path)
+        skill_root = Path(__file__).resolve().parents[1]
+        os.environ["BONUS_SKILL_DIR"] = str(skill_root)
+        server = skill_root / "services" / "jobs-viewer" / "server.py"
+        previous_argv = sys.argv
+        sys.argv = [str(server), "--host", str(cfg.viewer.get("bind", "127.0.0.1")), "--port", str(args.port)]
+        try:
+            runpy.run_path(str(server), run_name="__main__")
+        finally:
+            sys.argv = previous_argv
         return 0
     if command == "migrate":
         from . import cutover
@@ -611,6 +622,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     except dispatcher.AlreadyClaimed as exc:
         _json({"ok": False, "error": str(exc), "code": "already_claimed"}, stream=sys.stderr)
+        return 1
+    except dispatcher.ClassificationFailure as exc:
+        _json({"ok": False, "error": str(exc), "code": "classification_failure"}, stream=sys.stderr)
         return 1
     except dispatcher.AmbiguousDispatch as exc:
         _json({"ok": False, "error": str(exc), "code": "ambiguous_dispatch"}, stream=sys.stderr)

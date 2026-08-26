@@ -10,7 +10,9 @@ files. Never pass them to `bonus-drain migrate`.
 ## 1. Inventory and dry run
 
 Record the old DB path, validated new config path, target XDG paths, and all old scout,
-anchor, refresh, and viewer units. Then run:
+anchor, refresh, and viewer units. Also inventory the viewer bind, exact remote Host/HTTPS
+Origin allowlists, trusted-loopback-proxy flag, mutations flag, and HTTPS terminator mapping.
+Then run:
 
 ```sh
 bonus-drain migrate \
@@ -57,6 +59,7 @@ Create a timestamped directory on the same trusted host. Preserve modes and copy
 - the old and new config files, excluding resolved secret values;
 - the unit files and the `unit-files.before.txt`, `timers.before.txt`, and
   `units.before.txt` inventories;
+- the viewer profile and HTTPS terminator mapping inventory;
 - the installed-version/current-link inventory.
 
 Hash the backup and make it read-only. Open the copied DB with SQLite in read-only mode and
@@ -79,6 +82,11 @@ With old writers masked and the backup verified:
 7. Enable only `bonus-drain-refresh.timer`. Observe one successful refresh, then enable
    `bonus-drain-scout.timer`.
 8. Keep old writer units masked through at least one observed scheduling cycle.
+
+The viewer service, when separately enabled, runs the established two-tab UI on loopback port
+8766 and has `Wants=`/`After=` on the refresh timer. Tailscale Serve is the sole access
+boundary. Controls require `mutations_enabled: true`, exact Host/HTTPS Origin, and JSON request
+bodies; they never require an application login or secret.
 
 For an existing SQLite queue, copy the quiesced database into the separate XDG state path;
 never repoint the new runtime at an old hard link. Run `bonus-drain init` only against that
@@ -108,6 +116,10 @@ Retain the exact commands and output proving:
 - scout and viewers perform no foreground provider read;
 - `doctor` has no ambiguous claim requiring reconciliation;
 - the new refresh/scout timer identities and next-fire times are correct.
+- exact viewer-unit text and `systemd-analyze verify` prove the direct server command and
+  refresh-timer ordering; HTTP contracts prove exact Host/HTTPS Origin and JSON-only
+  mutations, while a disposable Chrome test proves the frozen frontend renders through the
+  real handler. Neither proves systemd, Tailscale, nor product TLS.
 
 ## Rollback
 
@@ -116,7 +128,8 @@ Rollback is also manual:
 1. Disable, stop, and mask the new scout and refresh timers/services. Stop the viewer.
 2. Prove no new process has the queue DB, WAL, or SHM open for writing.
 3. Preserve the failed-cutover DB and logs separately for diagnosis.
-4. Restore the verified DB/config backup with its recorded modes.
+4. Restore the verified DB/config backup with its recorded modes and restore the recorded
+   viewer profile/HTTPS terminator mapping only when separately authorized.
 5. Restore old unit files and their exact enabled/masked state from the inventory.
 6. Run the old read-only status/doctor checks before unmasking any writer.
 7. Unmask and start only the previously active old units, then prove one writer topology.

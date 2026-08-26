@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import ast
 import fnmatch
-import hashlib
 import json
 import os
 import re
@@ -138,28 +137,27 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             self.assertIsInstance(manifest.get("description"), str, manifest_path)
             self.assertTrue(manifest["description"].strip(), manifest_path)
             versions.append(manifest["version"])
-        self.assertEqual(versions, ["0.1.5", "0.1.5"])
+        self.assertEqual(versions, ["0.2.0", "0.2.0"])
 
-    def test_packaged_viewer_supports_secretless_read_only_tailnet_proxy(self) -> None:
+        sys.path.insert(0, str(SKILL_ROOT))
+        try:
+            from bonus_drain import __version__
+            from bonus_drain import lifecycle
+        finally:
+            sys.path.pop(0)
+        self.assertEqual(__version__, "0.2.0")
+        self.assertEqual(lifecycle._DEFAULT_VERSION, "0.2.0")
+
+    def test_packaged_viewer_supports_secretless_tailnet_controls(self) -> None:
         example = self.load_json(SKILL_ROOT / "config.example.json")
         viewer_config = example["viewer"]
         remote = viewer_config["remote"]
         self.assertEqual(viewer_config["bind"], "127.0.0.1")
-        self.assertIs(viewer_config["mutations_enabled"], False)
+        self.assertIs(viewer_config["mutations_enabled"], True)
         self.assertIs(remote["trusted_loopback_proxy"], True)
         self.assertNotIn("auth_secret_ref", remote)
 
-        sys.path.insert(0, str(SKILL_ROOT))
-        try:
-            from bonus_drain import viewer
-
-            policy = viewer.SecurityPolicy.from_config(viewer_config, remote=True)
-        finally:
-            sys.path.pop(0)
-        host = remote["allowed_hosts"][0]
-        self.assertTrue(policy.authorize_read(None, host))
-        self.assertFalse(policy.authorize_read(None, "untrusted.example"))
-        self.assertFalse(policy.mutations_enabled)
+        self.assertTrue((SKILL_ROOT / "services" / "jobs-viewer" / "server.py").is_file())
 
     def test_claude_and_codex_marketplaces_point_at_the_plugin_root(self) -> None:
         self.require_plugin()
@@ -272,20 +270,16 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             "skills/bonus-drain/bonus_drain/usage.py",
             "skills/bonus-drain/bonus_drain/planner.py",
             "skills/bonus-drain/bonus_drain/dispatcher.py",
+            "skills/bonus-drain/bonus_drain/kick.py",
             "skills/bonus-drain/bonus_drain/scout.py",
-            "skills/bonus-drain/bonus_drain/viewer.py",
             "skills/bonus-drain/bonus_drain/lifecycle.py",
             "skills/bonus-drain/bonus_drain/cutover.py",
+            "skills/bonus-drain/services/jobs-viewer/server.py",
             "skills/bonus-drain/systemd/bonus-drain-refresh.service",
             "skills/bonus-drain/systemd/bonus-drain-refresh.timer",
             "skills/bonus-drain/systemd/bonus-drain-scout.service",
             "skills/bonus-drain/systemd/bonus-drain-scout.timer",
             "skills/bonus-drain/systemd/bonus-drain-viewer.service",
-            "skills/bonus-drain/services/jobs-viewer/server.py",
-            "skills/bonus-drain/services/jobs-viewer/usage.sh",
-            "skills/bonus-drain/services/jobs-viewer/codex-usage.sh",
-            "skills/bonus-drain/services/jobs-viewer/grok-usage.sh",
-            "skills/bonus-drain/VIEWER_FOLLOW_UP.md",
         }
         actual = {
             path.relative_to(PLUGIN_ROOT).as_posix() for path in self.plugin_files()
@@ -293,6 +287,17 @@ class BonusDrainPackageContractTests(unittest.TestCase):
         self.assertTrue(
             required_paths <= actual,
             f"package lacks standalone assets: {sorted(required_paths - actual)}",
+        )
+        retired = {
+            path for path in actual
+            if path == "skills/bonus-drain/VIEWER_FOLLOW_UP.md"
+            or path.endswith("services/jobs-viewer/usage.sh")
+            or path.endswith("services/jobs-viewer/codex-usage.sh")
+            or path.endswith("services/jobs-viewer/grok-usage.sh")
+        }
+        self.assertFalse(
+            retired,
+            f"retired copied collector assets must not ship: {sorted(retired)}",
         )
 
         for relative_path in (
@@ -411,34 +416,53 @@ class BonusDrainPackageContractTests(unittest.TestCase):
         runtime_text = "\n".join(
             text
             for path, text in self.payload_text()
-            if path != SKILL_ROOT / "services" / "jobs-viewer" / "server.py"
             if path.suffix in {".py", ".sh", ".service", ".timer"}
             or os.access(path, os.X_OK)
         )
         self.assertNotRegex(runtime_text, r"(?i)\buv\b")
-        self.assertNotRegex(runtime_text, r"(?i)\bbg-schedule\b")
         self.assertNotRegex(runtime_text, r"(?i)\bcodex-bg-thread\b")
-
-        original_server = SKILL_ROOT / "services" / "jobs-viewer" / "server.py"
-        original_text = original_server.read_text(encoding="utf-8")
-        marker = "DB_PATH = Path(os.environ.get("
-        runtime_tail = original_text[original_text.index(marker):].encode("utf-8")
-        self.assertEqual(
-            hashlib.sha256(runtime_tail).hexdigest(),
-            "9ebbaeaa6540a40ad631a7388f11fd5ee1180b0612af84cc1384bfd21377bd87",
-            "the original server and embedded UI changed after the plugin path adapter",
+        core_runtime_text = "\n".join(
+            text for path, text in self.payload_text()
+            if path.name != "server.py" and (
+                path.suffix in {".py", ".sh", ".service", ".timer"}
+                or os.access(path, os.X_OK)
+            )
         )
+        self.assertNotRegex(core_runtime_text, r"(?i)\bbg-schedule\b")
 
         viewer_unit = (
             SKILL_ROOT / "systemd" / "bonus-drain-viewer.service"
         ).read_text(encoding="utf-8")
         self.assertIn(
-            "%h/.local/lib/bonus-drain/current/services/jobs-viewer/server.py",
+                "ExecStart=/usr/bin/python3 -B %h/.local/lib/bonus-drain/current/services/jobs-viewer/server.py --port 8766",
             viewer_unit,
         )
-        self.assertIn("--host 127.0.0.1 --port 8766", viewer_unit)
+        self.assertIn(
+            "Environment=BONUS_DRAIN_CONFIG=%h/.config/bonus-drain/config.json",
+            viewer_unit,
+        )
+        self.assertRegex(viewer_unit, r"(?m)^Wants=.*\bbonus-drain-refresh\.timer\b")
+        self.assertRegex(viewer_unit, r"(?m)^After=.*\bbonus-drain-refresh\.timer\b")
+        self.assertNotIn("Environment=BONUS_DB=", viewer_unit)
         self.assertNotIn("claude-settings", viewer_unit)
         self.assertNotRegex(viewer_unit, r"(?i)\buv\b")
+
+        analyzer = shutil.which("systemd-analyze")
+        if analyzer is not None:
+            completed = subprocess.run(
+                [analyzer, "verify", str(SKILL_ROOT / "systemd" / "bonus-drain-viewer.service")],
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=20,
+            )
+            self.assertEqual(
+                completed.returncode,
+                0,
+                f"systemd-analyze rejected the shipped viewer unit:\n{completed.stdout}\n{completed.stderr}",
+            )
 
         runtime_package = SKILL_ROOT / "bonus_drain"
         local_modules = {path.stem for path in runtime_package.glob("*.py")}
@@ -466,16 +490,12 @@ class BonusDrainPackageContractTests(unittest.TestCase):
         self.require_plugin()
         for path, text in self.payload_text():
             relative_path = path.relative_to(PLUGIN_ROOT)
-            literal_original_asset = relative_path.as_posix().startswith(
-                "skills/bonus-drain/services/jobs-viewer/"
-            )
-            if not literal_original_asset:
-                for pattern, description in PERSONAL_TEXT.items():
-                    self.assertNotRegex(
-                        text,
-                        re.compile(pattern, re.IGNORECASE),
-                        f"{relative_path} contains {description}",
-                    )
+            for pattern, description in PERSONAL_TEXT.items():
+                self.assertNotRegex(
+                    text,
+                    re.compile(pattern, re.IGNORECASE),
+                    f"{relative_path} contains {description}",
+                )
             for pattern in TOKEN_PATTERNS:
                 self.assertNotRegex(
                     text,
@@ -488,13 +508,13 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                 f"{relative_path} contains an inline secret assignment; use a secret reference",
             )
 
-    def test_viewer_example_and_schema_default_to_loopback_and_read_only(self) -> None:
+    def test_viewer_example_enables_tailnet_controls_but_schema_defaults_safe(self) -> None:
         self.require_plugin()
         example = self.load_json(SKILL_ROOT / "config.example.json")
         viewer = example.get("viewer")
         self.assertIsInstance(viewer, dict, "config example needs a viewer section")
         self.assertIn(viewer.get("bind"), {"127.0.0.1", "localhost"})
-        self.assertIs(viewer.get("mutations_enabled"), False)
+        self.assertIs(viewer.get("mutations_enabled"), True)
 
         schema = self.load_json(SKILL_ROOT / "config.schema.json")
         viewer_schema = schema.get("properties", {}).get("viewer", {})

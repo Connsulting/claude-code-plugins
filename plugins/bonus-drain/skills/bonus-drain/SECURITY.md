@@ -51,95 +51,68 @@ requirement.
 
 ## Viewer defaults
 
-The generic Bonus-only viewer reads persisted cache and SQLite only. It does not run usage
-readers, activation commands, router classification, or refresh subprocesses in an HTTP
-request.
+Bonus Drain preserves the established two-tab background-jobs viewer. Request threads read
+persisted usage snapshots and SQLite, and inspect local systemd timer metadata; they never call
+a provider API, activation command, or router for a GET. The separate
+`bonus-drain-refresh.timer` owns bounded usage refresh. Force is always an explicit button
+action. Concrete and `auto` Force both delegate to the shared router-only kickoff service.
 
-The installed service template currently runs the copied original combined jobs viewer to
-preserve its UI exactly. Its request handlers also read only disk cache and SQLite, while its
-historical background thread refreshes the copied legacy collectors. Unlike the generic
-viewer, it retains the original queue activation and force-run POST endpoints and does not
-consume the generic viewer's session policy. It must remain bound to `127.0.0.1` and be used
-only directly on the host or through tailnet-authenticated Tailscale Serve. It emits no CORS
-headers and its UI uses JSON POSTs, but this compatibility surface is not approved for a LAN,
-public reverse proxy, or unauthenticated port-forward. The migration to fully config-derived
-controls and the generic security policy is tracked in
-[VIEWER_FOLLOW_UP.md](VIEWER_FOLLOW_UP.md).
-
-The Bonus-only viewer defaults to:
+The viewer defaults to:
 
 - bind `127.0.0.1`;
-- read-only routes;
-- no session or mutation endpoint beyond remote sign-in;
+- no application authentication, identity session, or cookie;
+- mutations disabled unless explicitly enabled;
 - no CORS headers;
 - request bodies capped at 4096 bytes;
-- `no-store`, restrictive CSP, no-referrer, nosniff, and frame-deny headers.
+- `no-store`, same-origin referrer, nosniff, and frame-deny headers.
 
 Binding a local-mode viewer to a non-loopback address is rejected.
 
-## Explicit external mode
+The installed unit runs the established `services/jobs-viewer/server.py` on loopback port
+8766, with `BONUS_DRAIN_CONFIG` for the JSON graph and `Wants=`/`After=` the refresh timer.
+That ordering does not make an absent cache fresh; gates remain fail-closed.
 
-External mode is never inferred from the bind address. It always requires `--remote`, exact
-`allowed_hosts[]`, and exact HTTPS `allowed_origins[]`. It has two deliberately separate
-security profiles.
+## Tailnet-only external mode
 
-### Application-authenticated mode
+The viewer has one remote profile. `trusted_loopback_proxy: true` means tailnet-only Tailscale
+Serve is the access boundary. Bonus Drain deliberately has no application password, login
+route, authentication cookie, identity session, or viewer secret.
 
-This mode additionally requires:
-
-- an external `auth_secret_ref` resolved at startup;
-- loopback behind Tailscale Serve, or `https_terminated: true` for an intentionally
-  non-loopback bind behind a reviewed HTTPS terminator.
-
-The resolved secret is reduced to a one-way verifier and is not retained in config, logs,
-or a cookie. Successful sign-in issues a random, bounded-lifetime in-memory session cookie
-with `Secure; HttpOnly; SameSite=Strict`. Remote reads require the cookie and exact Host;
-an Origin header, when present, must match exactly. Mutations additionally require an exact
-Origin and a session-bound `X-CSRF-Token`. There is no wildcard host/origin, suffix match,
-origin reflection, or CORS response.
-
-Failed sign-ins are throttled in memory with a bounded five-minute window. Behind a local
-HTTPS proxy such as Tailscale Serve, attempts may share the proxy peer address, so repeated
-failures can temporarily lock out all remote sign-ins; this is intentionally fail-closed.
-
-Mutations remain absent unless `mutations_enabled` is explicitly true. Enabling them does
-not weaken session, CSRF, Host, Origin, HTTPS, body-size, task-ID, or queue-layer checks.
-
-### Trusted loopback proxy mode
-
-Set `trusted_loopback_proxy: true` only when an authenticated local proxy, such as
-tailnet-only Tailscale Serve, is the access boundary. This mode deliberately has no Bonus
-Drain application password or session. Startup fails unless all of these remain true:
+Startup fails unless all of these remain true:
 
 - the viewer binds to a loopback address;
-- `mutations_enabled` is false;
 - exact Host and HTTPS Origin allowlists are configured;
-- `auth_secret_ref` is absent.
+- the trusted loopback proxy flag is true;
+- configuration contains no application-auth field.
 
-The listener therefore remains unavailable from the LAN and public network. Tailscale
-authenticates tailnet membership before proxying to loopback. A generic unauthenticated
-port-forward is not an acceptable proxy for this mode.
+Every tailnet member that can reach the exact viewer URL is therefore an operator. This is
+the intended trust model, not a second authentication layer.
+
+Mutations remain absent unless `mutations_enabled` is explicitly true. When enabled,
+enable/disable and Force require exact Host, exact HTTPS Origin, JSON body limits, safe task
+and provider IDs. Exact Origin plus JSON-only request handling prevents a public page from
+submitting a simple cross-site browser request without altering the established frontend.
+Force then uses the shared router-only kickoff path and still enforces active state,
+compatibility, and atomic claims.
 
 ### Tailscale Serve example
 
-For a read-only tailnet viewer, keep `bind` as `127.0.0.1`, leave mutations disabled,
-configure `trusted_loopback_proxy: true` plus the exact MagicDNS Host/Origin, and start the
-viewer in remote mode. Then front it with HTTPS:
+Keep `bind` as `127.0.0.1`, configure `trusted_loopback_proxy: true` plus the exact MagicDNS
+Host/Origin, explicitly choose whether controls are enabled, and front the viewer with HTTPS:
 
 ```sh
 sudo tailscale serve --bg --https=8766 http://127.0.0.1:8766
 ```
 
-Open `https://EXACT_NODE_NAME:8766/`; Tailscale Serve must preserve that Host. Use the
-application-authenticated profile instead if the proxy is not itself an adequate access
-boundary or if viewer mutations are ever enabled. Disable the proxy with:
+Open `https://EXACT_NODE_NAME:8766/`; Tailscale Serve must preserve that Host. Set
+`mutations_enabled: true` for enable/disable and Force. No login step is required. Disable the
+proxy with:
 
 ```sh
 sudo tailscale serve --https=8766 off
 ```
 
-Do not expose the loopback HTTP listener through a generic port-forward, bind `0.0.0.0`
-without reviewed TLS termination, or place an auth secret directly in the JSON/unit.
+Do not expose the loopback HTTP listener through a generic port-forward or bind `0.0.0.0`.
 
 ## Installation and removal
 

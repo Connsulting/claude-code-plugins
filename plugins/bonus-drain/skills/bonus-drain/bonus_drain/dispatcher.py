@@ -19,7 +19,6 @@ from .config import AccountConfig, AdapterConfig, ConfigError, ProviderConfig, R
 from .db import (
     LEGACY_EXCLUSIVE_CAPABILITY,
     QueueDB,
-    QueueError,
     Task,
     cycle_from_key,
     task_requires_legacy_exclusive,
@@ -40,6 +39,10 @@ class AlreadyClaimed(DispatchError):
 
 class KnownDispatchFailure(DispatchError):
     """The router positively reported that no launch occurred."""
+
+
+class ClassificationFailure(DispatchError):
+    """A non-launching pre-claim router classification could not complete."""
 
 
 class AmbiguousDispatch(DispatchError):
@@ -405,10 +408,111 @@ def _materialize_mcp_config(config: RuntimeConfig, task: Task, _eligibility_key:
             pass
 
 
+def _phase_uncertainty(phase: str, message: str) -> DispatchError:
+    if phase == "classification":
+        detail = message.replace("; launch state is unknown", "")
+        return ClassificationFailure(
+            f"{detail}; dry-run classification failed before claim and is retry-safe"
+        )
+    return AmbiguousDispatch(message)
+
+
+def _explicitly_not_launched(value: Mapping[str, Any]) -> bool:
+    containers = [value]
+    dispatch_value = value.get("dispatch")
+    if isinstance(dispatch_value, Mapping):
+        containers.append(dispatch_value)
+    launch_values = [item.get("launched") for item in containers if "launched" in item]
+    if not launch_values or any(item is not False for item in launch_values):
+        return False
+    return not any(
+        isinstance(item.get("job_id"), str) and bool(item.get("job_id"))
+        for item in containers
+    )
+
+
+def _router_diagnostic(
+    config: RuntimeConfig,
+    adapter: AdapterConfig,
+    diagnostic: Any,
+) -> str:
+    """Redact and bound router-controlled text before it can leave dispatch.
+
+    Router JSON must remain unmodified for protocol parsing (including ``job_id``), but any
+    stdout/stderr-derived text is untrusted diagnostic data.  Reuse the adapter's configured
+    secret resolution and redactor so errors, claim details, summaries, and the viewer never
+    retain configured secret values.
+    """
+
+    from .adapters import _redact, _secrets
+
+    try:
+        secret_values, _secret_env = _secrets(adapter, {}, config, os.environ)
+    except Exception:
+        # Failure to resolve a redaction secret must not turn a router error into a new failure.
+        # _redact still removes named credential assignments and bounds the diagnostic.
+        secret_values = {}
+    return _redact(str(diagnostic), list(secret_values.values()))[:500]
+
+
+def _completed_router_result(
+    completed: subprocess.CompletedProcess[Any],
+    *,
+    config: RuntimeConfig,
+    adapter: AdapterConfig,
+    phase: str,
+) -> Mapping[str, Any]:
+    stdout = completed.stdout.decode("utf-8", errors="replace") \
+        if isinstance(completed.stdout, bytes) else str(completed.stdout or "")
+    stderr = completed.stderr.decode("utf-8", errors="replace") \
+        if isinstance(completed.stderr, bytes) else str(completed.stderr or "")
+    try:
+        value = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        if completed.returncode != 0:
+            detail = next(
+                (line for line in reversed(stderr.splitlines() + stdout.splitlines()) if line.strip()),
+                "no diagnostic",
+            )
+            raise _phase_uncertainty(
+                phase,
+                f"agent-router exited {completed.returncode} without validated JSON: "
+                f"{_router_diagnostic(config, adapter, detail)}; launch state is unknown",
+            ) from exc
+        raise _phase_uncertainty(
+            phase, "agent-router returned successful non-JSON output; launch state is unknown"
+        ) from exc
+    if not isinstance(value, Mapping):
+        raise _phase_uncertainty(
+            phase, "agent-router returned non-object output; launch state is unknown"
+        )
+    if phase == "launch" and _explicitly_not_launched(value):
+        detail = value.get("error")
+        if not isinstance(detail, str) or not detail:
+            detail = next(
+                (line for line in reversed(stderr.splitlines()) if line.strip()),
+                "router reported launched=false",
+            )
+        raise KnownDispatchFailure(_router_diagnostic(config, adapter, detail))
+    if completed.returncode != 0:
+        detail = next(
+            (line for line in reversed(stderr.splitlines() + stdout.splitlines()) if line.strip()),
+            "no diagnostic",
+        )
+        raise _phase_uncertainty(
+            phase,
+            f"agent-router exited {completed.returncode}: "
+            f"{_router_diagnostic(config, adapter, detail)}; launch state is unknown",
+        )
+    return value
+
+
 def _subprocess_call(
     argv: Sequence[str],
     *,
+    config: RuntimeConfig,
     adapter: AdapterConfig,
+    phase: str,
     **_kwargs: Any,
 ) -> Mapping[str, Any]:
     from .adapters import ProcessOutputLimit, run_bounded_process
@@ -420,46 +524,97 @@ def _subprocess_call(
             env=_safe_environment(adapter),
         )
     except subprocess.TimeoutExpired as exc:
-        raise AmbiguousDispatch(
+        raise _phase_uncertainty(
+            phase,
             f"agent-router timed out after {adapter.timeout_seconds:g}s; launch state is unknown"
         ) from exc
     except ProcessOutputLimit as exc:
-        raise AmbiguousDispatch("agent-router output exceeded configured limit; launch state is unknown") from exc
+        raise _phase_uncertainty(
+            phase, "agent-router output exceeded configured limit; launch state is unknown"
+        ) from exc
     except OSError as exc:
-        raise KnownDispatchFailure(str(exc)) from exc
-    stdout = completed.stdout.decode("utf-8", errors="replace")
-    stderr = completed.stderr.decode("utf-8", errors="replace")
-    if completed.returncode != 0:
-        detail = next((line for line in reversed(stderr.splitlines() + stdout.splitlines()) if line.strip()), "no diagnostic")
-        raise KnownDispatchFailure(f"agent-router exited {completed.returncode}: {detail[:500]}")
-    try:
-        value = json.loads(stdout)
-    except json.JSONDecodeError as exc:
-        raise AmbiguousDispatch("agent-router returned successful non-JSON output") from exc
-    if not isinstance(value, Mapping):
-        raise AmbiguousDispatch("agent-router returned successful non-object output")
-    return value
+        if phase == "classification":
+            raise ClassificationFailure(f"agent-router classifier could not start: {exc}") from exc
+        raise KnownDispatchFailure(f"agent-router could not start: {exc}") from exc
+    return _completed_router_result(completed, config=config, adapter=adapter, phase=phase)
 
 
 def _call_router(
     callback: Callable[..., Any] | None,
     argv: Sequence[str],
+    config: RuntimeConfig,
     adapter: AdapterConfig,
+    *,
+    phase: str,
 ) -> Mapping[str, Any]:
-    if callback is None:
-        result = _subprocess_call(argv, adapter=adapter)
-    else:
-        result = callback(
-            list(argv), timeout_seconds=adapter.timeout_seconds,
-            max_output_bytes=adapter.max_output_bytes, env_allowlist=adapter.env_allowlist,
-        )
+    if phase not in {"classification", "launch"}:
+        raise DispatchError(f"invalid router phase: {phase}")
+    if adapter.kind != "agent-router":
+        raise InvalidRoute(f"{phase} adapter {adapter.id} must be kind agent-router")
+    if phase == "classification" and "--dry-run" not in argv:
+        raise DispatchError("router classification must use --dry-run")
+    if phase == "launch" and "--dry-run" in argv:
+        raise DispatchError("router launch must not use --dry-run")
+    try:
+        if callback is None:
+            result = _subprocess_call(argv, config=config, adapter=adapter, phase=phase)
+        else:
+            result = callback(
+                list(argv), timeout_seconds=adapter.timeout_seconds,
+                max_output_bytes=adapter.max_output_bytes, env_allowlist=adapter.env_allowlist,
+                phase=phase,
+            )
+    except ClassificationFailure:
+        raise
+    except KnownDispatchFailure as exc:
+        if phase == "classification":
+            raise ClassificationFailure(str(exc)) from exc
+        raise
+    except AmbiguousDispatch as exc:
+        if phase == "classification":
+            raise ClassificationFailure(str(exc)) from exc
+        raise
+    except subprocess.TimeoutExpired as exc:
+        raise _phase_uncertainty(
+            phase, "agent-router timed out; launch state is unknown"
+        ) from exc
+    except OSError as exc:
+        if phase == "classification":
+            raise ClassificationFailure(f"agent-router classifier could not start: {exc}") from exc
+        raise KnownDispatchFailure(f"agent-router could not start: {exc}") from exc
+    except Exception as exc:
+        from .adapters import ProcessOutputLimit
+
+        if isinstance(exc, ProcessOutputLimit):
+            raise _phase_uncertainty(
+                phase, "agent-router output exceeded configured limit; launch state is unknown"
+            ) from exc
+        if phase == "classification":
+            raise ClassificationFailure(
+                f"agent-router dry-run classification failed before claim and is retry-safe: {exc}"
+            ) from exc
+        raise AmbiguousDispatch(
+            "agent-router invocation failed after the launch attempt; launch state is unknown"
+        ) from exc
+    if isinstance(result, subprocess.CompletedProcess):
+        return _completed_router_result(result, config=config, adapter=adapter, phase=phase)
     if isinstance(result, str):
         try:
             result = json.loads(result)
         except json.JSONDecodeError as exc:
-            raise AmbiguousDispatch("agent-router returned successful non-JSON output") from exc
+            raise _phase_uncertainty(
+                phase, "agent-router returned successful non-JSON output; launch state is unknown"
+            ) from exc
     if not isinstance(result, Mapping):
-        raise AmbiguousDispatch("agent-router returned successful non-object output")
+        raise _phase_uncertainty(
+            phase, "agent-router returned successful non-object output; launch state is unknown"
+        )
+    if phase == "launch" and _explicitly_not_launched(result):
+        detail = result.get("error")
+        raise KnownDispatchFailure(
+            _router_diagnostic(config, adapter, detail)
+            if isinstance(detail, str) and detail else "router reported launched=false"
+        )
     return result
 
 
@@ -546,12 +701,17 @@ def dispatch(
             "run", "--provider", "auto", "--dry-run", "--dir", task.cwd,
             "--name", f"Bonus classification: {task.id}", "--json", classification_prompt(task),
         ]
-        classified = _call_router(router_call, classifier_argv, classifier_adapter)
+        classified = _call_router(
+            router_call, classifier_argv, config, classifier_adapter, phase="classification",
+        )
         provider = _classified_provider(config, classified)
     else:
         provider = _provider(config, requested_provider)
     if provider.id == "auto" or not provider_compatible(task, provider):
         raise InvalidRoute(f"provider {provider.id} is incompatible with task {task.id}")
+    adapter = config.adapter(provider.dispatch.adapter_id)
+    if adapter.kind != "agent-router":
+        raise InvalidRoute(f"launch adapter {adapter.id} must be kind agent-router")
 
     account = _account_for(config, provider, eligibility_key)
     account_id = account.id if account else None
@@ -601,7 +761,6 @@ def dispatch(
             _activation(config, account, "activate", activation_call)
             activated = account is not None and activation_call is not None
         prompt = render_prompt(config, task, eligibility_key, provider.id, account_id)
-        adapter = config.adapter(provider.dispatch.adapter_id)
         launch_argv = list(adapter.argv) + [
             "run", "--provider", provider.dispatch.provider, "--dir", task.cwd,
             "--name", f"Bonus: {task.id}",
@@ -612,7 +771,7 @@ def dispatch(
         if mcp_path is not None:
             launch_argv.extend(["--mcp-config", str(mcp_path), "--strict-mcp-config"])
         launch_argv.extend(["--json", prompt])
-        response = _call_router(router_call, launch_argv, adapter)
+        response = _call_router(router_call, launch_argv, config, adapter, phase="launch")
         dispatch_data = response.get("dispatch")
         job_id = dispatch_data.get("job_id") if isinstance(dispatch_data, Mapping) else response.get("job_id")
         if not isinstance(job_id, str) or not job_id:
@@ -635,49 +794,49 @@ def dispatch(
         if activation_call is not None and activated:
             try:
                 _activation(config, account, "release", activation_call)
-            except DispatchError:
+            except Exception:
                 pass
         raise
     except ActivationUnavailable:
         queue.release_claim(task.id, eligibility_key, reason="activation unavailable")
         raise
-    except (KnownDispatchFailure, DispatchError, OSError, subprocess.SubprocessError) as exc:
-        if activation_call is not None and activated:
-            try:
-                _activation(config, account, "release", activation_call)
-            except DispatchError:
-                pass
-        try:
-            queue.record(
-                task.id, eligibility_key, status="failed", provider_id=provider.id,
-                account_id=account_id, summary=f"known launch failure: {str(exc)[:500]}",
-                release_activation=release_lease if lease_managed else None,
-            )
-        except Exception:
-            try:
-                queue.release_claim(task.id, eligibility_key, reason="known launch failure")
-            except QueueError:
-                pass
-        raise KnownDispatchFailure(str(exc)) from exc
     except Exception as exc:
-        # A callback exception is a positive pre-launch failure unless it explicitly declared
-        # ambiguity.  Release both activation and claim via the terminal failed record.
         if activation_call is not None and activated:
             try:
                 _activation(config, account, "release", activation_call)
-            except DispatchError:
-                pass
+            except Exception as release_exc:
+                queue.mark_ambiguous(
+                    task.id, eligibility_key,
+                    detail=f"known-not-launched activation cleanup failed: {str(release_exc)[:500]}",
+                )
+                raise AmbiguousDispatch(
+                    "launch did not occur, but account activation cleanup requires reconciliation"
+                ) from release_exc
         try:
-            queue.record(
-                task.id, eligibility_key, status="failed", provider_id=provider.id,
-                account_id=account_id, summary=f"known launch failure: {str(exc)[:500]}",
-                release_activation=release_lease if lease_managed else None,
-            )
-        except Exception:
-            try:
+            if lease_managed and activated:
+                queue.record(
+                    task.id, eligibility_key, status="failed", provider_id=provider.id,
+                    account_id=account_id, summary=f"known not launched: {str(exc)[:500]}",
+                    release_activation=release_lease,
+                )
+                # A positively non-launched attempt is retry-safe. Requeue removes the
+                # temporary failed terminal event after its durable activation cleanup.
+                queue.requeue(task.id, eligibility_key)
+            else:
                 queue.release_claim(task.id, eligibility_key, reason="known launch failure")
-            except QueueError:
-                pass
+        except Exception as cleanup_exc:
+            claim = queue.claim_for(task.id, eligibility_key)
+            if claim is not None and claim.state == "claimed":
+                queue.mark_ambiguous(
+                    task.id, eligibility_key,
+                    detail=f"known-not-launched cleanup requires reconciliation: {str(cleanup_exc)[:500]}",
+                )
+                raise AmbiguousDispatch(
+                    "launch did not occur, but cleanup requires reconciliation"
+                ) from cleanup_exc
+            raise DispatchError(
+                "launch did not occur, but retry eligibility could not be restored"
+            ) from cleanup_exc
         raise KnownDispatchFailure(str(exc)) from exc
 
 

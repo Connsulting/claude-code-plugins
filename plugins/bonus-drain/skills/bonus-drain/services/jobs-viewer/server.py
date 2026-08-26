@@ -15,11 +15,11 @@ One page, two tabs:
 This replaces the two former in-skill viewers (bonus-drain :8766, bg-schedule
 :8767). It now serves both on a single port (:8766).
 
-Localhost-agnostic: binds 127.0.0.1 and knows nothing about Tailscale. HTTPS over
-the tailnet is fronted separately by `tailscale serve` (see README.md).
+Localhost-agnostic: binds the configured loopback address and knows nothing about
+Tailscale. HTTPS over the tailnet is fronted separately by `tailscale serve`.
 
 Usage:
-    uv run server.py [--port 8766] [--host 127.0.0.1]
+    python3 server.py [--port 8766] [--host 127.0.0.1]
 """
 from __future__ import annotations
 
@@ -34,57 +34,68 @@ import re
 import shutil
 import sqlite3
 import subprocess
-import tempfile
-import threading
+import sys
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from ipaddress import ip_address
 from pathlib import Path
 
 # services/jobs-viewer/ -> services/ -> installed Bonus Drain skill root.
 # BONUS_SKILL_DIR remains overrideable so the same literal server can run from a source tree
 # during validation without depending on the claude-settings checkout at runtime.
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO))
+
+from bonus_drain import config as graph_config  # noqa: E402
+from bonus_drain import dispatcher as graph_dispatcher  # noqa: E402
+from bonus_drain import usage as graph_usage  # noqa: E402
+from bonus_drain.db import QueueDB  # noqa: E402
+from bonus_drain.kick import kick_task  # noqa: E402
+
 BONUS_SKILL_DIR = Path(os.environ.get("BONUS_SKILL_DIR", str(REPO)))
-VIEWER_SUPPORT_DIR = Path(os.environ.get(
-    "BONUS_VIEWER_SUPPORT_DIR", str(Path(__file__).resolve().parent)
-))
 BONUSDB_SH = BONUS_SKILL_DIR / "bonusdb.sh"
-RUN_NOW_SH = BONUS_SKILL_DIR / "run-now.sh"
-USAGE_SH = VIEWER_SUPPORT_DIR / "usage.sh"
-CODEX_USAGE_SH = VIEWER_SUPPORT_DIR / "codex-usage.sh"
-GROK_USAGE_SH = VIEWER_SUPPORT_DIR / "grok-usage.sh"
 ACCOUNTS_SH = BONUS_SKILL_DIR / "accounts.sh"
-DB_PATH = Path(os.environ.get("BONUS_DB", str(Path.home() / ".claude" / "bonus-drain.db")))
+DB_PATH = Path(os.environ.get(
+    "BONUS_DB", str(Path.home() / ".local" / "state" / "bonus-drain" / "queue.db")
+))
 DRAIN_LEAD_MAX_HOURS = int(os.environ.get("DRAIN_LEAD_MAX_HOURS", "30"))
-USAGE_CACHE_DIR = Path(os.environ.get(
-    "BONUS_VIEWER_CACHE_DIR", str(Path.home() / ".cache" / "bonus-drain")
-))
-CLAUDE_USAGE_CACHE_PATH = Path(os.environ.get(
-    "CLAUDE_USAGE_CACHE", str(USAGE_CACHE_DIR / "claude-usage.json")
-))
-CODEX_USAGE_CACHE_PATH = Path(os.environ.get(
-    "CODEX_USAGE_CACHE", str(USAGE_CACHE_DIR / "codex-usage.json")
-))
-GROK_USAGE_CACHE_PATH = Path(os.environ.get(
-    "GROK_USAGE_CACHE", str(USAGE_CACHE_DIR / "grok-usage.json")
-))
-CLAUDE_USAGE_REFRESH_STATE_PATH = Path(os.environ.get(
-    "CLAUDE_USAGE_REFRESH_STATE", str(USAGE_CACHE_DIR / "claude-usage-refresh.json")
-))
-CODEX_USAGE_REFRESH_STATE_PATH = Path(os.environ.get(
-    "CODEX_USAGE_REFRESH_STATE", str(USAGE_CACHE_DIR / "codex-usage-refresh.json")
-))
-GROK_USAGE_REFRESH_STATE_PATH = Path(os.environ.get(
-    "GROK_USAGE_REFRESH_STATE", str(USAGE_CACHE_DIR / "grok-usage-refresh.json")
-))
-USAGE_REFRESH_SECONDS = 10 * 60
-USAGE_REFRESH_TIMEOUT_SECONDS = 60
 CLAUDE_ACCOUNTS_STORE = Path(os.environ.get(
-    "BONUS_ACCOUNTS_STORE", str(Path.home() / ".claude" / "accounts")
+    "BONUS_ACCOUNTS_STORE", str(Path.home() / ".config" / "bonus-drain" / "accounts" / "claude")
 ))
 
 UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
+ALLOWED_HOSTS: tuple[str, ...] = ("127.0.0.1", "localhost")
+ALLOWED_ORIGINS: tuple[str, ...] = ()
+MUTATIONS_ENABLED = False
+VIEWER_BIND = "127.0.0.1"
+
+
+def configure_request_boundary() -> None:
+    """Load the secretless Tailscale boundary used by the HTTP handler."""
+
+    global ALLOWED_HOSTS, ALLOWED_ORIGINS, DB_PATH, MUTATIONS_ENABLED, VIEWER_BIND
+    cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
+    viewer = cfg.viewer
+    bind = str(viewer.get("bind", "127.0.0.1"))
+    try:
+        loopback = bind.lower() == "localhost" or ip_address(bind).is_loopback
+    except ValueError:
+        loopback = False
+    if not loopback:
+        raise ValueError("viewer bind must be loopback")
+    remote = viewer.get("remote") or {}
+    if remote and remote.get("trusted_loopback_proxy") is not True:
+        raise ValueError("remote viewer must be behind the trusted loopback proxy")
+    hosts = remote.get("allowed_hosts") or ()
+    origins = remote.get("allowed_origins") or ()
+    if remote and (not hosts or not origins):
+        raise ValueError("remote viewer requires exact hosts and origins")
+    ALLOWED_HOSTS = tuple(hosts) if remote else ("127.0.0.1", "localhost")
+    ALLOWED_ORIGINS = tuple(origins)
+    DB_PATH = cfg.database
+    MUTATIONS_ENABLED = viewer.get("mutations_enabled") is True
+    VIEWER_BIND = bind
 
 
 # ===========================================================================
@@ -128,21 +139,44 @@ def _normalize_usage(raw) -> dict | None:
     return values
 
 
-def _read_usage_cache(path: Path, normalize) -> dict | None:
+def _provider_usage(provider_id: str) -> dict | None:
+    """Translate normalized graph cache into the established viewer's window shape."""
+
     try:
-        return normalize(json.loads(path.read_text(encoding="utf-8")))
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
+        snapshots = graph_usage.read_all(cfg)
+    except (graph_config.ConfigError, OSError, ValueError):
         return None
+    candidates: list[tuple[int, int, float, int]] = []
+    for account in cfg.accounts_for_provider(provider_id):
+        snapshot = snapshots.get((provider_id, account.id))
+        if snapshot is None or not snapshot.fresh:
+            continue
+        for limit in cfg.limits_for_plan(account.plan_id):
+            reading = snapshot.limits.get(limit.id)
+            if not reading:
+                continue
+            used, reset = reading.get("used_percent"), reading.get("resets_at")
+            if isinstance(used, (int, float)) and isinstance(reset, (int, float)):
+                candidates.append((snapshot.captured_at, limit.window_seconds, float(used), int(reset)))
+    if not candidates:
+        return None
+    newest = max(item[0] for item in candidates)
+    windows = [item for item in candidates if item[0] == newest]
+    shortest = min(windows, key=lambda item: item[1])
+    longest = max(windows, key=lambda item: item[1])
+    return _normalize_usage({
+        "u5": shortest[2], "r5": shortest[3],
+        "u7": longest[2], "r7": longest[3],
+    })
 
 
 def get_usage() -> dict | None:
-    """Read the Claude snapshot only; HTTP requests never invoke usage.sh."""
-    return _read_usage_cache(CLAUDE_USAGE_CACHE_PATH, _normalize_usage)
+    return _provider_usage("claude")
 
 
 def get_codex_usage() -> dict | None:
-    """Read the Codex snapshot only; HTTP requests never invoke codex-usage.sh."""
-    return _read_usage_cache(CODEX_USAGE_CACHE_PATH, _normalize_usage)
+    return _provider_usage("codex")
 
 
 def _normalize_grok_usage(raw) -> dict | None:
@@ -182,120 +216,12 @@ def _normalize_grok_usage(raw) -> dict | None:
 
 
 def get_grok_usage() -> dict | None:
-    """Read the last valid Grok snapshot only; page rendering never runs provider telemetry."""
-    return _read_usage_cache(GROK_USAGE_CACHE_PATH, _normalize_grok_usage)
-
-
-def _write_usage_cache(path: Path, usage: dict) -> None:
-    """Atomically replace a durable snapshot after a fully valid refresh."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", dir=path.parent,
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as temporary:
-            json.dump(usage, temporary, sort_keys=True, separators=(",", ":"), allow_nan=False)
-            temporary.write("\n")
-            temporary.flush()
-            os.fsync(temporary.fileno())
-        os.replace(temporary_name, path)
-    except Exception:
-        try:
-            os.unlink(temporary_name)
-        except OSError:
-            pass
-        raise
-
-
-def _refresh_due(state_path: Path, now: float) -> bool:
-    """Persisted timing means a service restart cannot turn into a provider retry storm."""
-    try:
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-        if not isinstance(state, dict):
-            return True
-        last_attempt = _grok_number(state.get("last_attempt"))
-        return last_attempt is None or now - last_attempt >= USAGE_REFRESH_SECONDS
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        return True
-
-
-def _refresh_usage(command: Path, cache_path: Path, state_path: Path, parse_output) -> bool:
-    """Run a provider reader only from the background loop and retain good cache on failure."""
-    now = time.time()
-    if not _refresh_due(state_path, now):
-        return False
-    try:
-        # Record the attempt before starting I/O: a crash or restart cannot retry the provider
-        # more frequently than the cadence, including after invalid responses or timeouts.
-        _write_usage_cache(state_path, {"last_attempt": int(now)})
-        completed = subprocess.run(
-            ["bash", str(command)], capture_output=True, text=True,
-            timeout=USAGE_REFRESH_TIMEOUT_SECONDS,
-        )
-        if completed.returncode != 0:
-            return False
-        usage = parse_output(completed.stdout)
-        if usage is None:
-            return False
-        _write_usage_cache(cache_path, usage)
-        return True
-    except (OSError, ValueError, TypeError, json.JSONDecodeError, subprocess.SubprocessError):
-        return False
-
-
-def _script_usage(raw: str) -> dict | None:
-    parts = raw.split()
-    if len(parts) != 4:
+    usage = _provider_usage("grok")
+    if usage is None:
         return None
-    return _normalize_usage(dict(zip(("u5", "r5", "u7", "r7"), parts)))
-
-
-def _script_grok_usage(raw: str) -> dict | None:
-    return _normalize_grok_usage(json.loads(raw))
-
-
-def refresh_claude_usage() -> bool:
-    return _refresh_usage(USAGE_SH, CLAUDE_USAGE_CACHE_PATH, CLAUDE_USAGE_REFRESH_STATE_PATH,
-                          _script_usage)
-
-
-def refresh_codex_usage() -> bool:
-    return _refresh_usage(CODEX_USAGE_SH, CODEX_USAGE_CACHE_PATH, CODEX_USAGE_REFRESH_STATE_PATH,
-                          _script_usage)
-
-
-def refresh_grok_usage() -> bool:
-    return _refresh_usage(GROK_USAGE_SH, GROK_USAGE_CACHE_PATH, GROK_USAGE_REFRESH_STATE_PATH,
-                          _script_grok_usage)
-
-
-def _refresh_usage_loop(stop_event: threading.Event) -> None:
-    """Refresh all provider snapshots at startup, then no more often than every ten minutes."""
-    while not stop_event.is_set():
-        for refresh in (refresh_claude_usage, refresh_codex_usage, refresh_grok_usage):
-            try:
-                refresh()
-            except Exception:
-                # A bad provider implementation must not starve the independent budget cards.
-                pass
-        stop_event.wait(USAGE_REFRESH_SECONDS)
-
-
-def start_usage_refresher() -> tuple[threading.Event, threading.Thread]:
-    """Start the non-blocking provider refresher owned by this server process."""
-    stop_event = threading.Event()
-    thread = threading.Thread(
-        target=_refresh_usage_loop, args=(stop_event,),
-        name="bonus-usage-refresher", daemon=True,
-    )
-    thread.start()
-    return stop_event, thread
-
-
-def stop_usage_refresher(stop_event: threading.Event, thread: threading.Thread) -> None:
-    """Request shutdown and wait only for an in-flight refresh's bounded subprocess timeout."""
-    stop_event.set()
-    thread.join(timeout=USAGE_REFRESH_TIMEOUT_SECONDS + 1)
+    return _normalize_grok_usage({
+        "weekly_percent": usage["u7"], "weekly_reset": usage["r7"],
+    })
 
 
 # The read-only half of one scout tick, expressed purely as calls into the skill's own
@@ -705,34 +631,23 @@ RUN_ENGINES = ("claude", "codex", "grok", "auto")
 
 
 def run_task_now(task_id: str, engine: str) -> tuple[bool, str]:
-    """Force-dispatch one task on a named engine through the skill's own run-now.sh.
-
-    The viewer deliberately owns none of this: run-now.sh resolves the cycle, re-checks
-    eligibility through bonusdb.sh (an already-dispatched task comes back empty, so a
-    double-click cannot launch twice), decides the engine when asked for `auto`, and calls
-    the same dispatcher the hourly scout uses. Budget gates are bypassed on purpose - these
-    buttons are the per-task `kick`.
-
-    The engine is validated here only to keep an arbitrary string out of the argv; run-now.sh
-    validates it again and owns the real rules (Codex refused on a Claude-only task, the
-    router's verdict clamped). The viewer must not grow a second copy of that policy."""
+    """Force-dispatch through the shared router-only kickoff service."""
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", task_id):
         return False, "invalid task id"
     if engine not in RUN_ENGINES:
         return False, "invalid engine"
-    # `auto` adds a classifier round-trip on top of the launch, so give it more room than the
-    # 120s a bare dispatch needed; run-now caps the router call itself at 90s.
-    timeout = 240 if engine == "auto" else 120
     try:
-        result = subprocess.run(
-            ["bash", str(RUN_NOW_SH), task_id, engine],
-            capture_output=True, text=True, timeout=timeout,
-        )
-    except Exception:
+        cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
+        result = kick_task(cfg, QueueDB(cfg.database), task_id, engine)
+    except graph_dispatcher.AlreadyClaimed:
+        return False, "this job is already claimed or no longer eligible"
+    except graph_dispatcher.AmbiguousDispatch:
+        return False, "launch state is ambiguous; reconcile it before retrying"
+    except graph_dispatcher.DispatchError as exc:
+        return False, str(exc)[:500] or "could not launch this job"
+    except (graph_config.ConfigError, OSError, ValueError):
         return False, "could not launch this job"
-    if result.returncode != 0:
-        return False, _last_line(result.stderr, "could not launch this job")
-    return True, _last_line(result.stdout, "launched")
+    return True, f"launched on {result.provider_id} as {result.job_id}"
 
 
 # ===========================================================================
@@ -1531,7 +1446,7 @@ def _codex_cards(gates: dict, cx: dict | None, n_codex: int, coord: str, batch: 
     scraping) when the rotator store is absent or holds a single account.
 
     Only the ACTIVE account can carry a batch: bonus-drain dispatches Codex through whatever
-    `~/.codex/auth.json` holds, and that is by definition the account the rotator has swapped in.
+    the provider credential store holds, which is the account the configured activator selected.
     Drawing the batch on both cards would claim work is landing somewhere it cannot."""
     lead = int(_f(gates.get("codex_lead_hours"), DRAIN_LEAD_MAX_HOURS))
     win_h = int(_f(gates.get("window_hours"), 5))
@@ -2448,6 +2363,8 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
+        if not self._request_allowed(mutation=False):
+            return
         if self.path in ("/", "/index.html"):
             try:
                 body = render_page()
@@ -2472,6 +2389,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
 
     def do_POST(self):
+        if not MUTATIONS_ENABLED:
+            self._send(HTTPStatus.METHOD_NOT_ALLOWED, b'{"error":"mutations disabled"}', "application/json")
+            return
+        if not self._request_allowed(mutation=True):
+            return
         if self.path == "/api/bonus/task":
             payload = self._read_json()
             if payload is None:
@@ -2499,6 +2421,8 @@ class Handler(BaseHTTPRequestHandler):
     def _read_json(self) -> dict | None:
         """Body as a dict, or None having already sent the 400."""
         try:
+            if self._one_header("Content-Type") != "application/json":
+                raise ValueError
             length = int(self.headers.get("Content-Length", "0"))
             if length <= 0 or length > 4096:
                 raise ValueError
@@ -2513,8 +2437,29 @@ class Handler(BaseHTTPRequestHandler):
     def _bad_request(self):
         self._send(HTTPStatus.BAD_REQUEST, b'{"error":"invalid request"}', "application/json")
 
+    def _one_header(self, name: str) -> str | None:
+        values = self.headers.get_all(name, failobj=[])
+        return values[0] if len(values) == 1 else None
+
+    def _request_allowed(self, *, mutation: bool) -> bool:
+        host = self._one_header("Host")
+        if host not in ALLOWED_HOSTS:
+            self._send(HTTPStatus.FORBIDDEN, b'{"error":"host rejected"}', "application/json")
+            return False
+        if not mutation:
+            return True
+        origin = self._one_header("Origin")
+        if origin not in ALLOWED_ORIGINS:
+            self._send(HTTPStatus.FORBIDDEN, b'{"error":"request rejected"}', "application/json")
+            return False
+        return True
+
     def _send(self, status, body: bytes, ctype="text/html; charset=utf-8"):
         self.send_response(status)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "same-origin")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -2524,21 +2469,23 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8766")))
-    ap.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
+    ap.add_argument("--host", default=os.environ.get("HOST"))
     args = ap.parse_args()
+    configure_request_boundary()
+    host = args.host or VIEWER_BIND
+    if host != VIEWER_BIND:
+        raise SystemExit(f"viewer host must match configured loopback bind {VIEWER_BIND}")
     if not DB_PATH.exists():
         print(f"warning: {DB_PATH} not found; the bonus tab will render empty until bonus-drain is initialized")
     if shutil.which("bash") is None:
         print("warning: bash not found; remaining-table pick will be empty")
-    srv = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"jobs viewer on http://{args.host}:{args.port}  (db={DB_PATH})")
-    usage_refresh_stop, usage_refresh_thread = start_usage_refresher()
+    srv = ThreadingHTTPServer((host, args.port), Handler)
+    print(f"jobs viewer on http://{host}:{args.port}  (db={DB_PATH})")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        stop_usage_refresher(usage_refresh_stop, usage_refresh_thread)
         srv.server_close()
     return 0
 

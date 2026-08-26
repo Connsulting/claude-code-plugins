@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from .config import RuntimeConfig
 from .db import QueueDB, hour_round
@@ -38,7 +38,30 @@ class ScoutReport:
         }
 
 
-def _cycle_anchor(config: RuntimeConfig, snapshots: dict[Any, Any], now_epoch: int) -> int:
+@dataclass(frozen=True)
+class TickPlan:
+    cycle_anchor: int
+    snapshots: Mapping[Any, Any]
+    plan: PlanResult
+    allocations: Mapping[tuple[str, str], tuple[Any, ...]]
+
+
+class _InitializedQueueReader(QueueDB):
+    """Read an already initialized queue without rerunning schema migrations."""
+
+    def initialize(self) -> None:
+        return None
+
+
+def _initialized_queue_reader(queue: Any) -> Any:
+    if isinstance(queue, _InitializedQueueReader):
+        return queue
+    if isinstance(queue, QueueDB):
+        return _InitializedQueueReader(queue.path, timeout_seconds=queue.timeout_seconds)
+    return queue
+
+
+def _cycle_anchor(config: RuntimeConfig, snapshots: Mapping[Any, Any], now_epoch: int) -> int:
     resets: list[int] = []
     for account in config.accounts:
         snapshot = snapshots.get((account.provider_id, account.id))
@@ -51,39 +74,29 @@ def _cycle_anchor(config: RuntimeConfig, snapshots: dict[Any, Any], now_epoch: i
     return hour_round(min(resets)) if resets else hour_round(now_epoch)
 
 
-def run_once(
+def plan_tick(
     config: RuntimeConfig,
-    queue: QueueDB | None = None,
+    queue: QueueDB,
     cache_root: str | Path | None = None,
     *,
     now_epoch: int | None = None,
-    dry_run: bool = False,
-    router_call: Callable[..., Any] | None = None,
-    activation_call: Callable[[str, str], Any] | None = None,
-) -> ScoutReport:
-    """Plan and dispatch one tick using cache only.
-
-    The scout never invokes a usage adapter.  ``refresh`` is the sole usage producer.
-    """
+) -> TickPlan:
+    """Build one adjusted tick plan from cache and initialized SQLite reads only."""
 
     now = int(time.time() if now_epoch is None else now_epoch)
-    queue = queue or QueueDB(config.database)
-    queue.initialize()
+    reader = _initialized_queue_reader(queue)
     snapshots = read_all(config, cache_root, now_epoch=now)
     anchor = _cycle_anchor(config, snapshots, now)
     availability: dict[tuple[str, str], int] = {}
     for account in config.accounts:
         provider = config.provider(account.provider_id)
-        availability[(account.provider_id, account.id)] = queue.count_eligible(
+        availability[(account.provider_id, account.id)] = reader.count_eligible(
             anchor,
             provider_id=provider.id,
             capabilities=provider.capabilities,
         )
     plan = build_plan(config, snapshots, eligible_count=availability, now_epoch=now)
-    dispatched: list[DispatchResult] = []
-    previews: list[dict[str, Any]] = []
-    errors: list[dict[str, str]] = []
-    allocations: dict[tuple[str, str], list[Any]] = {}
+    allocations: dict[tuple[str, str], tuple[Any, ...]] = {}
 
     # Build a capacity-expanded bipartite graph and find an augmenting-path matching. Processing
     # tasks in queue order preserves priority, while reassignment prevents a flexible task from
@@ -96,7 +109,7 @@ def run_once(
     slot_batch: dict[int, int] = {}
     for batch_index, batch in enumerate(plan.batches):
         provider = config.provider(batch.provider_id)
-        candidates = list(queue.eligible_tasks(
+        candidates = list(reader.eligible_tasks(
             batch.resets_at,
             provider_id=provider.id,
             capabilities=provider.capabilities,
@@ -133,12 +146,11 @@ def run_once(
         augment(task_id, set(), set())
 
     for batch_index, batch in enumerate(plan.batches):
-        selected = [
+        allocations[(batch.provider_id, batch.account_id)] = tuple(
             task_by_id[slot_task[slot]]
             for slot in slots
             if slot_batch[slot] == batch_index and slot in slot_task
-        ]
-        allocations[(batch.provider_id, batch.account_id)] = selected
+        )
 
     adjusted_batches = tuple(
         replace(
@@ -165,15 +177,41 @@ def run_once(
             adjusted_gates.append(replace(gate, batch_size=adjusted.batch_size))
         else:
             adjusted_gates.append(gate)
-    plan = PlanResult(
+    adjusted_plan = PlanResult(
         adjusted_batches,
         adjusted_closed,
         tuple(adjusted_gates),
         plan.generated_at,
     )
+    return TickPlan(anchor, snapshots, adjusted_plan, allocations)
+
+
+def run_once(
+    config: RuntimeConfig,
+    queue: QueueDB | None = None,
+    cache_root: str | Path | None = None,
+    *,
+    now_epoch: int | None = None,
+    dry_run: bool = False,
+    router_call: Callable[..., Any] | None = None,
+    activation_call: Callable[[str, str], Any] | None = None,
+) -> ScoutReport:
+    """Plan and dispatch one tick using cache only.
+
+    The scout never invokes a usage adapter.  ``refresh`` is the sole usage producer.
+    """
+
+    now = int(time.time() if now_epoch is None else now_epoch)
+    queue = queue or QueueDB(config.database)
+    queue.initialize()
+    tick = plan_tick(config, queue, cache_root, now_epoch=now)
+    plan = tick.plan
+    dispatched: list[DispatchResult] = []
+    previews: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
 
     for batch in plan.batches:  # already nearest-reset-first
-        tasks = allocations[(batch.provider_id, batch.account_id)]
+        tasks = tick.allocations[(batch.provider_id, batch.account_id)]
         if dry_run:
             for task in tasks:
                 previews.append({
