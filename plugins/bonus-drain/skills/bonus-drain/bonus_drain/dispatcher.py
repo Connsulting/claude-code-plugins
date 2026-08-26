@@ -63,6 +63,15 @@ _MCP_SENSITIVE_RE = re.compile(
     r"(?:authorization|cookie|credential|password|secret|token|api[-_]?key)", re.IGNORECASE
 )
 _MCP_OWNED_FILE_RE = re.compile(r"^task-[0-9a-f]{24}\.json$")
+_MCP_FLAG_REJECTION_RE = re.compile(
+    r"(?:unknown|unrecognized|unexpected)\s+(?:option|argument|flag)"
+    r"|(?:option|argument|flag)\s+(?:is\s+)?(?:unknown|unrecognized|unexpected)",
+    re.IGNORECASE,
+)
+_MCP_CLAUDE_ONLY_RE = re.compile(
+    r"--(?:strict-)?mcp-config\s+is\s+a\s+claude\s+only\s+flag",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -408,6 +417,17 @@ def _materialize_mcp_config(config: RuntimeConfig, task: Task, _eligibility_key:
             pass
 
 
+def _uses_claude_mcp_scoping(provider: ProviderConfig) -> bool:
+    """Whether this agent-router provider accepts Claude's task MCP flags.
+
+    MCP selection is a Claude Code-only router contract.  Codex deliberately uses its
+    configured connectors instead of a task-provided MCP file, so do not validate,
+    materialize, or pass task MCP state for it (or for other providers).
+    """
+
+    return provider.dispatch.provider == "claude"
+
+
 def _phase_uncertainty(phase: str, message: str) -> DispatchError:
     if phase == "classification":
         detail = message.replace("; launch state is unknown", "")
@@ -429,6 +449,21 @@ def _explicitly_not_launched(value: Mapping[str, Any]) -> bool:
         isinstance(item.get("job_id"), str) and bool(item.get("job_id"))
         for item in containers
     )
+
+
+def _positive_prelaunch_mcp_flag_rejection(stdout: str, stderr: str) -> str | None:
+    """Return a parser diagnostic that proves a rejected MCP flag never launched work."""
+
+    for line in reversed((stderr + "\n" + stdout).splitlines()):
+        normalized = line.strip()
+        if (
+            "--mcp-config" in normalized or "--strict-mcp-config" in normalized
+        ) and (
+            _MCP_FLAG_REJECTION_RE.search(normalized)
+            or _MCP_CLAUDE_ONLY_RE.search(normalized)
+        ):
+            return normalized
+    return None
 
 
 def _router_diagnostic(
@@ -474,6 +509,8 @@ def _completed_router_result(
                 (line for line in reversed(stderr.splitlines() + stdout.splitlines()) if line.strip()),
                 "no diagnostic",
             )
+            if phase == "launch" and _positive_prelaunch_mcp_flag_rejection(stdout, stderr):
+                raise KnownDispatchFailure(_router_diagnostic(config, adapter, detail)) from exc
             raise _phase_uncertainty(
                 phase,
                 f"agent-router exited {completed.returncode} without validated JSON: "
@@ -767,9 +804,10 @@ def dispatch(
         ]
         if task.model:
             launch_argv.extend(["--model", task.model])
-        mcp_path = _materialize_mcp_config(config, task, eligibility_key)
-        if mcp_path is not None:
-            launch_argv.extend(["--mcp-config", str(mcp_path), "--strict-mcp-config"])
+        if _uses_claude_mcp_scoping(provider):
+            mcp_path = _materialize_mcp_config(config, task, eligibility_key)
+            if mcp_path is not None:
+                launch_argv.extend(["--mcp-config", str(mcp_path), "--strict-mcp-config"])
         launch_argv.extend(["--json", prompt])
         response = _call_router(router_call, launch_argv, config, adapter, phase="launch")
         dispatch_data = response.get("dispatch")

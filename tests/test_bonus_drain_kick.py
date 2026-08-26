@@ -343,6 +343,93 @@ class KickContractTests(unittest.TestCase):
                     )
                 self.assertEqual(self.queue.claim_for(task_id, key), None)
 
+    def test_codex_ignores_task_mcp_scoping_for_explicit_and_auto_kicks(self) -> None:
+        codex = config_module.ProviderConfig(
+            "codex", config_module.DispatchBinding("router", "codex"), frozenset(), "single",
+        )
+        cfg = replace(self.config, providers=(codex,), plans=(), accounts=(), limits=())
+        cases = (
+            ("codex-none-explicit", "none", "codex"),
+            ("codex-none-auto", "none", "auto"),
+            ("codex-connectors-explicit", "project-connectors", "codex"),
+            ("codex-connectors-auto", "project-connectors", "auto"),
+        )
+        for task_id, task_mcp, requested_provider in cases:
+            with self.subTest(task_id=task_id, requested_provider=requested_provider):
+                self.queue.add_task(_task(task_id, mcp=task_mcp))
+                seen: list[list[str]] = []
+
+                def router(argv: list[str], **_kwargs: object) -> dict[str, object]:
+                    seen.append(argv)
+                    if "--dry-run" in argv:
+                        return {"provider_id": "codex"}
+                    return {"dispatch": {"job_id": f"job-{task_id}", "launched": True}}
+
+                result = dispatcher.dispatch(
+                    cfg, self.queue, task_id=task_id, eligibility_key=f"manual/{task_id}",
+                    requested_provider=requested_provider, router_call=router,
+                )
+                self.assertEqual(result.provider_id, "codex")
+                launch = next(argv for argv in seen if "--dry-run" not in argv)
+                self.assertNotIn("--mcp-config", launch)
+                self.assertNotIn("--strict-mcp-config", launch)
+
+    def test_claude_preserves_task_mcp_scoping(self) -> None:
+        claude = config_module.ProviderConfig(
+            "claude", config_module.DispatchBinding("router", "claude"), frozenset(), "single",
+        )
+        cfg = replace(self.config, providers=(claude,), plans=(), accounts=(), limits=())
+        source_mcp = self.root / "claude-mcp.json"
+        source_mcp.write_text(
+            json.dumps({"mcpServers": {"project": {"command": "project-mcp"}}}),
+            encoding="utf-8",
+        )
+        self.queue.add_task(_task("claude-mcp", mcp=str(source_mcp)))
+        seen: list[list[str]] = []
+
+        def router(argv: list[str], **_kwargs: object) -> dict[str, object]:
+            seen.append(argv)
+            return {"dispatch": {"job_id": "job-claude-mcp", "launched": True}}
+
+        dispatcher.dispatch(
+            cfg, self.queue, task_id="claude-mcp", eligibility_key="manual/claude-mcp",
+            requested_provider="claude", router_call=router,
+        )
+        launch = seen[0]
+        mcp_index = launch.index("--mcp-config")
+        self.assertEqual(launch[mcp_index + 2], "--strict-mcp-config")
+        self.assertEqual(
+            json.loads(Path(launch[mcp_index + 1]).read_text(encoding="utf-8")),
+            {"mcpServers": {"project": {"command": "project-mcp"}}},
+        )
+
+    def test_router_mcp_flag_parser_rejection_is_known_not_launched(self) -> None:
+        claude = config_module.ProviderConfig(
+            "claude", config_module.DispatchBinding("router", "claude"), frozenset(), "single",
+        )
+        cfg = replace(self.config, providers=(claude,), plans=(), accounts=(), limits=())
+        source_mcp = self.root / "rejected-mcp.json"
+        source_mcp.write_text(
+            json.dumps({"mcpServers": {"project": {"command": "project-mcp"}}}),
+            encoding="utf-8",
+        )
+        self.queue.add_task(_task("mcp-parser-rejection", mcp=str(source_mcp)))
+        rejected = subprocess.CompletedProcess(
+            [], 2, b"", (
+                b"agent-router: --mcp-config is a claude only flag, but this task routed "
+                b"to codex: rerun with --provider claude, or drop --mcp-config"
+            ),
+        )
+        with mock.patch("bonus_drain.adapters.run_bounded_process", return_value=rejected) as launched:
+            with self.assertRaises(dispatcher.KnownDispatchFailure):
+                dispatcher.dispatch(
+                    cfg, self.queue, task_id="mcp-parser-rejection",
+                    eligibility_key="manual/mcp-parser-rejection", requested_provider="claude",
+                )
+        argv = launched.call_args.args[0]
+        self.assertIn("--mcp-config", argv)
+        self.assertEqual(self.queue.claim_for("mcp-parser-rejection"), None)
+
     def test_racing_concrete_kicks_produce_exactly_one_router_launch(self) -> None:
         from bonus_drain import kick
 
