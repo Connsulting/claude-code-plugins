@@ -39,7 +39,7 @@ When you revise a plan after the user comments, the changed blocks light up in t
 
 How it works:
 
-- The baseline is a single sidecar named `<plan>.md.snapshot` holding the version the user last reviewed. There is exactly one snapshot per plan; it is overwritten on each revision. It does **not** end in `.md`, so agentic `*.md` search, the index (`rglob("*.md")`), and direct GETs all ignore it -- the canonical `.md` is always the one people see.
+- The baseline is a single sidecar named `<plan>.md.snapshot` holding the version the user last reviewed. There is exactly one snapshot per plan; it is overwritten on each revision. It does **not** end in `.md`, so agentic `*.md` search, the Markdown index scan, and direct GETs all ignore it -- the canonical `.md` is always the one people see.
 - `render.py` diffs current-vs-snapshot at the block level by reusing the existing anchor hashes (unchanged text keeps its anchor and aligns; reworded text gets a new anchor). A `replace` of N old blocks by M new ones is read as N edits (`changed`) plus M-N additions (`added`). Removed blocks have no current element to tag and are not surfaced.
 - Comments that get resolved during a revision already disappear from the view (`comments_for_anchor` filters `resolved`), so the right rail clears itself; the highlight is what carries the trace of what changed.
 
@@ -116,7 +116,7 @@ The topbar has no room for a session name, so the label stays short and the dest
 
 ### Provenance: `<plan>.md.session`
 
-Routing needs to know who wrote the plan, and nothing else records that. The authoring agent writes a sidecar next to the plan. Like `.md.snapshot`, it deliberately does **not** end in `.md`, so the index, `rglob("*.md")`, and agentic markdown search all ignore it.
+Routing needs to know who wrote the plan, and nothing else records that. The authoring agent writes a sidecar next to the plan. Like `.md.snapshot`, it deliberately does **not** end in `.md`, so the index and agentic Markdown searches ignore it.
 
 ```json
 {
