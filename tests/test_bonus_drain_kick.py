@@ -343,6 +343,29 @@ class KickContractTests(unittest.TestCase):
                     )
                 self.assertEqual(self.queue.claim_for(task_id, key), None)
 
+    def test_router_missing_codex_executable_is_known_not_launched_and_retry_safe(self) -> None:
+        codex = config_module.ProviderConfig(
+            "codex", config_module.DispatchBinding("router", "codex"), frozenset(), "single",
+        )
+        cfg = replace(self.config, providers=(codex,), plans=(), accounts=(), limits=())
+        task_id = "missing-codex"
+        key = "manual/missing-codex"
+        self.queue.add_task(_task(task_id))
+        rejected = subprocess.CompletedProcess(
+            [], 1, b"", (
+                b"could not run `codex app-server daemon start`: No such file or directory"
+            ),
+        )
+        with mock.patch("bonus_drain.adapters.run_bounded_process", return_value=rejected):
+            for _attempt in range(2):
+                with self.assertRaises(dispatcher.KnownDispatchFailure) as raised:
+                    dispatcher.dispatch(
+                        cfg, self.queue, task_id=task_id, eligibility_key=key,
+                        requested_provider="codex",
+                    )
+                self.assertIn("codex app-server daemon start", str(raised.exception))
+                self.assertEqual(self.queue.claim_for(task_id, key), None)
+
     def test_codex_ignores_task_mcp_scoping_for_explicit_and_auto_kicks(self) -> None:
         codex = config_module.ProviderConfig(
             "codex", config_module.DispatchBinding("router", "codex"), frozenset(), "single",

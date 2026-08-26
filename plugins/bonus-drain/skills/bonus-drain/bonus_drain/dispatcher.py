@@ -72,6 +72,10 @@ _MCP_CLAUDE_ONLY_RE = re.compile(
     r"--(?:strict-)?mcp-config\s+is\s+a\s+claude\s+only\s+flag",
     re.IGNORECASE,
 )
+_CODEX_APP_SERVER_MISSING_RE = re.compile(
+    r"could not run [`']codex app-server daemon start[`']:\s*No such file or directory",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -466,6 +470,16 @@ def _positive_prelaunch_mcp_flag_rejection(stdout: str, stderr: str) -> str | No
     return None
 
 
+def _positive_prelaunch_codex_executable_rejection(stdout: str, stderr: str) -> str | None:
+    """Return the exact router diagnostic proving Codex could not be executed."""
+
+    for line in reversed((stderr + "\n" + stdout).splitlines()):
+        normalized = line.strip()
+        if _CODEX_APP_SERVER_MISSING_RE.search(normalized):
+            return normalized
+    return None
+
+
 def _router_diagnostic(
     config: RuntimeConfig,
     adapter: AdapterConfig,
@@ -509,8 +523,14 @@ def _completed_router_result(
                 (line for line in reversed(stderr.splitlines() + stdout.splitlines()) if line.strip()),
                 "no diagnostic",
             )
-            if phase == "launch" and _positive_prelaunch_mcp_flag_rejection(stdout, stderr):
-                raise KnownDispatchFailure(_router_diagnostic(config, adapter, detail)) from exc
+            prelaunch_rejection = (
+                _positive_prelaunch_mcp_flag_rejection(stdout, stderr)
+                or _positive_prelaunch_codex_executable_rejection(stdout, stderr)
+            )
+            if phase == "launch" and prelaunch_rejection is not None:
+                raise KnownDispatchFailure(
+                    _router_diagnostic(config, adapter, prelaunch_rejection)
+                ) from exc
             raise _phase_uncertainty(
                 phase,
                 f"agent-router exited {completed.returncode} without validated JSON: "

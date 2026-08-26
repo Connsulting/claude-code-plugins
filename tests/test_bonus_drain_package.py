@@ -159,6 +159,20 @@ class BonusDrainPackageContractTests(unittest.TestCase):
 
         self.assertTrue((SKILL_ROOT / "services" / "jobs-viewer" / "server.py").is_file())
 
+    def test_packaged_viewer_unit_preserves_user_installed_router_binaries(self) -> None:
+        viewer_unit = SKILL_ROOT / "systemd" / "bonus-drain-viewer.service"
+        self.require_file(viewer_unit)
+        unit_text = viewer_unit.read_text(encoding="utf-8")
+        path_line = next(
+            (line for line in unit_text.splitlines() if line.startswith("Environment=PATH=")),
+            None,
+        )
+        self.assertEqual(
+            path_line,
+            "Environment=PATH=%h/.local/bin:%h/.cargo/bin:"
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        )
+
     def test_claude_and_codex_marketplaces_point_at_the_plugin_root(self) -> None:
         self.require_plugin()
         claude_marketplace = self.load_json(REPO_ROOT / ".claude-plugin" / "marketplace.json")
