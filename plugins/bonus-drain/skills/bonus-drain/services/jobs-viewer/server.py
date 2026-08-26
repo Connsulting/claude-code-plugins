@@ -1671,6 +1671,7 @@ def render_bonus_body() -> str:
               <div class="qsub" title="{esc(goal)}">{esc(goal_short)}</div>
               <div class="qmeta"><span>{kind}{cad}</span>
                 {engine_badge(t["engine_class"])}
+                <span>size {esc(t.get("size") or "unknown")}</span>
                 <span title="{esc(t.get("cwd", ""))}">{cwd}</span><span>{last}</span></div>
             </div>
             <div class="qact">{_run_buttons(t)}

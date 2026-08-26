@@ -22,6 +22,7 @@ VALID_STATUSES = frozenset({"dispatched", "done", "skipped", "failed"})
 TERMINAL_STATUSES = frozenset({"done", "skipped", "failed"})
 LEGACY_EXCLUSIVE_CAPABILITY = "legacy-exclusive"
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+TASK_SIZES = ("tiny", "small", "medium", "large", "huge")
 
 
 def is_safe_task_id(value: Any) -> bool:
@@ -33,6 +34,14 @@ def is_safe_task_id(value: Any) -> bool:
 def _require_task_id(value: Any) -> str:
     if not is_safe_task_id(value):
         raise QueueError("task id must be 1-128 safe id characters and must not start with a dash")
+    return value
+
+
+def require_task_size(value: Any) -> str:
+    """Return a canonical task-size estimate or reject the supplied metadata."""
+
+    if not isinstance(value, str) or value not in TASK_SIZES:
+        raise QueueError(f"task size must be one of: {', '.join(TASK_SIZES)}")
     return value
 
 
@@ -102,6 +111,7 @@ class Task:
     use_implement: bool = False
     allowed_providers: tuple[str, ...] = ()
     required_capabilities: tuple[str, ...] = ()
+    size: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -113,7 +123,7 @@ class Task:
         return value
 
     def legacy_pick_dict(self) -> dict[str, Any]:
-        """Exact historical ``bonusdb.sh pick`` row shape."""
+        """Historical ``bonusdb.sh pick`` row shape plus optional task metadata."""
 
         return {
             "id": self.id,
@@ -131,10 +141,11 @@ class Task:
             "model": self.model,
             "mcp": self.mcp,
             "use_implement": int(self.use_implement),
+            "size": self.size,
         }
 
     def legacy_contract_dict(self) -> dict[str, Any]:
-        """Exact historical canonical-registration lookup shape."""
+        """Historical canonical-registration lookup shape plus optional task metadata."""
 
         value = self.legacy_pick_dict()
         value["active"] = int(self.active)
@@ -253,6 +264,7 @@ class QueueDB:
             "use_implement": "INTEGER NOT NULL DEFAULT 0",
             "allowed_providers_json": "TEXT",
             "required_capabilities_json": "TEXT",
+            "size": "TEXT",
         }
         run_columns = {
             "engine": "TEXT",
@@ -311,6 +323,7 @@ class QueueDB:
             model=row["model"], mcp=row["mcp"], use_implement=bool(row["use_implement"]),
             allowed_providers=_json_tuple(row["allowed_providers_json"]),
             required_capabilities=_json_tuple(row["required_capabilities_json"]),
+            size=row["size"],
         )
 
     @staticmethod
@@ -348,6 +361,8 @@ class QueueDB:
             raise QueueError("oneoff tasks cannot have a cadence")
         allowed = _json_tuple(values.get("allowed_providers") or values.get("provider_ids"))
         required = _json_tuple(values.get("required_capabilities"))
+        raw_size = values.get("size")
+        size = None if raw_size is None else require_task_size(raw_size)
         parameters = {
             "id": item_id, "title": str(values.get("title") or item_id), "kind": kind,
             "priority": priority, "cadence": cadence or None, "cwd": str(values.get("cwd") or os.getcwd()),
@@ -359,6 +374,7 @@ class QueueDB:
             "use_implement": int(bool(values.get("use_implement", False))),
             "allowed": json.dumps(list(allowed)) if allowed else None,
             "required": json.dumps(list(required)) if required else None,
+            "size": size,
         }
         self.initialize()
         try:
@@ -368,11 +384,11 @@ class QueueDB:
                     INSERT INTO tasks(
                       id,title,kind,priority,cadence,cwd,goal,context,constraints,
                       precondition,done_when,created_at,active,claude_only,model,mcp,
-                      use_implement,allowed_providers_json,required_capabilities_json
+                      use_implement,allowed_providers_json,required_capabilities_json,size
                     ) VALUES(
                       :id,:title,:kind,:priority,:cadence,:cwd,:goal,:context,:constraints,
                       :precondition,:done_when,:created_at,:active,:claude_only,:model,:mcp,
-                      :use_implement,:allowed,:required
+                      :use_implement,:allowed,:required,:size
                     )
                     """, parameters,
                 )
@@ -814,6 +830,33 @@ class QueueDB:
         if priority not in range(5):
             raise QueueError("priority must be from 0 through 4")
         self._update_task(task_id, "priority", priority)
+
+    def set_size(self, task_id: str, size: str, cycle: int) -> Task:
+        task_id = _require_task_id(task_id)
+        canonical_size = require_task_size(size)
+        if not isinstance(cycle, int) or isinstance(cycle, bool):
+            raise QueueError("cycle must be an integer")
+        self.initialize()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE id=?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise QueueError(f"no such task: {task_id}")
+            task = self._task_from_row(row)
+            if not self._eligible_in_connection(connection, task, cycle):
+                raise QueueError(f"task is not upcoming in cycle {cycle}: {task_id}")
+            connection.execute(
+                "UPDATE tasks SET size=? WHERE id=?",
+                (canonical_size, task_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE id=?",
+                (task_id,),
+            ).fetchone()
+        assert row is not None
+        return self._task_from_row(row)
 
     def set_model(self, task_id: str, model: str | None) -> None:
         self._update_task(task_id, "model", model or None)

@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   title                 TEXT NOT NULL,
   kind                  TEXT NOT NULL CHECK (kind IN ('oneoff','recurring')),
   priority              INTEGER NOT NULL DEFAULT 2 CHECK (priority BETWEEN 0 AND 4),
+  size                  TEXT,
   cadence               TEXT CHECK (cadence IN ('weekly','monthly')),
   cwd                   TEXT NOT NULL,
   goal                  TEXT NOT NULL,

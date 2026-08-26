@@ -135,6 +135,7 @@ def _task_values(args: argparse.Namespace) -> dict[str, Any]:
         "title": args.title,
         "kind": args.kind,
         "priority": args.priority,
+        "size": args.size,
         "cadence": args.cadence,
         "cwd": args.cwd,
         "goal": args.goal,
@@ -285,6 +286,11 @@ def _command(args: argparse.Namespace) -> int:
         _cfg, queue = _queue(args)
         queue.set_priority(args.task, args.priority)
         return 0
+    if command == "set-size":
+        _cfg, queue = _queue(args)
+        task = queue.set_size(args.task, args.size, args.cycle)
+        _json({"task": task.to_dict()}) if args.json else print(f"sized: {task.id} {task.size}")
+        return 0
     if command == "set-model":
         _cfg, queue = _queue(args)
         queue.set_model(args.task, args.model)
@@ -387,6 +393,11 @@ def _command(args: argparse.Namespace) -> int:
             use_implement=bool(raw_task.get("use_implement", False)),
             allowed_providers=tuple(raw_task.get("allowed_providers") or ()),
             required_capabilities=tuple(raw_task.get("required_capabilities") or ()),
+            size=(
+                None
+                if raw_task.get("size") is None
+                else db.require_task_size(raw_task.get("size"))
+            ),
         )
         if not task.id or task.kind not in {"oneoff", "recurring"}:
             raise CLIError("task JSON requires a valid id and kind")
@@ -537,7 +548,8 @@ def build_parser() -> argparse.ArgumentParser:
     add = sub.add_parser("add"); _add_common(add); _add_json(add)
     add.add_argument("--id", required=True); add.add_argument("--title", required=True)
     add.add_argument("--kind", choices=("oneoff", "recurring"), required=True)
-    add.add_argument("--priority", type=int, default=2); add.add_argument("--cadence")
+    add.add_argument("--priority", type=int, default=2)
+    add.add_argument("--size", choices=db.TASK_SIZES, required=True); add.add_argument("--cadence")
     add.add_argument("--cwd", required=True); add.add_argument("--goal", required=True)
     add.add_argument("--context"); add.add_argument("--constraints"); add.add_argument("--precondition")
     add.add_argument("--done-when", dest="done_when"); add.add_argument("--claude-only", type=int, default=0)
@@ -564,6 +576,7 @@ def build_parser() -> argparse.ArgumentParser:
     runs = sub.add_parser("runs"); _add_common(runs); _add_json(runs); runs.add_argument("--limit", type=int, default=50); runs.add_argument("--task")
     requeue = sub.add_parser("requeue"); _add_common(requeue); _add_json(requeue); requeue.add_argument("task"); requeue.add_argument("--eligibility-key")
     priority = sub.add_parser("set-priority"); _add_common(priority); priority.add_argument("task"); priority.add_argument("priority", type=int)
+    size = sub.add_parser("set-size"); _add_common(size); _add_json(size); size.add_argument("task"); size.add_argument("size", choices=db.TASK_SIZES); size.add_argument("--cycle", type=int, required=True)
     model = sub.add_parser("set-model"); _add_common(model); model.add_argument("task"); model.add_argument("model", nargs="?")
     for name in ("activate", "deactivate"):
         item = sub.add_parser(name); _add_common(item); _add_json(item); item.add_argument("task")

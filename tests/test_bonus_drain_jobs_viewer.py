@@ -217,6 +217,86 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertIn('class="task-run"', completed.stdout)
         self.assertNotRegex(completed.stdout.lower(), r"sign in|access secret|authentication required")
 
+    def test_upcoming_rows_render_size_or_unknown_without_annotating_history(self) -> None:
+        unexpected = '<img src=x onerror=alert(1)>'
+        remaining = [
+            {
+                "id": "medium-job", "title": "Medium upcoming", "kind": "oneoff",
+                "priority": 2, "cadence": None, "cwd": "/tmp/medium", "goal": "medium goal",
+                "engine_class": "codex-ok", "last_ts": None, "size": "medium",
+            },
+            {
+                "id": "legacy-job", "title": "Legacy upcoming", "kind": "oneoff",
+                "priority": 2, "cadence": None, "cwd": "/tmp/legacy", "goal": "legacy goal",
+                "engine_class": "codex-ok", "last_ts": None, "size": None,
+            },
+            {
+                "id": "unexpected-job", "title": "Unexpected upcoming", "kind": "oneoff",
+                "priority": 2, "cadence": None, "cwd": "/tmp/unexpected", "goal": "unexpected goal",
+                "engine_class": "codex-ok", "last_ts": None, "size": unexpected,
+            },
+        ]
+        history = [{
+            "ts": "2026-08-25T12:00:00Z", "task": "historical-job",
+            "title": "Historical run", "kind": "oneoff", "status": "done",
+            "engine": "codex", "cycle": 123, "summary": "already complete",
+            "branch": None, "size": "tiny",
+        }]
+        disabled = [{
+            "id": "disabled-job", "title": "Disabled task", "kind": "oneoff",
+            "priority": 3, "cadence": None, "cwd": "/tmp/disabled",
+            "goal": "disabled goal", "size": "huge",
+        }]
+        with (
+            mock.patch.object(self.viewer, "get_usage", return_value=None),
+            mock.patch.object(self.viewer, "get_codex_usage", return_value=None),
+            mock.patch.object(self.viewer, "get_grok_usage", return_value=None),
+            mock.patch.object(self.viewer, "current_cycle", return_value=123),
+            mock.patch.object(self.viewer, "get_remaining", return_value=remaining),
+            mock.patch.object(self.viewer, "get_recent_runs", return_value=history),
+            mock.patch.object(self.viewer, "get_counts", return_value={"active": 3, "oneoff_done": 1}),
+            mock.patch.object(self.viewer, "get_disabled", return_value=disabled),
+            mock.patch.object(self.viewer, "get_inflight", return_value=[]),
+            mock.patch.object(self.viewer, "get_gates", return_value={"coordinator": "none"}),
+            mock.patch.object(self.viewer, "_claude_cards", return_value=[]),
+            mock.patch.object(self.viewer, "_codex_cards", return_value=[]),
+            mock.patch.object(self.viewer, "_grok_cards", return_value=[]),
+            mock.patch.object(
+                self.viewer, "_verdict",
+                return_value=("idle", "nothing draining", "idle", ""),
+            ),
+            mock.patch.object(self.viewer, "_rotation", return_value=""),
+            mock.patch.object(self.viewer, "get_dispatch_times", return_value=[]),
+        ):
+            body = self.viewer.render_bonus_body()
+
+        def upcoming_row(title: str) -> str:
+            marker = f'<div class="qtitle">{title}</div>'
+            position = body.index(marker)
+            start = body.rfind('<div class="qrow">', 0, position)
+            end = body.find('<div class="qrow">', position)
+            if end < 0:
+                end = body.find('<div class="sec">', position)
+            self.assertGreaterEqual(start, 0)
+            self.assertGreater(end, position)
+            return body[start:end]
+
+        self.assertIn("size medium", upcoming_row("Medium upcoming"))
+        self.assertIn("size unknown", upcoming_row("Legacy upcoming"))
+        self.assertIn(
+            "size &lt;img src=x onerror=alert(1)&gt;",
+            upcoming_row("Unexpected upcoming"),
+        )
+        self.assertNotIn(unexpected, body)
+
+        run_start = body.index("<span>run log</span>")
+        disabled_start = body.index("<span><i class=\"caret\"></i>disabled")
+        history_section = body[run_start:disabled_start]
+        disabled_section = body[disabled_start:body.index("<footer>", disabled_start)]
+        self.assertNotIn("size tiny", history_section)
+        self.assertNotIn("size huge", disabled_section)
+        self.assertNotIn("size unknown", disabled_section)
+
 
 if __name__ == "__main__":
     unittest.main()

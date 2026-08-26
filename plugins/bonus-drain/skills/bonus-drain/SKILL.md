@@ -62,14 +62,56 @@ An item is eligible for this queue only when all are true:
 Reject or redirect urgent work, interactive design, broad cleanup, unclear publishing,
 production changes, and tasks whose success depends on another person's response.
 
-Capture at least: stable ID, title, kind (`oneoff` or `recurring`), priority, cwd, goal,
-context, constraints, precondition, done-when, and compatible provider/task routing. Prefer
-`mcp=none` unless the task demonstrably needs a named server. Mark build-shaped work only
-through the explicit implementation flag; do not infer it from cwd or prose.
+Capture at least: stable ID, title, kind (`oneoff` or `recurring`), priority, size, cwd, goal,
+context, constraints, precondition, done-when, and compatible provider/task routing. Priority
+is urgency/drain order; size is the best available estimate of autonomous scope and effort.
+Estimate size before previewing or adding the task:
 
-Preview the validated task, then add it with the CLI. After adding, read it back by ID and
-verify every execution field. A duplicate or mismatched canonical identity is an error, not
-permission to create a near-duplicate.
+- `tiny`: one deterministic action or edit plus one quick proof; roughly under 15 minutes.
+- `small`: a few bounded edits/checks or narrow research; roughly under 1 hour.
+- `medium`: multi-file work or several evidence paths; roughly 1–3 hours.
+- `large`: cross-module, integration/E2E, or substantial research; roughly 3–8 hours.
+- `huge`: broader than one workday or highly uncertain; split it when possible, and reject it
+  when it cannot remain one autonomous, safely skippable job.
+
+When between sizes, choose the larger. `unknown` is display-only for legacy/null rows and is
+never valid on add. Prefer `mcp=none` unless the task demonstrably needs a named server. Mark
+build-shaped work only through the explicit implementation flag; do not infer it from cwd or
+prose.
+
+Preview the validated task, then add it with the CLI and its required estimate:
+
+```sh
+bonus-drain add --id TASK_ID --title "TASK TITLE" --kind oneoff --priority 2 \
+  --size medium --cwd /absolute/project/path --goal "CONCRETE GOAL" --json
+```
+
+After adding, read the canonical JSON task back by ID:
+
+```sh
+bonus-drain contract-task --id TASK_ID --title "TASK TITLE"
+```
+
+Inspect the exact-ID task object and compare every execution field, including `size`.
+Human `queue-status` output is not add verification. A duplicate, extra canonical match, or
+mismatched canonical identity is an error, not permission to create a near-duplicate.
+
+For an explicitly authorized current-upcoming size backfill, freeze the authoritative `pick`
+and its exact cycle as `CYCLE` from the same current scout/viewer snapshot, then have an
+independent estimation agent assign one rubric value per returned ID from the complete task
+contract. Immediately fetch that pick again using the same frozen `CYCLE` and update only IDs
+in both snapshots:
+
+```sh
+bonus-drain set-size TASK_ID medium --cycle "$CYCLE" --json
+```
+
+Verify each returned task object, then re-run the current pick and confirm every still-upcoming
+task has a non-null size. `set-size` does not discover the current cycle; it validates the
+operator-supplied frozen cycle at its transaction boundary and does not close a later
+post-recheck dispatch race. Never query or update spent, inactive, run-log-only, or otherwise
+absent rows for this backfill. A recurring task absent because it already ran this cycle stays
+null until it is separately eligible for an authorized upcoming-only estimate.
 
 ## Mode: run
 
