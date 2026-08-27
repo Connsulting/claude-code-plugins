@@ -61,10 +61,10 @@ class JobsViewerContractTests(unittest.TestCase):
 
     def test_existing_ui_is_preserved_without_login_or_generic_viewer_copy(self) -> None:
         expected_frontend_hashes = {
-            "CSS": "4410f322733d7d602d63c0deb2daef40288fa57ffc899aee6e3d3f7d1cd7e5aa",
-            "ICON_SPRITE": "7c5f372d21654d5980b50830bb48a53a6aa94ec9440dc34e88301d5d44f72199",
-            "SCRIPT": "c3012ef3517b75f04b0b3b928194cbb9c77765dba7ffa8960f0f1f438af7e324",
-            "PAGE": "d736c4f06db4fe65e6d15f1bcdf661dccee8971694d7be352226fdf83797bbda",
+            "CSS": "612907cebed828f396a0509031694ac47b868262cfe8b321a902358b7e8647d4",
+            "ICON_SPRITE": "333ef2163122e3450f95ea008ef6eaaad6ecb8f2562244bfb02e6317a4c06a03",
+            "SCRIPT": "b0ced2b4ca8e3b4852a4362ca815da8ba1769566f5522f309cf3cd8691a7b35d",
+            "PAGE": "69071b11da43869de11c5211fe5fed4a976f38f6499c4b70ce9205845b4033de",
         }
         self.assertEqual(
             {
@@ -350,8 +350,8 @@ class JobsViewerContractTests(unittest.TestCase):
         def upcoming_row(title: str) -> str:
             marker = f'<div class="qtitle">{title}</div>'
             position = body.index(marker)
-            start = body.rfind('<div class="qrow">', 0, position)
-            end = body.find('<div class="qrow">', position)
+            start = body.rfind('<div class="qrow"', 0, position)
+            end = body.find('<div class="qrow"', position)
             if end < 0:
                 end = body.find('<div class="sec">', position)
             self.assertGreaterEqual(start, 0)
@@ -395,6 +395,192 @@ class JobsViewerContractTests(unittest.TestCase):
         disabled_section = body[disabled_start:body.index("<footer>", disabled_start)]
         self.assertNotIn("size estimate", history_section)
         self.assertNotIn("size estimate", disabled_section)
+
+
+    QUEUE_FIXTURE = [
+        {
+            "id": "weekly-claude", "title": "Weekly Claude sweep", "kind": "recurring",
+            "priority": 1, "cadence": "weekly", "cwd": "/tmp/one", "goal": "sweep",
+            "size": "small", "last_ts": None, "eligible_providers": ["claude"],
+        },
+        {
+            "id": "oneoff-codex", "title": "One-off Codex refactor", "kind": "oneoff",
+            "priority": 2, "cadence": None, "cwd": "/tmp/two", "goal": "refactor",
+            "size": "large", "last_ts": None, "eligible_providers": ["codex", "grok"],
+        },
+        {
+            "id": "oneoff-claude", "title": "One-off Claude audit", "kind": "oneoff",
+            "priority": 2, "cadence": None, "cwd": "/tmp/three", "goal": "audit",
+            "size": "small", "last_ts": None, "eligible_providers": ["claude", "codex"],
+        },
+    ]
+
+    def _bonus_body(self, remaining):
+        with (
+            mock.patch.object(self.viewer, "get_usage", return_value=None),
+            mock.patch.object(self.viewer, "get_codex_usage", return_value=None),
+            mock.patch.object(self.viewer, "get_grok_usage", return_value=None),
+            mock.patch.object(self.viewer, "current_cycle", return_value=123),
+            mock.patch.object(self.viewer, "get_remaining", return_value=remaining),
+            mock.patch.object(self.viewer, "get_recent_runs", return_value=[]),
+            mock.patch.object(self.viewer, "get_disabled", return_value=[]),
+            mock.patch.object(self.viewer, "get_inflight", return_value=[]),
+            mock.patch.object(self.viewer, "get_gates", return_value={"coordinator": "none"}),
+            mock.patch.object(self.viewer, "_claude_cards", return_value=[]),
+            mock.patch.object(self.viewer, "_codex_cards", return_value=[]),
+            mock.patch.object(self.viewer, "_grok_cards", return_value=[]),
+            mock.patch.object(
+                self.viewer, "_verdict",
+                return_value=("idle", "nothing draining", "idle", ""),
+            ),
+            mock.patch.object(self.viewer, "_rotation", return_value=""),
+            mock.patch.object(self.viewer, "get_dispatch_times", return_value=[]),
+        ):
+            return self.viewer.render_bonus_body()
+
+    def test_queue_filter_chips_cover_the_facets_present_in_the_queue(self) -> None:
+        body = self._bonus_body(self.QUEUE_FIXTURE)
+        bar = body[body.index('id="qfilters"'):body.index('id="qlist"')]
+
+        for group, label in (
+            ("kind", "type"), ("provider", "supported by"),
+            ("priority", "priority"), ("size", "size"),
+        ):
+            with self.subTest(group=group):
+                self.assertIn(f'role="group" aria-label="filter by {label}"', bar)
+                self.assertIn(f'class="fchip fall on" data-group="{group}" data-value=""', bar)
+
+        # Every chip but priority is its glyph plus a count, and the words that would have
+        # labelled it survive as the title and the accessible name.
+        self.assertIn(
+            'data-value="oneoff" aria-pressed="false" aria-label="one-off" title="one-off">'
+            + self.viewer.ico("arrow") + "<i>2</i>", bar,
+        )
+        self.assertIn(
+            'data-value="recurring" aria-pressed="false" aria-label="recurring" '
+            'title="recurring">' + self.viewer.ico("cycle") + "<i>1</i>", bar,
+        )
+        # A provider row counts once per provider it supports, not once per row.
+        for provider, count in (("claude", 2), ("codex", 2), ("grok", 1)):
+            with self.subTest(provider=provider):
+                self.assertIn(
+                    f'data-value="{provider}" aria-pressed="false" '
+                    f'aria-label="{provider.title()}" title="{provider.title()}">'
+                    + self.viewer.ico(provider) + f"<i>{count}</i>", bar,
+                )
+        self.assertIn('aria-label="priority 1" title="priority 1">P1<i>1</i>', bar)
+        self.assertIn('aria-label="priority 2" title="priority 2">P2<i>2</i>', bar)
+        # The size chip is the same five-block gauge the rows carry, so the filter and the row
+        # it filters cannot drift apart.
+        self.assertIn(
+            'data-value="small" aria-pressed="false" aria-label="small size" '
+            'title="small size">' + self.viewer._size_blocks("small") + "<i>2</i>", bar,
+        )
+        self.assertIn(
+            'data-value="large" aria-pressed="false" aria-label="large size" '
+            'title="large size">' + self.viewer._size_blocks("large") + "<i>1</i>", bar,
+        )
+        self.assertIn(self.viewer._size_blocks("small"), self.viewer.size_badge("small"))
+
+        # Nothing in the bar spells a facet out, so the row stays one line.
+        for word in ("one-off<", "recurring<", "Claude<", "Codex<", "Grok<", "small<", "large<"):
+            self.assertNotIn(word, bar)
+
+        # Every row carries the facets the chips filter on.
+        self.assertIn('data-kind="oneoff" data-priority="2"', body)
+        self.assertIn('data-size="large" data-providers="codex grok"', body)
+        self.assertIn('data-size="small" data-providers="claude codex"', body)
+
+    def test_single_value_facets_and_an_empty_queue_render_no_dead_controls(self) -> None:
+        uniform = [dict(t, priority=2, kind="oneoff", cadence=None, size="small",
+                        eligible_providers=["claude"]) for t in self.QUEUE_FIXTURE]
+        # Nothing here can be filtered, so the bar itself is dropped rather than rendered as
+        # four controls that cannot change the list.
+        uniform_body = self._bonus_body(uniform)
+        self.assertNotIn('id="qfilters"', uniform_body)
+        self.assertIn('id="qlist"', uniform_body)
+
+        # One facet varying is enough to earn the bar, and only that facet gets a group.
+        mixed = [dict(t, size=size) for t, size in zip(uniform, ("small", "large", "large"))]
+        bar = self._bonus_body(mixed)
+        self.assertIn('id="qfilters"', bar)
+        self.assertIn('aria-label="filter by size"', bar)
+        for label in ("type", "supported by", "priority"):
+            self.assertNotIn(f'aria-label="filter by {label}"', bar)
+
+        drained = self._bonus_body([])
+        self.assertNotIn('id="qfilters"', drained)
+        self.assertIn("queue drained", drained)
+
+    def test_selecting_filters_hides_rows_and_renumbers_the_queue_in_a_browser(self) -> None:
+        chrome = shutil.which("google-chrome") or shutil.which("google-chrome-stable")
+        if chrome is None:
+            self.skipTest("Chrome is unavailable")
+        with (
+            mock.patch.object(self.viewer, "render_bonus_body",
+                              return_value=self._bonus_body(self.QUEUE_FIXTURE)),
+            mock.patch.object(self.viewer, "render_schedule_body", return_value="scheduled body"),
+        ):
+            page = self.viewer.render_page().decode()
+
+        def dump(clicks: str) -> str:
+            script = "".join(
+                f"document.querySelector('.fchip[data-group=\"{g}\"]"
+                f"[data-value=\"{v}\"]').click();"
+                for g, v in clicks
+            )
+            with tempfile.TemporaryDirectory() as work:
+                target = Path(work) / "page.html"
+                target.write_text(page + f"<script>{script}</script>")
+                completed = subprocess.run(
+                    [
+                        chrome, "--headless=new", "--no-sandbox", "--disable-gpu",
+                        "--disable-dev-shm-usage", "--no-proxy-server",
+                        f"--user-data-dir={work}/profile", "--dump-dom", target.as_uri(),
+                    ],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, timeout=60, check=False,
+                )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            return completed.stdout
+
+        def row(dom: str, title: str) -> str:
+            position = dom.index(f'<div class="qtitle">{title}</div>')
+            return dom[dom.rfind('<div class="qrow"', 0, position):position]
+
+        unfiltered = dump([])
+        self.assertNotIn("hidden", row(unfiltered, "One-off Codex refactor"))
+        self.assertIn(">3 jobs<", unfiltered)
+
+        # One group: the two one-offs survive, the recurring row goes, and the surviving rows
+        # renumber from 1 so the drain order never shows a gap.
+        kind_only = dump([("kind", "oneoff")])
+        self.assertIn("hidden", row(kind_only, "Weekly Claude sweep"))
+        self.assertNotIn("hidden", row(kind_only, "One-off Codex refactor"))
+        self.assertIn(">2 of 3 jobs<", kind_only)
+        self.assertIn('<span class="qn">1</span>', row(kind_only, "One-off Codex refactor"))
+        self.assertIn('<span class="qn">2</span>', row(kind_only, "One-off Claude audit"))
+        self.assertIn("2 tasks", kind_only)
+        self.assertNotIn("hidden", kind_only[kind_only.index('data-band="2"') - 40:][:60])
+
+        # Across groups the filters intersect: one-off AND Claude-eligible AND small.
+        crossed = dump([("kind", "oneoff"), ("provider", "claude"), ("size", "small")])
+        self.assertIn("hidden", row(crossed, "One-off Codex refactor"))
+        self.assertNotIn("hidden", row(crossed, "One-off Claude audit"))
+        self.assertIn(">1 of 3 jobs<", crossed)
+        self.assertIn('id="qfreset"', crossed)
+        self.assertNotIn('id="qfreset" hidden', crossed)
+
+        # Within a group they union, and an empty band header is dropped with its count.
+        union = dump([("provider", "codex"), ("provider", "grok")])
+        self.assertIn("hidden", row(union, "Weekly Claude sweep"))
+        self.assertIn(">2 of 3 jobs<", union)
+
+        # A selection that matches nothing says so rather than looking like a drained queue.
+        nothing = dump([("kind", "recurring"), ("size", "large")])
+        self.assertIn("no remaining jobs match these filters", nothing)
+        self.assertNotIn('id="qnone" hidden', nothing)
+        self.assertIn(">0 of 3 jobs<", nothing)
 
 
 if __name__ == "__main__":

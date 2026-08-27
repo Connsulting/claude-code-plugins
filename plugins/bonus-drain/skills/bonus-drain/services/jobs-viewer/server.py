@@ -1015,8 +1015,20 @@ _CALENDAR_SYMBOL = (
     '<rect x="4" y="5.5" width="16" height="14" rx="2"></rect>'
     '<path d="M8 3.5v4M16 3.5v4M4 10h16"></path></g></symbol>'
 )
+_CYCLE_SYMBOL = (
+    '<symbol id="i-cycle" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" '
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M19.4 12a7.4 7.4 0 1 1-2.17-5.23"></path>'
+    '<path d="M17.6 3.1v3.9h-3.9"></path></g></symbol>'
+)
+_ARROW_SYMBOL = (
+    '<symbol id="i-arrow" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" '
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+    '<path d="M4.4 12h14.4M13.2 6.4 18.8 12l-5.6 5.6"></path></g></symbol>'
+)
 ICON_SPRITE = ICON_SPRITE.replace(
-    '<symbol id="i-auto"', _GROK_SYMBOL + _CALENDAR_SYMBOL + '<symbol id="i-auto"', 1,
+    '<symbol id="i-auto"',
+    _GROK_SYMBOL + _CALENDAR_SYMBOL + _CYCLE_SYMBOL + _ARROW_SYMBOL + '<symbol id="i-auto"', 1,
 )
 
 
@@ -1040,13 +1052,18 @@ def size_badge(size: str | None) -> str:
     """Five-block capacity mark, with a visible fallback for legacy NULL rows."""
     label = size if size in SIZE_LEVEL else "unknown"
     level = SIZE_LEVEL.get(label, 0)
-    blocks = "".join(
-        f'<i class="{"on" if n <= level else ""}"></i>' for n in range(1, 6)
-    )
     unknown = '<span class="qmeta-label">unknown</span>' if level == 0 else ""
     return (f'<span class="qmeta-icon qsize" role="img" '
             f'aria-label="{esc(label)} size estimate" title="{esc(label)} size estimate">'
-            f'<span class="sizeblocks" aria-hidden="true">{blocks}</span>{unknown}</span>')
+            f'{_size_blocks(label)}{unknown}</span>')
+
+
+def _size_blocks(label: str) -> str:
+    """The five-block capacity mark on its own, so the row badge and the size filter chip
+    cannot drift apart."""
+    level = SIZE_LEVEL.get(label, 0)
+    blocks = "".join(f'<i class="{"on" if n <= level else ""}"></i>' for n in range(1, 6))
+    return f'<span class="sizeblocks" aria-hidden="true">{blocks}</span>'
 
 
 def schedule_badge(kind: str, last_ts: str | None) -> str:
@@ -1665,6 +1682,105 @@ def _pacing_strip(anchor, gates: dict, dispatches: list[float], batch: int) -> s
     </div>"""
 
 
+QUEUE_FILTER_GROUPS = ("kind", "provider", "priority", "size")
+PROVIDER_LABELS = {"claude": "Claude", "codex": "Codex", "grok": "Grok"}
+
+
+def _facet_kind(t: dict) -> str:
+    return "recurring" if t.get("kind") == "recurring" else "oneoff"
+
+
+def _facet_size(t: dict) -> str:
+    size = t.get("size")
+    return size if size in SIZE_LEVEL else "unknown"
+
+
+def _facet_providers(t: dict) -> list[str]:
+    have = set(t.get("eligible_providers") or _legacy_providers(t))
+    return [p for p in PROVIDER_LABELS if p in have]
+
+
+def _queue_filters(remaining: list[dict]) -> str:
+    """Facet chips above the queue, applied client-side.
+
+    Only values actually present in this cycle's queue get a chip: a zero-count chip filters to
+    an empty list, which reads as a broken control rather than an empty facet. Every group is
+    multi-select, OR within a group and AND across them, and an empty group means no constraint
+    - which is what the leading `all` chip sets, so "all" stays a visible state rather than
+    only the absence of a selection. The filter is client-side because the page reloads itself
+    every 60s: a server-side filter would have to carry its state on the URL to survive that,
+    where localStorage survives it for free."""
+    if not remaining:
+        return ""
+
+    counts: dict[str, dict[str, int]] = {g: {} for g in QUEUE_FILTER_GROUPS}
+
+    def bump(group: str, value: str) -> None:
+        counts[group][value] = counts[group].get(value, 0) + 1
+
+    for t in remaining:
+        bump("kind", _facet_kind(t))
+        bump("size", _facet_size(t))
+        bump("priority", str(t["priority"]))
+        for provider in _facet_providers(t):
+            bump("provider", provider)
+
+    size_order = list(SIZE_LEVEL) + ["unknown"]
+    # (value, glyph, spoken name). The glyph carries the whole chip: with four facets on one
+    # row there is no width for words, and every mark here is already the row vocabulary - the
+    # engine marks, the five-block size gauge - so the chip reads as "filter by this thing you
+    # can see in the rows". The spoken name is the title and the aria-label, never visible.
+    groups: list[tuple[str, str, list[tuple[str, str, str]]]] = [
+        ("kind", "type", [
+            (v, ico("arrow" if v == "oneoff" else "cycle"),
+             "one-off" if v == "oneoff" else "recurring")
+            for v in ("oneoff", "recurring") if v in counts["kind"]
+        ]),
+        ("provider", "supported by", [
+            (v, ico(v), PROVIDER_LABELS[v])
+            for v in PROVIDER_LABELS if v in counts["provider"]
+        ]),
+        ("priority", "priority", [
+            (v, "P" + v, "priority " + v) for v in sorted(counts["priority"], key=int)
+        ]),
+        ("size", "size", [
+            (v, _size_blocks(v), v + " size") for v in size_order if v in counts["size"]
+        ]),
+    ]
+
+    blocks = []
+    for group, label, options in groups:
+        # A single-value facet cannot filter anything, so it is a control that does nothing.
+        if len(options) < 2:
+            continue
+        chips = ['<button type="button" class="fchip fall on" data-group="' + group
+                 + '" data-value="" aria-pressed="true">all</button>']
+        for value, glyph, name in options:
+            chips.append(
+                '<button type="button" class="fchip" data-group="' + group
+                + '" data-value="' + esc(value) + '" aria-pressed="false"'
+                + ' aria-label="' + esc(name) + '" title="' + esc(name) + '">'
+                + glyph + "<i>" + str(counts[group][value]) + "</i></button>"
+            )
+        # The group name is spoken, not printed. Printing four labels cost ~200px, which is
+        # exactly what the fourth group needed to stay on one row, and the marks are the same
+        # ones the rows below carry - the label was naming what you can already see.
+        blocks.append(
+            '<div class="fgrp" role="group" aria-label="filter by ' + esc(label) + '">'
+            + "".join(chips) + "</div>"
+        )
+
+    if not blocks:
+        return ""
+    return (
+        '\n      <div class="qfilters" id="qfilters" role="group" aria-label="Filter remaining jobs">'
+        + "".join(blocks)
+        + '<button type="button" class="freset" id="qfreset" hidden'
+        + ' title="Clear every filter" aria-label="Clear every filter">clear</button>'
+        + "</div>"
+    )
+
+
 def render_bonus_body() -> str:
     usage = get_usage()
     codex = get_codex_usage()
@@ -1745,13 +1861,14 @@ def render_bonus_body() -> str:
                 seen.add(pri)
                 n = band_counts[pri]
                 rows.append(f"""
-          <div class="band"><span class="bpri" style="--c:{PRI_TINT.get(pri, "var(--dim)")}">P{esc(pri)}</span>
+          <div class="band" data-band="{esc(pri)}"><span class="bpri" style="--c:{PRI_TINT.get(pri, "var(--dim)")}">P{esc(pri)}</span>
             <span class="brule"></span><span class="bcount">{n} task{"" if n == 1 else "s"}</span></div>""")
             cwd = esc(Path(t.get("cwd", "")).name or t.get("cwd", ""))
             goal = t.get("goal", "") or ""
             goal_short = goal if len(goal) <= 170 else goal[:170] + "…"
             rows.append(f"""
-          <div class="qrow">
+          <div class="qrow" data-kind="{_facet_kind(t)}" data-priority="{esc(pri)}"
+               data-size="{esc(_facet_size(t))}" data-providers="{" ".join(_facet_providers(t))}">
             <span class="qn">{i}</span>
             <div class="qmain">
               <div class="qtitle">{esc(t["title"])}</div>
@@ -1766,6 +1883,7 @@ def render_bonus_body() -> str:
                       >{busy_button(ico("ban"))}</button>
             </div>
           </div>""")
+        rows.append('<p class="empty" id="qnone" hidden>no remaining jobs match these filters.</p>')
         queue = "".join(rows)
     else:
         queue = '<p class="empty">nothing remaining this cycle — queue drained (or none eligible yet).</p>'
@@ -1853,8 +1971,10 @@ def render_bonus_body() -> str:
 
     <div class="sec">
       <div class="sech"><span>remaining this week · drain order</span>
-        <span class="note">one-offs before recurring inside each band</span></div>
-      {queue}
+        <span class="note"><span id="qcount">{len(remaining)} job{"" if len(remaining) == 1 else "s"}</span>
+          · one-offs before recurring inside each band</span></div>
+      {_queue_filters(remaining)}
+      <div id="qlist">{queue}</div>
     </div>
 
     <div class="sec">
@@ -2243,6 +2363,40 @@ footer{margin:34px 0 0;font-size:10.5px;color:var(--dim2);letter-spacing:.04em}
 .fltitle{flex:1 1 240px;font-size:12.5px;min-width:0}
 .elapsed{font-variant-numeric:tabular-nums;font-size:12px}
 
+/* queue filters ------------------------------------------------------------------------
+   Chips, not selects: the whole facet is visible at rest with its count, and a native <select>
+   multiple is unusable on the phone this page is mostly read on. `all` is a chip of its own so
+   the cleared state is something you press, not something you deduce. */
+[hidden]{display:none!important}
+.qfilters{display:flex;flex-wrap:wrap;align-items:center;gap:9px 16px;
+  padding:9px 12px;background:var(--panel);border:1px solid var(--line)}
+.fgrp{display:flex;align-items:center;gap:4px;flex-wrap:wrap;min-width:0}
+/* Groups are separated by a rule rather than a heading: the marks name themselves, and the
+   only thing a reader needs is where one facet ends and the next begins. */
+.fgrp+.fgrp{border-left:1px solid var(--line);padding-left:14px}
+.fchip{display:inline-flex;align-items:center;gap:5px;min-height:30px;padding:0 8px;
+  font:inherit;font-size:11px;cursor:pointer;border-radius:0;background:none;
+  border:1px solid rgba(233,231,226,.18);color:rgba(233,231,226,.78)}
+.fchip:hover{background:rgba(255,255,255,.07)}
+.fchip .ico{width:15px;height:15px;margin-right:0;opacity:.82}
+.fchip .sizeblocks{height:12px}
+.fchip .sizeblocks i{width:4px;height:9px;opacity:.28}
+.fchip .sizeblocks i.on{opacity:.92}
+.fchip i{font-style:normal;font-size:10px;color:var(--dim2);font-variant-numeric:tabular-nums}
+/* Selected is a lift in weight, not the accent: amber on this page means LIVE, and a selected
+   filter is neither live nor an account state. */
+.fchip.on{border-color:rgba(233,231,226,.52);background:rgba(255,255,255,.10);color:var(--fg)}
+.fchip.on i{color:var(--dim)}
+.freset{margin-left:auto;min-height:30px;padding:0 8px;font:inherit;font-size:10.5px;
+  cursor:pointer;background:none;border:1px solid transparent;color:var(--dim2);border-radius:0}
+.freset:hover{color:var(--acc2)}
+#qlist{margin-top:2px}
+@media(max-width:640px){
+  .qfilters{gap:8px 12px}
+  .fgrp+.fgrp{border-left:0;padding-left:0}
+  .freset{margin-left:0}
+}
+
 /* queue ------------------------------------------------------------------------------- */
 .band{display:flex;align-items:center;gap:10px;padding:18px 0 6px}
 .bpri{font-size:10.5px;letter-spacing:.14em;color:var(--c)}
@@ -2411,6 +2565,82 @@ SCRIPT = """
       }
     });
   });
+  // Queue facet filters. Client-side and localStorage-backed, so a selection survives the
+  // page's own 60s meta refresh; the server keeps rendering the whole queue.
+  (function(){
+    var bar=document.getElementById('qfilters'),list=document.getElementById('qlist');
+    if(!bar||!list)return;
+    var GROUPS=['kind','provider','priority','size'],FKEY='bonusQueueFilters';
+    var chips=Array.prototype.slice.call(bar.querySelectorAll('.fchip'));
+    var rows=Array.prototype.slice.call(list.querySelectorAll('.qrow'));
+    var bands=Array.prototype.slice.call(list.querySelectorAll('.band'));
+    var none=document.getElementById('qnone'),count=document.getElementById('qcount');
+    var reset=document.getElementById('qfreset');
+    var offered={};
+    GROUPS.forEach(function(g){offered[g]=[]});
+    chips.forEach(function(c){if(c.dataset.value)offered[c.dataset.group].push(c.dataset.value)});
+    var state={};
+    GROUPS.forEach(function(g){state[g]=[]});
+    try{
+      var raw=JSON.parse(localStorage.getItem(FKEY)||'{}');
+      // Drop values this cycle no longer offers, or a stale selection would silently hide
+      // every row and read as an empty queue.
+      GROUPS.forEach(function(g){
+        if(Array.isArray(raw[g]))state[g]=raw[g].filter(function(v){return offered[g].indexOf(v)>=0});
+      });
+    }catch(e){}
+    function keep(row){
+      return GROUPS.every(function(g){
+        var sel=state[g];
+        if(!sel.length)return true;
+        if(g==='provider'){
+          var have=(row.dataset.providers||'').split(' ');
+          return sel.some(function(v){return have.indexOf(v)>=0});
+        }
+        return sel.indexOf(row.dataset[g==='kind'?'kind':g])>=0;
+      });
+    }
+    function apply(){
+      var shown=0,per={};
+      rows.forEach(function(r){
+        var ok=keep(r);
+        r.hidden=!ok;
+        if(!ok)return;
+        shown++;
+        var n=r.querySelector('.qn');
+        if(n)n.textContent=shown;
+        per[r.dataset.priority]=(per[r.dataset.priority]||0)+1;
+      });
+      bands.forEach(function(b){
+        var n=per[b.dataset.band]||0;
+        b.hidden=!n;
+        var c=b.querySelector('.bcount');
+        if(c)c.textContent=n+' task'+(n===1?'':'s');
+      });
+      if(none)none.hidden=shown>0;
+      var filtered=GROUPS.some(function(g){return state[g].length});
+      if(count)count.textContent=(filtered?shown+' of '+rows.length:rows.length)+' job'+(rows.length===1&&!filtered?'':'s');
+      if(reset)reset.hidden=!filtered;
+      chips.forEach(function(c){
+        var v=c.dataset.value,on=v?state[c.dataset.group].indexOf(v)>=0:!state[c.dataset.group].length;
+        c.classList.toggle('on',on);
+        c.setAttribute('aria-pressed',on?'true':'false');
+      });
+      try{localStorage.setItem(FKEY,JSON.stringify(state))}catch(e){}
+    }
+    chips.forEach(function(c){
+      c.addEventListener('click',function(){
+        var g=c.dataset.group,v=c.dataset.value;
+        if(!v){state[g]=[]}
+        else{var i=state[g].indexOf(v);if(i>=0)state[g].splice(i,1);else state[g].push(v)}
+        apply();
+      });
+    });
+    if(reset)reset.addEventListener('click',function(){
+      GROUPS.forEach(function(g){state[g]=[]});apply();
+    });
+    apply();
+  })();
   var saved='bonus';
   try{saved=localStorage.getItem(KEY)||'bonus'}catch(e){}
   show(saved);
