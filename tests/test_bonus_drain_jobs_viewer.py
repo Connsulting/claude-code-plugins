@@ -60,7 +60,7 @@ class JobsViewerContractTests(unittest.TestCase):
 
     def test_existing_ui_is_preserved_without_login_or_generic_viewer_copy(self) -> None:
         expected_frontend_hashes = {
-            "CSS": "1aa4a685d0645366bcf5e0a82733abd7c6d3940466e9cb23219d57d5b888c002",
+            "CSS": "4410f322733d7d602d63c0deb2daef40288fa57ffc899aee6e3d3f7d1cd7e5aa",
             "ICON_SPRITE": "7c5f372d21654d5980b50830bb48a53a6aa94ec9440dc34e88301d5d44f72199",
             "SCRIPT": "c3012ef3517b75f04b0b3b928194cbb9c77765dba7ffa8960f0f1f438af7e324",
             "PAGE": "d736c4f06db4fe65e6d15f1bcdf661dccee8971694d7be352226fdf83797bbda",
@@ -86,6 +86,30 @@ class JobsViewerContractTests(unittest.TestCase):
         for marker in ("authentication required", "sign in", "access secret", "bonus_drain_session"):
             self.assertNotIn(marker, page.lower())
         self.assertNotIn("independent provider capacity console", page)
+
+    def test_active_stripes_and_dispatching_bar_shimmer_have_distinct_meanings(self) -> None:
+        """A gold stripe is active; a shimmering bar is an actual dispatch."""
+        claude = self.viewer._claude_cards(
+            {"acct": [{"label": "Business", "u7": 22}], "active": "Business"}, None, 0, "", 0,
+        )[0]
+        codex = self.viewer._codex_cards(
+            {"codex_acct": [{"label": "Personal", "u7": 22}], "codex_active": "Personal"}, None, 0, "", 0,
+        )[0]
+        grok = self.viewer._grok_cards({}, {"weekly_percent": 22}, 0, "", 0)[0]
+
+        for card in (claude, codex, grok):
+            with self.subTest(account=card["name"]):
+                self.assertTrue(card["active"])
+                row = self.viewer._account_row(card)
+                self.assertIn('<i class="stripe on"></i>', row)
+                self.assertIn('bar lg idle', row)
+
+        draining = self.viewer._claude_cards(
+            {"acct": [{"label": "Business", "u7": 22}], "active": "Business", "selected": "Business"},
+            None, 0, "claude", 1,
+        )[0]
+        self.assertIn('bar lg draining', self.viewer._account_row(draining))
+        self.assertIn('@keyframes drainshimmer', self.viewer.CSS)
 
     def test_secretless_force_requires_exact_browser_boundary_and_json(self) -> None:
         self.viewer.ALLOWED_HOSTS = (self.HOST,)

@@ -1269,14 +1269,19 @@ def _account_row(c: dict) -> str:
     p = _week(c)
     known = c["u7"] is not None
     u7, ceiling = _f(c["u7"]), _f(c["ceiling"])
-    stripe = {"acc": "on", "warn": "warn", "dim": ""}.get(tone, "")
-    if not known:
+    # The stripe answers a distinct, higher-level question from the status copy: which
+    # subscription is currently selected for this provider. Keep that identity visible even
+    # when its usage cache is unknown or its drain window is closed.
+    stripe = "on" if c.get("active") else {"acc": "on", "warn": "warn", "dim": ""}.get(tone, "")
+    if not known and not c.get("active"):
         stripe, tone = "unk", "unk"
 
     # --- budget cell ---------------------------------------------------------------------
     if known:
         fig = f'<span class="fig"><b>{u7:g}%</b> of {ceiling:g} ceiling</span>'
-        bar = _bar(u7, ceiling, "lg" + ("" if c["live"] else " idle"), p["elapsed"])
+        # The stripe at left identifies the active subscription. Gold movement is reserved for
+        # a batch that is actually dispatching on this account.
+        bar = _bar(u7, ceiling, "lg" + (" draining" if c["batch"] > 0 else " idle"), p["elapsed"])
     else:
         fig = '<span class="fig unk"><b>?</b> of ' + f'{ceiling:g} ceiling</span>'
         bar = '<div class="bar lg unknown"></div>'
@@ -1520,8 +1525,10 @@ def _codex_cards(gates: dict, cx: dict | None, n_codex: int, coord: str, batch: 
             "batch_n": int(_f(gates.get("batch_n"), 6)),
             "eligible": n_codex, "elig_label": "jobs", "lead_h": lead,
             "active": is_active,
-            # Amber marks the engine bonus work is actually landing on.
-            "live": is_sel or (is_active and windows > 0),
+            # The usage bar is gold for the active subscription. A live batch is separately
+            # represented by `batch`/the draining tag, so a closed drain window must not make
+            # the active Codex account look inactive.
+            "live": is_sel or is_active,
             "behind": selected if (selected and not is_sel and windows > 0) else "",
         })
     return cards
@@ -1551,7 +1558,9 @@ def _grok_cards(gates: dict, grok: dict | None, n_grok: int,
         "batch": batch if coord == "grok" else 0,
         "batch_n": int(_f(gates.get("batch_n"), 6)),
         "eligible": n_grok, "elig_label": "jobs", "lead_h": lead,
-        "active": coord == "grok", "live": coord == "grok", "behind": "",
+        # Grok has one configured subscription, so it is always the active account. Whether
+        # a batch is currently landing on it is separately represented by `live`/`batch`.
+        "active": True, "live": True, "behind": "",
     }]
 
 
@@ -2008,6 +2017,10 @@ a{color:var(--acc2);text-decoration:none}
 .bar.unknown{background:repeating-linear-gradient(135deg,
   oklch(0.66 0.045 250 / .38) 0 5px, rgba(255,255,255,.05) 5px 10px)}
 .bar.idle .fill{background:rgba(233,231,226,.32)}
+.bar.draining .fill{background:linear-gradient(110deg,var(--acc) 0%,var(--acc2) 38%,#fff2b8 50%,
+  var(--acc2) 62%,var(--acc) 100%);background-size:220% 100%;animation:drainshimmer 1.6s linear infinite}
+@keyframes drainshimmer{to{background-position:-220% 0}}
+@media (prefers-reduced-motion:reduce){.bar.draining .fill{animation:none}}
 .bar.sm{height:4px;margin-top:5px}
 .bar.sm .fill{background:rgba(233,231,226,.5)}
 .bar.sm .mark{background:rgba(233,231,226,.45)}

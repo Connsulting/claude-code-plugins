@@ -1,6 +1,6 @@
 {
   "name": "bonus-drain",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Queue and safely dispatch low-priority work against independently paced provider capacity.",
   "author": {
     "name": "Connsulting"
