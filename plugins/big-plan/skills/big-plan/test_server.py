@@ -13,6 +13,7 @@ from unittest import mock
 
 RUNTIME_DIR = Path(__file__).parent
 SERVER_PATH = RUNTIME_DIR / "server.py"
+STYLE_PATH = RUNTIME_DIR / "assets" / "style.css"
 sys.path.insert(0, str(RUNTIME_DIR))
 SPEC = importlib.util.spec_from_file_location("big_plan_server", SERVER_PATH)
 assert SPEC and SPEC.loader
@@ -68,6 +69,20 @@ class SidebarControlsTest(unittest.TestCase):
         self.assertIn('class="comments-toggle sidebar-handle" aria-controls="comments-rail"', page)
         self.assertIn('<aside class="toc-rail" id="toc-rail"', page)
         self.assertIn('<aside class="comments-rail" id="comments-rail"', page)
+
+
+class ContentWidthTest(unittest.TestCase):
+    def test_content_can_use_a_wide_desktop_viewport(self) -> None:
+        style = STYLE_PATH.read_text()
+
+        self.assertIn(
+            ".content {\n"
+            "  grid-area: content;\n"
+            "  padding: 24px 32px 80px;\n"
+            "  max-width: 1600px;\n"
+            "  width: 100%;",
+            style,
+        )
 
 
 if __name__ == "__main__":

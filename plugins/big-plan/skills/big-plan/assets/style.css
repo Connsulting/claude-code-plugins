@@ -254,7 +254,7 @@ body.changes-hidden .content tr:has([data-changed]) > th { background: transpare
 .content {
   grid-area: content;
   padding: 24px 32px 80px;
-  max-width: 860px;
+  max-width: 1600px;
   width: 100%;
   margin: 0 auto;
   overflow-wrap: break-word;
