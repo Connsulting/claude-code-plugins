@@ -114,6 +114,21 @@ class TaskSizeContractTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    def test_queue_json_exposes_graph_backed_provider_eligibility(self) -> None:
+        self.queue.add_task(_task_values("provider-filtered", size="small"))
+        args = type("Args", (), {
+            "command": "queue", "cycle": NOW, "run_limit": 10, "json": True,
+        })()
+        with (
+            mock.patch.object(cli, "_queue", return_value=(_runtime_config(self.database), self.queue)),
+            _capture_cli_json() as payloads,
+        ):
+            self.assertEqual(cli._command(args), 0)
+        self.assertEqual(
+            payloads[0]["eligible_provider_ids"]["provider-filtered"],
+            ["alpha"],
+        )
+
     def assert_plain_nullable_size_column(self, database: Path) -> None:
         with sqlite3.connect(database) as connection:
             columns = connection.execute("PRAGMA table_info(tasks)").fetchall()

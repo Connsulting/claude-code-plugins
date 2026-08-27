@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from types import SimpleNamespace
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -104,12 +105,56 @@ class JobsViewerContractTests(unittest.TestCase):
                 self.assertIn('<i class="stripe on"></i>', row)
                 self.assertIn('bar lg idle', row)
 
+        window_draining = self.viewer._grok_cards(
+            {}, {"weekly_percent": 22}, 0, "grok", 0,
+        )[0]
+        self.assertIn('bar lg draining', self.viewer._account_row(window_draining))
+
         draining = self.viewer._claude_cards(
             {"acct": [{"label": "Business", "u7": 22}], "active": "Business", "selected": "Business"},
             None, 0, "claude", 1,
         )[0]
         self.assertIn('bar lg draining', self.viewer._account_row(draining))
         self.assertIn('@keyframes drainshimmer', self.viewer.CSS)
+
+    def test_live_grok_ledger_batch_shimmers_and_drives_the_verdict(self) -> None:
+        grok = self.viewer._grok_cards(
+            {}, {"weekly_percent": 50, "weekly_reset": 2_000_000_000}, 4, "grok", 2,
+        )[0]
+        self.assertIn('bar lg draining', self.viewer._account_row(grok))
+        tone, label, text, _sub = self.viewer._verdict([grok], "grok", 30 * 3600)
+        self.assertEqual((tone, label), ("live", "draining"))
+        self.assertIn("Grok", text)
+
+    def test_remaining_and_force_buttons_use_graph_provider_eligibility(self) -> None:
+        pick = [{"id": "claude-codex", "title": "Claude and Codex", "kind": "oneoff",
+                 "priority": 2, "cwd": "/tmp", "goal": "test",
+                 "eligible_providers": ["claude", "codex"]}]
+        with (
+            mock.patch.object(self.viewer, "_remaining_snapshot", return_value=pick),
+            mock.patch.object(self.viewer, "_last_runs", return_value={}),
+        ):
+            remaining = self.viewer.get_remaining(123)
+        self.assertEqual(remaining[0]["eligible_providers"], ["claude", "codex"])
+        buttons = self.viewer._run_buttons(remaining[0])
+        self.assertIn('data-engine="claude"', buttons)
+        self.assertIn('data-engine="codex"', buttons)
+        self.assertIn('data-engine="grok"', buttons)
+        grok = buttons[buttons.index('data-engine="grok"'):]
+        self.assertIn('disabled title="This task is not eligible for Grok"', grok)
+
+    def test_gates_uses_the_current_json_cli_protocol(self) -> None:
+        self.viewer._gates_cache.update(t=0.0, key=None, val=None)
+        response = SimpleNamespace(stdout=(
+            "lead_hours=30\n"
+            '{"gates":[{"provider_id":"grok","open":true,"batch_size":6,'
+            '"resets_at":2000000000}]}\n'
+        ))
+        with mock.patch.object(self.viewer.subprocess, "run", return_value=response) as run:
+            gates = self.viewer.get_gates(4, 4, 4, None, None)
+        self.assertIn("gates --json", run.call_args.args[0][2])
+        self.assertEqual(gates["grok_batch"], 6)
+        self.assertEqual(gates["coordinator"], "grok")
 
     def test_secretless_force_requires_exact_browser_boundary_and_json(self) -> None:
         self.viewer.ALLOWED_HOSTS = (self.HOST,)
@@ -283,7 +328,6 @@ class JobsViewerContractTests(unittest.TestCase):
             mock.patch.object(self.viewer, "current_cycle", return_value=123),
             mock.patch.object(self.viewer, "get_remaining", return_value=remaining),
             mock.patch.object(self.viewer, "get_recent_runs", return_value=history),
-            mock.patch.object(self.viewer, "get_counts", return_value={"active": 3, "oneoff_done": 1}),
             mock.patch.object(self.viewer, "get_disabled", return_value=disabled),
             mock.patch.object(self.viewer, "get_inflight", return_value=[]),
             mock.patch.object(self.viewer, "get_gates", return_value={"coordinator": "none"}),

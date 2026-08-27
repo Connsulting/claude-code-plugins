@@ -320,7 +320,9 @@ case "$R7g" in ''|*[!0-9]*) ;; *)
   fi ;;
 esac
 emit windows_left_claude "$WLC"; emit windows_left_codex "$WLX"; emit windows_left_grok "$WLG"
-"$BONUSDB" plan "$U5c" "$U7c" "$U7x" "$U7g" "$1" "$2" "$3" "$WLC" "$WLX" "$WLG"
+# The positional planner protocol was retired with the graph-backed CLI. Keep the shell
+# half above for account-display snapshots, but ask the owning CLI for its gates.
+"$BONUSDB" gates --json
 """
 
 _gates_cache: dict = {"t": 0.0, "key": None, "val": None}
@@ -356,13 +358,23 @@ def get_gates(n_elig: int, n_codex: int, n_grok: int,
         return _gates_cache["val"]
     out: dict = {"acct": [], "codex_acct": []}
     try:
-        raw = subprocess.run(
+        result = subprocess.run(
             ["bash", "-c", _GATES_SH, "gates", str(n_elig), str(n_codex),
              str(n_grok), grok_json, codex_json, str(int(now))],
             capture_output=True, text=True, timeout=25,
             env={**os.environ, "BD": str(BONUS_SKILL_DIR)},
-        ).stdout
+        )
+        raw = result.stdout
+        gate_payload: dict | None = None
         for line in raw.splitlines():
+            if line.startswith("{"):
+                try:
+                    parsed = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(parsed, dict):
+                    gate_payload = parsed
+                continue
             if "=" not in line:
                 continue
             k, v = line.split("=", 1)
@@ -382,6 +394,23 @@ def get_gates(n_elig: int, n_codex: int, n_grok: int,
                     })
             else:
                 out[k] = v
+        # `gates --json` is the current planning boundary. These fields preserve the viewer's
+        # display metadata, while shimmer remains driven by durable in-flight runs below.
+        gates = gate_payload.get("gates", []) if gate_payload else []
+        candidates = []
+        for gate in gates:
+            if not isinstance(gate, dict) or not gate.get("open"):
+                continue
+            provider = gate.get("provider_id")
+            if provider not in RUN_ENGINES:
+                continue
+            batch = int(_f(gate.get("batch_size")))
+            out[f"{provider}_batch"] = max(int(_f(out.get(f"{provider}_batch"))), batch)
+            if batch > 0:
+                candidates.append(gate)
+        if candidates:
+            next_gate = min(candidates, key=lambda gate: _f(gate.get("resets_at")) or float("inf"))
+            out["coordinator"] = next_gate["provider_id"]
     except Exception:
         pass
     _gates_cache.update(t=now, key=key, val=out)
@@ -473,21 +502,51 @@ def _pick(cycle: int, codex_only: bool) -> list[dict]:
         return []
 
 
+def _remaining_snapshot(cycle: int) -> list[dict] | None:
+    """Read graph-backed remaining work plus the providers the scout can use."""
+    try:
+        out = subprocess.run(
+            ["bash", str(BONUSDB_SH), "queue", "--json", str(cycle)],
+            capture_output=True, text=True, timeout=15,
+        ).stdout.strip()
+        payload = json.loads(out) if out else {}
+        if not isinstance(payload, dict):
+            return None
+        values = payload.get("eligible_provider_ids")
+        task_ids = payload.get("eligible_task_ids")
+        tasks = payload.get("tasks")
+        if not isinstance(values, dict) or not isinstance(task_ids, list) or not isinstance(tasks, list):
+            return None
+        tasks_by_id = {task.get("id"): task for task in tasks if isinstance(task, dict)}
+        remaining = []
+        for task_id in task_ids:
+            task = tasks_by_id.get(task_id)
+            providers = values.get(task_id)
+            if task is None or not isinstance(providers, list):
+                continue
+            task = dict(task)
+            task["eligible_providers"] = [str(provider) for provider in providers]
+            remaining.append(task)
+        return remaining
+    except Exception:
+        return None
+
+
 def get_remaining(cycle: int) -> list[dict]:
-    """Authoritative "remaining this week, in drain order" via bonusdb.sh pick,
-    enriched with each task's last-run timestamp/status. The Codex-OK vs
-    Claude-only label comes straight from `pick --codex` (the same routing the
-    scout uses) rather than a re-implemented predicate, so it can't drift from
-    the picker's `[1m]`/model rules."""
-    picks = _pick(cycle, codex_only=False)
-    codex_ids = {p["id"] for p in _pick(cycle, codex_only=True)}
+    """Remaining work in drain order, annotated with scout-authoritative providers."""
+    picks = _remaining_snapshot(cycle)
+    if picks is None:
+        # Compatibility for an older installed CLI during a package upgrade. This branch keeps
+        # the historical display only until the paired graph-backed CLI is installed.
+        picks = _pick(cycle, codex_only=False)
+        for p in picks:
+            p["eligible_providers"] = _legacy_providers(p)
     last = _last_runs()
     for p in picks:
         lr = last.get(p["id"])
         p["last_ts"] = lr["ts"] if lr else None
         p["last_status"] = lr["status"] if lr else None
         p["last_engine"] = lr["engine"] if lr else None
-        p["engine_class"] = "codex-ok" if p["id"] in codex_ids else "claude-only"
     return picks
 
 
@@ -571,19 +630,6 @@ def _iso_epoch(iso) -> float | None:
         return time.mktime(t) - time.timezone
     except Exception:
         return None
-
-
-def get_counts() -> dict:
-    try:
-        with _db() as cx:
-            active = cx.execute("SELECT COUNT(*) FROM tasks WHERE active=1").fetchone()[0]
-            oneoff_done = cx.execute(
-                """SELECT COUNT(*) FROM tasks t WHERE t.kind='oneoff'
-                   AND EXISTS (SELECT 1 FROM runs r WHERE r.task=t.id)"""
-            ).fetchone()[0]
-            return {"active": active, "oneoff_done": oneoff_done}
-    except Exception:
-        return {"active": 0, "oneoff_done": 0}
 
 
 def get_disabled() -> list[dict]:
@@ -1021,33 +1067,29 @@ def schedule_badge(kind: str, last_ts: str | None) -> str:
 def _run_buttons(t: dict) -> str:
     """The force-dispatch buttons that replaced the old single "Run now".
 
-    Codex is rendered disabled on a Claude-only task rather than hidden: a missing button reads
-    as a rendering bug, while a disabled one with a reason explains why this task cannot go
-    there. run-now.sh refuses the same case server-side, so this is a hint, not the guard.
+    An unavailable provider is rendered disabled rather than hidden: a missing button reads as
+    a rendering bug, while the reason makes the graph-backed routing constraint visible.
+    run-now.sh refuses the same case server-side, so this is a hint, not the guard.
 
     Auto asks agent-router which engine fits, then bonus-drain launches on it."""
     tid = esc(t["id"])
-    portable = t["engine_class"] in ("codex-ok", "grok-ok")
-    if portable:
-        codex_cls, codex_attrs = "", ' title="Force-dispatch on Codex now"'
-        codex_aria = "Force-dispatch on Codex now"
-    else:
-        codex_cls = " unavailable"
-        codex_attrs = ' disabled title="Claude-only task: it cannot run on Codex"'
-        codex_aria = "Claude-only task: it cannot run on Codex"
-    if portable:
-        grok_cls, grok_attrs = "", ' title="Force-dispatch on Grok now"'
-        grok_aria = "Force-dispatch on Grok now"
-    else:
-        grok_cls = " unavailable"
-        grok_attrs = ' disabled title="Claude-only task: it cannot run on Grok"'
-        grok_aria = "Claude-only task: it cannot run on Grok"
+    providers = set(t.get("eligible_providers") or _legacy_providers(t))
+
+    def attrs(provider: str, label: str) -> tuple[str, str, str]:
+        if provider in providers:
+            text = f"Force-dispatch on {label} now"
+            return "", f' title="{text}"', text
+        text = f"This task is not eligible for {label}"
+        return " unavailable", f' disabled title="{text}"', text
+
+    claude_cls, claude_attrs, claude_aria = attrs("claude", "Claude")
+    codex_cls, codex_attrs, codex_aria = attrs("codex", "Codex")
+    grok_cls, grok_attrs, grok_aria = attrs("grok", "Grok")
     return f"""
               <span class="runset">
                 <span class="runlbl">force</span>
-                <button class="task-run ionly" data-task-id="{tid}" data-engine="claude"
-                        aria-label="Force-dispatch on Claude now"
-                        title="Force-dispatch on Claude now">{busy_button(ico("claude"))}</button>
+                <button class="task-run ionly{claude_cls}" data-task-id="{tid}" data-engine="claude"
+                        aria-label="{claude_aria}" {claude_attrs}>{busy_button(ico("claude"))}</button>
                 <button class="task-run ionly{codex_cls}" data-task-id="{tid}" data-engine="codex"
                         aria-label="{codex_aria}" {codex_attrs}>{busy_button(ico("codex"))}</button>
                 <button class="task-run ionly{grok_cls}" data-task-id="{tid}" data-engine="grok"
@@ -1056,6 +1098,11 @@ def _run_buttons(t: dict) -> str:
                         aria-label="Let agent-router pick the engine, then dispatch"
                         title="Let agent-router pick the engine, then dispatch">{busy_button(ico("auto"))}</button>
               </span>"""
+
+
+def _legacy_providers(task: dict) -> list[str]:
+    """Keep direct renderer fixtures compatible with the pre-provider field shape."""
+    return ["claude", "codex", "grok"] if task.get("engine_class") in ("codex-ok", "grok-ok") else ["claude"]
 
 
 def _bar(pct, mark=None, cls="", time_mark=None) -> str:
@@ -1279,9 +1326,9 @@ def _account_row(c: dict) -> str:
     # --- budget cell ---------------------------------------------------------------------
     if known:
         fig = f'<span class="fig"><b>{u7:g}%</b> of {ceiling:g} ceiling</span>'
-        # The stripe at left identifies the active subscription. Gold movement is reserved for
-        # a batch that is actually dispatching on this account.
-        bar = _bar(u7, ceiling, "lg" + (" draining" if c["batch"] > 0 else " idle"), p["elapsed"])
+        # The stripe identifies the active subscription. Movement means this account owns the
+        # current drain window; a child job may have already finished between scout ticks.
+        bar = _bar(u7, ceiling, "lg" + (" draining" if c.get("draining") else " idle"), p["elapsed"])
     else:
         fig = '<span class="fig unk"><b>?</b> of ' + f'{ceiling:g} ceiling</span>'
         bar = '<div class="bar lg unknown"></div>'
@@ -1381,7 +1428,7 @@ def _verdict(cards: list[dict], coord: str, lead_secs: int) -> tuple[str, str, s
     if not cards:
         return "idle", "no usage signal", "No account is reporting usage.", ""
     drain = next((c for c in cards if c["batch"] > 0), None)
-    if drain is not None and coord in ("claude", "codex"):
+    if drain is not None:
         into = (dur(lead_secs - (_f(drain["r7"]) - time.time()))
                 if drain.get("r7") else "")
         sub = f'batch {drain["batch"]}/{drain["batch_n"]}'
@@ -1401,7 +1448,7 @@ def _verdict(cards: list[dict], coord: str, lead_secs: int) -> tuple[str, str, s
         near = min(spendable or live, key=lambda c: _f(c.get("r7")) or float("inf"))
         state, _ = _card_state(near)
         return ("hold", "holding",
-                f'{ico(near["engine"])}{esc(near["name"])} has an open window and did not dispatch.',
+                f'{ico(near["engine"])}{esc(near["name"])} has an open window; no active batch.',
                 f'{esc(state)} &middot; resets in {dur(_f(near["r7"]) - time.time())}')
 
     opening = [c for c in cards if c["opens_in"] is not None]
@@ -1465,6 +1512,7 @@ def _claude_cards(gates: dict, usage: dict | None, n_elig: int, coord: str, batc
             "eligible": n_elig, "elig_label": "eligible", "lead_h": lead,
             "active": is_active,
             "live": is_sel or a["label"] == active,
+            "draining": is_sel and coord == "claude",
             "behind": selected if (selected and not is_sel and windows > 0) else "",
         })
     return cards
@@ -1529,6 +1577,7 @@ def _codex_cards(gates: dict, cx: dict | None, n_codex: int, coord: str, batch: 
             # represented by `batch`/the draining tag, so a closed drain window must not make
             # the active Codex account look inactive.
             "live": is_sel or is_active,
+            "draining": is_sel and coord == "codex",
             "behind": selected if (selected and not is_sel and windows > 0) else "",
         })
     return cards
@@ -1560,7 +1609,7 @@ def _grok_cards(gates: dict, grok: dict | None, n_grok: int,
         "eligible": n_grok, "elig_label": "jobs", "lead_h": lead,
         # Grok has one configured subscription, so it is always the active account. Whether
         # a batch is currently landing on it is separately represented by `live`/`batch`.
-        "active": True, "live": True, "behind": "",
+        "active": True, "live": True, "draining": coord == "grok", "behind": "",
     }]
 
 
@@ -1623,23 +1672,30 @@ def render_bonus_body() -> str:
     cycle = current_cycle(usage)
     remaining = get_remaining(cycle)
     runs = get_recent_runs()
-    counts = get_counts()
     disabled = get_disabled()
     inflight = get_inflight()
 
-    n_codex = sum(1 for r in remaining if r["engine_class"] in ("codex-ok", "grok-ok"))
-    n_grok = n_codex
-    n_claude = len(remaining) - n_codex
+    n_claude = sum("claude" in set(r.get("eligible_providers") or _legacy_providers(r)) for r in remaining)
+    n_codex = sum("codex" in set(r.get("eligible_providers") or _legacy_providers(r)) for r in remaining)
+    n_grok = sum("grok" in set(r.get("eligible_providers") or _legacy_providers(r)) for r in remaining)
     n_weekly = sum(
         1 for r in remaining
         if r.get("kind") == "recurring" and r.get("cadence") == "weekly"
     )
     n_oneoff = sum(1 for r in remaining if r.get("kind") == "oneoff")
     gates = get_gates(len(remaining), n_codex, n_grok, grok, codex)
-    coord = gates.get("coordinator", "none")
-    c_batch = int(_f(gates.get("claude_batch")))
-    x_batch = int(_f(gates.get("codex_batch")))
-    g_batch = int(_f(gates.get("grok_batch")))
+    # A plan identifies the provider currently owning an open drain window; the ledger says how
+    # many child jobs remain in flight. The window owns shimmer, while only the ledger can claim
+    # that a batch is dispatching in the status copy.
+    live_batches = {
+        engine: sum(1 for job in inflight if job.get("engine") == engine)
+        for engine in RUN_ENGINES
+    }
+    live_engines = [engine for engine, count in live_batches.items() if count]
+    coord = live_engines[0] if live_engines else gates.get("coordinator", "none")
+    c_batch = live_batches.get("claude", 0)
+    x_batch = live_batches.get("codex", 0)
+    g_batch = live_batches.get("grok", 0)
 
     # --- header + live status pill -------------------------------------------------
     cards = _claude_cards(gates, usage, len(remaining), coord, c_batch)
@@ -1653,7 +1709,6 @@ def render_bonus_body() -> str:
 
     subline = " · ".join([
         "leftover-token backlog", f"{n_weekly} weekly", f"{n_oneoff} one-offs",
-        f'{counts["active"]} active', f'{counts["oneoff_done"]} one-offs spent',
     ])
 
     # --- in flight ------------------------------------------------------------------
@@ -1789,7 +1844,8 @@ def render_bonus_body() -> str:
     <div class="rows">
       <div class="rowhd"><span>drain order</span>
         <span>{len(remaining)} jobs &middot;
-          {ico("claude")}{n_claude} Claude-only</span></div>
+          {ico("claude")}{n_claude} Claude &middot; {ico("codex")}{n_codex} Codex &middot;
+          {ico("grok")}{n_grok} Grok eligible</span></div>
       {"".join(_account_row(c) for c in cards)}
     </div>
     {_pacing_strip(anchor, gates, get_dispatch_times(cycle), c_batch)}
@@ -1804,7 +1860,8 @@ def render_bonus_body() -> str:
     <div class="sec">
       <div class="sech"><span>run log</span>
         <span class="note">{this_cycle} ran this cycle · {len(remaining)} still eligible
-          ({n_codex} jobs, {ico("claude")}{n_claude} Claude-only)</span></div>
+          ({ico("claude")}{n_claude} Claude · {ico("codex")}{n_codex} Codex ·
+          {ico("grok")}{n_grok} Grok)</span></div>
       <div class="card flat">{runlog}</div>
     </div>
     {disabled_sec}

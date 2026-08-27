@@ -265,10 +265,35 @@ def _command(args: argparse.Namespace) -> int:
                 print(event.task)
         return 0
     if command in {"queue", "queue-status"}:
-        _cfg, queue = _queue(args)
+        cfg, queue = _queue(args)
         cycle = args.cycle or 0
         if command == "queue" or args.json:
-            _json(queue.snapshot(cycle=cycle, run_limit=args.run_limit))
+            snapshot = queue.snapshot(cycle=cycle, run_limit=args.run_limit)
+            # `pick` has a historical shape that cannot express explicit provider
+            # allowlists. Expose the graph-backed eligibility the scout actually uses.
+            eligible_ids_by_provider = {
+                provider.id: {
+                    task.id for task in queue.eligible_tasks(
+                        cycle, provider_id=provider.id, capabilities=provider.capabilities,
+                    )
+                }
+                for provider in cfg.providers
+            }
+            eligible_task_ids = set().union(*eligible_ids_by_provider.values())
+            tasks_by_id = {task.id: task for task in queue.tasks()}
+            candidates = [tasks_by_id[task_id] for task_id in eligible_task_ids]
+            candidates.sort(key=lambda task: (
+                task.priority, task.kind == "recurring", task.created_at, task.id,
+            ))
+            snapshot["eligible_task_ids"] = [task.id for task in candidates]
+            snapshot["eligible_provider_ids"] = {
+                task.id: [
+                    provider.id for provider in cfg.providers
+                    if task.id in eligible_ids_by_provider[provider.id]
+                ]
+                for task in candidates
+            }
+            _json(snapshot)
         else:
             _human_queue_status(queue, cycle)
         return 0
