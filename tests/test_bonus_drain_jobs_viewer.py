@@ -61,9 +61,9 @@ class JobsViewerContractTests(unittest.TestCase):
 
     def test_existing_ui_is_preserved_without_login_or_generic_viewer_copy(self) -> None:
         expected_frontend_hashes = {
-            "CSS": "612907cebed828f396a0509031694ac47b868262cfe8b321a902358b7e8647d4",
+            "CSS": "bc06d8d61215ff38ca26f7cc212cbf44d925e225ab8f15133c9469c36cf61553",
             "ICON_SPRITE": "333ef2163122e3450f95ea008ef6eaaad6ecb8f2562244bfb02e6317a4c06a03",
-            "SCRIPT": "b0ced2b4ca8e3b4852a4362ca815da8ba1769566f5522f309cf3cd8691a7b35d",
+            "SCRIPT": "d03d5ffba79141eb952ea8fff8d9f8c3b9809bf10744d9d9a1f3b7a4edc5fb00",
             "PAGE": "69071b11da43869de11c5211fe5fed4a976f38f6499c4b70ce9205845b4033de",
         }
         self.assertEqual(
@@ -212,6 +212,63 @@ class JobsViewerContractTests(unittest.TestCase):
             ok, message = self.viewer.run_task_now("portable-a", "claude")
         self.assertTrue(ok, message)
         kick.assert_called_once_with(cfg, queue_type.return_value, "portable-a", "claude")
+
+    def test_requeue_restores_only_a_retryable_terminal_job(self) -> None:
+        cfg = mock.Mock(database=Path("/tmp/queue.db"))
+        queue = mock.Mock()
+        queue.requeue.return_value = True
+        with (
+            mock.patch.object(self.viewer.graph_config, "load_config", return_value=cfg),
+            mock.patch.object(self.viewer, "QueueDB", return_value=queue) as queue_type,
+            mock.patch.dict(os.environ, {"BONUS_DRAIN_CONFIG": "/tmp/config.json"}),
+        ):
+            ok, message = self.viewer.requeue_task("portable-a")
+        self.assertTrue(ok, message)
+        queue_type.assert_called_once_with(cfg.database)
+        queue.requeue.assert_called_once_with("portable-a")
+
+        queue.requeue.side_effect = self.viewer.QueueError("portable-a last ran done; refusing to retry completed work")
+        with (
+            mock.patch.object(self.viewer.graph_config, "load_config", return_value=cfg),
+            mock.patch.object(self.viewer, "QueueDB", return_value=queue),
+        ):
+            ok, message = self.viewer.requeue_task("portable-a")
+        self.assertFalse(ok)
+        self.assertIn("last ran done", message)
+
+    def test_requeue_endpoint_uses_the_existing_mutation_boundary(self) -> None:
+        self.viewer.ALLOWED_HOSTS = (self.HOST,)
+        self.viewer.ALLOWED_ORIGINS = (self.ORIGIN,)
+        self.viewer.MUTATIONS_ENABLED = True
+        server = self._server()
+        payload = json.dumps({"id": "portable-a"}).encode()
+        headers = {
+            "Host": self.HOST, "Origin": self.ORIGIN,
+            "Content-Type": "application/json", "Content-Length": str(len(payload)),
+        }
+        with mock.patch.object(self.viewer, "requeue_task", return_value=(True, "requeued")) as requeue:
+            status, _headers, body = self._request(
+                server, "POST", "/api/bonus/task/requeue", headers=headers, body=payload,
+            )
+        self.assertEqual(status, 200, body)
+        requeue.assert_called_once_with("portable-a")
+
+    def test_run_log_offers_requeue_only_for_failed_and_skipped_jobs(self) -> None:
+        history = [
+            {"ts": "2026-08-26T12:00:00Z", "task": "failed-job", "title": "Failed job", "kind": "oneoff", "status": "failed", "engine": "codex", "cycle": 123, "summary": "error", "branch": None},
+            {"ts": "2026-08-26T11:00:00Z", "task": "skipped-job", "title": "Skipped job", "kind": "oneoff", "status": "skipped", "engine": "claude", "cycle": 123, "summary": "precondition", "branch": None},
+            {"ts": "2026-08-26T10:00:00Z", "task": "done-job", "title": "Done job", "kind": "oneoff", "status": "done", "engine": "claude", "cycle": 123, "summary": "complete", "branch": None},
+        ]
+        body = self._bonus_body([], runs=history)
+        self.assertIn('class="task-requeue ionly" data-task-id="failed-job"', body)
+        self.assertIn('class="task-requeue ionly" data-task-id="skipped-job"', body)
+        self.assertIn(self.viewer.ico("cycle"), body)
+        self.assertIn('aria-label="Codex">' + self.viewer.ico("codex"), body)
+        self.assertIn('aria-label="Claude">' + self.viewer.ico("claude"), body)
+        self.assertEqual(body.count('class="laction"'), len(history))
+        done_start = body.index('<span class="ltitle">Done job</span>')
+        done_end = body.find('</div>', done_start)
+        self.assertNotIn("task-requeue", body[done_start:done_end])
 
     def test_configured_graph_owns_database_and_runtime_bind(self) -> None:
         database = Path("/tmp/authoritative-queue.db")
@@ -415,14 +472,14 @@ class JobsViewerContractTests(unittest.TestCase):
         },
     ]
 
-    def _bonus_body(self, remaining):
+    def _bonus_body(self, remaining, runs=None):
         with (
             mock.patch.object(self.viewer, "get_usage", return_value=None),
             mock.patch.object(self.viewer, "get_codex_usage", return_value=None),
             mock.patch.object(self.viewer, "get_grok_usage", return_value=None),
             mock.patch.object(self.viewer, "current_cycle", return_value=123),
             mock.patch.object(self.viewer, "get_remaining", return_value=remaining),
-            mock.patch.object(self.viewer, "get_recent_runs", return_value=[]),
+            mock.patch.object(self.viewer, "get_recent_runs", return_value=runs or []),
             mock.patch.object(self.viewer, "get_disabled", return_value=[]),
             mock.patch.object(self.viewer, "get_inflight", return_value=[]),
             mock.patch.object(self.viewer, "get_gates", return_value={"coordinator": "none"}),

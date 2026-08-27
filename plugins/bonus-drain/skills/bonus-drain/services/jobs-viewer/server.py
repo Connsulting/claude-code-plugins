@@ -50,7 +50,7 @@ sys.path.insert(0, str(REPO))
 from bonus_drain import config as graph_config  # noqa: E402
 from bonus_drain import dispatcher as graph_dispatcher  # noqa: E402
 from bonus_drain import usage as graph_usage  # noqa: E402
-from bonus_drain.db import QueueDB  # noqa: E402
+from bonus_drain.db import QueueDB, QueueError  # noqa: E402
 from bonus_drain.kick import kick_task  # noqa: E402
 
 BONUS_SKILL_DIR = Path(os.environ.get("BONUS_SKILL_DIR", str(REPO)))
@@ -694,6 +694,22 @@ def run_task_now(task_id: str, engine: str) -> tuple[bool, str]:
     except (graph_config.ConfigError, OSError, ValueError):
         return False, "could not launch this job"
     return True, f"launched on {result.provider_id} as {result.job_id}"
+
+
+def requeue_task(task_id: str) -> tuple[bool, str]:
+    """Restore the most recent skipped or failed run to the dispatchable queue."""
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", task_id):
+        return False, "invalid task id"
+    try:
+        cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
+        changed = QueueDB(cfg.database).requeue(task_id)
+    except QueueError as exc:
+        return False, str(exc)[:500] or "could not requeue this job"
+    except (graph_config.ConfigError, OSError, ValueError):
+        return False, "could not requeue this job"
+    if not changed:
+        return False, "this job could not be requeued"
+    return True, "requeued"
 
 
 # ===========================================================================
@@ -1894,13 +1910,25 @@ def render_bonus_body() -> str:
         lrows = []
         for r in runs:
             sc = STATUS_COLORS.get(r["status"], "var(--dim)")
+            engine = r.get("engine")
+            if engine in RUN_ENGINES:
+                engine_display = (f'<span class="lengine" title="{esc(engine.title())}" '
+                                  f'aria-label="{esc(engine.title())}">{ico(engine)}</span>')
+            else:
+                engine_display = '<span class="lengine dimtxt">—</span>'
+            retry = ""
+            if r["status"] in {"failed", "skipped"}:
+                retry = f'''<button class="task-requeue ionly" data-task-id="{esc(r["task"])}"
+                              aria-label="Requeue {esc(r["title"])}" title="Requeue this job"
+                              >{busy_button(ico("cycle"))}</button>'''
             lrows.append(f"""
           <div class="lg">
             <span class="ltime" title="{esc(r["ts"])}">{rel_time(r["ts"])}</span>
             <span class="lstat" style="--c:{sc}">{esc(r["status"])}</span>
             <span class="ltitle">{esc(r["title"])}</span>
-            <span class="dimtxt">{esc(r.get("engine") or "—")}</span>
+            {engine_display}
             <span class="lnote">{esc(r.get("summary") or "")}</span>
+            <span class="laction">{retry}</span>
           </div>""")
         runlog = "".join(lrows)
     else:
@@ -2434,13 +2462,21 @@ footer{margin:34px 0 0;font-size:10.5px;color:var(--dim2);letter-spacing:.04em}
    unavailable, so it reads `not-allowed` and dims further - the two must not look alike. */
 .task-run:disabled,.task-toggle:disabled{cursor:wait;opacity:.6}
 .task-run.unavailable{cursor:not-allowed;opacity:.3}
+.task-requeue{display:inline-flex;align-items:center;justify-content:center;min-height:38px;min-width:44px;
+  padding:0;cursor:pointer;background:none;border:1px solid var(--line);color:var(--dim)}
+.task-requeue:hover:enabled{color:var(--fg);border-color:rgba(233,231,226,.38);background:rgba(255,255,255,.07)}
+.task-requeue:disabled{cursor:wait;opacity:.6}
+.task-requeue .ico{width:18px;height:18px;margin:0}
 
 /* run log ----------------------------------------------------------------------------- */
 .lg{display:flex;gap:14px;align-items:baseline;flex-wrap:wrap;padding:9px 16px}
 .ltime{font-size:11px;color:var(--dim2);font-variant-numeric:tabular-nums;min-width:56px}
 .lstat{font-size:10.5px;letter-spacing:.10em;text-transform:uppercase;min-width:74px;color:var(--c)}
 .ltitle{flex:1 1 220px;font-size:12px;min-width:0}
+.lengine{display:inline-flex;align-items:center;justify-content:center;flex:0 0 20px;color:var(--dim2)}
+.lengine .ico{width:16px;height:16px;margin:0}
 .lnote{flex:1 1 190px;font-size:11px;color:var(--dim2);min-width:0}
+.laction{margin-left:auto;flex:0 0 44px;display:flex;justify-content:flex-end;align-items:center;align-self:center}
 
 /* scheduled-jobs tab ------------------------------------------------------------------- */
 .chips{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 0}
@@ -2563,6 +2599,17 @@ SCRIPT = """
         b.classList.remove('busy');
         alert('Could not launch this job on '+b.dataset.engine+': '+e.message);
       }
+    });
+  });
+  document.querySelectorAll('.task-requeue').forEach(function(b){
+    b.addEventListener('click',async function(){
+      b.disabled=true;b.classList.add('busy');
+      try{
+        var response=await fetch('/api/bonus/task/requeue',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:b.dataset.taskId})});
+        var data=await response.json().catch(function(){return {}});
+        if(!response.ok)throw new Error(data.message||'requeue failed');
+        location.reload();
+      }catch(e){b.disabled=false;b.classList.remove('busy');alert('Could not requeue this job: '+e.message);}
     });
   });
   // Queue facet filters. Client-side and localStorage-backed, so a selection survives the
@@ -2743,6 +2790,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._bad_request()
                 return
             ok, message = run_task_now(task_id, engine)
+        elif self.path == "/api/bonus/task/requeue":
+            payload = self._read_json()
+            if payload is None:
+                return
+            task_id = payload.get("id")
+            if not isinstance(task_id, str):
+                self._bad_request()
+                return
+            ok, message = requeue_task(task_id)
         else:
             self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
             return
