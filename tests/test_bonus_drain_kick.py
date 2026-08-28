@@ -464,6 +464,43 @@ class KickContractTests(unittest.TestCase):
             {"mcpServers": {"project": {"command": "project-mcp"}}},
         )
 
+    def test_named_mcp_selection_does_not_validate_unselected_server_secrets(self) -> None:
+        claude = config_module.ProviderConfig(
+            "claude", config_module.DispatchBinding("router", "claude"), frozenset(), "single",
+        )
+        cfg = replace(self.config, providers=(claude,), plans=(), accounts=(), limits=())
+        project = self.root / "project"
+        project.mkdir()
+        (project / ".git").mkdir()
+        (project / ".mcp.json").write_text(json.dumps({
+            "mcpServers": {
+                "wiki": {"command": "wiki-mcp"},
+                "unselected": {
+                    "command": "other-mcp",
+                    "env": {"TOKEN": "literal-local-secret"},
+                },
+            },
+        }), encoding="utf-8")
+        self.queue.add_task(_task("named-mcp", cwd=str(project), mcp="wiki"))
+        seen: list[list[str]] = []
+
+        def router(argv: list[str], **_kwargs: object) -> dict[str, object]:
+            seen.append(argv)
+            return {"dispatch": {"job_id": "job-named-mcp", "launched": True}}
+
+        with mock.patch.dict(os.environ, {"HOME": str(self.root)}, clear=False):
+            dispatcher.dispatch(
+                cfg, self.queue, task_id="named-mcp", eligibility_key="manual/named-mcp",
+                requested_provider="claude", router_call=router,
+            )
+
+        launch = seen[0]
+        mcp_index = launch.index("--mcp-config")
+        self.assertEqual(
+            json.loads(Path(launch[mcp_index + 1]).read_text(encoding="utf-8")),
+            {"mcpServers": {"wiki": {"command": "wiki-mcp"}}},
+        )
+
     def test_router_mcp_flag_parser_rejection_is_known_not_launched(self) -> None:
         claude = config_module.ProviderConfig(
             "claude", config_module.DispatchBinding("router", "claude"), frozenset(), "single",

@@ -285,7 +285,11 @@ def _sanitize_mcp_value(value: Any, label: str) -> Any:
     raise DispatchError(f"{label} contains a non-JSON value")
 
 
-def _mcp_servers(value: Mapping[str, Any], label: str) -> dict[str, Mapping[str, Any]]:
+def _mcp_servers(
+    value: Mapping[str, Any],
+    label: str,
+    selected_names: set[str] | None = None,
+) -> dict[str, Mapping[str, Any]]:
     raw = value.get("mcpServers", {})
     if not isinstance(raw, Mapping) or len(raw) > _MCP_SERVER_LIMIT:
         raise DispatchError(f"{label}.mcpServers must be a bounded object")
@@ -294,6 +298,8 @@ def _mcp_servers(value: Mapping[str, Any], label: str) -> dict[str, Mapping[str,
         name = str(raw_name)
         if not _MCP_NAME_RE.fullmatch(name) or not isinstance(definition, Mapping):
             raise DispatchError(f"{label} contains an invalid MCP server")
+        if selected_names is not None and name not in selected_names:
+            continue
         sanitized = _sanitize_mcp_value(definition, f"MCP server {name}")
         # Round-trip through JSON to bound the sanitized definition and detach it from input.
         encoded = json.dumps(sanitized, sort_keys=True, separators=(",", ":"))
@@ -324,6 +330,7 @@ def _resolved_mcp_servers(task: Task) -> dict[str, Mapping[str, Any]]:
         raise DispatchError("MCP selection must contain 1..32 unique server names")
     if any(not _MCP_NAME_RE.fullmatch(name) for name in names):
         raise DispatchError("MCP selection contains an unsafe server name")
+    selected_names = set(names)
 
     merged: dict[str, Mapping[str, Any]] = {}
     home = Path(os.environ.get("HOME", str(Path.home()))).expanduser()
@@ -331,7 +338,7 @@ def _resolved_mcp_servers(task: Task) -> dict[str, Mapping[str, Any]]:
     global_value: Mapping[str, Any] = {}
     if global_path.is_file():
         global_value = _read_mcp_json(global_path, "user MCP config")
-        merged.update(_mcp_servers(global_value, "user MCP config"))
+        merged.update(_mcp_servers(global_value, "user MCP config", selected_names))
 
     ancestors: list[Path] = []
     repository_found = False
@@ -346,7 +353,11 @@ def _resolved_mcp_servers(task: Task) -> dict[str, Mapping[str, Any]]:
     for directory in reversed(ancestors):
         path = directory / ".mcp.json"
         if path.is_file():
-            merged.update(_mcp_servers(_read_mcp_json(path, "project MCP config"), "project MCP config"))
+            merged.update(_mcp_servers(
+                _read_mcp_json(path, "project MCP config"),
+                "project MCP config",
+                selected_names,
+            ))
     projects = global_value.get("projects", {})
     if projects is not None and not isinstance(projects, Mapping):
         raise DispatchError("user MCP config projects must be an object")
@@ -356,7 +367,7 @@ def _resolved_mcp_servers(task: Task) -> dict[str, Mapping[str, Any]]:
             if project:
                 if not isinstance(project, Mapping):
                     raise DispatchError("user MCP project entry must be an object")
-                merged.update(_mcp_servers(project, "user MCP project entry"))
+                merged.update(_mcp_servers(project, "user MCP project entry", selected_names))
 
     missing = [name for name in names if name not in merged]
     if missing:
