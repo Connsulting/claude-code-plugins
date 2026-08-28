@@ -501,6 +501,17 @@ class KickContractTests(unittest.TestCase):
             {"mcpServers": {"wiki": {"command": "wiki-mcp"}}},
         )
 
+    def test_set_mcp_updates_the_canonical_task_contract(self) -> None:
+        with _capture_cli_json() as payloads:
+            code = cli.main([
+                "set-mcp", "--database", str(self.config.database),
+                "portable", "none", "--json",
+            ])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(payloads[0]["task"]["mcp"], "none")
+        self.assertEqual(self.queue.task("portable").mcp, "none")
+
     def test_router_mcp_flag_parser_rejection_is_known_not_launched(self) -> None:
         claude = config_module.ProviderConfig(
             "claude", config_module.DispatchBinding("router", "claude"), frozenset(), "single",

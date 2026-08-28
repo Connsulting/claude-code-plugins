@@ -861,12 +861,18 @@ class QueueDB:
     def set_model(self, task_id: str, model: str | None) -> None:
         self._update_task(task_id, "model", model or None)
 
+    def set_mcp(self, task_id: str, mcp: str | None) -> None:
+        canonical = mcp.strip() if mcp is not None else None
+        if mcp is not None and not canonical:
+            raise QueueError("mcp must be a non-empty selection or omitted")
+        self._update_task(task_id, "mcp", canonical)
+
     def set_active(self, task_id: str, active: bool) -> None:
         self._update_task(task_id, "active", int(active))
 
     def _update_task(self, task_id: str, column: str, value: Any) -> None:
         _require_task_id(task_id)
-        if column not in {"priority", "model", "active"}:
+        if column not in {"priority", "model", "mcp", "active"}:
             raise QueueError("unsafe task update")
         self.initialize()
         with self._transaction() as connection:

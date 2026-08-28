@@ -320,6 +320,13 @@ def _command(args: argparse.Namespace) -> int:
         _cfg, queue = _queue(args)
         queue.set_model(args.task, args.model)
         return 0
+    if command == "set-mcp":
+        _cfg, queue = _queue(args)
+        queue.set_mcp(args.task, args.mcp)
+        task = queue.task(args.task)
+        assert task is not None
+        _json({"task": task.to_dict()}) if args.json else print(f"mcp: {task.id} {task.mcp or 'default'}")
+        return 0
     if command in {"activate", "deactivate"}:
         _cfg, queue = _queue(args)
         queue.set_active(args.task, command == "activate")
@@ -603,6 +610,7 @@ def build_parser() -> argparse.ArgumentParser:
     priority = sub.add_parser("set-priority"); _add_common(priority); priority.add_argument("task"); priority.add_argument("priority", type=int)
     size = sub.add_parser("set-size"); _add_common(size); _add_json(size); size.add_argument("task"); size.add_argument("size", choices=db.TASK_SIZES); size.add_argument("--cycle", type=int, required=True)
     model = sub.add_parser("set-model"); _add_common(model); model.add_argument("task"); model.add_argument("model", nargs="?")
+    mcp = sub.add_parser("set-mcp"); _add_common(mcp); _add_json(mcp); mcp.add_argument("task"); mcp.add_argument("mcp", nargs="?")
     for name in ("activate", "deactivate"):
         item = sub.add_parser(name); _add_common(item); _add_json(item); item.add_argument("task")
 
