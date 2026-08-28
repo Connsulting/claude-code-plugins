@@ -110,7 +110,9 @@ Verify each returned task object, then re-run the current pick and confirm every
 task has a non-null size. `set-size` does not discover the current cycle; it validates the
 operator-supplied frozen cycle at its transaction boundary and does not close a later
 post-recheck dispatch race. Never query or update spent, inactive, run-log-only, or otherwise
-absent rows for this backfill. A recurring task absent because it already ran this cycle stays
+absent rows for this backfill. Recurrence is based on elapsed time from the most recent recorded
+run, never a provider-reset or manual-dispatch cycle: weekly jobs cool down for at least four
+days and monthly jobs for at least 28 days. A recurring task absent during that cooldown stays
 null until it is separately eligible for an authorized upcoming-only estimate.
 
 ## Mode: run

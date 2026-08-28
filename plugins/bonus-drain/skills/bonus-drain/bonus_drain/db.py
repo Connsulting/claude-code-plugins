@@ -23,6 +23,10 @@ TERMINAL_STATUSES = frozenset({"done", "skipped", "failed"})
 LEGACY_EXCLUSIVE_CAPABILITY = "legacy-exclusive"
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 TASK_SIZES = ("tiny", "small", "medium", "large", "huge")
+RECURRING_COOLDOWNS_SECONDS = {
+    "weekly": 4 * 24 * 60 * 60,
+    "monthly": 28 * 24 * 60 * 60,
+}
 
 
 def is_safe_task_id(value: Any) -> bool:
@@ -432,18 +436,23 @@ class QueueDB:
             return False
         if task.kind == "oneoff":
             return connection.execute("SELECT 1 FROM runs WHERE task=? LIMIT 1", (task.id,)).fetchone() is None
-        if task.cadence == "weekly":
-            row = connection.execute(
-                "SELECT 1 FROM runs WHERE task=? AND (((cycle+1800)/3600)*3600)=? LIMIT 1",
-                (task.id, hour_round(cycle)),
-            ).fetchone()
-            return row is None
+        cooldown = RECURRING_COOLDOWNS_SECONDS.get(task.cadence or "")
+        if cooldown is None:
+            raise QueueError(f"unsupported recurring cadence: {task.cadence}")
         row = connection.execute(
-            """SELECT 1 FROM runs WHERE task=? AND status='done'
-                 AND (julianday('now') - julianday(replace(ts,'Z',''))) < 28 LIMIT 1""",
+            "SELECT ts FROM runs WHERE task=? ORDER BY rowid_pk DESC LIMIT 1",
             (task.id,),
         ).fetchone()
-        return row is None
+        if row is None:
+            return True
+        try:
+            last_run = datetime.fromisoformat(str(row["ts"]).replace("Z", "+00:00"))
+            if last_run.tzinfo is None:
+                last_run = last_run.replace(tzinfo=timezone.utc)
+        except ValueError:
+            # A malformed run timestamp must not make a recurring job eligible early.
+            return False
+        return time.time() - last_run.timestamp() >= cooldown
 
     def eligible_tasks(
         self, cycle: int, *, provider_id: str | None = None, capabilities: Iterable[str] = (),

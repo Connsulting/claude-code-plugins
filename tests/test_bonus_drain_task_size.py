@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 from unittest import mock
@@ -323,7 +324,10 @@ class TaskSizeContractTests(unittest.TestCase):
         self.queue.add_task(_task_values("claimed"))
         self.queue.record("spent", status="done", cycle=cycle)
         self.queue.record("weekly-current", status="done", cycle=cycle)
-        self.queue.record("weekly-prior", status="done", cycle=cycle - 604_800)
+        self.queue.record(
+            "weekly-prior", status="done", cycle=cycle - 604_800,
+            timestamp=(datetime.now(timezone.utc) - timedelta(days=4)).isoformat(),
+        )
         self.assertTrue(self.queue.claim(
             "claimed", f"alpha-account/alpha-weekly/{cycle}", "alpha", "alpha-account",
             provider_capabilities=("cpu",),
@@ -410,6 +414,36 @@ class TaskSizeContractTests(unittest.TestCase):
             {"target", "untouched", "spent", "weekly-current", "weekly-prior", "inactive", "claimed"},
         )
         self.assertEqual(self.queue.task("untouched").size, "small")
+
+    def test_recurring_cooldowns_use_the_last_run_time_not_the_dispatch_cycle(self) -> None:
+        self.queue.add_task(_task_values("weekly") | {"kind": "recurring", "cadence": "weekly"})
+        self.queue.add_task(_task_values("monthly") | {"kind": "recurring", "cadence": "monthly"})
+        now = NOW
+
+        def timestamp(seconds_ago: int) -> str:
+            return datetime.fromtimestamp(now - seconds_ago, timezone.utc).isoformat()
+
+        # The first weekly run came from a manual cycle. A later provider-reset cycle
+        # must not make it eligible again before the four-day cooldown has elapsed.
+        self.queue.record("weekly", status="done", cycle=123, timestamp=timestamp(3 * 24 * 60 * 60))
+        self.queue.record("monthly", status="skipped", cycle=456, timestamp=timestamp(27 * 24 * 60 * 60))
+        with mock.patch.object(db.time, "time", return_value=now):
+            self.assertEqual(
+                self.queue.eligible_tasks(now + 604_800, provider_id="alpha", capabilities=("cpu",)),
+                [],
+            )
+
+        self.queue.record("weekly", status="done", cycle=789, timestamp=timestamp(4 * 24 * 60 * 60))
+        self.queue.record("monthly", status="done", cycle=987, timestamp=timestamp(28 * 24 * 60 * 60))
+        with mock.patch.object(db.time, "time", return_value=now):
+            self.assertEqual(
+                {
+                    task.id for task in self.queue.eligible_tasks(
+                        now + 1_209_600, provider_id="alpha", capabilities=("cpu",),
+                    )
+                },
+                {"weekly", "monthly"},
+            )
 
     def test_task_json_surfaces_carry_size_and_null_and_render_json_accepts_both(self) -> None:
         unscoped = {"allowed_providers": (), "required_capabilities": ()}
