@@ -16,6 +16,13 @@ can occupy only one batch per tick, so a portable task consumed by an earlier re
 also consume a later provider slot, while exclusive work remains available to a provider
 with the required capability.
 
+Each limit may set `max_percent_per_window` as a hard declining reserve, not a per-tick
+allowance. The planner retains that percentage for every remaining
+`pacing_window_seconds` interval before reset. For example, a 5% reserve with 25 hours
+remaining in five-hour intervals retains 25%; it can launch only the estimated work above
+that target, and closes the account once it reaches it. An estimate is required whenever a
+nonzero reserve is configured, so an unknown job cost cannot spend through the boundary.
+
 ## Requirements
 
 - Python 3.10 or newer with the standard `sqlite3` module.
