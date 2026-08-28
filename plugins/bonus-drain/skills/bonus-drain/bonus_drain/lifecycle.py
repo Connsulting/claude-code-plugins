@@ -461,6 +461,17 @@ def doctor(
         if not checks["database_parent"]:
             diagnostics.append(f"database parent is missing or unsafe: {database.parent}")
 
+        recorder = cfg.record_command[0] if cfg.record_command else ""
+        checks["record_command_absolute"] = bool(recorder and Path(recorder).is_absolute())
+        checks["record_command_executable"] = bool(
+            checks["record_command_absolute"] and _executable_available(recorder)
+        )
+        required_checks.update({"record_command_absolute", "record_command_executable"})
+        if not checks["record_command_absolute"]:
+            diagnostics.append("terminal record command requires an absolute executable path")
+        elif not checks["record_command_executable"]:
+            diagnostics.append(f"terminal record executable is unavailable: {recorder}")
+
         from . import config as config_module
 
         for ref in cfg.secret_refs:

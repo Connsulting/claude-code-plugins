@@ -187,6 +187,58 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         )
 
+    def test_doctor_rejects_an_unavailable_terminal_record_executable(self) -> None:
+        sys.path.insert(0, str(SKILL_ROOT))
+        try:
+            from bonus_drain import lifecycle
+        finally:
+            sys.path.pop(0)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home = root / "home"
+            state = root / "state"
+            state.mkdir()
+            lifecycle.install(SKILL_ROOT, home, version="0.3.1+doctor-test")
+
+            config = self.load_json(SKILL_ROOT / "config.example.json")
+            missing_recorder = root / "missing" / "bonus-drain"
+            config["database"] = str(state / "queue.db")
+            config["record_command"] = [str(missing_recorder), "record"]
+            config["adapters"] = [
+                adapter for adapter in config["adapters"]
+                if adapter["id"] in {"router", "codex-personal-usage"}
+            ]
+            config["providers"] = [
+                provider for provider in config["providers"] if provider["id"] == "codex"
+            ]
+            config["providers"][0]["account_mode"] = "single"
+            config["plans"] = [
+                plan for plan in config["plans"] if plan["id"] == "codex-personal-plan"
+            ]
+            config["accounts"] = [
+                account for account in config["accounts"] if account["id"] == "codex-personal"
+            ]
+            config["accounts"][0].pop("activation_adapter_id", None)
+            config["limits"] = [
+                limit for limit in config["limits"] if limit["id"] == "codex-personal-weekly"
+            ]
+            for adapter in config["adapters"]:
+                adapter["argv"][0] = "/bin/true"
+            config_path = root / "config.json"
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+
+            report = lifecycle.doctor(home, config_path=config_path)
+
+        self.assertFalse(report.ok)
+        self.assertIs(report.checks["config"], True, report)
+        self.assertIs(report.checks["record_command_absolute"], True)
+        self.assertIs(report.checks["record_command_executable"], False)
+        self.assertIn(
+            f"terminal record executable is unavailable: {missing_recorder}",
+            report.diagnostics,
+        )
+
     def test_claude_and_codex_marketplaces_point_at_the_plugin_root(self) -> None:
         self.require_plugin()
         claude_marketplace = self.load_json(REPO_ROOT / ".claude-plugin" / "marketplace.json")
