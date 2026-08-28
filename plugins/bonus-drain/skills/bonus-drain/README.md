@@ -14,7 +14,12 @@ stale cache data closes only the affected account. Leaving work queued is expect
 Scout reserves concrete compatible task IDs in nearest-reset order before dispatch. A task
 can occupy only one batch per tick, so a portable task consumed by an earlier reset cannot
 also consume a later provider slot, while exclusive work remains available to a provider
-with the required capability.
+with the required capability. Legacy-exclusive tasks drain before portable tasks regardless
+of provider batch order; normal queue priority remains authoritative within each class.
+
+Manual dispatch without an explicit account reuses an account already leased by the selected
+provider. This permits compatible concurrent launches without switching credentials beneath
+running jobs. An explicit account hint remains authoritative and fails closed on a conflict.
 
 Each limit may set `max_percent_per_window` as a hard declining reserve, not a per-tick
 allowance. The planner retains that percentage for every remaining

@@ -699,12 +699,17 @@ def _account_for(
     config: RuntimeConfig,
     provider: ProviderConfig,
     eligibility_key: str,
+    leased_account_ids: tuple[str, ...] = (),
 ) -> AccountConfig | None:
     account_hint = eligibility_key.split("/", 1)[0]
-    for account in config.accounts_for_provider(provider.id):
+    accounts = config.accounts_for_provider(provider.id)
+    for account in accounts:
         if account.id == account_hint:
             return account
-    accounts = config.accounts_for_provider(provider.id)
+    leased = set(leased_account_ids)
+    for account in accounts:
+        if account.id in leased:
+            return account
     return accounts[0] if accounts else None
 
 
@@ -770,7 +775,15 @@ def dispatch(
     if adapter.kind != "agent-router":
         raise InvalidRoute(f"launch adapter {adapter.id} must be kind agent-router")
 
-    account = _account_for(config, provider, eligibility_key)
+    account = _account_for(
+        config,
+        provider,
+        eligibility_key,
+        tuple(
+            lease.account_id
+            for lease in queue.activation_leases(provider_id=provider.id)
+        ),
+    )
     account_id = account.id if account else None
     if not queue.claim(
         task.id, eligibility_key, provider.id, account_id,

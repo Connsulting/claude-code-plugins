@@ -183,6 +183,44 @@ class KickContractTests(unittest.TestCase):
         for forbidden in ("run-now.sh", "/bash", "claude", "codex", "grok", "account-switch"):
             self.assertNotIn(forbidden, flattened)
 
+    def test_manual_kick_reuses_the_provider_account_with_active_leases(self) -> None:
+        from bonus_drain import kick
+
+        activation = config_module.AdapterConfig(
+            "switch", "activation", (str(self.root / "bin" / "account-switch"),),
+        )
+        personal = replace(
+            self.config.accounts[0], id="alpha-personal", activation_adapter_id="switch",
+        )
+        business = replace(
+            self.config.accounts[0], id="alpha-business", activation_adapter_id="switch",
+        )
+        cfg = replace(
+            self.config,
+            adapters=(*self.config.adapters, activation),
+            accounts=(personal, business, self.config.accounts[1]),
+        )
+        self.queue.add_task(_task("already-running"))
+        held_key = f"alpha-business/alpha-weekly/{NOW + 604800}"
+        self.assertTrue(self.queue.claim(
+            "already-running", held_key, "alpha", "alpha-business",
+            provider_capabilities=("legacy-exclusive", "cpu"),
+        ))
+        self.assertTrue(self.queue.acquire_activation(
+            "already-running", held_key, "alpha", "alpha-business", lambda: None,
+        ))
+
+        result = kick.kick_task(
+            cfg, self.queue, task_id="portable", requested_provider="alpha",
+            now_epoch=NOW, router_call=self._router,
+        )
+
+        self.assertEqual(result.account_id, "alpha-business")
+        self.assertEqual(
+            {lease.account_id for lease in self.queue.activation_leases(provider_id="alpha")},
+            {"alpha-business"},
+        )
+
     def test_runtime_injected_non_router_classifier_and_launcher_are_rejected_before_execution(self) -> None:
         bad = config_module.AdapterConfig("bad", "usage", ("/bin/false",))
         bad_provider = replace(

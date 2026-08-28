@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .config import RuntimeConfig
-from .db import QueueDB, hour_round
+from .db import QueueDB, hour_round, task_requires_legacy_exclusive
 from .dispatcher import (
     AmbiguousDispatch,
     DispatchResult,
@@ -142,6 +142,10 @@ def plan_tick(
                 return True
         return False
 
+    # A legacy-exclusive task has fewer places to run than portable work. Preserve the
+    # queue's normal priority order within each class, but exhaust exclusive work first so
+    # portable tasks cannot consume every compatible slot across a multi-provider tick.
+    task_order.sort(key=lambda task_id: not task_requires_legacy_exclusive(task_by_id[task_id]))
     for task_id in task_order:
         augment(task_id, set(), set())
 
