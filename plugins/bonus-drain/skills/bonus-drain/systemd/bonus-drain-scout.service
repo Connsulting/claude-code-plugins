@@ -6,12 +6,12 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+KillMode=process
 Environment=BONUS_DRAIN_CONFIG=%h/.config/bonus-drain/config.json
 Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/usr/bin/env %h/.local/bin/bonus-drain scout --json
 UMask=0077
 NoNewPrivileges=yes
-PrivateTmp=yes
 ProtectClock=yes
 ProtectKernelLogs=yes
 ProtectKernelModules=yes

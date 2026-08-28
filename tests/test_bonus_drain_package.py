@@ -187,6 +187,13 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         )
 
+    def test_packaged_scout_unit_preserves_detached_provider_jobs(self) -> None:
+        scout_unit = SKILL_ROOT / "systemd" / "bonus-drain-scout.service"
+        self.require_file(scout_unit)
+        unit_text = scout_unit.read_text(encoding="utf-8")
+        self.assertIn("KillMode=process\n", unit_text)
+        self.assertNotIn("PrivateTmp=", unit_text)
+
     def test_doctor_rejects_an_unavailable_terminal_record_executable(self) -> None:
         sys.path.insert(0, str(SKILL_ROOT))
         try:
