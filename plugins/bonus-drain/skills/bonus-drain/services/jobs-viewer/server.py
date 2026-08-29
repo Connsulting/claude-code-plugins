@@ -356,8 +356,20 @@ def get_gates(n_elig: int, n_codex: int, n_grok: int,
     key = (n_elig, n_codex, n_grok, grok_json, codex_json)
     if _gates_cache["val"] is not None and _gates_cache["key"] == key and now - _gates_cache["t"] < 60:
         return _gates_cache["val"]
-    out: dict = {"acct": [], "codex_acct": []}
+    out: dict = {"acct": [], "codex_acct": [], "limit_config": {}}
     try:
+        # The viewer only repeats the planner's arithmetic when it can use the same configured
+        # limit. It does not infer a rate from the usage display or legacy shell defaults.
+        cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
+        for account in cfg.accounts:
+            limits = [limit for limit in cfg.limits if limit.plan_id == account.plan_id]
+            if len(limits) == 1:
+                limit = limits[0]
+                out["limit_config"][account.id] = {
+                    "ceiling": limit.ceiling_percent,
+                    "per_window": limit.max_percent_per_window,
+                    "window_seconds": limit.pacing_window_seconds,
+                }
         result = subprocess.run(
             ["bash", "-c", _GATES_SH, "gates", str(n_elig), str(n_codex),
              str(n_grok), grok_json, codex_json, str(int(now))],
@@ -741,6 +753,14 @@ def list_timers() -> list[dict]:
             "last": _usec(r.get("last")),
         })
     return out
+
+
+def next_scout() -> float | None:
+    """The actual next scout fire, as scheduled by the user systemd manager."""
+    for timer in list_timers():
+        if timer.get("unit") == "bonus-drain-scout.timer":
+            return timer.get("next")
+    return None
 
 
 def _usec(v) -> float | None:
@@ -1193,7 +1213,39 @@ def _card_state(c: dict) -> tuple[str, str]:
     # account that was not selected is queued behind another rather than held by a gate.
     if c.get("behind"):
         return f'queued · behind {c["behind"]}', "dim"
-    return "holding · ahead of pace", "dim"
+    drainable = c.get("drainable")
+    if drainable is not None:
+        if drainable > 0:
+            return f"ready · {drainable:g} pts drainable", "acc"
+        return f"holding · {c['reserve']:g} pts reserved", "dim"
+    return "holding · planner unavailable", "dim"
+
+
+def _pacing_budget(used, reset, ceiling, max_per_window, window_seconds) -> tuple[float, float] | None:
+    """Mirror the planner's reserve arithmetic for the card's explicit status copy."""
+    try:
+        used, reset, ceiling = float(used), float(reset), float(ceiling)
+        max_per_window, window_seconds = float(max_per_window), float(window_seconds)
+    except (TypeError, ValueError):
+        return None
+    remaining = reset - time.time()
+    if remaining <= 0 or window_seconds <= 0:
+        return None
+    windows = max(1, math.ceil(remaining / window_seconds))
+    reserve = min(ceiling, max_per_window * windows)
+    return max(0.0, ceiling - used - reserve), reserve
+
+
+def _attach_pacing(cards: list[dict], gates: dict) -> None:
+    limits = gates.get("limit_config") or {}
+    for card in cards:
+        limit = limits.get(card.get("account_id"))
+        if not isinstance(limit, dict):
+            continue
+        budget = _pacing_budget(card.get("u7"), card.get("r7"), limit.get("ceiling"),
+                                limit.get("per_window"), limit.get("window_seconds"))
+        if budget is not None:
+            card["drainable"], card["reserve"] = budget
 
 
 def _week(c: dict) -> dict:
@@ -1480,6 +1532,10 @@ def _verdict(cards: list[dict], coord: str, lead_secs: int) -> tuple[str, str, s
     if live:
         near = min(spendable or live, key=lambda c: _f(c.get("r7")) or float("inf"))
         state, _ = _card_state(near)
+        if near.get("drainable", 0) > 0:
+            return ("hold", "ready",
+                    f'{ico(near["engine"])}{esc(near["name"])} is ready for the next scout.',
+                    f'{esc(state)} &middot; resets in {dur(_f(near["r7"]) - time.time())}')
         return ("hold", "holding",
                 f'{ico(near["engine"])}{esc(near["name"])} has an open window; no active batch.',
                 f'{esc(state)} &middot; resets in {dur(_f(near["r7"]) - time.time())}')
@@ -1537,7 +1593,8 @@ def _claude_cards(gates: dict, usage: dict | None, n_elig: int, coord: str, batc
         elif is_active and len(accounts) > 1:
             tag = '<span class="tag">active</span>'
         cards.append({
-            "name": _card_name("claude", a["label"]), "tag": tag, "engine": "claude",
+            "name": _card_name("claude", a["label"]), "account_id": f"claude-{str(a['label']).lower()}",
+            "tag": tag, "engine": "claude",
             "u5": a.get("u5"), "u7": a.get("u7"), "ceiling": _f(a.get("ceiling"), 98),
             "hot": hot, "r7": a.get("r7"), "windows": windows, "opens_in": opens,
             "ppw": ppw, "batch": batch if (is_sel and coord == "claude") else 0,
@@ -1595,7 +1652,8 @@ def _codex_cards(gates: dict, cx: dict | None, n_codex: int, coord: str, batch: 
         else:
             tag = ""
         cards.append({
-            "name": _card_name("codex", a["label"]), "tag": tag, "engine": "codex",
+            "name": _card_name("codex", a["label"]), "account_id": f"codex-{str(a['label']).lower()}",
+            "tag": tag, "engine": "codex",
             # hot=None, deliberately, even where config carries a 5h knob: the ChatGPT plan has
             # no 5h window, so there is no second budget and nothing to draw as one.
             "u5": None, "hot": None,
@@ -1632,7 +1690,7 @@ def _grok_cards(gates: dict, grok: dict | None, n_grok: int,
         ahead = _f(reset) - time.time() - lead * 3600
         opens = ahead if ahead > 0 else None
     return [{
-        "name": "Grok", "tag": "", "engine": "grok",
+        "name": "Grok", "account_id": "grok-personal", "tag": "", "engine": "grok",
         "u5": None, "hot": None, "u7": grok.get("weekly_percent"),
         "ceiling": _f(gates.get("grok_ceiling"), 98), "r7": reset,
         "windows": windows, "opens_in": opens,
@@ -1833,11 +1891,14 @@ def render_bonus_body() -> str:
     cards = _claude_cards(gates, usage, len(remaining), coord, c_batch)
     cards.extend(_codex_cards(gates, codex, n_codex, coord, x_batch))
     cards.extend(_grok_cards(gates, grok, n_grok, coord, g_batch))
+    _attach_pacing(cards, gates)
+    scout_at = next_scout()
+    scout_note = (f"next scout {rel(scout_at)}" if scout_at else "next scout unavailable")
 
     lead_secs = int(_f(gates.get("lead_hours"), DRAIN_LEAD_MAX_HOURS)) * 3600
     cards = _drain_order(cards)
     v_tone, v_label, v_text, v_sub = _verdict(cards, coord, lead_secs)
-    pill = (v_label, v_tone)
+    v_sub = f"{v_sub} &middot; {esc(scout_note)}" if v_sub else esc(scout_note)
 
     subline = " · ".join([
         "leftover-token backlog", f"{n_weekly} weekly", f"{n_oneoff} one-offs",
@@ -1978,7 +2039,6 @@ def render_bonus_body() -> str:
         <h1>bonus-drain</h1>
         <div class="sub">{esc(subline)}</div>
       </div>
-      <div class="pill {pill[1]}"><span class="pdot"></span><span>{esc(pill[0])}</span></div>
     </div>
 
     <div class="vbar {v_tone}"><span class="vdot"></span>
@@ -1989,7 +2049,7 @@ def render_bonus_body() -> str:
     {_rotation(cards)}
     <div class="rows">
       <div class="rowhd"><span>drain order</span>
-        <span>{len(remaining)} jobs &middot;
+        <span>{esc(scout_note)} &middot; {len(remaining)} jobs &middot;
           {ico("claude")}{n_claude} Claude &middot; {ico("codex")}{n_codex} Codex &middot;
           {ico("grok")}{n_grok} Grok eligible</span></div>
       {"".join(_account_row(c) for c in cards)}

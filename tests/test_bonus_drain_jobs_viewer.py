@@ -126,6 +126,22 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertEqual((tone, label), ("live", "draining"))
         self.assertIn("Grok", text)
 
+    def test_ready_status_uses_planner_reserve_and_next_scout_is_systemd_backed(self) -> None:
+        with mock.patch.object(self.viewer.time, "time", return_value=1_000):
+            card = {
+                "batch": 0, "u7": 68, "ceiling": 99, "windows": 3,
+                "opens_in": None, "hot": None, "eligible": 1, "behind": "",
+            }
+            card["drainable"], card["reserve"] = self.viewer._pacing_budget(
+                68, 1_000 + 13 * 3600, 99, 5, 5 * 3600,
+            )
+        self.assertEqual(self.viewer._card_state(card), ("ready · 16 pts drainable", "acc"))
+        with mock.patch.object(self.viewer, "list_timers", return_value=[
+            {"unit": "other.timer", "next": 1},
+            {"unit": "bonus-drain-scout.timer", "next": 2_000},
+        ]):
+            self.assertEqual(self.viewer.next_scout(), 2_000)
+
     def test_remaining_and_force_buttons_use_graph_provider_eligibility(self) -> None:
         pick = [{"id": "claude-codex", "title": "Claude and Codex", "kind": "oneoff",
                  "priority": 2, "cwd": "/tmp", "goal": "test",
