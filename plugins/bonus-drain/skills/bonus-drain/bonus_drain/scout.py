@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from . import db
 from .config import RuntimeConfig
 from .db import QueueDB, hour_round, task_requires_legacy_exclusive
 from .dispatcher import (
@@ -26,6 +28,8 @@ class ScoutReport:
     dispatched: tuple[DispatchResult, ...]
     previews: tuple[dict[str, Any], ...]
     errors: tuple[dict[str, str], ...]
+    blockers: tuple[dict[str, Any], ...] = ()
+    router_preflight: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -35,6 +39,8 @@ class ScoutReport:
             "dispatched": [item.to_dict() for item in self.dispatched],
             "previews": list(self.previews),
             "errors": list(self.errors),
+            "blockers": list(self.blockers),
+            "router_preflight": list(self.router_preflight),
         }
 
 
@@ -72,6 +78,35 @@ def _cycle_anchor(config: RuntimeConfig, snapshots: Mapping[Any, Any], now_epoch
             if isinstance(reset, (int, float)) and not isinstance(reset, bool) and int(reset) > now_epoch:
                 resets.append(int(reset))
     return hour_round(min(resets)) if resets else hour_round(now_epoch)
+
+
+def _router_preflight(config: RuntimeConfig, plan: PlanResult) -> tuple[dict[str, Any], ...]:
+    """Describe each resolved router executable needed by this tick without launching it."""
+
+    adapter_ids = {
+        config.provider(batch.provider_id).dispatch.adapter_id for batch in plan.batches
+    }
+    result: list[dict[str, Any]] = []
+    for adapter_id in sorted(adapter_ids):
+        adapter = config.adapter(adapter_id)
+        executable = Path(adapter.argv[0])
+        available = False
+        identity = None
+        try:
+            available = executable.is_file() and os.access(executable, os.X_OK)
+            if available:
+                stat = executable.stat()
+                identity = f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
+        except OSError:
+            # A router replaced between the checks is unavailable for this tick.
+            available = False
+        result.append({
+            "adapter_id": adapter.id,
+            "executable": str(executable),
+            "available": available,
+            "identity": identity,
+        })
+    return tuple(result)
 
 
 def plan_tick(
@@ -210,9 +245,53 @@ def run_once(
     queue.initialize()
     tick = plan_tick(config, queue, cache_root, now_epoch=now)
     plan = tick.plan
+    router_preflight = _router_preflight(config, plan)
     dispatched: list[DispatchResult] = []
     previews: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
+
+    lifecycle_report = db.doctor(queue)
+    if not lifecycle_report.ok:
+        message = "; ".join(lifecycle_report.diagnostics)
+        blocker = {
+            "kind": "reconciliation_required",
+            "tasks": list(lifecycle_report.reconciliation_required),
+            "message": message,
+        }
+        error = {
+            "task_id": "*", "kind": "reconciliation_required",
+            "message": message or "queue lifecycle requires reconciliation",
+        }
+        return ScoutReport(
+            now, dry_run, plan, (), (), (error,), (blocker,), router_preflight,
+        )
+
+    inflight = queue.inflight_details(now_epoch=now)
+    if inflight:
+        blocker = {
+            "kind": "inflight",
+            "message": "global scout concurrency policy blocks while any drain job is non-terminal",
+            "runs": inflight,
+        }
+        return ScoutReport(
+            now, dry_run, plan, (), (), (), (blocker,), router_preflight,
+        )
+
+    unavailable = [item for item in router_preflight if not item["available"]]
+    if unavailable:
+        blockers = tuple({
+            "kind": "router_unavailable",
+            "adapter_id": item["adapter_id"],
+            "executable": item["executable"],
+            "message": "resolved agent-router executable is missing or not executable",
+        } for item in unavailable)
+        router_errors = tuple({
+            "task_id": "*", "kind": "router_unavailable",
+            "message": f"router preflight failed: {item['executable']}",
+        } for item in unavailable)
+        return ScoutReport(
+            now, dry_run, plan, (), (), router_errors, blockers, router_preflight,
+        )
 
     for batch in plan.batches:  # already nearest-reset-first
         tasks = tick.allocations[(batch.provider_id, batch.account_id)]
@@ -241,4 +320,7 @@ def run_once(
             except Exception as exc:
                 errors.append({"task_id": task.id, "kind": "failed", "message": str(exc)})
 
-    return ScoutReport(now, dry_run, plan, tuple(dispatched), tuple(previews), tuple(errors))
+    return ScoutReport(
+        now, dry_run, plan, tuple(dispatched), tuple(previews), tuple(errors),
+        (), router_preflight,
+    )

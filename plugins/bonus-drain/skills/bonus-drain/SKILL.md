@@ -79,6 +79,10 @@ never valid on add. Prefer `mcp=none` unless the task demonstrably needs a named
 build-shaped work only through the explicit implementation flag; do not infer it from cwd or
 prose.
 
+Any task that requires live Kubernetes proof, multiple external components, or integration
+E2E is at least `medium`. Choose `large` when the required proof crosses two or more component
+boundaries, even if the source edit itself looks small.
+
 Preview the validated task, then add it with the CLI and its required estimate:
 
 ```sh
@@ -156,6 +160,10 @@ bonus-drain dispatch TASK_ID [PROVIDER_ID_OR_auto] --json
 Every dispatched task must record exactly one terminal event through the command embedded in
 its prompt. The prompt must include task ID, kind, eligibility key, concrete provider and
 account, DB/config identity, precondition, constraints, and done-when.
+
+Replaying the same terminal status for one task and eligibility key is idempotent. A conflicting
+terminal status or pre-existing duplicate terminal history is a reconciliation error, never a
+second terminal event.
 
 - `done`: done-when is demonstrated.
 - `skipped`: the precondition is false or the work is already complete.

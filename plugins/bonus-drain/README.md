@@ -140,6 +140,10 @@ and the claim and applicable activation lease stay fail-closed until reconciliat
 
 Scout reserves actual compatible task IDs in nearest-reset order, preventing a portable task
 from consuming two provider slots while preserving exclusive work for a capable provider.
+Within one priority, eligible tasks are oldest-waiting-first; a recurring task starts waiting
+when its cooldown ends. Before any claim, scout reports queue reconciliation blockers, global
+in-flight runs with their ages, and the resolved executable identity for every router needed by
+the tick. A lifecycle or router failure stops the tick once instead of failing each selected task.
 Normalized usage requires explicit provider/account identity and capture time. Missing Grok
 utilization stays unknown. Source and installed wrappers ignore caller `PYTHONPATH`/cwd
 packages; timed-out collector and rotator process groups are terminated with descendants.

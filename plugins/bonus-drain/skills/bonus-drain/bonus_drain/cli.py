@@ -257,12 +257,16 @@ def _command(args: argparse.Namespace) -> int:
             provider, legacy = "claude", True
         elif args.codex:
             provider = "codex"
-        events = queue.inflight(provider_id=provider, include_legacy=legacy)
+        events = queue.inflight_details(
+            provider_id=provider, include_legacy=legacy, now_epoch=_now(args),
+        )
         if args.json:
-            _json({"runs": [event.to_dict() for event in events]})
+            _json({"runs": events})
         else:
             for event in events:
-                print(event.task)
+                age = event["age_seconds"]
+                age_text = "unknown" if age is None else f"{age}s"
+                print(f"{event['task']}\t{age_text}")
         return 0
     if command in {"queue", "queue-status"}:
         cfg, queue = _queue(args)
@@ -602,7 +606,7 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--router-job-id"); record.add_argument("--ts"); record.add_argument("--branch"); record.add_argument("--summary")
 
     inflight = sub.add_parser("inflight"); _add_common(inflight); _add_json(inflight)
-    inflight.add_argument("--provider"); inflight.add_argument("--claude", action="store_true"); inflight.add_argument("--codex", action="store_true")
+    inflight.add_argument("--provider"); inflight.add_argument("--claude", action="store_true"); inflight.add_argument("--codex", action="store_true"); inflight.add_argument("--now", type=int)
     for name in ("queue", "queue-status"):
         item = sub.add_parser(name); _add_common(item); _add_json(item); item.add_argument("cycle", type=int, nargs="?"); item.add_argument("--run-limit", type=int, default=50)
     runs = sub.add_parser("runs"); _add_common(runs); _add_json(runs); runs.add_argument("--limit", type=int, default=50); runs.add_argument("--task")
