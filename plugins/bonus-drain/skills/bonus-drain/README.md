@@ -18,8 +18,11 @@ with the required capability. Legacy-exclusive tasks drain before portable tasks
 of provider batch order; normal queue priority remains authoritative within each class.
 
 Manual dispatch without an explicit account reuses an account already leased by the selected
-provider. This permits compatible concurrent launches without switching credentials beneath
-running jobs. An explicit account hint remains authoritative and fails closed on a conflict.
+provider; if no lease exists, it selects the single account whose configured active-account
+marker matches. This permits compatible concurrent launches without switching credentials
+beneath running jobs. If a multi-account provider has neither an active marker nor a lease,
+manual dispatch fails closed and requires `--account ACCOUNT_ID`. An explicit account hint
+remains authoritative and fails closed on a conflict.
 
 Each limit may set `max_percent_per_window` as a hard declining reserve, not a per-tick
 allowance. The planner retains that percentage for every remaining

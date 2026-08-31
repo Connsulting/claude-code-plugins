@@ -148,7 +148,7 @@ Use the stable CLI's shared dispatch path; never call a provider command or a le
 directly:
 
 ```sh
-bonus-drain dispatch TASK_ID [PROVIDER_ID_OR_auto] --json
+bonus-drain dispatch TASK_ID [PROVIDER_ID_OR_auto] [--account ACCOUNT_ID] --json
 ```
 
 ## Terminal contract

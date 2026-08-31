@@ -221,6 +221,51 @@ class KickContractTests(unittest.TestCase):
             {"alpha-business"},
         )
 
+    def test_manual_kick_uses_the_active_account_instead_of_config_order(self) -> None:
+        from bonus_drain import kick
+
+        active = self.root / "active"
+        active.write_text("Business\n", encoding="utf-8")
+        personal_activation = config_module.AdapterConfig(
+            "personal-switch", "activation", ("switch", "--label", "Personal", "--active-path", str(active)),
+        )
+        business_activation = config_module.AdapterConfig(
+            "business-switch", "activation", ("switch", "--label", "Business", "--active-path", str(active)),
+        )
+        personal = replace(
+            self.config.accounts[0], id="alpha-personal", activation_adapter_id="personal-switch",
+        )
+        business = replace(
+            self.config.accounts[0], id="alpha-business", activation_adapter_id="business-switch",
+        )
+        cfg = replace(
+            self.config,
+            adapters=(*self.config.adapters, personal_activation, business_activation),
+            accounts=(personal, business, self.config.accounts[1]),
+        )
+
+        result = kick.kick_task(
+            cfg, self.queue, task_id="portable", requested_provider="alpha",
+            now_epoch=NOW, router_call=self._router,
+            activation_call=lambda _action, _account: None,
+        )
+
+        self.assertEqual(result.account_id, "alpha-business")
+        self.assertTrue(result.eligibility_key.startswith("alpha-business/manual/"))
+
+    def test_manual_multi_account_provider_requires_an_explicit_or_active_account(self) -> None:
+        from bonus_drain import kick
+
+        personal = replace(self.config.accounts[0], id="alpha-personal")
+        business = replace(self.config.accounts[0], id="alpha-business")
+        cfg = replace(self.config, accounts=(personal, business, self.config.accounts[1]))
+
+        with self.assertRaisesRegex(dispatcher.InvalidRoute, "requires --account"):
+            kick.kick_task(
+                cfg, self.queue, task_id="portable", requested_provider="alpha",
+                now_epoch=NOW, router_call=self._router,
+            )
+
     def test_runtime_injected_non_router_classifier_and_launcher_are_rejected_before_execution(self) -> None:
         bad = config_module.AdapterConfig("bad", "usage", ("/bin/false",))
         bad_provider = replace(
@@ -511,6 +556,17 @@ class KickContractTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(payloads[0]["task"]["mcp"], "none")
         self.assertEqual(self.queue.task("portable").mcp, "none")
+
+    def test_set_providers_updates_the_canonical_task_contract(self) -> None:
+        with _capture_cli_json() as payloads:
+            code = cli.main([
+                "set-providers", "--database", str(self.config.database),
+                "portable", "beta", "--json",
+            ])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(payloads[0]["task"]["allowed_providers"], ["beta"])
+        self.assertEqual(self.queue.task("portable").allowed_providers, ("beta",))
 
     def test_router_mcp_flag_parser_rejection_is_known_not_launched(self) -> None:
         claude = config_module.ProviderConfig(

@@ -386,6 +386,7 @@ def _command(args: argparse.Namespace) -> int:
         result = kick_task(
             cfg, queue, task_id=args.task, requested_provider=args.provider,
             eligibility_key=getattr(args, "eligibility_key", None), now_epoch=_now(args),
+            account_id=getattr(args, "account", None),
         )
         _json({"dispatch": result.to_dict()}) if args.json else print(result.job_id)
         return 0
@@ -623,7 +624,7 @@ def build_parser() -> argparse.ArgumentParser:
     scout_parser = sub.add_parser("scout"); _add_common(scout_parser); _add_json(scout_parser); scout_parser.add_argument("--now", type=int); scout_parser.add_argument("--dry-run", action="store_true")
 
     for name in ("dispatch", "run-now"):
-        item = sub.add_parser(name); _add_common(item); _add_json(item); item.add_argument("task"); item.add_argument("provider", nargs="?", default="auto"); item.add_argument("--eligibility-key"); item.add_argument("--now", type=int)
+        item = sub.add_parser(name); _add_common(item); _add_json(item); item.add_argument("task"); item.add_argument("provider", nargs="?", default="auto"); item.add_argument("--account"); item.add_argument("--eligibility-key"); item.add_argument("--now", type=int)
     render = sub.add_parser("render-prompt"); _add_common(render); render.add_argument("task"); render.add_argument("--provider", required=True); render.add_argument("--account"); render.add_argument("--eligibility-key", required=True)
     render_json = sub.add_parser("render-prompt-json"); _add_common(render_json); render_json.add_argument("--task-json", required=True); render_json.add_argument("--cycle", type=int, required=True); render_json.add_argument("--provider", required=True); render_json.add_argument("--account")
 
