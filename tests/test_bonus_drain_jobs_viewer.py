@@ -61,7 +61,7 @@ class JobsViewerContractTests(unittest.TestCase):
 
     def test_existing_ui_is_preserved_without_login_or_generic_viewer_copy(self) -> None:
         expected_frontend_hashes = {
-            "CSS": "bc06d8d61215ff38ca26f7cc212cbf44d925e225ab8f15133c9469c36cf61553",
+            "CSS": "a3ee02c830248cd5906807b1d75d2c0de2d468da7dbe41d0dc5e8ac897611d44",
             "ICON_SPRITE": "333ef2163122e3450f95ea008ef6eaaad6ecb8f2562244bfb02e6317a4c06a03",
             "SCRIPT": "d03d5ffba79141eb952ea8fff8d9f8c3b9809bf10744d9d9a1f3b7a4edc5fb00",
             "PAGE": "69071b11da43869de11c5211fe5fed4a976f38f6499c4b70ce9205845b4033de",

@@ -1158,7 +1158,7 @@ def _legacy_providers(task: dict) -> list[str]:
     return ["claude", "codex", "grok"] if task.get("engine_class") in ("codex-ok", "grok-ok") else ["claude"]
 
 
-def _bar(pct, mark=None, cls="", time_mark=None) -> str:
+def _bar(pct, mark=None, cls="", time_mark=None, style="") -> str:
     """A usage bar with an optional threshold tick (the ceiling, or the 5h throttle line).
     The tick is the whole point of this shape over a plain progress bar: it shows how much of
     the distance to the gate has been spent, not just how much has been used."""
@@ -1169,7 +1169,8 @@ def _bar(pct, mark=None, cls="", time_mark=None) -> str:
     progress = ""
     if time_mark is not None:
         progress = f'<i class="wk" style="left:{max(0.0, min(100.0, _f(time_mark))):.1f}%"></i>'
-    return f'<div class="bar {cls}"><i class="fill" style="width:{pct:.1f}%"></i>{tick}{progress}</div>'
+    return (f'<div class="bar {cls}"{" " + style if style else ""}>'
+            f'<i class="fill" style="width:{pct:.1f}%"></i>{tick}{progress}</div>')
 
 
 def _f(v, default: float = 0.0) -> float:
@@ -1272,6 +1273,43 @@ def _week(c: dict) -> dict:
     out.update(known=True, elapsed=100.0 * (1.0 - left / week),
                headroom=max(0.0, _f(c["ceiling"]) - _f(c["u7"])))
     return out
+
+
+PACE_SPAN = 30.0  # points of over/under-pace at which the bar colour saturates
+PACE_EASE = 0.6   # <1 builds colour faster near pace; see _pace_color()
+
+
+def _pace_color(c: dict, p: dict) -> str:
+    """Inline colour vars that tint an account's budget bar by how it is pacing.
+
+    Four bars of the same accent colour all look alike, so the one fact that decides whether
+    this account needs attention - is it ahead of or behind a straight-line week - was only
+    readable by subtracting two numbers in the caption underneath. Colour carries it instead:
+    over pace runs red, under pace runs green, and dead on pace desaturates to the neutral
+    grey the bars already used, so "on pace" is the absence of a signal rather than a third
+    colour to learn.
+
+    The ramp saturates at +/- PACE_SPAN points, past which the number no longer changes what
+    you would do about it. Lightness drops with distance from pace as chroma rises, so the
+    extremes read as deep red / deep green rather than as neon on a dark panel. Returns "" for
+    an unknown reading, which keeps its hatched bar and gets no colour it has not earned.
+
+    The ramp is eased rather than linear. A straight line spends most of its colour on deltas
+    this fleet does not produce: the accounts here sit inside about +/- 15 points, which on a
+    linear ramp to 30 is half saturation, so every bar came out a pale wash and the panel read
+    as though the colour were not moving at all. PACE_EASE < 1 front-loads the ramp, giving the
+    range that actually occurs most of the spectrum while leaving the endpoints exactly where
+    they belong - 0 is still neutral, +/- 30 is still fully deep.
+    """
+    if not p["known"]:
+        return ""
+    t = max(-1.0, min(1.0, (_f(c["u7"]) - _f(p["elapsed"])) / PACE_SPAN))
+    mag = abs(t) ** PACE_EASE
+    hue = 28.0 if t > 0 else 152.0
+    chroma = 0.155 * mag
+    light = 0.70 - 0.13 * mag
+    return (f'style="--pace:oklch({light:.3f} {chroma:.3f} {hue:g});'
+            f'--pace2:oklch({light + 0.09:.3f} {chroma:.3f} {hue:g})"')
 
 
 def _drain_order(cards: list[dict]) -> list[dict]:
@@ -1413,7 +1451,8 @@ def _account_row(c: dict) -> str:
         fig = f'<span class="fig"><b>{u7:g}%</b> of {ceiling:g} ceiling</span>'
         # The stripe identifies the active subscription. Movement means this account owns the
         # current drain window; a child job may have already finished between scout ticks.
-        bar = _bar(u7, ceiling, "lg" + (" draining" if c.get("draining") else " idle"), p["elapsed"])
+        bar = _bar(u7, ceiling, "lg" + (" draining" if c.get("draining") else " idle"),
+                   p["elapsed"], _pace_color(c, p))
     else:
         fig = '<span class="fig unk"><b>?</b> of ' + f'{ceiling:g} ceiling</span>'
         bar = '<div class="bar lg unknown"></div>'
@@ -2270,7 +2309,9 @@ a{color:var(--acc2);text-decoration:none}
   border:1px solid var(--line);padding:1px 5px;vertical-align:1px}
 .tag.acc{color:var(--acc2);border-color:oklch(0.80 0.14 78 / .45)}
 .bar{position:relative;height:8px;background:rgba(255,255,255,.07);margin-top:12px}
-.bar .fill{position:absolute;top:0;bottom:0;left:0;background:var(--acc)}
+/* --pace / --pace2 are set inline per account bar by _pace_color(): red over pace, green
+   under, neutral grey on it. They fall back to the accent so every other bar is unchanged. */
+.bar .fill{position:absolute;top:0;bottom:0;left:0;background:var(--pace,var(--acc))}
 .bar .mark{position:absolute;top:-3px;bottom:-3px;width:1px;background:rgba(233,231,226,.6)}
 /* Week-elapsed position. It used to be .time-mark: 1px at .25 alpha, on a bar where the taller
    brighter ceiling tick takes the eye, so nobody ever read it. Same data, given a cap so it is a
@@ -2281,9 +2322,12 @@ a{color:var(--acc2);text-decoration:none}
   border-top:4px solid rgba(233,231,226,.8)}
 .bar.unknown{background:repeating-linear-gradient(135deg,
   oklch(0.66 0.045 250 / .38) 0 5px, rgba(255,255,255,.05) 5px 10px)}
-.bar.idle .fill{background:rgba(233,231,226,.32)}
-.bar.draining .fill{background:linear-gradient(110deg,var(--acc) 0%,var(--acc2) 38%,#fff2b8 50%,
-  var(--acc2) 62%,var(--acc) 100%);background-size:220% 100%;animation:drainshimmer 1.6s linear infinite}
+/* Idle keeps its recessive grey only where there is no pacing colour to show; where there is,
+   idle vs draining stays legible through the shimmer, not through hue. */
+.bar.idle .fill{background:var(--pace,rgba(233,231,226,.32));opacity:.82}
+.bar.draining .fill{background:linear-gradient(110deg,var(--pace,var(--acc)) 0%,
+  var(--pace2,var(--acc2)) 38%,#fff2b8 50%,var(--pace2,var(--acc2)) 62%,var(--pace,var(--acc)) 100%);
+  background-size:220% 100%;animation:drainshimmer 1.6s linear infinite}
 @keyframes drainshimmer{to{background-position:-220% 0}}
 @media (prefers-reduced-motion:reduce){.bar.draining .fill{animation:none}}
 .bar.sm{height:4px;margin-top:5px}
