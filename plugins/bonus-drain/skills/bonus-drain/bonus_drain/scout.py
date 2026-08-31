@@ -210,6 +210,11 @@ def run_once(
     queue.initialize()
     tick = plan_tick(config, queue, cache_root, now_epoch=now)
     plan = tick.plan
+    # A scout tick never adds work while any previously dispatched Bonus Drain task
+    # remains non-terminal.  Claims still protect task identity, but this global
+    # gate is the concurrency policy: one active Bonus Drain job at a time.
+    if queue.inflight():
+        return ScoutReport(now, dry_run, plan, (), (), ())
     dispatched: list[DispatchResult] = []
     previews: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
