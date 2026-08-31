@@ -61,9 +61,9 @@ class JobsViewerContractTests(unittest.TestCase):
 
     def test_existing_ui_is_preserved_without_login_or_generic_viewer_copy(self) -> None:
         expected_frontend_hashes = {
-            "CSS": "a3ee02c830248cd5906807b1d75d2c0de2d468da7dbe41d0dc5e8ac897611d44",
+            "CSS": "f0c9a7ac4761e4dcd9ce928905e3d6fb396631dc204dd3f464e13f3eedf69885",
             "ICON_SPRITE": "333ef2163122e3450f95ea008ef6eaaad6ecb8f2562244bfb02e6317a4c06a03",
-            "SCRIPT": "d03d5ffba79141eb952ea8fff8d9f8c3b9809bf10744d9d9a1f3b7a4edc5fb00",
+            "SCRIPT": "31188ca22e8f8162c4e9b46294d8ed670c7a2186c1520ae628c21cee5e6c1f16",
             "PAGE": "69071b11da43869de11c5211fe5fed4a976f38f6499c4b70ce9205845b4033de",
         }
         self.assertEqual(
@@ -506,7 +506,6 @@ class JobsViewerContractTests(unittest.TestCase):
                 self.viewer, "_verdict",
                 return_value=("idle", "nothing draining", "idle", ""),
             ),
-            mock.patch.object(self.viewer, "_rotation", return_value=""),
             mock.patch.object(self.viewer, "get_dispatch_times", return_value=[]),
         ):
             return self.viewer.render_bonus_body()
@@ -654,6 +653,110 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertIn("no remaining jobs match these filters", nothing)
         self.assertNotIn('id="qnone" hidden', nothing)
         self.assertIn(">0 of 3 jobs<", nothing)
+
+    def test_mobile_folds_wrap_the_header_rotation_chart_and_drain_order(self) -> None:
+        """Phone: those three blocks start closed behind their own headers. Desktop CSS
+        never hides the bodies, so the wrappers must not become the layout."""
+        body = self._bonus_body(self.QUEUE_FIXTURE)
+        self.assertIn('class="mfold mfold-wrap" data-fold="header"', body)
+        self.assertIn('class="hd mfold-sum"', body)
+        self.assertIn('class="mfold-hint idle"', body)
+        self.assertIn('class="tl mfold" data-fold="rotation"', body)
+        self.assertIn('class="rows mfold" data-fold="drain"', body)
+        self.assertIn('class="rowhd mfold-sum"', body)
+        header_at = body.index('data-fold="header"')
+        vbar_at = body.index('class="vbar idle"')
+        rotation_at = body.index('data-fold="rotation"')
+        drain_at = body.index('data-fold="drain"')
+        remaining_at = body.index("remaining this week")
+        self.assertLess(header_at, vbar_at)
+        self.assertLess(vbar_at, rotation_at)
+        self.assertLess(rotation_at, drain_at)
+        self.assertLess(drain_at, remaining_at)
+        # The verdict lives in the header's fold body, and the account rows live in drain's.
+        self.assertIn('class="mfold-body"', body[vbar_at - 80:vbar_at])
+        self.assertIn("<i class=\"caret\"></i>drain order", body)
+        self.assertIn("<i class=\"caret\"></i>rotation", body)
+
+        css, script = self.viewer.CSS, self.viewer.SCRIPT
+        self.assertIn(".mfold-sum .caret{display:none}", css)
+        self.assertIn("@media(max-width:640px)", css)
+        self.assertIn(".mfold:not(.open)>.mfold-body{display:none}", css)
+        self.assertIn(".mfold-wrap{display:contents}", css)
+        self.assertIn("bonusMobileFolds", script)
+        self.assertIn("max-width:640px", script)
+
+    def test_tapping_a_mobile_fold_header_opens_it_in_a_browser(self) -> None:
+        chrome = shutil.which("google-chrome") or shutil.which("google-chrome-stable")
+        if chrome is None:
+            self.skipTest("Chrome is unavailable")
+        with (
+            mock.patch.object(self.viewer, "render_bonus_body",
+                              return_value=self._bonus_body(self.QUEUE_FIXTURE)),
+            mock.patch.object(self.viewer, "render_schedule_body", return_value="scheduled body"),
+        ):
+            page = self.viewer.render_page().decode()
+        # dump-dom's viewport is desktop-sized, so the production matchMedia would treat
+        # this as desktop and refuse to toggle. Force the phone branch; the CSS hide is
+        # already under the 640px breakpoint, so the class is what we can assert here.
+        page = page.replace(
+            "<head>",
+            "<head><script>window.matchMedia=function(q){"
+            "return{matches:String(q).indexOf('max-width')>=0,media:q,"
+            "addEventListener:function(){},removeEventListener:function(){}}}"
+            "</script>",
+            1,
+        )
+
+        def dump(extra: str) -> str:
+            with tempfile.TemporaryDirectory() as work:
+                target = Path(work) / "page.html"
+                target.write_text(page + f"<script>{extra}</script>")
+                completed = subprocess.run(
+                    [
+                        chrome, "--headless=new", "--no-sandbox", "--disable-gpu",
+                        "--disable-dev-shm-usage", "--no-proxy-server",
+                        f"--user-data-dir={work}/profile", "--dump-dom", target.as_uri(),
+                    ],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, timeout=60, check=False,
+                )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            return completed.stdout
+
+        def fold(dom: str, name: str) -> str:
+            body_at = dom.index("<body")
+            marker = f'data-fold="{name}"'
+            hit = dom.index(marker, body_at)
+            start = dom.rfind("<div", body_at, hit)
+            later = [dom.find(f'data-fold="{other}"', hit + 1) for other in
+                     ("header", "rotation", "drain") if other != name]
+            later = [i for i in later if i >= 0]
+            return dom[start:min(later) if later else hit + 400]
+
+        closed = dump("")
+        for name in ("header", "rotation", "drain"):
+            with self.subTest(fold=name, state="closed"):
+                markup = fold(closed, name)
+                self.assertNotRegex(markup, r'class="[^"]*\bopen\b')
+                self.assertIn('aria-expanded="false"', markup)
+
+        opened = dump("".join(
+            f"document.querySelector('.mfold[data-fold=\"{name}\"]>.mfold-sum').click();"
+            for name in ("header", "rotation", "drain")
+        ))
+        for name in ("header", "rotation", "drain"):
+            with self.subTest(fold=name, state="open"):
+                markup = fold(opened, name)
+                self.assertRegex(markup, r'class="[^"]*\bopen\b')
+                self.assertIn('aria-expanded="true"', markup)
+
+        persisted = dump(
+            "document.querySelector('.mfold[data-fold=\"header\"]>.mfold-sum').click();"
+            "document.documentElement.setAttribute('data-header-fold',"
+            "JSON.parse(localStorage.getItem('bonusMobileFolds')||'{}').header?'1':'0');"
+        )
+        self.assertIn('data-header-fold="1"', persisted)
 
 
 if __name__ == "__main__":

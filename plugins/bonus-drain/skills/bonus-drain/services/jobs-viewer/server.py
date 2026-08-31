@@ -1410,9 +1410,10 @@ def _rotation(cards: list[dict]) -> str:
     seen = {int(_f(c.get("lead_h"), DRAIN_LEAD_MAX_HOURS)) for c in cards}
     leads = f"{seen.pop()}h " if len(seen) == 1 else ""
     return f"""
-    <div class="tl">
-      <div class="tlhead"><span>rotation &middot; next 7 days</span>
+    <div class="tl mfold" data-fold="rotation">
+      <div class="tlhead mfold-sum"><span><i class="caret"></i>rotation &middot; next 7 days</span>
         <span class="rt">{leads}drain window before each reset</span></div>
+      <div class="mfold-body">
       <div class="tlgrid">
         <div class="tldays">{days}</div>
         {"".join(lanes)}
@@ -1422,6 +1423,7 @@ def _rotation(cards: list[dict]) -> str:
         <span><i class="sw r"></i>weekly reset</span>
         <span><i class="sw u"></i>unknown reading</span>
         <span class="wn"><i class="sw ov"></i>windows overlap, one waits</span>
+      </div>
       </div>
     </div>"""
 
@@ -2073,25 +2075,31 @@ def render_bonus_body() -> str:
                  default=None)
 
     return f"""
-    <div class="hd">
+    <div class="mfold mfold-wrap" data-fold="header">
+    <div class="hd mfold-sum">
       <div>
-        <h1>bonus-drain</h1>
+        <h1><i class="caret"></i>bonus-drain</h1>
         <div class="sub">{esc(subline)}</div>
       </div>
+      <span class="mfold-hint {v_tone}">{esc(v_label)}</span>
     </div>
-
+    <div class="mfold-body">
     <div class="vbar {v_tone}"><span class="vdot"></span>
       <div class="vmain"><b>{esc(v_label)}</b>
         <div class="vtext">{v_text}</div>
         <div class="vsub">{v_sub}</div></div>
     </div>
+    </div>
+    </div>
     {_rotation(cards)}
-    <div class="rows">
-      <div class="rowhd"><span>drain order</span>
+    <div class="rows mfold" data-fold="drain">
+      <div class="rowhd mfold-sum"><span><i class="caret"></i>drain order</span>
         <span>{esc(scout_note)} &middot; {len(remaining)} jobs &middot;
           {ico("claude")}{n_claude} Claude &middot; {ico("codex")}{n_codex} Codex &middot;
           {ico("grok")}{n_grok} Grok eligible</span></div>
+      <div class="mfold-body">
       {"".join(_account_row(c) for c in cards)}
+      </div>
     </div>
     {_pacing_strip(anchor, gates, get_dispatch_times(cycle), c_batch)}
     {flight}
@@ -2485,6 +2493,31 @@ details.fold>summary:hover{color:var(--acc2)}
   border-left:4px solid currentColor;border-top:3px solid transparent;border-bottom:3px solid transparent;
   transition:transform .12s ease}
 details[open]>summary .caret{transform:rotate(90deg)}
+/* On a phone the title, rotation chart, and drain-order rows are a screen of scroll before
+   in-flight / remaining this week, which is what this page is opened on a phone to see. Each
+   keeps its existing header as the tap target and starts closed. Desktop is unchanged: the
+   caret, the compact verdict hint, and the collapse itself live inside the phone breakpoint,
+   and the header wrapper has no box of its own so the title and verdict stay siblings. */
+.mfold-wrap{display:contents}
+.mfold-hint{display:none;font-size:11px;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--dim);align-self:center;flex:none}
+.mfold-hint.hold{color:var(--ok)}
+.mfold-hint.live{color:var(--acc2)}
+.mfold-sum .caret{display:none}
+@media(max-width:640px){
+  .mfold-sum{cursor:pointer;-webkit-tap-highlight-color:transparent}
+  .mfold-sum .caret{display:inline-block}
+  .mfold.open>.mfold-sum .caret{transform:rotate(90deg)}
+  .mfold:not(.open)>.mfold-body{display:none}
+  .mfold:not(.open)>.mfold-sum .sub{display:none}
+  .mfold:not(.open)>.mfold-sum .mfold-hint{display:block}
+  .hd.mfold-sum,.tlhead.mfold-sum,.rowhd.mfold-sum{min-height:44px;align-items:center}
+  .hd{margin:14px 0 10px}
+  .mfold:not(.open)>.mfold-sum{flex-wrap:nowrap}
+  .mfold:not(.open)>.mfold-sum>span:first-child{flex:none;white-space:nowrap}
+  .mfold:not(.open)>.mfold-sum>.rt,
+  .mfold:not(.open)>.mfold-sum>span:last-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+}
 footer{margin:34px 0 0;font-size:10.5px;color:var(--dim2);letter-spacing:.04em}
 .empty{color:var(--dim);padding:14px 16px;background:var(--panel);border:1px solid var(--line)}
 
@@ -2716,6 +2749,53 @@ SCRIPT = """
       }catch(e){b.disabled=false;b.classList.remove('busy');alert('Could not requeue this job: '+e.message);}
     });
   });
+  // Phone folds for the header, rotation chart, and drain-order rows. CSS hides the bodies
+  // under 640px unless `.open` is set, so a no-JS load is already collapsed; this only
+  // toggles that class and remembers it across the 60s refresh. Desktop ignores the class.
+  (function(){
+    var folds=Array.prototype.slice.call(document.querySelectorAll('.mfold[data-fold]'));
+    if(!folds.length)return;
+    var MQ=window.matchMedia('(max-width:640px)'),KEY='bonusMobileFolds';
+    function mobile(){return MQ.matches}
+    function load(){try{return JSON.parse(localStorage.getItem(KEY)||'{}')}catch(e){return {}}}
+    function save(state){try{localStorage.setItem(KEY,JSON.stringify(state))}catch(e){}}
+    function apply(){
+      var on=mobile(),state=load();
+      folds.forEach(function(el){
+        var open=on&&!!state[el.dataset.fold];
+        el.classList.toggle('open',open);
+        var sum=el.querySelector(':scope>.mfold-sum');
+        if(!sum)return;
+        if(on){
+          sum.setAttribute('role','button');
+          sum.setAttribute('tabindex','0');
+          sum.setAttribute('aria-expanded',open?'true':'false');
+        }else{
+          sum.removeAttribute('role');
+          sum.removeAttribute('tabindex');
+          sum.removeAttribute('aria-expanded');
+        }
+      });
+    }
+    folds.forEach(function(el){
+      var sum=el.querySelector(':scope>.mfold-sum');
+      if(!sum)return;
+      function toggle(ev){
+        if(!mobile())return;
+        ev.preventDefault();
+        var state=load();
+        state[el.dataset.fold]=!el.classList.contains('open');
+        save(state);
+        apply();
+      }
+      sum.addEventListener('click',toggle);
+      sum.addEventListener('keydown',function(ev){
+        if(ev.key==='Enter'||ev.key===' ')toggle(ev);
+      });
+    });
+    if(MQ.addEventListener)MQ.addEventListener('change',apply);
+    apply();
+  })();
   // Queue facet filters. Client-side and localStorage-backed, so a selection survives the
   // page's own 60s meta refresh; the server keeps rendering the whole queue.
   (function(){
