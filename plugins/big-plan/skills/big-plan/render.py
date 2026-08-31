@@ -294,6 +294,13 @@ def _delete_button(cid: str) -> str:
     )
 
 
+def _resolve_button(cid: str) -> str:
+    return (
+        f'<button type="button" class="comment-resolve" data-id="{cid}" '
+        f'title="Resolve this comment" aria-label="Resolve">✓</button>'
+    )
+
+
 def _reply_button(cid: str) -> str:
     return (
         f'<button type="button" class="comment-reply" data-id="{cid}" '
@@ -340,6 +347,7 @@ def render_comment_html(c: dict) -> str:
     ts = html.escape(c.get("timestamp", ""))
     cid = html.escape(c.get("id", ""))
     delbtn = _delete_button(cid)
+    resolvebtn = _resolve_button(cid)
     replybtn = _reply_button(cid)
     replies = render_replies_html(c)
     # The marker the "N answered" chip navigates by, and what CSS tints.
@@ -351,7 +359,7 @@ def render_comment_html(c: dict) -> str:
         return (
             f'<div class="comment decision" data-id="{cid}"{answered}>'
             f'<div class="comment-meta"><span class="ts">{ts}</span>'
-            f"{replybtn}{delbtn}</div>"
+            f"{replybtn}{resolvebtn}{delbtn}</div>"
             f'<div class="comment-body"><strong>Decided:</strong> {chosen}</div>'
             f"{replies}"
             f"</div>"
@@ -364,7 +372,7 @@ def render_comment_html(c: dict) -> str:
         suffix = f": {text}" if text else ""
         return (
             f'<div class="comment status" data-id="{cid}">'
-            f'<div class="comment-meta"><span class="ts">{ts}</span>{delbtn}</div>'
+            f'<div class="comment-meta"><span class="ts">{ts}</span>{resolvebtn}{delbtn}</div>'
             f'<div class="comment-body">Marked {state}{suffix}</div>'
             f"</div>"
         )
@@ -379,7 +387,7 @@ def render_comment_html(c: dict) -> str:
     return (
         f'<div class="comment" data-id="{cid}"{answered}>'
         f'<div class="comment-meta"><span class="ts">{ts}</span>'
-        f"{replybtn}{delbtn}</div>"
+        f"{replybtn}{resolvebtn}{delbtn}</div>"
         f'{quote_html}'
         f'<div class="comment-body">{text}</div>'
         f"{replies}"

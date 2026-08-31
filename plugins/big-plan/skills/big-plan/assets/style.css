@@ -588,6 +588,19 @@ mark.comment-highlight.flash { background: var(--accent); color: #fff; }
   font-family: inherit;
 }
 .comment-popover .comment-popover-delete:hover { color: var(--fg); background: var(--bg); }
+.comment-popover .comment-popover-resolve {
+  margin-top: 6px;
+  margin-left: 4px;
+  background: transparent;
+  border: 1px solid var(--comment-border);
+  color: var(--muted);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 2px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.comment-popover .comment-popover-resolve:hover { color: var(--fg); background: var(--bg); }
 
 .comments-rail {
   grid-area: comments;
@@ -737,6 +750,21 @@ dialog button[value="submit"] { background: var(--accent); color: white; border-
   cursor: pointer;
   font-family: inherit;
 }
+.comment-resolve {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 2px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.comment-resolve:hover { background: var(--comment-bg); border-color: var(--comment-border); color: var(--fg); }
+.comment-resolve:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 .comment-delete:hover {
   background: var(--comment-bg);
   border-color: var(--comment-border);
@@ -759,7 +787,8 @@ dialog button[value="submit"] { background: var(--accent); color: white; border-
 }
 /* Delete already claims margin-left:auto to sit at the far right. When both are
    present Reply takes the auto and Delete just follows it. */
-.comment-reply + .comment-delete { margin-left: 0; }
+.comment-reply + .comment-resolve { margin-left: 0; }
+.comment-resolve + .comment-delete { margin-left: 0; }
 .comment-reply:hover {
   background: var(--comment-bg);
   border-color: var(--comment-border);

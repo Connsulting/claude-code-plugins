@@ -81,7 +81,7 @@ Answered threads surface three ways so a phone reader can find them: a `data-ans
 
 ### Deleting
 
-Every comment surface has a `×` (text/decision/status) or tap-to-toggle (reactions, task checkboxes) delete affordance. Use `POST /api/comments/<rel>/<id>/delete` to remove a comment by id. The legacy `/resolve` endpoint is still served for any script that uses it but the UI no longer surfaces it.
+Every text/decision/status comment has a `✓` resolve button and a `×` delete button. `✓` marks it resolved and preserves it in the sidecar, while resolved comments stop rendering; `×` removes it from the sidecar. Reactions and task checkboxes retain their tap-to-toggle behavior. Use `POST /api/comments/<rel>/<id>/resolve` or `/delete` respectively.
 
 ## Authoring conventions (HTML affordances)
 

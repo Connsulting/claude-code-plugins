@@ -273,6 +273,23 @@
     }
   });
 
+  document.addEventListener("click", async (e) => {
+    const btn = e.target.closest(".comment-resolve");
+    if (!btn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const id = btn.dataset.id;
+    try {
+      const res = await fetch(`${apiBase}/${encodeURIComponent(id)}/resolve`, {
+        method: "POST",
+      });
+      if (!res.ok) throw new Error("resolve failed: " + res.status);
+      window.location.reload();
+    } catch (err) {
+      alert("Could not resolve: " + err.message);
+    }
+  });
+
   // -- Replies (threads on a comment) --
   // An inline composer rather than the add-comment dialog: a reply belongs to a
   // comment, not to an anchor, and on a phone a textarea that opens in place
@@ -913,6 +930,14 @@
     );
   }
 
+  function resolveBtn(cid) {
+    return (
+      '<button type="button" class="comment-resolve" data-id="' +
+      escapeAttr(cid) +
+      '" title="Resolve this comment" aria-label="Resolve">✓</button>'
+    );
+  }
+
   function replyBtn(cid) {
     return (
       '<button type="button" class="comment-reply" data-id="' +
@@ -949,6 +974,7 @@
     const ts = escapeHtml(c.timestamp || "");
     const cid = escapeAttr(c.id || "");
     const del = deleteBtn(c.id || "");
+    const resolve = resolveBtn(c.id || "");
     const rep = replyBtn(c.id || "");
     const thread = repliesHtml(c);
     const answered = isAnswered(c) ? ' data-answered="true"' : "";
@@ -964,7 +990,7 @@
       return (
         '<div class="comment decision" data-id="' + cid + '"' + answered + ">" +
         '<div class="comment-meta"><span class="ts">' + ts + "</span>" +
-        rep + del + "</div>" +
+        rep + resolve + del + "</div>" +
         '<div class="comment-body"><strong>Decided:</strong> ' +
         escapeHtml(choices.join(", ")) + "</div>" + thread + "</div>"
       );
@@ -974,7 +1000,7 @@
       const t = c.text ? ": " + c.text : "";
       return (
         '<div class="comment status" data-id="' + cid + '">' +
-        '<div class="comment-meta"><span class="ts">' + ts + "</span>" + del + "</div>" +
+        '<div class="comment-meta"><span class="ts">' + ts + "</span>" + resolve + del + "</div>" +
         '<div class="comment-body">Marked ' + escapeHtml(state) +
         escapeHtml(t) + "</div></div>"
       );
@@ -988,7 +1014,7 @@
     return (
       '<div class="comment" data-id="' + cid + '"' + answered + ">" +
       '<div class="comment-meta"><span class="ts">' + ts + "</span>" +
-      rep + del + "</div>" +
+      rep + resolve + del + "</div>" +
       quoteHtml +
       '<div class="comment-body">' + escapeHtml(c.text || "") + "</div>" +
       thread + "</div>"
@@ -1511,6 +1537,26 @@
       }
     });
     pop.appendChild(delBtn);
+
+    const resolveBtn = document.createElement("button");
+    resolveBtn.type = "button";
+    resolveBtn.className = "comment-popover-resolve";
+    resolveBtn.textContent = "Resolve";
+    resolveBtn.addEventListener("click", async (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (!id) return;
+      try {
+        const res = await fetch(`${apiBase}/${encodeURIComponent(id)}/resolve`, {
+          method: "POST",
+        });
+        if (!res.ok) throw new Error("resolve failed: " + res.status);
+        window.location.reload();
+      } catch (err) {
+        alert("Could not resolve: " + err.message);
+      }
+    });
+    pop.appendChild(resolveBtn);
 
     document.body.appendChild(pop);
     const rect = mark.getBoundingClientRect();
