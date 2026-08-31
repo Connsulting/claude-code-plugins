@@ -876,12 +876,22 @@ class QueueDB:
             raise QueueError("mcp must be a non-empty selection or omitted")
         self._update_task(task_id, "mcp", canonical)
 
+    def set_providers(self, task_id: str, providers: Iterable[str]) -> None:
+        canonical = tuple(str(provider).strip() for provider in providers if str(provider).strip())
+        if not canonical:
+            raise QueueError("providers must contain at least one provider id")
+        if len(canonical) != len(set(canonical)):
+            raise QueueError("providers must not contain duplicates")
+        if any(not TASK_ID_RE.fullmatch(provider) for provider in canonical):
+            raise QueueError("providers contains an invalid provider id")
+        self._update_task(task_id, "allowed_providers_json", json.dumps(canonical))
+
     def set_active(self, task_id: str, active: bool) -> None:
         self._update_task(task_id, "active", int(active))
 
     def _update_task(self, task_id: str, column: str, value: Any) -> None:
         _require_task_id(task_id)
-        if column not in {"priority", "model", "mcp", "active"}:
+        if column not in {"priority", "model", "mcp", "allowed_providers_json", "active"}:
             raise QueueError("unsafe task update")
         self.initialize()
         with self._transaction() as connection:
