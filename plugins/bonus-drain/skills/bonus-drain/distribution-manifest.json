@@ -10,6 +10,7 @@
     "bin/bonus-drain-account-activation",
     "bin/bonus-drain-account-usage",
     "bin/bonus-drain-grok-usage",
+    "bonus-drain-review.prompt",
     "bonus_drain/__init__.py",
     "bonus_drain/__main__.py",
     "bonus_drain/adapters.py",
