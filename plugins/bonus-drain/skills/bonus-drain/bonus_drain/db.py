@@ -55,6 +55,13 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def _timestamp_epoch(value: str) -> float:
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
 def hour_round(epoch: int) -> int:
     return ((int(epoch) + 1800) // 3600) * 3600
 
@@ -464,13 +471,35 @@ class QueueDB:
         if row is None:
             return True
         try:
-            last_run = datetime.fromisoformat(str(row["ts"]).replace("Z", "+00:00"))
-            if last_run.tzinfo is None:
-                last_run = last_run.replace(tzinfo=timezone.utc)
+            last_run_epoch = _timestamp_epoch(str(row["ts"]))
         except ValueError:
             # A malformed run timestamp must not make a recurring job eligible early.
             return False
-        return time.time() - last_run.timestamp() >= cooldown
+        return time.time() - last_run_epoch >= cooldown
+
+    @staticmethod
+    def _eligible_since_in_connection(
+        connection: sqlite3.Connection, task: Task,
+    ) -> float:
+        """Return when an already-eligible task began waiting."""
+
+        try:
+            created_at = _timestamp_epoch(task.created_at)
+        except ValueError:
+            created_at = float("inf")
+        if task.kind == "oneoff":
+            return created_at
+        row = connection.execute(
+            "SELECT ts FROM runs WHERE task=? ORDER BY rowid_pk DESC LIMIT 1",
+            (task.id,),
+        ).fetchone()
+        if row is None:
+            return created_at
+        cooldown = RECURRING_COOLDOWNS_SECONDS[task.cadence or ""]
+        try:
+            return _timestamp_epoch(str(row["ts"])) + cooldown
+        except ValueError:
+            return float("inf")
 
     def eligible_tasks(
         self, cycle: int, *, provider_id: str | None = None, capabilities: Iterable[str] = (),
@@ -480,7 +509,7 @@ class QueueDB:
         self.initialize()
         with self._connect() as connection:
             rows = connection.execute("SELECT * FROM tasks WHERE active=1").fetchall()
-            candidates: list[Task] = []
+            candidates: list[tuple[Task, float]] = []
             for row in rows:
                 task = self._task_from_row(row)
                 if task_id and task.id != task_id:
@@ -493,15 +522,19 @@ class QueueDB:
                 if not self._provider_compatible(task, provider_id, capabilities):
                     continue
                 if self._eligible_in_connection(connection, task, int(cycle)):
-                    candidates.append(task)
+                    candidates.append((task, self._eligible_since_in_connection(connection, task)))
         if claude_priority:
-            candidates.sort(key=lambda task: (
-                not task_requires_legacy_exclusive(task), task.priority,
-                task.kind == "recurring", task.created_at, task.id,
+            candidates.sort(key=lambda item: (
+                not task_requires_legacy_exclusive(item[0]), item[0].priority,
+                item[1], item[0].kind == "recurring", item[0].created_at, item[0].id,
             ))
         else:
-            candidates.sort(key=lambda task: (task.priority, task.kind == "recurring", task.created_at, task.id))
-        return candidates if limit is None else candidates[: max(0, int(limit))]
+            candidates.sort(key=lambda item: (
+                item[0].priority, item[1], item[0].kind == "recurring",
+                item[0].created_at, item[0].id,
+            ))
+        tasks = [task for task, _eligible_since in candidates]
+        return tasks if limit is None else tasks[: max(0, int(limit))]
 
     def count_eligible(self, cycle: int, **kwargs: Any) -> int:
         return len(self.eligible_tasks(cycle, **kwargs))
@@ -727,8 +760,44 @@ class QueueDB:
             assert result is not None
             return result
 
+        def existing_terminal(connection: sqlite3.Connection) -> sqlite3.Row | None:
+            if status not in TERMINAL_STATUSES:
+                return None
+            if eligibility_key is None:
+                rows = connection.execute(
+                    """SELECT * FROM runs
+                         WHERE task=? AND eligibility_key IS NULL AND cycle=?
+                           AND status IN ('done','skipped','failed')
+                         ORDER BY rowid_pk""",
+                    (task_id, resolved_cycle),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """SELECT * FROM runs
+                         WHERE task=?
+                           AND (eligibility_key=? OR (eligibility_key IS NULL AND cycle=?))
+                           AND status IN ('done','skipped','failed')
+                         ORDER BY rowid_pk""",
+                    (task_id, eligibility_key, resolved_cycle),
+                ).fetchall()
+            if len(rows) > 1:
+                raise QueueError(
+                    f"multiple terminal events already exist for {task_id}; reconciliation required"
+                )
+            if not rows:
+                return None
+            existing = rows[0]
+            if existing["status"] != status:
+                raise QueueError(
+                    f"terminal event already recorded as {existing['status']} for {task_id}"
+                )
+            return existing
+
         with self._transaction() as connection:
             resolve(connection)
+            prior_terminal = existing_terminal(connection)
+            if prior_terminal is not None:
+                return self._run_from_row(prior_terminal)
             lease = None
             if status in TERMINAL_STATUSES and eligibility_key:
                 lease = connection.execute(
@@ -768,7 +837,8 @@ class QueueDB:
             release_activation()
             with self._transaction() as connection:
                 resolve(connection)
-                row = finalize(connection, lease_state="releasing")
+                prior_terminal = existing_terminal(connection)
+                row = prior_terminal or finalize(connection, lease_state="releasing")
         assert row is not None
         return self._run_from_row(row)
 
@@ -786,19 +856,49 @@ class QueueDB:
 
     def inflight(self, *, provider_id: str | None = None, include_legacy: bool = False) -> list[RunEvent]:
         events = self.runs()
-        terminal_after: set[str] = set()
+        terminal_keys: set[tuple[str, str]] = set()
+        terminal_cycles: set[tuple[str, int]] = set()
+        legacy_terminal_cycles: set[tuple[str, int]] = set()
         result: list[RunEvent] = []
         for event in events:
             if event.status in TERMINAL_STATUSES:
-                terminal_after.add(event.task)
+                terminal_cycles.add((event.task, event.cycle))
+                if event.eligibility_key is None:
+                    legacy_terminal_cycles.add((event.task, event.cycle))
+                else:
+                    terminal_keys.add((event.task, event.eligibility_key))
                 continue
-            if event.status != "dispatched" or event.task in terminal_after:
+            if event.status != "dispatched":
+                continue
+            if event.eligibility_key is None:
+                completed = (event.task, event.cycle) in terminal_cycles
+            else:
+                completed = (
+                    (event.task, event.eligibility_key) in terminal_keys
+                    or (event.task, event.cycle) in legacy_terminal_cycles
+                )
+            if completed:
                 continue
             effective = event.provider_id
             if provider_id is not None and effective != provider_id:
                 if not (include_legacy and effective is None):
                     continue
             result.append(event)
+        return result
+
+    def inflight_details(
+        self, *, provider_id: str | None = None, include_legacy: bool = False,
+        now_epoch: int | None = None,
+    ) -> list[dict[str, Any]]:
+        now = int(time.time() if now_epoch is None else now_epoch)
+        result: list[dict[str, Any]] = []
+        for event in self.inflight(provider_id=provider_id, include_legacy=include_legacy):
+            value = event.to_dict()
+            try:
+                value["age_seconds"] = max(0, now - int(_timestamp_epoch(event.ts)))
+            except ValueError:
+                value["age_seconds"] = None
+            result.append(value)
         return result
 
     def requeue(self, task_id: str, eligibility_key: str | None = None) -> bool:

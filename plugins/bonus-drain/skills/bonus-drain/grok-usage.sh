@@ -63,6 +63,23 @@ emit_json() {
     }'
 }
 
+# Billing logs and the cache use display names; /v1/user uses the API spelling.
+# SuperGrok Heavy is SuperGrokPro. Free and unknown names stay rejected.
+grok_paid_weekly_display_tier() {
+  case "$1" in
+    "SuperGrok Plus"|"SuperGrok Heavy") return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+grok_display_tier_from_api() {
+  case "$1" in
+    SuperGrokPlus) printf '%s\n' "SuperGrok Plus" ;;
+    SuperGrokPro) printf '%s\n' "SuperGrok Heavy" ;;
+    *) printf '%s\n' "" ;;
+  esac
+}
+
 clock_valid=0
 if [[ "$now_epoch" =~ ^[0-9]+$ ]] && [[ "$max_age" =~ ^[0-9]+$ ]]; then
   clock_valid=1
@@ -102,7 +119,7 @@ if [ -n "$event" ]; then
     fi
   fi
 
-  if [ "$disk_tier" = "SuperGrok Plus" ] && \
+  if grok_paid_weekly_display_tier "$disk_tier" && \
      [ "$period_type" = "USAGE_PERIOD_TYPE_WEEKLY" ]; then
     reset_epoch="$(date -u -d "$period_end" +%s 2>/dev/null)" || reset_epoch=""
     if [[ "$reset_epoch" =~ ^[0-9]+$ ]]; then
@@ -146,9 +163,10 @@ if [ -n "$access_token" ] && [ "$clock_valid" -eq 1 ]; then
         --header 'X-XAI-Token-Auth: xai-grok-cli' \
         "$user_url" 2>/dev/null)" || user=""
       user_valid=0
-      if jq -e '
-        type == "object" and .subscriptionTier == "SuperGrokPlus"
-      ' <<<"$user" >/dev/null 2>&1; then
+      api_tier="$(jq -r '.subscriptionTier | if type == "string" then . else "" end' \
+        <<<"$user" 2>/dev/null)" || api_tier=""
+      mapped_tier="$(grok_display_tier_from_api "$api_tier")"
+      if [ -n "$mapped_tier" ]; then
         user_valid=1
       fi
       billing_valid=0
@@ -176,7 +194,7 @@ if [ -n "$access_token" ] && [ "$clock_valid" -eq 1 ]; then
         fi
       fi
       if [ "$billing_valid" -eq 1 ] && [ "$user_valid" -eq 1 ]; then
-        direct_tier="SuperGrok Plus"
+        direct_tier="$mapped_tier"
         direct_source_ts="$(date -u -d "@$now_epoch" +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)" || \
           direct_source_ts=""
         direct_valid=1
