@@ -184,6 +184,11 @@ def render_prompt(
             "Do not replace the task id or eligibility key and do not stop an idle background session.",
         ]
     )
+    if account_id and config.account(account_id).activation_scope == "launch":
+        contract.insert(
+            -3,
+            f"The recorded account {account_id} is the launch account, not a run-long account pin; later credential rotation is permitted.",
+        )
     prompt = "\n\n".join(sections + ["\n".join(contract)])
     if task.use_implement:
         return f"/implement {prompt}\nBACKGROUND_RUN=1"
@@ -869,6 +874,19 @@ def dispatch(
             )
         except Exception as exc:
             raise AmbiguousDispatch("router launched but dispatch bookkeeping failed") from exc
+        if account is not None and account.activation_scope == "launch" and activated:
+            try:
+                if lease_managed:
+                    queue.release_activation_after_dispatch(
+                        task.id, eligibility_key, release_lease,
+                    )
+                else:
+                    _activation(config, account, "release", activation_call)
+                activated = False
+            except Exception as exc:
+                raise AmbiguousDispatch(
+                    "router launched but launch-scoped activation cleanup requires reconciliation"
+                ) from exc
         return DispatchResult(task.id, eligibility_key, provider.id, account_id, job_id, prompt)
     except AmbiguousDispatch as exc:
         claim = queue.claim_for(task.id, eligibility_key)

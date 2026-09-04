@@ -29,13 +29,19 @@ descriptors and accept only bounded regular files. Collector and rotator subproc
 in isolated process groups; timeout kills the group, including descendants. Activation never
 receives unrelated account secret references.
 
+Launch-scoped activation is permitted only by explicit account configuration. It releases a
+pin after both the router job identity and dispatched row are durable while retaining the task
+claim. Run scope remains the default. A failed post-launch release leaves a committed
+`releasing` lease and ambiguous claim for reconciliation rather than pretending the pin moved.
+
 Multi-account providers require a verified activation adapter on every account. A durable
 SQLite lease is created only for a matching dispatch claim. Committed `activating` and
 `releasing` transition states bracket external PIN changes; an interrupted side effect remains
 durable, blocks dispatch, and is reported for reconciliation. Same-account holders share one
 active lease, cross-account switches are rejected, ambiguous outcomes retain their lease, and
-only the last terminal holder releases. Terminal recording and lease deletion commit only after
-a verified release; a failure leaves the `releasing` marker instead of silently unlocking.
+only the last holder releases. Run-scoped holders release at terminal; launch-scoped holders
+release after a proven dispatch. Lease deletion commits only after a verified release; a failure
+leaves the `releasing` marker instead of silently unlocking.
 
 Normalized usage responses must explicitly state provider ID, account ID, and capture time.
 Direct Grok collection is configuration-limited to one account identity, and an omitted usage

@@ -159,6 +159,49 @@ class BonusDrainPackageContractTests(unittest.TestCase):
 
         self.assertTrue((SKILL_ROOT / "services" / "jobs-viewer" / "server.py").is_file())
 
+    def test_example_releases_only_claude_activation_after_launch(self) -> None:
+        example = self.load_json(SKILL_ROOT / "config.example.json")
+        accounts = {account["id"]: account for account in example["accounts"]}
+
+        self.assertEqual(accounts["claude-personal"]["activation_scope"], "launch")
+        self.assertEqual(accounts["claude-business"]["activation_scope"], "launch")
+        self.assertNotIn("activation_scope", accounts["codex-personal"])
+
+        sys.path.insert(0, str(SKILL_ROOT))
+        try:
+            from bonus_drain import config as config_module
+        finally:
+            sys.path.pop(0)
+        validated = config_module.validate_config(
+            example,
+            source_dir=SKILL_ROOT,
+            source_path=SKILL_ROOT / "config.example.json",
+        )
+        self.assertEqual(
+            {account.id: account.activation_scope for account in validated.accounts},
+            {
+                "claude-personal": "launch",
+                "claude-business": "launch",
+                "codex-personal": "run",
+                "grok-personal": "run",
+            },
+        )
+
+        mixed = json.loads(json.dumps(example))
+        next(
+            account for account in mixed["accounts"]
+            if account["id"] == "claude-business"
+        )["activation_scope"] = "run"
+        with self.assertRaisesRegex(
+            config_module.ConfigError,
+            "accounts must share one activation_scope",
+        ):
+            config_module.validate_config(
+                mixed,
+                source_dir=SKILL_ROOT,
+                source_path=SKILL_ROOT / "config.example.json",
+            )
+
     def test_packaged_viewer_unit_preserves_user_installed_router_binaries(self) -> None:
         viewer_unit = SKILL_ROOT / "systemd" / "bonus-drain-viewer.service"
         self.require_file(viewer_unit)

@@ -29,6 +29,8 @@ source private helper functions or invent a second DB path.
    Known-not-launched failure releases it; a post-launch ambiguity holds the claim and any
    activation lease fail-closed for reconciliation. Never claim activation releases
    immediately after ambiguity.
+   A configured launch-scoped activation releases only after a concrete job identity and its
+   dispatched record exist; run-scoped activation remains held through the terminal event.
 7. Use the resolved executable record command embedded in the dispatched prompt. It must
    point to the stable CLI and the JSON graph's database. `BONUS_DB` is deprecated queue-only
    compatibility and cannot retarget the configured graph.

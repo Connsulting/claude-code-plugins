@@ -24,6 +24,13 @@ beneath running jobs. If a multi-account provider has neither an active marker n
 manual dispatch fails closed and requires `--account ACCOUNT_ID`. An explicit account hint
 remains authoritative and fails closed on a conflict.
 
+Account activation defaults to `activation_scope: "run"`, which holds the selected credential
+through the terminal event. Providers that safely reread switched credentials between calls may
+instead configure every account in that provider with `activation_scope: "launch"`. That scope
+releases the external pin only after the router job identity and dispatched row are durable, so
+an independent token rotator can apply its own five-hour threshold while the job continues. The
+recorded account is the launch account; later handoffs belong to the rotator's decision log.
+
 Bonus Drain has no five-hour pacing reserve. Once an account enters its configured drain
 window, it can launch up to its batch cap until it reaches the weekly ceiling.
 
@@ -124,13 +131,13 @@ switch, and releases only its own matching label.
 
 Every account of a provider with more than one configured account must use the shipped,
 verified activation adapter form with a literal expected account and one shared PIN,
-active-label, and rotator domain. Dispatch claims acquire durable SQLite activation leases.
+active-label, rotator domain, and activation scope. Dispatch claims acquire durable SQLite activation leases.
 Committed `activating` and `releasing` states bracket external PIN changes. Concurrent
 launches on one account share the proven activation; a different account is blocked until
-every holder is terminal. Ambiguous router outcomes retain both claim and lease. The last
-terminal record commits a `releasing` marker before removing the PIN and commits its terminal
-row afterward; an interruption leaves durable reconciliation evidence. An ambiguous outcome
-never relinquishes its activation lease immediately.
+every run-scoped holder is terminal or every launch-scoped holder has a proven dispatch. Ambiguous
+router outcomes retain both claim and lease. The last holder commits a `releasing` marker before
+removing the PIN and commits the lease deletion afterward; an interruption leaves durable
+reconciliation evidence. An ambiguous outcome never relinquishes its activation lease immediately.
 
 CLI `auto` is a non-launching, pre-claim `agent-router --dry-run`; its uncertainty is
 retry-safe. After a concrete router launch has been attempted, any uncertainty is

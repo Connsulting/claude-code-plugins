@@ -205,6 +205,143 @@ class KickContractTests(unittest.TestCase):
             prompt.index("When finished, record exactly one terminal event"),
         )
 
+    def test_launch_scoped_activation_releases_after_a_proven_launch(self) -> None:
+        activation = config_module.AdapterConfig(
+            "switch", "activation", (str(self.root / "bin" / "account-switch"),),
+        )
+        alpha = replace(
+            self.config.accounts[0],
+            activation_adapter_id="switch",
+            activation_scope="launch",
+        )
+        cfg = replace(
+            self.config,
+            adapters=(*self.config.adapters, activation),
+            accounts=(alpha, self.config.accounts[1]),
+        )
+        activation_events: list[tuple[str, str]] = []
+
+        with mock.patch.object(
+            dispatcher,
+            "_activation",
+            side_effect=lambda _cfg, account, action, _callback: activation_events.append(
+                (action, account.id)
+            ),
+        ):
+            result = dispatcher.dispatch(
+                cfg,
+                self.queue,
+                task_id="portable",
+                eligibility_key="manual/launch-scope",
+                requested_provider="alpha",
+                router_call=self._router,
+            )
+
+        self.assertEqual(result.job_id, "job-1")
+        self.assertEqual(
+            activation_events,
+            [("activate", "alpha-account"), ("release", "alpha-account")],
+        )
+        self.assertEqual(self.queue.activation_leases(provider_id="alpha"), [])
+        self.assertIsNotNone(self.queue.claim_for("portable", "manual/launch-scope"))
+        self.assertEqual(
+            [event.status for event in self.queue.runs(task_id="portable")],
+            ["dispatched"],
+        )
+        self.assertIn("launch account, not a run-long account pin", result.prompt)
+
+        self.queue.record(
+            "portable",
+            "manual/launch-scope",
+            status="done",
+            provider_id="alpha",
+            account_id="alpha-account",
+        )
+        self.assertIsNone(self.queue.claim_for("portable", "manual/launch-scope"))
+
+    def test_run_scoped_activation_stays_leased_until_terminal(self) -> None:
+        activation = config_module.AdapterConfig(
+            "switch", "activation", (str(self.root / "bin" / "account-switch"),),
+        )
+        alpha = replace(self.config.accounts[0], activation_adapter_id="switch")
+        cfg = replace(
+            self.config,
+            adapters=(*self.config.adapters, activation),
+            accounts=(alpha, self.config.accounts[1]),
+        )
+        activation_events: list[tuple[str, str]] = []
+
+        with mock.patch.object(
+            dispatcher,
+            "_activation",
+            side_effect=lambda _cfg, account, action, _callback: activation_events.append(
+                (action, account.id)
+            ),
+        ):
+            result = dispatcher.dispatch(
+                cfg,
+                self.queue,
+                task_id="portable",
+                eligibility_key="manual/run-scope",
+                requested_provider="alpha",
+                router_call=self._router,
+            )
+
+        self.assertEqual(activation_events, [("activate", "alpha-account")])
+        self.assertEqual(
+            [lease.account_id for lease in self.queue.activation_leases(provider_id="alpha")],
+            ["alpha-account"],
+        )
+        self.assertNotIn("launch account, not a run-long account pin", result.prompt)
+
+    def test_launch_scoped_release_failure_stays_fail_closed(self) -> None:
+        activation = config_module.AdapterConfig(
+            "switch", "activation", (str(self.root / "bin" / "account-switch"),),
+        )
+        alpha = replace(
+            self.config.accounts[0],
+            activation_adapter_id="switch",
+            activation_scope="launch",
+        )
+        cfg = replace(
+            self.config,
+            adapters=(*self.config.adapters, activation),
+            accounts=(alpha, self.config.accounts[1]),
+        )
+
+        def activation_side_effect(
+            _cfg: object, _account: object, action: str, _callback: object,
+        ) -> None:
+            if action == "release":
+                raise dispatcher.DispatchError("release failed")
+
+        with (
+            mock.patch.object(dispatcher, "_activation", side_effect=activation_side_effect),
+            self.assertRaisesRegex(
+                dispatcher.AmbiguousDispatch,
+                "launch-scoped activation cleanup requires reconciliation",
+            ),
+        ):
+            dispatcher.dispatch(
+                cfg,
+                self.queue,
+                task_id="portable",
+                eligibility_key="manual/launch-release-failure",
+                requested_provider="alpha",
+                router_call=self._router,
+            )
+
+        claim = self.queue.claim_for("portable", "manual/launch-release-failure")
+        self.assertIsNotNone(claim)
+        self.assertEqual(claim.state, "ambiguous")
+        self.assertEqual(
+            [event.status for event in self.queue.runs(task_id="portable")],
+            ["dispatched"],
+        )
+        leases = self.queue.activation_leases(provider_id="alpha")
+        self.assertEqual([lease.state for lease in leases], ["releasing"])
+        self.assertFalse(db.doctor(self.queue).ok)
+
     def test_manual_kick_reuses_the_provider_account_with_active_leases(self) -> None:
         from bonus_drain import kick
 

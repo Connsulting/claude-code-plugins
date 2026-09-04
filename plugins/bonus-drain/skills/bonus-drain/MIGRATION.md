@@ -98,9 +98,11 @@ legacy-exclusive model rows remain restricted to providers declaring the reserve
 Initialization also creates the additive `activation_leases` table. It does not synthesize a
 lease for historical rows. Before enabling scout, `doctor` must report no ambiguous claim or
 incomplete activation transition, and every multi-account provider must validate with a
-verified activator on each account. A terminal record releases the last external account PIN
-before its DB transaction commits; release failure preserves the claim/lease for manual
-reconciliation. Back up this table with the rest of the queue for both cutover and rollback.
+verified activator and one shared activation scope across its accounts. Run-scoped activation
+releases the last external PIN at terminal; launch-scoped activation releases it only after the
+router identity and dispatched record are durable. Release failure preserves the claim/lease
+for manual reconciliation. Back up this table with the rest of the queue for both cutover and
+rollback.
 
 Do not enable the viewer until its local or remote mode has been reviewed against
 [SECURITY.md](SECURITY.md).

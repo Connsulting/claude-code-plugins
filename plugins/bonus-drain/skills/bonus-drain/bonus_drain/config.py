@@ -145,6 +145,7 @@ class AccountConfig:
     plan_id: str
     usage_adapter_id: str | None = None
     activation_adapter_id: str | None = None
+    activation_scope: str = "run"
     secret_refs: Mapping[str, str] = field(default_factory=dict)
     reset_adapter_id: str | None = None
 
@@ -457,7 +458,7 @@ def validate_config(
     for index, row in enumerate(account_rows):
         _reject_unknown(row, {
             "id", "provider_id", "plan_id", "usage_adapter_id", "reset_adapter_id",
-            "activation_adapter_id", "secret_refs",
+            "activation_adapter_id", "activation_scope", "secret_refs",
         }, f"accounts[{index}]")
         item_id = _identifier(row.get("id"), f"accounts[{index}].id")
         provider_id = _identifier(row.get("provider_id"), f"accounts[{index}].provider_id")
@@ -470,6 +471,12 @@ def validate_config(
         usage_adapter_id = row.get("usage_adapter_id")
         reset_adapter_id = row.get("reset_adapter_id")
         activation_adapter_id = row.get("activation_adapter_id")
+        activation_scope = _string(
+            row.get("activation_scope", "run"),
+            f"accounts[{index}].activation_scope",
+        )
+        if activation_scope not in {"launch", "run"}:
+            raise ConfigError(f"accounts[{index}].activation_scope must be launch or run")
         if usage_adapter_id is not None:
             usage_adapter_id = _identifier(usage_adapter_id, f"accounts[{index}].usage_adapter_id")
             adapter = adapter_by_id.get(usage_adapter_id)
@@ -485,6 +492,10 @@ def validate_config(
             adapter = adapter_by_id.get(activation_adapter_id)
             if adapter is None or adapter.kind != "activation":
                 raise ConfigError(f"account {item_id} activation adapter is missing or not kind activation")
+        elif activation_scope != "run":
+            raise ConfigError(
+                f"account {item_id} activation_scope requires an activation adapter"
+            )
         accounts.append(
             AccountConfig(
                 item_id,
@@ -493,6 +504,7 @@ def validate_config(
                 usage_adapter_id=usage_adapter_id,
                 reset_adapter_id=reset_adapter_id,
                 activation_adapter_id=activation_adapter_id,
+                activation_scope=activation_scope,
                 secret_refs=_ref_map(row.get("secret_refs"), f"accounts[{index}].secret_refs", secret_ids),
             )
         )
@@ -515,6 +527,7 @@ def validate_config(
         if len(provider_accounts) < 2:
             continue
         activation_domains: set[tuple[str | None, str | None, str | None]] = set()
+        activation_scopes: set[str] = set()
         for account in provider_accounts:
             if not account.activation_adapter_id:
                 raise ConfigError(
@@ -538,9 +551,14 @@ def validate_config(
                 adapter_option(adapter, "--active-path"),
                 adapter_option(adapter, "--rotate"),
             ))
+            activation_scopes.add(account.activation_scope)
         if len(activation_domains) != 1:
             raise ConfigError(
                 f"multi-account provider {provider_id} activation adapters must share one PIN, active proof, and rotator domain"
+            )
+        if len(activation_scopes) != 1:
+            raise ConfigError(
+                f"multi-account provider {provider_id} accounts must share one activation_scope"
             )
 
     direct_grok_providers: set[str] = set()

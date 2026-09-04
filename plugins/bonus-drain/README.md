@@ -127,11 +127,14 @@ that can run those tasks. Explicit provider allowlists and required capabilities
 independent.
 
 Every account of a multi-account provider must use the shipped verified activation form with
-a literal expected account, PIN path, and active-label proof. Claims hold durable SQLite
+a literal expected account, PIN path, active-label proof, and one provider-wide activation
+scope. Claims hold durable SQLite
 activation leases: same-account launches share one switch, cross-account launches wait,
-ambiguous outcomes retain both claim and lease, and only the last terminal record can release
-the lease after verified external release. A failed or interrupted release remains durable and
-requires explicit reconciliation; it must never be treated as immediately released.
+and ambiguous outcomes retain both claim and lease. Run scope holds through terminal. Launch
+scope releases only after a proven router job identity and durable dispatched record, allowing
+a credential rotator to enforce five-hour thresholds during the run. A failed or interrupted
+release remains durable and requires explicit reconciliation; it must never be treated as
+immediately released.
 
 CLI `auto` classification is a non-launching `agent-router --dry-run` before a claim, so its
 uncertainty is retry-safe. Once a concrete launch has been attempted, timeout, malformed

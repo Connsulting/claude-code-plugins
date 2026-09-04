@@ -151,6 +151,7 @@
         "usage_adapter_id": {"$ref": "#/$defs/id"},
         "reset_adapter_id": {"$ref": "#/$defs/id"},
         "activation_adapter_id": {"$ref": "#/$defs/id"},
+        "activation_scope": {"type": "string", "enum": ["launch", "run"], "default": "run"},
         "secret_refs": {"type": "object", "additionalProperties": {"$ref": "#/$defs/id"}}
       }
     },

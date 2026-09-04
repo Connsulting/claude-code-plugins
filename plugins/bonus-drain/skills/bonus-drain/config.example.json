@@ -108,12 +108,12 @@
     {
       "id": "claude-personal", "provider_id": "claude",
       "plan_id": "claude-personal-plan", "usage_adapter_id": "claude-personal-usage",
-      "activation_adapter_id": "claude-personal-activation"
+      "activation_adapter_id": "claude-personal-activation", "activation_scope": "launch"
     },
     {
       "id": "claude-business", "provider_id": "claude",
       "plan_id": "claude-business-plan", "usage_adapter_id": "claude-business-usage",
-      "activation_adapter_id": "claude-business-activation"
+      "activation_adapter_id": "claude-business-activation", "activation_scope": "launch"
     },
     {
       "id": "codex-personal", "provider_id": "codex",

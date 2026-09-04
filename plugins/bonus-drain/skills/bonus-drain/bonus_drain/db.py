@@ -689,6 +689,75 @@ class QueueDB:
             ).fetchall()
         return [ActivationLease(**dict(row)) for row in rows]
 
+    def release_activation_after_dispatch(
+        self,
+        task_id: str,
+        eligibility_key: str,
+        release: Callable[[], None],
+    ) -> bool:
+        """Release a launch-scoped lease after its router launch is durably recorded.
+
+        The claim and dispatched run remain live.  Only the activation lease is removed, so
+        providers that can safely rotate credentials between calls do not stay pinned for the
+        full background run.  The last holder performs the external release through the same
+        committed ``releasing`` transition used by terminal bookkeeping.
+        """
+
+        self.initialize()
+        needs_release = False
+        with self._transaction() as connection:
+            lease = connection.execute(
+                """SELECT provider_id,account_id,state FROM activation_leases
+                     WHERE task_id=? AND eligibility_key=?""",
+                (task_id, eligibility_key),
+            ).fetchone()
+            if lease is None:
+                return False
+            if lease["state"] != "active":
+                raise QueueError("launch-scoped activation lease requires reconciliation")
+            dispatched = connection.execute(
+                """SELECT 1 FROM runs
+                     WHERE task=? AND eligibility_key=? AND status='dispatched'
+                       AND provider_id=? AND account_id=?""",
+                (task_id, eligibility_key, lease["provider_id"], lease["account_id"]),
+            ).fetchone()
+            if dispatched is None:
+                raise QueueError("activation cannot release before a proven dispatch")
+            holders = int(connection.execute(
+                """SELECT COUNT(*) FROM activation_leases
+                     WHERE provider_id=? AND account_id=?""",
+                (lease["provider_id"], lease["account_id"]),
+            ).fetchone()[0])
+            if holders > 1:
+                cursor = connection.execute(
+                    """DELETE FROM activation_leases
+                         WHERE task_id=? AND eligibility_key=? AND state='active'""",
+                    (task_id, eligibility_key),
+                )
+                if cursor.rowcount != 1:
+                    raise QueueError("launch-scoped activation release requires reconciliation")
+                return False
+            cursor = connection.execute(
+                """UPDATE activation_leases SET state='releasing'
+                     WHERE task_id=? AND eligibility_key=? AND state='active'""",
+                (task_id, eligibility_key),
+            )
+            if cursor.rowcount != 1:
+                raise QueueError("launch-scoped activation release requires reconciliation")
+            needs_release = True
+
+        if needs_release:
+            release()
+            with self._transaction() as connection:
+                cursor = connection.execute(
+                    """DELETE FROM activation_leases
+                         WHERE task_id=? AND eligibility_key=? AND state='releasing'""",
+                    (task_id, eligibility_key),
+                )
+                if cursor.rowcount != 1:
+                    raise QueueError("launch-scoped activation release requires reconciliation")
+        return needs_release
+
     def release_claim(self, task_id: str, eligibility_key: str, *, reason: str | None = None) -> bool:
         del reason
         self.initialize()
