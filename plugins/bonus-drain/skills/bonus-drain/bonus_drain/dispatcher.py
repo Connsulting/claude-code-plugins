@@ -20,6 +20,7 @@ from .db import (
     LEGACY_EXCLUSIVE_CAPABILITY,
     QueueDB,
     Task,
+    canonical_model,
     cycle_from_key,
     task_requires_legacy_exclusive,
 )
@@ -846,8 +847,9 @@ def dispatch(
             "run", "--provider", provider.dispatch.provider, "--dir", task.cwd,
             "--name", f"Bonus: {task.id}",
         ]
-        if task.model:
-            launch_argv.extend(["--model", task.model])
+        model = canonical_model(task.model)
+        if model:
+            launch_argv.extend(["--model", model])
         if _uses_claude_mcp_scoping(provider):
             mcp_path = _materialize_mcp_config(config, task, eligibility_key)
             if mcp_path is not None:

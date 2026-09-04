@@ -356,20 +356,9 @@ def get_gates(n_elig: int, n_codex: int, n_grok: int,
     key = (n_elig, n_codex, n_grok, grok_json, codex_json)
     if _gates_cache["val"] is not None and _gates_cache["key"] == key and now - _gates_cache["t"] < 60:
         return _gates_cache["val"]
-    out: dict = {"acct": [], "codex_acct": [], "limit_config": {}}
+    out: dict = {"acct": [], "codex_acct": []}
     try:
-        # The viewer only repeats the planner's arithmetic when it can use the same configured
-        # limit. It does not infer a rate from the usage display or legacy shell defaults.
         cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
-        for account in cfg.accounts:
-            limits = [limit for limit in cfg.limits if limit.plan_id == account.plan_id]
-            if len(limits) == 1:
-                limit = limits[0]
-                out["limit_config"][account.id] = {
-                    "ceiling": limit.ceiling_percent,
-                    "per_window": limit.max_percent_per_window,
-                    "window_seconds": limit.pacing_window_seconds,
-                }
         result = subprocess.run(
             ["bash", "-c", _GATES_SH, "gates", str(n_elig), str(n_codex),
              str(n_grok), grok_json, codex_json, str(int(now))],
@@ -1189,7 +1178,7 @@ def _card_name(engine: str, label: str) -> str:
 
 def _card_state(c: dict) -> tuple[str, str]:
     """The one-line verdict in a card's top-right, in the same precedence the gates apply:
-    drain window timing -> ceiling -> 5h throttle -> weekly pacing. Each line names the rule
+    drain window timing -> weekly ceiling. Each line names the rule
     that is actually holding, so a stalled drain explains itself without opening the scout log."""
     if c["batch"] > 0:
         return f'dispatching · batch {c["batch"]}/{c["batch_n"]}', "acc"
@@ -1205,48 +1194,13 @@ def _card_state(c: dict) -> tuple[str, str]:
                 else "closed · no reset signal"), "dim"
     if c["u7"] >= c["ceiling"]:
         return "capped · ceiling reached", "warn"
-    # hot is None for an engine with no 5h window at all (Codex), so there is no throttle to trip.
-    if c["hot"] is not None and _f(c["u5"]) >= _f(c["hot"]):
-        return "throttled · 5h window hot", "warn"
     if c["eligible"] <= 0:
         return "open · nothing eligible", "dim"
     # Only one Claude account drains per tick (the open one whose reset is nearest), so an open
     # account that was not selected is queued behind another rather than held by a gate.
     if c.get("behind"):
         return f'queued · behind {c["behind"]}', "dim"
-    drainable = c.get("drainable")
-    if drainable is not None:
-        if drainable > 0:
-            return f"ready · {drainable:g} pts drainable", "acc"
-        return f"holding · {c['reserve']:g} pts reserved", "dim"
-    return "holding · planner unavailable", "dim"
-
-
-def _pacing_budget(used, reset, ceiling, max_per_window, window_seconds) -> tuple[float, float] | None:
-    """Mirror the planner's reserve arithmetic for the card's explicit status copy."""
-    try:
-        used, reset, ceiling = float(used), float(reset), float(ceiling)
-        max_per_window, window_seconds = float(max_per_window), float(window_seconds)
-    except (TypeError, ValueError):
-        return None
-    remaining = reset - time.time()
-    if remaining <= 0 or window_seconds <= 0:
-        return None
-    windows = max(1, math.ceil(remaining / window_seconds))
-    reserve = min(ceiling, max_per_window * windows)
-    return max(0.0, ceiling - used - reserve), reserve
-
-
-def _attach_pacing(cards: list[dict], gates: dict) -> None:
-    limits = gates.get("limit_config") or {}
-    for card in cards:
-        limit = limits.get(card.get("account_id"))
-        if not isinstance(limit, dict):
-            continue
-        budget = _pacing_budget(card.get("u7"), card.get("r7"), limit.get("ceiling"),
-                                limit.get("per_window"), limit.get("window_seconds"))
-        if budget is not None:
-            card["drainable"], card["reserve"] = budget
+    return f"ready · {max(0, _f(c['ceiling']) - _f(c['u7'])):g} pts headroom", "acc"
 
 
 def _week(c: dict) -> dict:
@@ -1432,7 +1386,7 @@ def _account_row(c: dict) -> str:
     """One account as a row rather than a card. The state line moves from a 10px caption in the
     corner to the headline, because it names the rule that is actually binding and is therefore
     the answer to "why is nothing happening". The budget, the pace and the countdown sit beside it
-    on one scan line; the pacing arithmetic, the 5h throttle and the window counts fold away.
+    on one scan line; the window counts fold away.
 
     Everything that is identical across accounts - the eligible-task counts - has moved to the
     section header. Printed per card it read as a per-account number, which it never was.
@@ -1489,21 +1443,8 @@ def _account_row(c: dict) -> str:
     win = []
     if c["windows"] > 0:
         win.append(("state", f'open, {c["windows"]} windows left', ""))
-        # The pacing arithmetic earns its space only where it decides something. On a closed
-        # window it used to render "window closed", restating the state line one row above.
-        headroom = max(0.0, ceiling - u7) if known else 0.0
-        per_window = headroom / c["windows"] if known else 0.0
-        if not known:
-            win.append(("pacing", "no usage reading", "dim"))
-        elif c["windows"] <= 1:
-            win.append(("pacing", "final window, drains all", "acc"))
-        elif per_window >= c["ppw"]:
-            win.append(("pacing", f"{per_window:.1f}% / window, clear", "ok"))
-        else:
-            win.append(("pacing", f'{per_window:.1f}% / window, hold (< {_f(c["ppw"]):g}%)', "dim"))
     elif c["opens_in"] is not None:
         win.append(("opens in", dur(c["opens_in"]), "acc"))
-        win.append(("pacing", "evaluated when it opens", "dim"))
     else:
         win.append(("state", "closed, no reset signal", "dim"))
     if c.get("behind"):
@@ -1514,13 +1455,6 @@ def _account_row(c: dict) -> str:
             f'<div class="dl"><span>{esc(k)}</span>'
             f'<b{" class=" + chr(34) + t + chr(34) if t else ""}>{esc(v)}</b></div>'
             for k, v, t in rows)
-
-    if c["hot"] is None:
-        five = '<div class="dnil">no 5h window on this plan</div>'
-    else:
-        five = (dls([("used", f'{_f(c["u5"]):g}%', ""),
-                     ("throttles at", f'{_f(c["hot"]):g}%', "")])
-                + _bar(c["u5"], c["hot"], "sm"))
 
     return f"""
           <details class="arow">
@@ -1538,7 +1472,6 @@ def _account_row(c: dict) -> str:
             <div class="adet">
               <div class="dgroup"><div class="dh">weekly</div>{dls(wk)}</div>
               <div class="dgroup"><div class="dh">drain window</div>{dls(win)}</div>
-              <div class="dgroup"><div class="dh">5h throttle</div>{five}</div>
             </div>
           </details>"""
 
@@ -1932,7 +1865,6 @@ def render_bonus_body() -> str:
     cards = _claude_cards(gates, usage, len(remaining), coord, c_batch)
     cards.extend(_codex_cards(gates, codex, n_codex, coord, x_batch))
     cards.extend(_grok_cards(gates, grok, n_grok, coord, g_batch))
-    _attach_pacing(cards, gates)
     scout_at = next_scout()
     scout_note = (f"next scout {rel(scout_at)}" if scout_at else "next scout unavailable")
 
@@ -1994,6 +1926,7 @@ def render_bonus_body() -> str:
                 {schedule_badge(t["kind"], t.get("last_ts"))}
                 <span class="qrepo" title="{esc(t.get("cwd", ""))}">{cwd}</span></div>
               <div class="qsub" title="{esc(goal)}">{esc(goal_short)}</div>
+              <div class="qdesc" hidden>{esc(goal)}</div>
             </div>
             <div class="qact">{_run_buttons(t)}
               <button class="task-toggle ionly" data-task-id="{esc(t["id"])}" data-active="0"
@@ -2101,7 +2034,6 @@ def render_bonus_body() -> str:
       {"".join(_account_row(c) for c in cards)}
       </div>
     </div>
-    {_pacing_strip(anchor, gates, get_dispatch_times(cycle), c_batch)}
     {flight}
 
     <div class="sec">
@@ -2121,6 +2053,13 @@ def render_bonus_body() -> str:
     </div>
     {disabled_sec}
     <footer>refreshes every 60s · cycle {cycle}</footer>
+    <dialog id="qmodal" class="qmodal" aria-labelledby="qmodal-title" tabindex="-1">
+      <form method="dialog" class="qmodal-hd">
+        <h2 id="qmodal-title" class="qmodal-title"></h2>
+        <button class="qmodal-x" type="submit" aria-label="Close">×</button>
+      </form>
+      <div class="qmodal-body" id="qmodal-body"></div>
+    </dialog>
     """
 
 
@@ -2573,6 +2512,21 @@ footer{margin:34px 0 0;font-size:10.5px;color:var(--dim2);letter-spacing:.04em}
 .qmain{flex:1 1 300px;min-width:0}
 .qtitle{font-size:13.5px;line-height:1.35}
 .qsub{font-size:11.5px;color:var(--dim2);margin-top:8px;line-height:1.5;text-wrap:pretty}
+.qmodal{background:var(--panel);color:var(--fg);border:1px solid var(--line);padding:0;
+  width:min(36rem,calc(100vw - 28px));max-height:min(80vh,720px)}
+.qmodal:focus{outline:none}
+.qmodal::backdrop{background:rgba(0,0,0,.72)}
+.qmodal-hd{display:flex;align-items:flex-start;gap:12px;margin:0;padding:16px 16px 12px;
+  border-bottom:1px solid var(--line)}
+.qmodal-title{margin:0;flex:1;min-width:0;font-size:14px;font-weight:500;letter-spacing:-.01em;
+  line-height:1.35}
+.qmodal-x{flex:none;min-width:44px;min-height:44px;margin:-8px -8px 0 0;padding:0;font:inherit;
+  font-size:22px;line-height:1;color:var(--dim);background:none;border:0;cursor:pointer}
+.qmodal-x:hover{color:var(--fg)}
+.qmodal-x:focus{outline:none}
+.qmodal-x:focus-visible{outline:1px solid var(--dim);outline-offset:-1px}
+.qmodal-body{padding:16px;font-size:12.5px;color:var(--dim);white-space:pre-wrap;
+  overflow:auto;word-break:break-word;line-height:1.55;max-height:min(60vh,560px)}
 .qmeta{display:flex;gap:13px;align-items:center;flex-wrap:wrap;margin-top:5px;min-height:20px;
   font-size:11px;color:var(--dim2)}
 .qmeta-icon{display:inline-flex;align-items:center;gap:5px;line-height:1;color:var(--dim)}
@@ -2676,9 +2630,12 @@ table.grid{width:100%;border-collapse:collapse;font-size:12px}
 /* On a phone the queue row cannot fit its metadata AND its four controls, and the controls are
    the only part you can't get anywhere else - an engine button hanging off the right edge is a
    button that does not exist. Drop the goal line and the FORCE label, let the buttons take the
-   full row width under the title, and hide the schedule tab's second-line cron expression. */
+   full row width under the title, and hide the schedule tab's second-line cron expression.
+   The full goal stays in `.qdesc`; a tap on the row (not the controls) opens it in a dialog. */
 @media(max-width:640px){
   .qsub{display:none}.runlbl{display:none}.freq .sched{display:none}
+  .qrow{cursor:pointer;-webkit-tap-highlight-color:transparent}
+  .qrow .qact{cursor:auto}
   .qact{width:100%;justify-content:flex-end}
   .lnote{flex-basis:100%}
   .tldays{margin:0}
@@ -2870,6 +2827,62 @@ SCRIPT = """
     if(reset)reset.addEventListener('click',function(){
       GROUPS.forEach(function(g){state[g]=[]});apply();
     });
+    apply();
+  })();
+  // Phone: the goal line is hidden so the engine buttons fit, so a tap on the row
+  // (not its controls) opens the full description in a dialog. Desktop already
+  // shows the goal under the title and ignores the tap.
+  (function(){
+    var dlg=document.getElementById('qmodal');
+    var heading=document.getElementById('qmodal-title');
+    var body=document.getElementById('qmodal-body');
+    var list=document.getElementById('qlist');
+    if(!dlg||!heading||!body||!list)return;
+    var MQ=window.matchMedia('(max-width:640px)');
+    function mobile(){return MQ.matches}
+    function rows(){return Array.prototype.slice.call(list.querySelectorAll('.qrow:not(.off)'))}
+    function apply(){
+      var on=mobile();
+      rows().forEach(function(row){
+        var main=row.querySelector('.qmain');
+        if(!main)return;
+        if(on){
+          main.setAttribute('role','button');
+          main.setAttribute('tabindex','0');
+          main.setAttribute('aria-haspopup','dialog');
+        }else{
+          main.removeAttribute('role');
+          main.removeAttribute('tabindex');
+          main.removeAttribute('aria-haspopup');
+        }
+      });
+      if(!on&&dlg.open)dlg.close();
+    }
+    function openRow(row){
+      if(!row||row.classList.contains('off'))return;
+      var t=row.querySelector('.qtitle');
+      var d=row.querySelector('.qdesc')||row.querySelector('.qsub');
+      heading.textContent=t?t.textContent.trim():'';
+      body.textContent=d?d.textContent:'';
+      if(typeof dlg.showModal==='function'){dlg.showModal();dlg.focus();}
+    }
+    list.addEventListener('click',function(ev){
+      if(!mobile())return;
+      if(ev.target.closest('.qact'))return;
+      openRow(ev.target.closest('#qlist .qrow'));
+    });
+    list.addEventListener('keydown',function(ev){
+      if(!mobile())return;
+      if(ev.key!=='Enter'&&ev.key!==' ')return;
+      var main=ev.target.closest('.qmain');
+      if(!main||!list.contains(main))return;
+      ev.preventDefault();
+      openRow(main.closest('.qrow'));
+    });
+    dlg.addEventListener('click',function(ev){
+      if(ev.target===dlg)dlg.close();
+    });
+    if(MQ.addEventListener)MQ.addEventListener('change',apply);
     apply();
   })();
   var saved='bonus';

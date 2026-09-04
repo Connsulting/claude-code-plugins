@@ -129,26 +129,22 @@
     {
       "id": "claude-personal-weekly", "plan_id": "claude-personal-plan",
       "window_seconds": 604800, "ceiling_percent": 98, "lead_seconds": 108000,
-      "batch_size": 6, "max_percent_per_window": 5,
-      "estimated_percent_per_job": 0.75, "pacing_window_seconds": 18000
+      "batch_size": 6
     },
     {
       "id": "claude-business-weekly", "plan_id": "claude-business-plan",
       "window_seconds": 604800, "ceiling_percent": 98, "lead_seconds": 108000,
-      "batch_size": 6, "max_percent_per_window": 5,
-      "estimated_percent_per_job": 0.75, "pacing_window_seconds": 18000
+      "batch_size": 6
     },
     {
       "id": "codex-personal-weekly", "plan_id": "codex-personal-plan",
       "window_seconds": 604800, "ceiling_percent": 98, "lead_seconds": 108000,
-      "batch_size": 6, "max_percent_per_window": 5,
-      "estimated_percent_per_job": 0.75, "pacing_window_seconds": 18000
+      "batch_size": 6
     },
     {
       "id": "grok-personal-weekly", "plan_id": "grok-personal-plan",
       "window_seconds": 604800, "ceiling_percent": 98, "lead_seconds": 108000,
-      "batch_size": 6, "max_percent_per_window": 5,
-      "estimated_percent_per_job": 0.75, "pacing_window_seconds": 18000
+      "batch_size": 6
     }
   ],
   "viewer": {

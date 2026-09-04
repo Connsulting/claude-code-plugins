@@ -24,12 +24,8 @@ beneath running jobs. If a multi-account provider has neither an active marker n
 manual dispatch fails closed and requires `--account ACCOUNT_ID`. An explicit account hint
 remains authoritative and fails closed on a conflict.
 
-Each limit may set `max_percent_per_window` as a hard declining reserve, not a per-tick
-allowance. The planner retains that percentage for every remaining
-`pacing_window_seconds` interval before reset. For example, a 5% reserve with 25 hours
-remaining in five-hour intervals retains 25%; it can launch only the estimated work above
-that target, and closes the account once it reaches it. An estimate is required whenever a
-nonzero reserve is configured, so an unknown job cost cannot spend through the boundary.
+Bonus Drain has no five-hour pacing reserve. Once an account enters its configured drain
+window, it can launch up to its batch cap until it reaches the weekly ceiling.
 
 ## Requirements
 

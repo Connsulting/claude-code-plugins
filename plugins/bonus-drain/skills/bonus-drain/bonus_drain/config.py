@@ -157,9 +157,6 @@ class LimitConfig:
     ceiling_percent: float
     lead_seconds: int
     batch_size: int
-    max_percent_per_window: float = 0.0
-    estimated_percent_per_job: float | None = None
-    pacing_window_seconds: int = 18_000
 
 
 @dataclass(frozen=True)
@@ -573,15 +570,12 @@ def validate_config(
     for index, row in enumerate(limit_rows):
         _reject_unknown(row, {
             "id", "plan_id", "window_seconds", "ceiling_percent", "lead_seconds",
-            "batch_size", "max_percent_per_window", "estimated_percent_per_job",
-            "pacing_window_seconds",
+            "batch_size",
         }, f"limits[{index}]")
         item_id = _identifier(row.get("id"), f"limits[{index}].id")
         plan_id = _identifier(row.get("plan_id"), f"limits[{index}].plan_id")
         if plan_id not in plan_by_id:
             raise ConfigError(f"limit {item_id} references missing plan {plan_id}")
-        estimate_raw = row.get("estimated_percent_per_job")
-        estimate = None if estimate_raw is None else _number(estimate_raw, f"limits[{index}].estimated_percent_per_job", minimum=0.000001, maximum=100)
         limits.append(
             LimitConfig(
                 item_id,
@@ -590,9 +584,6 @@ def validate_config(
                 _number(row.get("ceiling_percent"), f"limits[{index}].ceiling_percent", minimum=0, maximum=100),
                 _integer(row.get("lead_seconds"), f"limits[{index}].lead_seconds", minimum=1),
                 _integer(row.get("batch_size"), f"limits[{index}].batch_size", minimum=1),
-                _number(row.get("max_percent_per_window", 0), f"limits[{index}].max_percent_per_window", minimum=0, maximum=100),
-                estimate,
-                _integer(row.get("pacing_window_seconds", 18_000), f"limits[{index}].pacing_window_seconds", minimum=1),
             )
         )
 

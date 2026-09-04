@@ -23,6 +23,8 @@ TERMINAL_STATUSES = frozenset({"done", "skipped", "failed"})
 LEGACY_EXCLUSIVE_CAPABILITY = "legacy-exclusive"
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 TASK_SIZES = ("tiny", "small", "medium", "large", "huge")
+CANONICAL_FABLE_MODEL = "claude-fable-5-1"
+_FABLE_MODEL_ALIASES = frozenset({"fable", "claude-fable-5"})
 RECURRING_COOLDOWNS_SECONDS = {
     "weekly": 4 * 24 * 60 * 60,
     "monthly": 28 * 24 * 60 * 60,
@@ -80,12 +82,28 @@ def _json_tuple(value: Any) -> tuple[str, ...]:
     return tuple(str(item) for item in parsed)
 
 
+def canonical_model(model: str | None) -> str | None:
+    """Persist and launch Fable pins as claude-fable-5-1."""
+
+    if not isinstance(model, str):
+        return None
+    stripped = model.strip() or None
+    if stripped in _FABLE_MODEL_ALIASES:
+        return CANONICAL_FABLE_MODEL
+    return stripped
+
+
 def legacy_exclusive_model(model: str | None) -> bool:
     """Compatibility classification; the generic planner never calls this helper."""
 
-    if not model:
+    pinned = canonical_model(model)
+    if not pinned:
         return False
-    return model.startswith("claude-") or model in {"opus", "sonnet", "haiku", "fable"} or "[1m]" in model
+    return (
+        pinned.startswith("claude-")
+        or pinned in {"opus", "sonnet", "haiku", "fable"}
+        or "[1m]" in pinned
+    )
 
 
 def task_requires_legacy_exclusive(task: "Task") -> bool:
@@ -374,7 +392,7 @@ class QueueDB:
             "constraints": values.get("constraints"), "precondition": values.get("precondition"),
             "done_when": values.get("done_when"), "created_at": str(values.get("created_at") or utc_now()),
             "active": int(bool(values.get("active", True))), "claude_only": int(bool(values.get("claude_only", False))),
-            "model": values.get("model"), "mcp": values.get("mcp"),
+            "model": canonical_model(values.get("model")), "mcp": values.get("mcp"),
             "use_implement": int(bool(values.get("use_implement", False))),
             "allowed": json.dumps(list(allowed)) if allowed else None,
             "required": json.dumps(list(required)) if required else None,
@@ -868,7 +886,7 @@ class QueueDB:
         return self._task_from_row(row)
 
     def set_model(self, task_id: str, model: str | None) -> None:
-        self._update_task(task_id, "model", model or None)
+        self._update_task(task_id, "model", canonical_model(model))
 
     def set_mcp(self, task_id: str, mcp: str | None) -> None:
         canonical = mcp.strip() if mcp is not None else None

@@ -120,21 +120,7 @@ def _limit_admission(limit: LimitConfig, reading: Any, now_epoch: int) -> tuple[
     if used >= limit.ceiling_percent:
         return 0, reset, f"at ceiling for limit {limit.id}"
 
-    windows_left = max(1, math.ceil(remaining / limit.pacing_window_seconds))
-    reserve = min(limit.ceiling_percent, limit.max_percent_per_window * windows_left)
-    drainable = limit.ceiling_percent - used - reserve
-    if drainable <= 0:
-        return 0, reset, f"at reserve target for limit {limit.id}"
-
     allowed = limit.batch_size
-    if limit.estimated_percent_per_job is not None:
-        allowed = min(allowed, math.floor(drainable / limit.estimated_percent_per_job))
-        if allowed <= 0:
-            return 0, reset, f"remaining budget is below one job estimate for limit {limit.id}"
-    elif reserve > 0:
-        # A reserve is a hard safety boundary. Without a job-cost estimate, one launch
-        # could cross it, so do not reinterpret missing accounting as spare capacity.
-        return 0, reset, f"cannot enforce reserve without a job estimate for limit {limit.id}"
     return allowed, reset, None
 
 

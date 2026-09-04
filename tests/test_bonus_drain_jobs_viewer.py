@@ -61,9 +61,9 @@ class JobsViewerContractTests(unittest.TestCase):
 
     def test_existing_ui_is_preserved_without_login_or_generic_viewer_copy(self) -> None:
         expected_frontend_hashes = {
-            "CSS": "f0c9a7ac4761e4dcd9ce928905e3d6fb396631dc204dd3f464e13f3eedf69885",
+            "CSS": "8c76d577e44e344f5b83c5fca507382593920faedb56526b379eadabf769280b",
             "ICON_SPRITE": "333ef2163122e3450f95ea008ef6eaaad6ecb8f2562244bfb02e6317a4c06a03",
-            "SCRIPT": "31188ca22e8f8162c4e9b46294d8ed670c7a2186c1520ae628c21cee5e6c1f16",
+            "SCRIPT": "1d8b73dfc68ad1701442d9d920ff39e0381ccc33f55fbc55d006913a006b3d8c",
             "PAGE": "69071b11da43869de11c5211fe5fed4a976f38f6499c4b70ce9205845b4033de",
         }
         self.assertEqual(
@@ -132,10 +132,7 @@ class JobsViewerContractTests(unittest.TestCase):
                 "batch": 0, "u7": 68, "ceiling": 99, "windows": 3,
                 "opens_in": None, "hot": None, "eligible": 1, "behind": "",
             }
-            card["drainable"], card["reserve"] = self.viewer._pacing_budget(
-                68, 1_000 + 13 * 3600, 99, 5, 5 * 3600,
-            )
-        self.assertEqual(self.viewer._card_state(card), ("ready · 16 pts drainable", "acc"))
+        self.assertEqual(self.viewer._card_state(card), ("ready · 31 pts headroom", "acc"))
         with mock.patch.object(self.viewer, "list_timers", return_value=[
             {"unit": "other.timer", "next": 1},
             {"unit": "bonus-drain-scout.timer", "next": 2_000},
@@ -686,6 +683,28 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertIn("bonusMobileFolds", script)
         self.assertIn("max-width:640px", script)
 
+    def test_queue_rows_keep_the_full_goal_for_the_mobile_modal(self) -> None:
+        long_goal = ("x" * 200) + " <script>alert(1)</script>"
+        body = self._bonus_body([dict(self.QUEUE_FIXTURE[0], title="Long goal job", goal=long_goal)])
+        self.assertIn('id="qmodal"', body)
+        self.assertIn('aria-labelledby="qmodal-title"', body)
+        self.assertIn('class="qdesc" hidden>', body)
+        self.assertIn(".qmodal::backdrop", self.viewer.CSS)
+        self.assertIn("qmodal-title", self.viewer.SCRIPT)
+
+        row_at = body.index('class="qtitle">Long goal job')
+        row = body[row_at:body.index('id="qnone"', row_at)]
+        desc_open = row.index('class="qdesc" hidden>')
+        desc = row[desc_open:row.index("</div>", desc_open)]
+        self.assertIn("x" * 200, desc)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", desc)
+        self.assertNotIn("<script>alert(1)</script>", desc)
+
+        sub_open = row.index('class="qsub"')
+        sub_text = row[row.index(">", sub_open) + 1:row.index("</div>", sub_open)]
+        self.assertTrue(sub_text.endswith("…"))
+        self.assertLess(len(sub_text), 180)
+
     def test_tapping_a_mobile_fold_header_opens_it_in_a_browser(self) -> None:
         chrome = shutil.which("google-chrome") or shutil.which("google-chrome-stable")
         if chrome is None:
@@ -757,6 +776,76 @@ class JobsViewerContractTests(unittest.TestCase):
             "JSON.parse(localStorage.getItem('bonusMobileFolds')||'{}').header?'1':'0');"
         )
         self.assertIn('data-header-fold="1"', persisted)
+
+    def test_tapping_a_mobile_queue_row_opens_the_description_modal_in_a_browser(self) -> None:
+        chrome = shutil.which("google-chrome") or shutil.which("google-chrome-stable")
+        if chrome is None:
+            self.skipTest("Chrome is unavailable")
+        with (
+            mock.patch.object(self.viewer, "render_bonus_body",
+                              return_value=self._bonus_body(self.QUEUE_FIXTURE)),
+            mock.patch.object(self.viewer, "render_schedule_body", return_value="scheduled body"),
+        ):
+            page = self.viewer.render_page().decode()
+        mobile_page = page.replace(
+            "<head>",
+            "<head><script>window.matchMedia=function(q){"
+            "return{matches:String(q).indexOf('max-width')>=0,media:q,"
+            "addEventListener:function(){},removeEventListener:function(){}}}"
+            "</script>",
+            1,
+        )
+
+        def dump(html: str, extra: str) -> str:
+            with tempfile.TemporaryDirectory() as work:
+                target = Path(work) / "page.html"
+                target.write_text(html + f"<script>{extra}</script>")
+                completed = subprocess.run(
+                    [
+                        chrome, "--headless=new", "--no-sandbox", "--disable-gpu",
+                        "--disable-dev-shm-usage", "--no-proxy-server",
+                        f"--user-data-dir={work}/profile", "--dump-dom", target.as_uri(),
+                    ],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, timeout=60, check=False,
+                )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            return completed.stdout
+
+        def dialog(dom: str) -> str:
+            start = dom.index('id="qmodal"')
+            start = dom.rfind("<dialog", 0, start)
+            return dom[start:dom.index("</dialog>", start) + len("</dialog>")]
+
+        opened = dump(
+            mobile_page,
+            "document.querySelector('.qrow .qtitle').click();",
+        )
+        markup = dialog(opened)
+        self.assertIn(" open", markup)
+        self.assertIn("Weekly Claude sweep", markup)
+        self.assertIn("sweep", markup[markup.index('id="qmodal-body"'):])
+        self.assertIn('role="button"', opened[opened.index('class="qtitle">Weekly Claude sweep') - 80:])
+
+        controls = dump(
+            mobile_page,
+            "document.querySelector('.qrow .qact').click();",
+        )
+        self.assertNotIn(" open", dialog(controls))
+
+        desktop = dump(
+            page,
+            "document.querySelector('.qrow .qtitle').click();",
+        )
+        self.assertNotIn(" open", dialog(desktop))
+        self.assertNotIn('role="button"', desktop[desktop.index('class="qtitle">Weekly Claude sweep') - 80:])
+
+        closed = dump(
+            mobile_page,
+            "document.querySelector('.qrow .qtitle').click();"
+            "document.querySelector('.qmodal-x').click();",
+        )
+        self.assertNotIn(" open", dialog(closed))
 
 
 if __name__ == "__main__":

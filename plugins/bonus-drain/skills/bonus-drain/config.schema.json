@@ -164,10 +164,7 @@
         "window_seconds": {"type": "integer", "minimum": 1},
         "ceiling_percent": {"type": "number", "minimum": 0, "maximum": 100},
         "lead_seconds": {"type": "integer", "minimum": 1},
-        "batch_size": {"type": "integer", "minimum": 1},
-        "max_percent_per_window": {"type": "number", "minimum": 0, "maximum": 100, "description": "Percentage reserve retained for each remaining pacing window; zero disables reserve pacing."},
-        "estimated_percent_per_job": {"type": "number", "exclusiveMinimum": 0, "maximum": 100},
-        "pacing_window_seconds": {"type": "integer", "minimum": 1}
+        "batch_size": {"type": "integer", "minimum": 1}
       }
     }
   }
