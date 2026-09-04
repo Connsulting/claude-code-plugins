@@ -40,6 +40,12 @@ _OWNED_NAME = ".bonus-drain-owned.json"
 _INSTALL_NAME = ".bonus-drain-install.json"
 _WRAPPER_MARKER = "# managed-by: bonus-drain lifecycle v1"
 _DEFAULT_VERSION = "0.3.1"
+_BYTECODE_CACHE_NAME = re.compile(
+    r"^(?P<module>[A-Za-z_][A-Za-z0-9_]*)\."
+    r"(?P<tag>[A-Za-z][A-Za-z0-9_]*-\d+)(?:\.opt-\d+)?\.pyc$"
+)
+
+
 @dataclass(frozen=True)
 class InstalledPaths:
     version: str
@@ -172,6 +178,22 @@ def _owned_payload(root: Path) -> dict[str, str]:
     return dict(files)
 
 
+def _is_owned_source_bytecode(root: Path, relative: str, owned: Mapping[str, str]) -> bool:
+    """Recognize only interpreter cache files derived from an owned Python source."""
+
+    cache = Path(relative)
+    if cache.parent.name != "__pycache__":
+        return False
+    match = _BYTECODE_CACHE_NAME.fullmatch(cache.name)
+    if match is None:
+        return False
+    source = cache.parent.parent / f"{match.group('module')}.py"
+    if source.as_posix() not in owned:
+        return False
+    cache_path = root / cache
+    return cache_path.is_file() and not cache_path.is_symlink()
+
+
 def _verify_version_dir(root: Path) -> dict[str, str]:
     if root.is_symlink() or not root.is_dir():
         raise OwnershipError(f"unsafe version directory: {root}")
@@ -182,7 +204,10 @@ def _verify_version_dir(root: Path) -> dict[str, str]:
         if path.is_file() or path.is_symlink()
     }
     expected = set(owned) | {_OWNED_NAME}
-    unknown = sorted(actual - expected)
+    unknown = sorted(
+        relative for relative in actual - expected
+        if not _is_owned_source_bytecode(root, relative, owned)
+    )
     missing = sorted(set(owned) - actual)
     changed = sorted(
         rel for rel, digest in owned.items()
