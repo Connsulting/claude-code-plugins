@@ -161,6 +161,10 @@ Every dispatched task must record exactly one terminal event through the command
 its prompt. The prompt must include task ID, kind, eligibility key, concrete provider and
 account, DB/config identity, precondition, constraints, and done-when.
 
+A background task must not exit blocked or waiting for input while its claim and activation
+lease remain live. If continuing safely would require new input or authority, it records
+`failed` with that blocker before exiting.
+
 Replaying the same terminal status for one task and eligibility key is idempotent. A conflicting
 terminal status or pre-existing duplicate terminal history is a reconciliation error, never a
 second terminal event.

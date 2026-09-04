@@ -183,6 +183,28 @@ class KickContractTests(unittest.TestCase):
         for forbidden in ("run-now.sh", "/bash", "claude", "codex", "grok", "account-switch"):
             self.assertNotIn(forbidden, flattened)
 
+    def test_dispatched_prompt_terminalizes_instead_of_leaving_a_blocked_lease(self) -> None:
+        prompt = dispatcher.render_prompt(
+            self.config,
+            self.queue.task("portable"),
+            "manual/terminal-before-blocked",
+            "alpha",
+            "alpha-account",
+        )
+
+        self.assertIn(
+            "Never leave this background run blocked, waiting for input, or otherwise non-terminal.",
+            prompt,
+        )
+        self.assertIn(
+            "record failed with the blocker before exiting",
+            prompt,
+        )
+        self.assertLess(
+            prompt.index("record failed with the blocker before exiting"),
+            prompt.index("When finished, record exactly one terminal event"),
+        )
+
     def test_manual_kick_reuses_the_provider_account_with_active_leases(self) -> None:
         from bonus_drain import kick
 

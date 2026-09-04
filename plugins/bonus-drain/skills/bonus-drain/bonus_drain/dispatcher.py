@@ -176,6 +176,8 @@ def render_prompt(
         ]
     contract.extend(
         [
+            "Never leave this background run blocked, waiting for input, or otherwise non-terminal.",
+            "If safe progress requires new input or authority, record failed with the blocker before exiting; do not request input or set a blocked status.",
             f"The concrete provider for this accounted run is {provider_id}.",
             "When finished, record exactly one terminal event with this command (replace only the status and summary placeholders):",
             f"  {_record_line(config, task, eligibility_key, provider_id, account_id)}",
