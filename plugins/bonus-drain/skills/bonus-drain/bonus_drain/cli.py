@@ -385,6 +385,12 @@ def _command(args: argparse.Namespace) -> int:
     if command == "refresh":
         cfg = _load_config(args, graph_required=True)
         records = usage.refresh_all(cfg, now_epoch=_now(args))
+        try:
+            db.QueueDB(cfg.database).record_usage(records.values())
+        except Exception:
+            # History is observability, not control flow: a refresh must still report the
+            # readings it just fetched even if the queue database is unwritable.
+            pass
         _json({"accounts": [record.to_dict() for record in records.values()]})
         return 0 if all(record.fresh for record in records.values()) else 1
     if command == "scout":

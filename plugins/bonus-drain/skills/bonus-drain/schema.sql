@@ -76,3 +76,15 @@ CREATE INDEX IF NOT EXISTS idx_runs_cycle ON runs(cycle);
 CREATE INDEX IF NOT EXISTS idx_claims_task ON dispatch_claims(task_id);
 CREATE INDEX IF NOT EXISTS idx_activation_provider_account
   ON activation_leases(provider_id, account_id);
+
+CREATE TABLE IF NOT EXISTS usage_history (
+  ts           TEXT    NOT NULL,
+  provider_id  TEXT    NOT NULL,
+  account_id   TEXT    NOT NULL,
+  limit_id     TEXT    NOT NULL,
+  used_percent REAL,
+  resets_at    INTEGER,
+  PRIMARY KEY(ts, provider_id, account_id, limit_id)
+);
+CREATE INDEX IF NOT EXISTS idx_usage_history_account
+  ON usage_history(account_id, limit_id, ts);

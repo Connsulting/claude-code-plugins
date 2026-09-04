@@ -60,6 +60,25 @@ DB_PATH = Path(os.environ.get(
     "BONUS_DB", str(Path.home() / ".local" / "state" / "bonus-drain" / "queue.db")
 ))
 DRAIN_LEAD_MAX_HOURS = int(os.environ.get("DRAIN_LEAD_MAX_HOURS", "30"))
+
+
+def _config_lead_hours(provider_id: str) -> int | None:
+    """Lead window for `provider_id`, read from the validated config the planner gates on.
+
+    `DRAIN_LEAD_MAX_HOURS` predates per-limit `lead_seconds` and is only a shell default, so it
+    goes stale the moment config.json changes and the UI then draws a drain window the scout
+    will not honour. Returns None when the provider's limits disagree, for the same reason the
+    rotation strip refuses to name a lead the lanes do not share: no single number is true.
+    """
+    try:
+        c = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
+        plan_provider = {p.id: p.provider_id for p in c.plans}
+        hours = {int(lim.lead_seconds // 3600)
+                 for lim in c.limits if plan_provider.get(lim.plan_id) == provider_id}
+    except Exception:
+        return None
+    return hours.pop() if len(hours) == 1 else None
+
 CLAUDE_ACCOUNTS_STORE = Path(os.environ.get(
     "BONUS_ACCOUNTS_STORE", str(Path.home() / ".config" / "bonus-drain" / "accounts" / "claude")
 ))
@@ -1529,7 +1548,7 @@ def _claude_cards(gates: dict, usage: dict | None, n_elig: int, coord: str, batc
     ceiling, and therefore its own end-of-week drain window - collapsing them into a single
     "claude" number would show a weekly percentage that belongs to neither). One card from
     usage.sh otherwise."""
-    lead = int(_f(gates.get("lead_hours"), DRAIN_LEAD_MAX_HOURS))
+    lead = _config_lead_hours("claude") or int(_f(gates.get("lead_hours"), DRAIN_LEAD_MAX_HOURS))
     win_h = int(_f(gates.get("window_hours"), 5))
     hot = _f(gates.get("five_hour_max"), 75)
     ppw = _f(gates.get("pct_per_window"), 2.5)
@@ -1591,7 +1610,7 @@ def _codex_cards(gates: dict, cx: dict | None, n_codex: int, coord: str, batch: 
     Only the ACTIVE account can carry a batch: bonus-drain dispatches Codex through whatever
     the provider credential store holds, which is the account the configured activator selected.
     Drawing the batch on both cards would claim work is landing somewhere it cannot."""
-    lead = int(_f(gates.get("codex_lead_hours"), DRAIN_LEAD_MAX_HOURS))
+    lead = _config_lead_hours("codex") or int(_f(gates.get("codex_lead_hours"), DRAIN_LEAD_MAX_HOURS))
     win_h = int(_f(gates.get("window_hours"), 5))
     accounts = gates.get("codex_acct") or []
     active = gates.get("codex_active") or ""
@@ -1655,8 +1674,8 @@ def _grok_cards(gates: dict, grok: dict | None, n_grok: int,
     # top rotation while the durable snapshot is absent or a refresh is still in flight; the
     # normal unknown-reading state explains the missing telemetry without hiding the engine.
     grok = grok or {}
-    lead = int(_f(gates.get("grok_lead_hours", gates.get("lead_hours")),
-                  DRAIN_LEAD_MAX_HOURS))
+    lead = _config_lead_hours("grok") or int(_f(gates.get("grok_lead_hours", gates.get("lead_hours")),
+                                               DRAIN_LEAD_MAX_HOURS))
     reset = grok.get("weekly_reset")
     windows = windows_until_reset(reset, lead, int(_f(gates.get("window_hours"), 5)))
     opens = None
@@ -1684,7 +1703,7 @@ def _pacing_strip(anchor, gates: dict, dispatches: list[float], batch: int) -> s
     of the strip IS the pacing: front-loaded bars mean the taper failed, an empty run of them
     means it held. The last window is dashed - it always drains, whatever the math says, because
     unspent weekly tokens expire at the reset."""
-    lead = int(_f(gates.get("lead_hours"), DRAIN_LEAD_MAX_HOURS))
+    lead = _config_lead_hours("claude") or int(_f(gates.get("lead_hours"), DRAIN_LEAD_MAX_HOURS))
     win_h = int(_f(gates.get("window_hours"), 5))
     if not anchor:
         return ""

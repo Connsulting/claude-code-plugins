@@ -284,6 +284,35 @@ class QueueDB:
                 (utc_now(),),
             )
 
+    def record_usage(self, snapshots) -> int:
+        """Append one row per (account, limit) reading so the weekly curve is recoverable.
+
+        The `*.usage.json` snapshots are overwritten on every refresh, so without this the only
+        observable is the latest point and no review can show a trajectory. Stale (`fresh=False`)
+        readings are skipped rather than written twice: a repeated cache read is not a new
+        measurement, and PRIMARY KEY(ts, ...) makes a same-second re-run idempotent.
+        """
+        rows = []
+        for snapshot in snapshots:
+            if not getattr(snapshot, "fresh", True):
+                continue
+            stamp = snapshot.captured_at
+            for limit_id, reading in (snapshot.limits or {}).items():
+                rows.append((
+                    utc_now(), snapshot.provider_id, snapshot.account_id, limit_id,
+                    reading.get("used_percent"), reading.get("resets_at"),
+                ))
+        if not rows:
+            return 0
+        with self._connect() as connection:
+            connection.executemany(
+                "INSERT OR IGNORE INTO usage_history"
+                "(ts, provider_id, account_id, limit_id, used_percent, resets_at) "
+                "VALUES(?,?,?,?,?,?)",
+                rows,
+            )
+        return len(rows)
+
     @staticmethod
     def _additive_migrations(connection: sqlite3.Connection) -> None:
         task_columns = {
@@ -335,6 +364,17 @@ class QueueDB:
               version INTEGER PRIMARY KEY,
               applied_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS usage_history (
+              ts           TEXT    NOT NULL,
+              provider_id  TEXT    NOT NULL,
+              account_id   TEXT    NOT NULL,
+              limit_id     TEXT    NOT NULL,
+              used_percent REAL,
+              resets_at    INTEGER,
+              PRIMARY KEY(ts, provider_id, account_id, limit_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_usage_history_account
+              ON usage_history(account_id, limit_id, ts);
             CREATE INDEX IF NOT EXISTS idx_runs_eligibility ON runs(task, eligibility_key);
             CREATE INDEX IF NOT EXISTS idx_claims_task ON dispatch_claims(task_id);
             CREATE INDEX IF NOT EXISTS idx_activation_provider_account
