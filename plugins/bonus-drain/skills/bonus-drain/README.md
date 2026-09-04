@@ -277,5 +277,8 @@ systemctl --user disable --now \
 ```
 
 Uninstall verifies hashes and refuses if an installed version, wrapper, or unit has been
-changed or contains an unknown file. Move operator additions elsewhere and retry; do not
-delete the state directories as part of runtime removal.
+changed or contains an unknown file. Interpreter-generated `__pycache__` bytecode is
+recognized only when its cache-tagged name maps to a manifest-owned Python source file;
+unknown source, executable, configuration, and arbitrary files still fail ownership.
+Move operator additions elsewhere and retry; do not delete the state directories as part
+of runtime removal.

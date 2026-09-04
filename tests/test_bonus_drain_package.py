@@ -79,6 +79,46 @@ class BonusDrainPackageContractTests(unittest.TestCase):
         self.assertIsInstance(value, dict, f"{path} must contain a JSON object")
         return value
 
+    def installed_config(self, home: Path, config_path: Path) -> None:
+        state = home / ".local" / "state" / "bonus-drain"
+        state.mkdir(parents=True)
+        config_path.write_text(
+            json.dumps({
+                "schema_version": 1,
+                "database": str(state / "queue.db"),
+                "cache_dir": str(home / ".cache" / "bonus-drain"),
+                "record_command": [str(home / ".local" / "bin" / "bonus-drain"), "record"],
+                "secret_refs": [],
+                "adapters": [
+                    {"id": "router", "kind": "agent-router", "argv": ["/bin/true"]},
+                    {"id": "usage", "kind": "usage", "argv": ["/bin/true"]},
+                ],
+                "providers": [{
+                    "id": "provider-a",
+                    "account_mode": "single",
+                    "dispatch": {"adapter_id": "router", "provider": "provider-a"},
+                }],
+                "plans": [{"id": "plan-a", "provider_id": "provider-a"}],
+                "accounts": [{
+                    "id": "account-a",
+                    "provider_id": "provider-a",
+                    "plan_id": "plan-a",
+                    "usage_adapter_id": "usage",
+                }],
+                "limits": [{
+                    "id": "weekly",
+                    "plan_id": "plan-a",
+                    "window_seconds": 604800,
+                    "ceiling_percent": 98,
+                    "lead_seconds": 108000,
+                    "batch_size": 1,
+                }],
+                "viewer": {"bind": "127.0.0.1", "mutations_enabled": False},
+                "pr_exceptions": [],
+            }),
+            encoding="utf-8",
+        )
+
     def plugin_files(self) -> list[Path]:
         self.require_plugin()
         return sorted(
@@ -288,6 +328,175 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             f"terminal record executable is unavailable: {missing_recorder}",
             report.diagnostics,
         )
+
+    def test_interpreter_bytecode_for_owned_modules_does_not_invalidate_installation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary) / "home"
+            config_path = home / ".config" / "bonus-drain" / "config.json"
+            subprocess.run(
+                [str(SKILL_ROOT / "install.sh"), "--home", str(home)],
+                check=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            config_path.parent.mkdir(parents=True)
+            self.installed_config(home, config_path)
+            current = home / ".local" / "lib" / "bonus-drain" / "current"
+            environment = dict(os.environ)
+            environment.pop("PYTHONDONTWRITEBYTECODE", None)
+            environment.update({
+                "HOME": str(home),
+                "BONUS_DRAIN_CONFIG": str(config_path),
+                "XDG_CACHE_HOME": str(home / ".cache"),
+                "XDG_CONFIG_HOME": str(home / ".config"),
+                "XDG_STATE_HOME": str(home / ".local" / "state"),
+            })
+            cli = home / ".local" / "bin" / "bonus-drain"
+            subprocess.run(
+                [str(cli), "init"],
+                check=True,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-c",
+                    "import sys; sys.path.insert(0, sys.argv[1]); import bonus_drain.db",
+                    str(current),
+                ],
+                check=True,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            generated = sorted(current.rglob("*.pyc"))
+            self.assertEqual(
+                [path.name for path in generated],
+                [
+                    f"__init__.{sys.implementation.cache_tag}.pyc",
+                    f"db.{sys.implementation.cache_tag}.pyc",
+                ],
+                "fixture must reproduce ordinary interpreter cache files",
+            )
+
+            completed = subprocess.run(
+                [str(cli), "doctor", "--json"],
+                check=False,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertTrue(json.loads(completed.stdout)["ok"])
+
+    def test_installation_still_rejects_unknown_non_cache_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary) / "home"
+            subprocess.run(
+                [str(SKILL_ROOT / "install.sh"), "--home", str(home)],
+                check=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            current = home / ".local" / "lib" / "bonus-drain" / "current"
+            unknown_files = (
+                "bonus_drain/unknown.py",
+                "bin/unknown-executable",
+                "unknown-config.json",
+                "arbitrary-file",
+                f"bonus_drain/__pycache__/unknown.{sys.implementation.cache_tag}.pyc",
+            )
+            for relative in unknown_files:
+                with self.subTest(relative=relative):
+                    path = current / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("not owned\n", encoding="utf-8")
+                    if relative.endswith("executable"):
+                        path.chmod(0o755)
+                    completed = subprocess.run(
+                        [str(home / ".local" / "bin" / "bonus-drain"), "status", "--json"],
+                        check=False,
+                        env={**os.environ, "HOME": str(home)},
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                    )
+                    self.assertEqual(completed.returncode, 1)
+                    payload = json.loads(completed.stdout)
+                    self.assertFalse(payload["ok"])
+                    self.assertIn(relative, "\n".join(payload["problems"]))
+                    path.unlink()
+
+    def test_fresh_installed_cli_stays_healthy_across_repeated_doctor_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary) / "home"
+            config_path = home / ".config" / "bonus-drain" / "config.json"
+            config_path.parent.mkdir(parents=True)
+            subprocess.run(
+                [str(SKILL_ROOT / "install.sh"), "--home", str(home)],
+                check=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.installed_config(home, config_path)
+            environment = dict(os.environ)
+            environment.pop("PYTHONDONTWRITEBYTECODE", None)
+            environment.update({
+                "HOME": str(home),
+                "BONUS_DRAIN_CONFIG": str(config_path),
+                "XDG_CACHE_HOME": str(home / ".cache"),
+                "XDG_CONFIG_HOME": str(home / ".config"),
+                "XDG_STATE_HOME": str(home / ".local" / "state"),
+            })
+            cli = home / ".local" / "bin" / "bonus-drain"
+            subprocess.run(
+                [str(cli), "init"],
+                check=True,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            results = [
+                subprocess.run(
+                    [str(cli), "doctor", "--json"],
+                    check=False,
+                    env=environment,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                for _ in range(2)
+            ]
+            caches = list((home / ".local" / "lib" / "bonus-drain" / "current").rglob("*.pyc"))
+
+        for index, completed in enumerate(results, start=1):
+            self.assertEqual(
+                completed.returncode,
+                0,
+                f"doctor pass {index} failed:\n{completed.stdout}\n{completed.stderr}",
+            )
+            self.assertTrue(json.loads(completed.stdout)["ok"])
+        self.assertEqual(caches, [], "ordinary installed CLI must not write bytecode caches")
 
     def test_claude_and_codex_marketplaces_point_at_the_plugin_root(self) -> None:
         self.require_plugin()
