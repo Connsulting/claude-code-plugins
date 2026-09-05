@@ -8,8 +8,10 @@ import re
 import shlex
 import stat
 import subprocess
+import sys
 import tempfile
 import time
+import uuid
 from hashlib import sha256
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -87,9 +89,133 @@ class DispatchResult:
     account_id: str | None
     job_id: str
     prompt: str
+    factory_run_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+# Factory telemetry (the /implement runs ledger). The dispatcher creates the runs row at
+# launch so a driver that never emits telemetry still leaves a joinable row. This is a
+# measurement side effect only: it never blocks, fails, or reorders a dispatch.
+FACTORY_RUN_ID_LINE = "FACTORY_RUN_ID"
+FACTORY_TELEMETRY_ENV = "BONUS_DRAIN_FACTORY_TELEMETRY"
+FACTORY_TELEMETRY_DEFAULT = Path.home() / ".claude" / "skills" / "implement" / "factory-telemetry.py"
+FACTORY_TELEMETRY_TIMEOUT_SECONDS = 30.0
+# The writer stamps runs.session_id from these when the payload has none; the dispatcher's
+# own session must never be recorded as the driver's.
+FACTORY_SESSION_ENV_KEYS = (
+    "CLAUDE_CODE_SESSION_ID",
+    "GROK_SESSION_ID",
+    "CODEX_SESSION_ID",
+    "CODEX_THREAD_ID",
+)
+
+
+def new_factory_run_id(task: Task) -> str:
+    return f"drain-{task.id}-{uuid.uuid4().hex[:12]}"
+
+
+def factory_telemetry_script() -> Path | None:
+    raw = os.environ.get(FACTORY_TELEMETRY_ENV)
+    if raw is not None and not raw.strip():
+        return None
+    path = Path(raw).expanduser() if raw else FACTORY_TELEMETRY_DEFAULT
+    return path if path.is_file() else None
+
+
+def factory_repo_name(cwd: str) -> str:
+    """The driver records the repo basename; guess it from the task cwd.
+
+    A cwd that is the parent of several repos (monorepo-of-repos) yields the parent's
+    name. The driver's own run event replaces the guess, so this only has to be a
+    reasonable label for rows the driver never touches.
+    """
+    path = Path(cwd).expanduser()
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        top = completed.stdout.strip()
+        if completed.returncode == 0 and top:
+            return Path(top).name
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return path.name or str(path)
+
+
+def factory_run_payload(
+    task: Task, provider: ProviderConfig, router_decision_id: Any,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "factory_version": "v1",
+        "repo": factory_repo_name(task.cwd),
+        "tier": "quick",
+        "launch_mode": "background",
+        "status": "dispatched",
+        "drain_task_id": task.id,
+    }
+    if isinstance(router_decision_id, int) and not isinstance(router_decision_id, bool):
+        payload["router_decision_id"] = router_decision_id
+    return payload
+
+
+def record_factory_run(
+    task: Task,
+    provider: ProviderConfig,
+    run_id: str,
+    router_decision_id: Any,
+    telemetry_call: Callable[[list[str], dict[str, Any]], Any] | None = None,
+) -> bool:
+    """Create the placeholder runs row for a launched /implement task.
+
+    Returns True when the row was written. Every failure is swallowed and reported on
+    stderr: the dispatch has already happened and its bookkeeping is authoritative.
+    """
+    try:
+        payload = factory_run_payload(task, provider, router_decision_id)
+        if telemetry_call is not None:
+            telemetry_call(["record", "run", "--run-id", run_id], payload)
+            return True
+        script = factory_telemetry_script()
+        if script is None:
+            return False
+        env = {key: value for key, value in os.environ.items() if key not in FACTORY_SESSION_ENV_KEYS}
+        with tempfile.NamedTemporaryFile(
+            "w", prefix="bonus-drain-factory-run-", suffix=".json", delete=False,
+            encoding="utf-8",
+        ) as handle:
+            json.dump(payload, handle, sort_keys=True)
+            payload_path = Path(handle.name)
+        try:
+            completed = subprocess.run(
+                [
+                    sys.executable, str(script), "record", "run",
+                    "--run-id", run_id, "--json-file", str(payload_path),
+                ],
+                capture_output=True, text=True, env=env,
+                timeout=FACTORY_TELEMETRY_TIMEOUT_SECONDS, check=False,
+            )
+        finally:
+            try:
+                payload_path.unlink()
+            except OSError:
+                pass
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout).strip()[:500]
+            print(
+                f"bonus-drain: factory run row for {task.id} not written: {detail}",
+                file=sys.stderr,
+            )
+            return False
+        return True
+    except Exception as exc:  # noqa: BLE001 - telemetry must never fail a dispatch
+        print(
+            f"bonus-drain: factory run row for {task.id} not written: {str(exc)[:500]}",
+            file=sys.stderr,
+        )
+        return False
 
 
 def provider_compatible(task: Task, provider: ProviderConfig) -> bool:
@@ -147,8 +273,14 @@ def render_prompt(
     eligibility_key: str,
     provider_id: str,
     account_id: str | None,
+    factory_run_id: str | None = None,
 ) -> str:
-    """Render one task and the stable terminal-record contract."""
+    """Render one task and the stable terminal-record contract.
+
+    ``factory_run_id`` is appended as an exact ``FACTORY_RUN_ID=<id>`` line after
+    ``BACKGROUND_RUN=1`` on /implement tasks so the driver's telemetry upserts onto the
+    runs row the dispatcher already created.
+    """
 
     sections = [f"Goal: {task.goal}"]
     for label, value in (
@@ -191,7 +323,10 @@ def render_prompt(
         )
     prompt = "\n\n".join(sections + ["\n".join(contract)])
     if task.use_implement:
-        return f"/implement {prompt}\nBACKGROUND_RUN=1"
+        rendered = f"/implement {prompt}\nBACKGROUND_RUN=1"
+        if factory_run_id:
+            rendered += f"\n{FACTORY_RUN_ID_LINE}={factory_run_id}"
+        return rendered
     return prompt
 
 
@@ -768,8 +903,13 @@ def dispatch(
     requested_provider: str,
     router_call: Callable[..., Any] | None = None,
     activation_call: Callable[[str, str], Any] | None = None,
+    telemetry_call: Callable[[list[str], dict[str, Any]], Any] | None = None,
 ) -> DispatchResult:
-    """Classify if requested, claim, activate, and launch through agent-router once."""
+    """Classify if requested, claim, activate, and launch through agent-router once.
+
+    ``telemetry_call`` is a test seam for the factory run row; runtime callers leave it
+    unset so the row is written through ``factory-telemetry.py``.
+    """
 
     task = queue.task(task_id)
     if task is None:
@@ -849,7 +989,10 @@ def dispatch(
         else:
             _activation(config, account, "activate", activation_call)
             activated = account is not None and activation_call is not None
-        prompt = render_prompt(config, task, eligibility_key, provider.id, account_id)
+        factory_run_id = new_factory_run_id(task) if task.use_implement else None
+        prompt = render_prompt(
+            config, task, eligibility_key, provider.id, account_id, factory_run_id,
+        )
         launch_argv = list(adapter.argv) + [
             "run", "--provider", provider.dispatch.provider, "--dir", task.cwd,
             "--name", f"Bonus: {task.id}",
@@ -874,6 +1017,12 @@ def dispatch(
             )
         except Exception as exc:
             raise AmbiguousDispatch("router launched but dispatch bookkeeping failed") from exc
+        if factory_run_id is not None:
+            # After the queue's own dispatched record so a telemetry problem can never
+            # leave the claim in a state that looks unlaunched.
+            record_factory_run(
+                task, provider, factory_run_id, response.get("log_id"), telemetry_call,
+            )
         if account is not None and account.activation_scope == "launch" and activated:
             try:
                 if lease_managed:
@@ -887,7 +1036,9 @@ def dispatch(
                 raise AmbiguousDispatch(
                     "router launched but launch-scoped activation cleanup requires reconciliation"
                 ) from exc
-        return DispatchResult(task.id, eligibility_key, provider.id, account_id, job_id, prompt)
+        return DispatchResult(
+            task.id, eligibility_key, provider.id, account_id, job_id, prompt, factory_run_id,
+        )
     except AmbiguousDispatch as exc:
         claim = queue.claim_for(task.id, eligibility_key)
         if claim is not None and claim.state == "claimed":
