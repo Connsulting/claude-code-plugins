@@ -17,7 +17,7 @@ recurrence cooldown, provider compatibility, atomic claims, or activation leases
 
 ## Dependencies
 
-Use `--depends-on parent-id,other-parent-id` on add, or edit the prerequisite list in the UI.
+Use `--depends-on parent-id,other-parent-id` on add, or update the prerequisite list from a planning thread with the CLI.
 The graph can branch and join. A child becomes ready only when **every prerequisite is done**.
 Failed and skipped prerequisites leave it waiting; they do not launch a child or mark it failed.
 A waiting child creates no run, consumes no claim, and does not call the router.
@@ -55,7 +55,8 @@ contracts cannot be edited. A failed/skipped task must first be explicitly reque
 requeue behavior still removes the matching run history; append-only retry attempts are deferred.
 
 The viewer shows readiness, execution mode, work group, source reference, and prerequisite
-progress, with filters for each workflow facet. Editing pauses page refresh. Actual new
+progress, with filters for each workflow facet. Rotation and provider usage remain visible above the queue.
+Task contracts are edited through planning threads and the CLI; the viewer has no job editor. Actual new
 launches record manual or bonus provenance; terminal events inherit it. Old rows remain
 origin unknown. The scheduled value is reserved for future queue-backed timer integration.
 
@@ -84,6 +85,6 @@ Front its loopback listener with a separately owned Tailscale Serve HTTPS port.
 The preview has a copy of tasks, run history, and cached capacity. Copied running rows are
 historical snapshot evidence, not proof that this preview owns those jobs. Four clearly labeled
 example tasks demonstrate a dependency chain without inferring dependencies for real work.
-All execution is disabled. Task edits and requeues affect the copy. Do not enable a scout or
+All execution is disabled. Requeues affect the copy. Task editing remains a CLI operation. Do not enable a scout or
 refresher against it. Stop the preview process and remove only its Tailscale Serve port when
 review finishes; keep the copied state until its owner chooses to discard it.

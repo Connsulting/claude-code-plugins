@@ -349,6 +349,28 @@ emit windows_left_claude "$WLC"; emit windows_left_codex "$WLX"; emit windows_le
 _gates_cache: dict = {"t": 0.0, "key": None, "val": None}
 
 
+def _preview_account_gates(cfg, gates: dict) -> None:
+    """Display copied normalized readings without copying any rotator credentials.
+
+    Live views retain their account-store display. A preview has only the normalized usage
+    cache, including its last captured readings; it never refreshes or activates an account.
+    """
+    snapshots = graph_usage.read_all(cfg)
+    for provider, field in (("claude", "acct"), ("codex", "codex_acct")):
+        accounts = []
+        for account in cfg.accounts_for_provider(provider):
+            limits = [limit for limit in cfg.limits if limit.plan_id == account.plan_id]
+            if not limits:
+                continue
+            weekly = max(limits, key=lambda limit: limit.window_seconds)
+            snapshot = snapshots.get((provider, account.id))
+            reading = snapshot.limits.get(weekly.id, {}) if snapshot else {}
+            accounts.append({"label": account.id, "ceiling": weekly.ceiling_percent,
+                             "u5": None, "u7": reading.get("used_percent"),
+                             "r7": reading.get("resets_at")})
+        gates[field] = accounts
+
+
 def get_gates(n_elig: int, n_codex: int, n_grok: int,
               grok_usage: dict | None, codex_usage: dict | None = None) -> dict:
     """Read-only planner view, keyed by the cached Codex and Grok provider snapshots."""
@@ -435,6 +457,8 @@ def get_gates(n_elig: int, n_codex: int, n_grok: int,
             out["coordinator"] = next_gate["provider_id"]
     except Exception:
         pass
+    if PREVIEW:
+        _preview_account_gates(graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG")), out)
     _gates_cache.update(t=now, key=key, val=out)
     return out
 
@@ -1158,45 +1182,6 @@ def _work_meta(t: dict) -> str:
     edges = "".join(f'<li><span class="dep-dot {"done" if d["satisfied"] else "waiting"}"></span>{esc(d["title"])} <code>{esc(d["id"])}</code> <span class="dimtxt">{esc(d["status"])}</span></li>' for d in dependencies)
     dependency_html = f'<details class="dependencies"><summary>{sum(d["satisfied"] for d in dependencies)}/{len(dependencies)} prerequisites complete</summary><ul>{edges}</ul></details>' if dependencies else ""
     return f'<div class="work-meta"><span class="work-state {esc(state)}">{esc(state)}</span><span>{esc(label)}</span>{group}{source_html}</div><div class="readiness-reason">{esc(status.get("reason", "Ready to run manually"))}</div>{dependency_html}'
-
-
-def _edit_button(t: dict) -> str:
-    if not MUTATIONS_ENABLED:
-        return ""
-    fields = {key: t.get(key) for key in ("id", "title", "priority", "size", "cwd", "goal", "context", "constraints", "precondition", "done_when", "execution_mode", "source_ref", "work_group", "depends_on")}
-    return f'<button class="task-edit" data-contract="{esc(json.dumps(fields))}" aria-label="Edit {esc(t["title"])}">Edit</button>'
-
-
-def _editor_dialog() -> str:
-    try:
-        with _db() as connection:
-            prerequisites = connection.execute(
-                "SELECT t.id,t.title,(SELECT status FROM runs r WHERE r.task=t.id "
-                "ORDER BY rowid_pk DESC LIMIT 1) AS status FROM tasks t "
-                "WHERE t.kind='oneoff' ORDER BY t.title,t.id"
-            ).fetchall()
-    except sqlite3.Error:
-        prerequisites = []
-    options = "".join(f'<option value="{esc(t["id"])}">{esc(t["title"])} · {esc(t["status"] or "queued")} [{esc(t["id"])}]</option>' for t in prerequisites)
-    fields = "".join(f'<label>{label}<textarea name="{key}" rows="{rows}"></textarea></label>' for key, label, rows in (
-        ("goal", "Goal", 3), ("context", "Context", 3), ("constraints", "Constraints / authority", 3),
-        ("precondition", "Precondition", 2), ("done_when", "Done when", 2)))
-    return f"""<dialog id="work-editor" class="work-editor" aria-labelledby="edit-title">
-      <form id="work-edit-form">
-        <div class="editor-heading"><h2 id="edit-title">Edit queued task</h2><button type="button" id="edit-close" aria-label="Close editor">×</button></div>
-        <p id="edit-task-id" class="dimtxt"></p>
-        <label>Title<input name="title" required></label>
-        <div class="editor-grid"><label>Execution<select name="execution_mode"><option value="manual">Manual — wait for me</option><option value="bonus">Bonus — use spare capacity</option></select></label>
-        <label>Priority<select name="priority">{"".join(f'<option value="{n}">P{n}</option>' for n in range(5))}</select></label></div>
-        <div class="editor-grid"><label>Work group<input name="work_group" placeholder="e.g. Release preparation"></label><label>Size<select name="size"><option value="">Unknown (legacy)</option>{"".join(f'<option>{size}</option>' for size in SIZE_LEVEL)}</select></label></div>
-        <label>Source thread / plan<input name="source_ref" placeholder="Link or thread reference"></label>
-        <label>Find prerequisites<input id="dependency-search" type="search" placeholder="Search by title or task ID"></label>
-        <label>Depends on<select name="depends_on" multiple size="6">{options}</select></label>
-        <p class="dimtxt">Every prerequisite must be a one-off task that finishes done. Failed and skipped tasks keep this task waiting.</p>
-        <label>Working directory<input name="cwd" required></label>{fields}
-        <p id="edit-error" role="alert"></p>
-        <div class="editor-actions"><button type="button" id="edit-cancel">Cancel</button><button type="submit" id="edit-save">Save changes</button></div>
-      </form></dialog>"""
 
 
 def _run_buttons(t: dict) -> str:
@@ -2037,7 +2022,7 @@ def render_bonus_body() -> str:
               <div class="qdesc" hidden>{esc(goal)}</div>
               {_work_meta(t)}
             </div>
-            <div class="qact">{_edit_button(t)}{_run_buttons(t)}
+            <div class="qact">{_run_buttons(t)}
               <button class="task-toggle ionly" data-task-id="{esc(t["id"])}" data-active="0"
                       aria-label="Disable this job" title="Disable this job"
                       >{busy_button(ico("ban"))}</button>
@@ -2126,8 +2111,19 @@ def render_bonus_body() -> str:
       <span class="dimtxt">your async work queue</span>
     </div>
     </div>
-    {'<div class="preview-banner">PREVIEW · copied queue · edits stay here · execution disabled</div>' if PREVIEW else ''}
+    {'<div class="preview-banner">PREVIEW · copied queue and usage snapshot · execution disabled</div>' if PREVIEW else ''}
     <div class="work-summary"><span><b>{len(remaining)}</b> queued</span><span><b>{sum(t.get("readiness", {}).get("state", "ready") == "ready" for t in remaining)}</b> ready</span><span><b>{sum(t.get("readiness", {}).get("state") == "waiting" for t in remaining)}</b> waiting on dependencies</span><span><b>{len(inflight)}</b> running</span></div>
+    <div class="vbar {v_tone}"><span class="vdot"></span><div class="vmain"><b>{esc(v_label)}</b><div class="vtext">{v_text}</div><div class="vsub">{v_sub}</div></div></div>
+    {_rotation(cards)}
+    <div class="rows mfold" data-fold="drain">
+      <div class="rowhd mfold-sum"><span><i class="caret"></i>usage · provider capacity</span>
+        <span>{esc(scout_note)} &middot; {len(remaining)} jobs &middot;
+          {ico("claude")}{n_claude} Claude &middot; {ico("codex")}{n_codex} Codex &middot;
+          {ico("grok")}{n_grok} Grok eligible</span></div>
+      <div class="mfold-body">
+      {"".join(_account_row(c) for c in cards)}
+      </div>
+    </div>
     {flight}
 
     <div class="sec">
@@ -2146,21 +2142,7 @@ def render_bonus_body() -> str:
       <div class="card flat">{runlog}</div>
     </div>
     {disabled_sec}
-    <details class="sec capacity-fold"><summary class="sech">Bonus Drain · automatic capacity</summary>
-    <div class="vbar {v_tone}"><span class="vdot"></span><div class="vmain"><b>{esc(v_label)}</b><div class="vtext">{v_text}</div><div class="vsub">{v_sub}</div></div></div>
-    {_rotation(cards)}
-    <div class="rows mfold" data-fold="drain">
-      <div class="rowhd mfold-sum"><span><i class="caret"></i>bonus capacity</span>
-        <span>{esc(scout_note)} &middot; {len(remaining)} jobs &middot;
-          {ico("claude")}{n_claude} Claude &middot; {ico("codex")}{n_codex} Codex &middot;
-          {ico("grok")}{n_grok} Grok eligible</span></div>
-      <div class="mfold-body">
-      {"".join(_account_row(c) for c in cards)}
-      </div>
-    </div>
-    </details>
-    <footer>refreshes every 60s · editing pauses refresh</footer>
-    {_editor_dialog()}
+    <footer>refreshes every 60s</footer>
     <dialog id="qmodal" class="qmodal" aria-labelledby="qmodal-title" tabindex="-1">
       <form method="dialog" class="qmodal-hd">
         <h2 id="qmodal-title" class="qmodal-title"></h2>
@@ -2759,8 +2741,8 @@ CSS += """
 .preview-banner{border:1px solid var(--acc);padding:12px 16px;border-radius:8px;color:var(--acc);margin:18px 0}
 .filter-more{font-size:11px;color:var(--dim)}.filter-more summary{cursor:pointer;padding:5px}.filter-extra{display:flex;flex-wrap:wrap;gap:10px;padding-top:10px}.filter-more[open]{flex-basis:100%}
 .work-summary{display:flex;gap:12px;flex-wrap:wrap;margin:22px 0 28px}.work-summary>span{padding:12px 16px;border:1px solid var(--line);border-radius:8px}.work-summary b{font-size:22px;margin-right:8px}
-.work-meta{display:flex;gap:9px;align-items:center;flex-wrap:wrap;font-size:11px;margin:9px 0;color:var(--dim)}.work-state{padding:3px 7px;border:1px solid currentColor;border-radius:5px;text-transform:capitalize}.work-state.ready,.dep-dot.done{color:#82c9a1}.work-state.waiting,.dep-dot.waiting{color:#e1b56e}.work-group{color:var(--fg)}.source-link{color:var(--acc);text-decoration:none}.readiness-reason{font-size:11px;color:var(--dim);margin:6px 0}.dependencies{font-size:11px;margin-top:8px}.dependencies summary{cursor:pointer;color:var(--acc)}.dependencies ul{padding:5px 0;list-style:none}.dependencies li{padding:5px 0}.dependencies code{color:var(--dim);font-size:10px}.dep-dot{display:inline-block;width:6px;height:6px;background:currentColor;border-radius:50%;margin-right:6px}.task-edit{border:1px solid var(--line);border-radius:6px;padding:8px 10px;background:transparent;color:var(--fg);cursor:pointer}.run-trigger{display:inline-block;font-size:10px;color:var(--acc);margin-right:10px}.qact{flex-wrap:wrap}.capacity-fold>summary{cursor:pointer;padding:18px 0}.work-editor{width:min(720px,94vw);max-height:88vh;padding:24px;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:12px}.work-editor::backdrop{background:#000b}.work-editor label{display:flex;flex-direction:column;gap:7px;margin:14px 0;font-size:12px}.work-editor input,.work-editor textarea,.work-editor select{box-sizing:border-box;width:100%;padding:10px;color:var(--fg);background:var(--card,#181b1d);border:1px solid #454545;border-radius:5px;font:inherit}.editor-grid{display:grid;grid-template-columns:1fr 1fr;gap:15px}.editor-heading,.editor-actions{display:flex;justify-content:space-between;gap:12px;align-items:center}.work-editor button{background:transparent;color:var(--fg);border:1px solid #555;border-radius:6px;padding:10px;cursor:pointer}#edit-save{background:var(--acc);color:#171717}#edit-error{color:#e78888}.work-editor .dimtxt{font-size:11px;line-height:1.7}.editor-actions{justify-content:flex-end;margin-top:18px}.qrow{scroll-margin-top:20px}
-@media(max-width:640px){.work-summary{gap:6px}.work-summary>span{padding:9px;font-size:10px}.work-summary b{font-size:16px}.qrow{grid-template-columns:20px minmax(0,1fr)!important}.qact{grid-column:2;justify-content:flex-start!important;margin-top:9px}.work-meta,.readiness-reason,.dependencies{font-size:10px}.runset{margin-left:5px}.work-editor{padding:16px}.editor-grid{grid-template-columns:1fr}.qmain{min-width:0}.work-meta{overflow-wrap:anywhere}.dependencies code{display:block;margin-left:12px}}
+.work-meta{display:flex;gap:9px;align-items:center;flex-wrap:wrap;font-size:11px;margin:9px 0;color:var(--dim)}.work-state{padding:3px 7px;border:1px solid currentColor;border-radius:5px;text-transform:capitalize}.work-state.ready,.dep-dot.done{color:#82c9a1}.work-state.waiting,.dep-dot.waiting{color:#e1b56e}.work-group{color:var(--fg)}.source-link{color:var(--acc);text-decoration:none}.readiness-reason{font-size:11px;color:var(--dim);margin:6px 0}.dependencies{font-size:11px;margin-top:8px}.dependencies summary{cursor:pointer;color:var(--acc)}.dependencies ul{padding:5px 0;list-style:none}.dependencies li{padding:5px 0}.dependencies code{color:var(--dim);font-size:10px}.dep-dot{display:inline-block;width:6px;height:6px;background:currentColor;border-radius:50%;margin-right:6px}.run-trigger{display:inline-block;font-size:10px;color:var(--acc);margin-right:10px}.qact{flex-wrap:wrap}.qrow{scroll-margin-top:20px}
+@media(max-width:640px){.work-summary{gap:6px}.work-summary>span{padding:9px;font-size:10px}.work-summary b{font-size:16px}.qrow{grid-template-columns:20px minmax(0,1fr)!important}.qact{grid-column:2;justify-content:flex-start!important;margin-top:9px}.work-meta,.readiness-reason,.dependencies{font-size:10px}.runset{margin-left:5px}.qmain{min-width:0}.work-meta{overflow-wrap:anywhere}.dependencies code{display:block;margin-left:12px}}
 """
 
 SCRIPT = """
@@ -2768,56 +2750,6 @@ SCRIPT = """
 (function(){
   var KEY='jobsViewerTab';
   setInterval(function(){if(!document.querySelector('dialog[open]'))location.reload()},60000);
-  (function(){
-    var dlg=document.getElementById('work-editor'), form=document.getElementById('work-edit-form');
-    if(!dlg||!form)return;
-    var original={};
-    document.querySelectorAll('.task-edit').forEach(function(button){button.addEventListener('click',function(){
-      original=JSON.parse(button.dataset.contract);
-      document.getElementById('edit-task-id').textContent=original.id;
-      document.getElementById('edit-error').textContent='';
-      Array.from(form.elements).forEach(function(input){if(input.name){
-        var value=original[input.name];
-        if(input.tagName==='SELECT'&&!input.multiple){
-          Array.from(input.querySelectorAll('option[data-legacy]')).forEach(function(option){option.remove()});
-          if(value!=null&&!Array.from(input.options).some(function(option){return option.value===String(value)})){
-            var legacy=new Option(String(value)+' (legacy)',String(value));legacy.dataset.legacy='1';input.add(legacy);
-          }
-        }
-        if(input.name==='depends_on')Array.from(input.options).forEach(function(option){option.selected=(value||[]).includes(option.value);option.disabled=option.value===original.id;option.hidden=false});
-        else input.value=value==null?'':value;
-      }});
-      document.getElementById('dependency-search').value='';
-      dlg.showModal();
-    })});
-    document.getElementById('dependency-search').addEventListener('input',function(event){
-      var query=event.target.value.toLowerCase();
-      Array.from(form.elements.depends_on.options).forEach(function(option){option.hidden=!option.selected&&!option.textContent.toLowerCase().includes(query)});
-    });
-    function close(){dlg.close()}
-    document.getElementById('edit-close').addEventListener('click',close);
-    document.getElementById('edit-cancel').addEventListener('click',close);
-    form.addEventListener('submit',async function(event){
-      event.preventDefault();var changes={};
-      Array.from(form.elements).forEach(function(input){
-        if(!input.name)return;
-        var value=input.value;
-        if(input.name==='priority')value=Number(value);
-        else if(input.name==='depends_on')value=Array.from(input.selectedOptions).map(function(option){return option.value}).sort();
-        else if(value==='')value=null;
-        var before=original[input.name];if(before===''||before===undefined)before=null;
-        if(input.name==='depends_on'&&!before)before=[];
-        if(JSON.stringify(value)!==JSON.stringify(before))changes[input.name]=value;
-      });
-      if(!Object.keys(changes).length){close();return}
-      var save=document.getElementById('edit-save');save.disabled=true;
-      try{
-        var response=await fetch('/api/bonus/task/edit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:original.id,changes:changes})});
-        var result=await response.json();if(!response.ok)throw new Error(result.message||'Could not save');
-        location.reload();
-      }catch(error){document.getElementById('edit-error').textContent=error.message;save.disabled=false}
-    });
-  })();
   function show(t){
     var tabs=document.querySelectorAll('.tab');
     var panes=document.querySelectorAll('.pane');
@@ -3145,20 +3077,6 @@ class Handler(BaseHTTPRequestHandler):
                 self._bad_request()
                 return
             ok, message = set_task_active(task_id, active)
-        elif self.path == "/api/bonus/task/edit":
-            payload = self._read_json()
-            if payload is None:
-                return
-            task_id, changes = payload.get("id"), payload.get("changes")
-            if not isinstance(task_id, str) or not isinstance(changes, dict):
-                self._bad_request()
-                return
-            try:
-                cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
-                QueueDB(cfg.database).edit_task(task_id, changes)
-                ok, message = True, "saved"
-            except (QueueError, graph_config.ConfigError) as exc:
-                ok, message = False, str(exc)
         elif self.path == "/api/bonus/task/run":
             payload = self._read_json()
             if payload is None:
@@ -3189,8 +3107,7 @@ class Handler(BaseHTTPRequestHandler):
             if self._one_header("Content-Type") != "application/json":
                 raise ValueError
             length = int(self.headers.get("Content-Length", "0"))
-            limit = 65536 if self.path == "/api/bonus/task/edit" else 4096
-            if length <= 0 or length > limit:
+            if length <= 0 or length > 4096:
                 raise ValueError
             payload = json.loads(self.rfile.read(length))
             if not isinstance(payload, dict):

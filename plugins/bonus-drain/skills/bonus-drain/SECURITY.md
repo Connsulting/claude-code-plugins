@@ -128,15 +128,16 @@ Install refuses foreign files/symlinks. Uninstall preflights every owned version
 and unit; it refuses unknown or changed material and never removes XDG config, cache, queue,
 or operator state.
 
-## Async work preview and edits
+## Async work preview and dependencies
 
-Queued task edits share the existing exact Host/HTTPS Origin and JSON-only boundary. Edit
-requests are capped at 64 KiB; other mutations remain capped at 4 KiB. Dependency changes are
-validated in the same write transaction as the contract update. Claims recheck dependencies,
-automatic execution policy, and the selected contract before activation or routing.
+The viewer provides monitoring and execution controls, with no contract editor or HTTP edit
+endpoint. Request bodies remain capped at 4 KiB. Planning threads edit contracts through the
+CLI. Dependency changes are validated in the same write transaction as the contract update.
+Claims recheck dependencies, automatic execution policy, and the selected contract before
+activation or routing.
 
 `viewer.preview: true` displays a copied-queue banner and rejects dispatch both in the viewer
 and the shared dispatcher. Preview setup additionally replaces all external adapters with
 rejecting executables and retargets database, cache, and activation paths to a private copy.
-Editing or requeueing there changes only that copy. No runtime installation or automatic
-scheduler is implied by running a preview.
+Requeueing there changes only that copy. No runtime installation or automatic scheduler is
+implied by running a preview.

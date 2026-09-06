@@ -659,12 +659,14 @@ class JobsViewerContractTests(unittest.TestCase):
         rotation_at = body.index('data-fold="rotation"')
         drain_at = body.index('data-fold="drain"')
         remaining_at = body.index("queued · priority order")
-        self.assertLess(header_at, remaining_at)
-        self.assertLess(remaining_at, vbar_at)
+        self.assertLess(header_at, vbar_at)
         self.assertLess(vbar_at, rotation_at)
         self.assertLess(rotation_at, drain_at)
-        self.assertIn('class="sec capacity-fold"', body)
-        self.assertIn("<i class=\"caret\"></i>bonus capacity", body)
+        self.assertLess(drain_at, remaining_at)
+        self.assertNotIn('class="sec capacity-fold"', body)
+        self.assertNotIn('class="task-edit"', body)
+        self.assertNotIn('id="work-editor"', body)
+        self.assertIn("<i class=\"caret\"></i>usage · provider capacity", body)
         self.assertIn("<i class=\"caret\"></i>rotation", body)
 
         css, script = self.viewer.CSS, self.viewer.SCRIPT

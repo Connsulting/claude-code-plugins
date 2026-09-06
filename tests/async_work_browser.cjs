@@ -1,4 +1,4 @@
-// Run only against an isolated preview created with --examples. Mutates demo tasks only.
+// Read-only browser proof against an isolated preview created with --examples.
 const {chromium} = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -17,38 +17,33 @@ const fs = require('node:fs');
  await page.locator('.fchip[data-group="workgroup"][data-value="Preview examples"]').click();
  assert.equal(await page.locator('#qlist .qrow:visible').count(),3);
  const row=id=>page.locator('#qlist .qrow').filter({has:page.locator('.task-toggle[data-task-id="'+id+'"]')});
- const edit=async id=>{await row(id).locator('.task-edit').click();await page.locator('#work-editor').waitFor({state:'visible'})};
- const save=async()=>{await Promise.all([page.waitForNavigation({waitUntil:'domcontentloaded'}),page.locator('#edit-save').click()])};
- await edit('preview-02-build');
- assert.deepEqual(await page.locator('[name="depends_on"]').evaluate(e=>Array.from(e.selectedOptions).map(o=>o.value)),['preview-01-plan']);
- await page.locator('[name="execution_mode"]').selectOption('bonus');await save();
- assert((await row('preview-02-build').innerText()).includes('Bonus · automatic'));
- await edit('preview-02-build');await page.locator('[name="execution_mode"]').selectOption('manual');await save();
+ assert.equal(await page.locator('.task-edit, #work-editor').count(),0);
+ assert.equal(await page.locator('.capacity-fold').count(),0);
+ const rotation=page.locator('[data-fold="rotation"]');
+ const capacity=page.locator('[data-fold="drain"]');
+ assert(await rotation.isVisible());assert(await capacity.isVisible());
+ assert(await rotation.locator('.mfold-body').isVisible());
+ assert(await capacity.locator('.mfold-body').isVisible());
+ assert.equal(await capacity.locator('.arow').count(),5);
+ assert((await rotation.boundingBox()).y<(await page.locator('#qlist').boundingBox()).y);
+ assert((await capacity.boundingBox()).y<(await page.locator('#qlist').boundingBox()).y);
  assert.equal(await row('preview-03-review').getAttribute('data-state'),'waiting');
- await edit('preview-03-review');await page.locator('[name="depends_on"]').selectOption(['preview-01-plan']);await save();
- assert.equal(await row('preview-03-review').getAttribute('data-state'),'ready');
- await edit('preview-03-review');await page.locator('[name="depends_on"]').selectOption(['preview-01-plan','preview-02-build']);await save();
- assert.equal(await row('preview-03-review').getAttribute('data-state'),'waiting');
- await edit('preview-02-build');
- await page.locator('[name="depends_on"]').selectOption(['preview-03-review']);
- await page.locator('#edit-save').click();
- await page.locator('#edit-error').filter({hasText:'cycle'}).waitFor();
- await page.locator('#edit-cancel').click();
  assert.equal(await page.locator('.task-run:not([disabled])').count(),0);
  const run=await context.request.post(url+'/api/bonus/task/run',{headers:{Origin:url},data:{id:'preview-02-build',engine:'auto'}});
  assert.equal(run.status(),400);assert((await run.text()).includes('execution is disabled'));
- const rejected=await context.request.post(url+'/api/bonus/task/edit',{headers:{Origin:'https://attacker.example'},data:{id:'preview-02-build',changes:{title:'should not save'}}});
+ const rejected=await context.request.post(url+'/api/bonus/task/run',{headers:{Origin:'https://attacker.example'},data:{id:'preview-02-build',engine:'auto'}});
  assert.equal(rejected.status(),403);
  await page.screenshot({path:root+'/screenshots/desktop.png'});
  await page.setViewportSize({width:390,height:844});
  await page.screenshot({path:root+'/screenshots/mobile.png'});
  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
- await edit('preview-03-review');
- await page.locator('#dependency-search').fill('build');
- assert(await page.locator('#work-editor').isVisible());
- await page.screenshot({path:root+'/screenshots/mobile-editor.png'});
- await page.locator('#edit-cancel').click();
+ assert(await rotation.isVisible());assert(await capacity.isVisible());
+ for(const section of [rotation,capacity]){
+   if(!await section.locator('.mfold-body').isVisible())await section.locator(':scope > .mfold-sum').click();
+   assert(await section.locator('.mfold-body').isVisible());
+ }
+ await page.screenshot({path:root+'/screenshots/mobile-capacity.png'});
  assert.deepEqual(errors,[]);
- console.log(JSON.stringify({https:true,manual_bonus_edit:true,dependency_readiness:true,cycle_rejected:true,dispatch_disabled:true,cross_origin_rejected:true,mobile_no_overflow:true,page_errors:errors,screenshots:root+'/screenshots'}));
+ console.log(JSON.stringify({https:true,rotation_and_usage_visible:true,no_job_editor:true,dependency_readiness:true,dispatch_disabled:true,cross_origin_rejected:true,mobile_no_overflow:true,page_errors:errors,screenshots:root+'/screenshots'}));
  } finally { await browser.close(); }
 })().catch(e=>{console.error(e);process.exit(1)});

@@ -82,7 +82,7 @@ def main():
         )
         for task_id, title, dependencies, mode in examples:
             queue.add_task(dict(id=task_id, title=title, kind='oneoff', priority=0, size='small',
-                                cwd=str(ROOT), goal='Preview example only. Explore the editor and dependency states.',
+                                cwd=str(ROOT), goal='Preview example only. Inspect the execution mode and dependency states.',
                                 constraints='Demo fixture. Do not execute.', done_when='Preview reviewed.',
                                 execution_mode=mode, work_group='Preview examples', source_ref='Preview fixture',
                                 depends_on=dependencies))

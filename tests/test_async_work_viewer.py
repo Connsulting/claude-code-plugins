@@ -1,10 +1,11 @@
-"""HTTP and rendering proof for task edits, dependency visibility, and preview isolation."""
+"""HTTP and rendering proof for monitoring, dependency visibility, and preview isolation."""
 import json
 import threading
 import unittest
 from dataclasses import replace
 from http.server import ThreadingHTTPServer
 from unittest import mock
+from types import SimpleNamespace
 
 from tests import test_bonus_drain_jobs_viewer as viewer_tests
 from tests import test_bonus_drain_kick as kick_tests
@@ -37,27 +38,8 @@ class AsyncViewerTests(unittest.TestCase):
             headers={'Host': 'viewer.example.test', 'Origin': 'https://viewer.example.test',
                      'Content-Type': 'application/json', **headers}, body=json.dumps(payload).encode())
 
-    def test_edit_persists_contract_and_rejects_cross_origin_without_writing(self):
-        payload = {'id': 'portable', 'changes': {'execution_mode': 'manual', 'work_group': 'New work'}}
-        status, _, _ = self.post('/api/bonus/task/edit', payload, Origin='https://other.example')
-        self.assertEqual(status, 403)
-        self.assertIsNone(self.fixture.queue.task('portable').work_group)
-        status, _, _ = self.post('/api/bonus/task/edit', payload)
-        self.assertEqual(status, 200)
-        self.assertEqual(self.fixture.queue.task('portable').work_group, 'New work')
 
-    def test_dependency_failure_rolls_back_entire_edit(self):
-        status, _, body = self.post('/api/bonus/task/edit', {'id': 'portable', 'changes': {'title': 'Changed', 'depends_on': ['missing']}})
-        self.assertEqual(status, 400)
-        self.assertIn(b'unknown prerequisite', body)
-        self.assertEqual(self.fixture.queue.task('portable').title, 'portable')
 
-    def test_edit_body_has_a_bounded_larger_limit(self):
-        status, _, _ = self.post('/api/bonus/task/edit', {'id': 'portable', 'changes': {'context': 'x' * 5000}})
-        self.assertEqual(status, 200)
-        status, _, _ = self.post('/api/bonus/task/edit', {'id': 'portable', 'changes': {'context': 'y' * 65536}})
-        self.assertEqual(status, 400)
-        self.assertEqual(self.fixture.queue.task('portable').context, 'x' * 5000)
 
     def test_preview_rejects_http_and_shared_dispatch_before_external_calls(self):
         with mock.patch.object(self.viewer, 'kick_task') as launch:
@@ -103,14 +85,28 @@ class AsyncViewerTests(unittest.TestCase):
         task['source_ref'] = 'https://example.test/plan'
         self.assertIn('rel="noopener noreferrer"', self.viewer._work_meta(task))
 
-    def test_queued_editor_keeps_dependency_options_identifiable(self):
-        html = self.viewer._editor_dialog()
-        self.assertIn('value="portable"', html)
-        self.assertIn('name="depends_on" multiple', html)
-        self.assertIn('id="dependency-search"', html)
-        self.assertIn("dialog[open]", self.viewer.SCRIPT)
 
-    def test_invalid_mode_type_is_a_client_error(self):
-        status, _, body = self.post('/api/bonus/task/edit', {'id': 'portable', 'changes': {'execution_mode': []}})
-        self.assertEqual(status, 400)
-        self.assertIn(b'execution_mode must be', body)
+
+    def test_browser_has_no_contract_edit_endpoint(self):
+        payload = {'id': 'portable', 'changes': {'goal': 'not allowed from this UI'}}
+        status, _, _ = self.post('/api/bonus/task/edit', payload)
+        self.assertEqual(status, 404)
+        self.assertEqual(self.fixture.queue.task('portable').goal, 'run portable')
+
+    def test_run_control_rejects_cross_origin_without_launching(self):
+        with mock.patch.object(self.viewer, 'kick_task') as launch:
+            status, _, _ = self.post('/api/bonus/task/run', {'id': 'portable', 'engine': 'auto'}, Origin='https://other.example')
+        self.assertEqual(status, 403)
+        launch.assert_not_called()
+
+    def test_preview_usage_comes_from_copied_cache_without_account_credentials(self):
+        cfg = mock.Mock()
+        cfg.accounts_for_provider.side_effect = lambda provider: [SimpleNamespace(id=provider+'-account', plan_id=provider+'-plan')]
+        cfg.limits = [SimpleNamespace(id=p+'-weekly', plan_id=p+'-plan', window_seconds=604800, ceiling_percent=95) for p in ('claude','codex')]
+        snapshots = {(p,p+'-account'): SimpleNamespace(limits={p+'-weekly': {'used_percent':42,'resets_at':2000000000}}) for p in ('claude','codex')}
+        gates = {}
+        with mock.patch.object(self.viewer.graph_usage, 'read_all', return_value=snapshots) as read:
+            self.viewer._preview_account_gates(cfg, gates)
+        read.assert_called_once_with(cfg)
+        self.assertEqual(gates['acct'][0]['u7'], 42)
+        self.assertEqual(gates['codex_acct'][0]['r7'], 2000000000)
