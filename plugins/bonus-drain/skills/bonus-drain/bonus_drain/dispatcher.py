@@ -284,6 +284,9 @@ def render_prompt(
 
     sections = [f"Goal: {task.goal}"]
     for label, value in (
+        ("Source thread or plan", task.source_ref),
+        ("Work group", task.work_group),
+        ("Prerequisite task IDs", ", ".join(task.depends_on)),
         ("Context", task.context),
         ("Constraints", task.constraints),
         ("Precondition", task.precondition),
@@ -293,15 +296,15 @@ def render_prompt(
             sections.append(f"{label}:\n{value}")
     if task.kind == "oneoff":
         contract = [
-            "--- BONUS TASK EXECUTION CONTRACT ---",
-            "This is opportunistic work funded by otherwise expiring capacity.",
+            "--- ASYNC TASK EXECUTION CONTRACT ---",
+            "Execute this authorized asynchronous task within its stated contract.",
             _pr_policy(config, task),
             "Run the precondition first. If it is unmet, record skipped immediately.",
             "On bounded ambiguity, choose the reasonable default, note it, and continue without asking for input.",
         ]
     else:
         contract = [
-            "--- RECURRING BONUS JOB EXECUTION CONTRACT ---",
+            "--- RECURRING ASYNC JOB EXECUTION CONTRACT ---",
             "Run this vetted recurring operation with its configured mandate unchanged.",
             "Run the precondition first. If it is unmet, record skipped immediately.",
             "On bounded ambiguity, choose the reasonable default, note it, and continue without asking for input.",
@@ -904,6 +907,7 @@ def dispatch(
     router_call: Callable[..., Any] | None = None,
     activation_call: Callable[[str, str], Any] | None = None,
     telemetry_call: Callable[[list[str], dict[str, Any]], Any] | None = None,
+    trigger: str = "manual",
 ) -> DispatchResult:
     """Classify if requested, claim, activate, and launch through agent-router once.
 
@@ -911,16 +915,25 @@ def dispatch(
     unset so the row is written through ``factory-telemetry.py``.
     """
 
+    if config.viewer.get("preview") is True:
+        raise InvalidRoute("Preview: execution is disabled")
     task = queue.task(task_id)
     if task is None:
         raise InvalidRoute(f"unknown task: {task_id}")
+    if trigger not in {"manual", "bonus", "scheduled"}:
+        raise InvalidRoute("invalid run trigger")
+    readiness = queue.readiness(task_id)
+    if not readiness["ready"]:
+        raise AlreadyClaimed(readiness["reason"])
+    if trigger == "bonus" and task.execution_mode != "bonus":
+        raise InvalidRoute("manual tasks require an explicit start")
     if requested_provider == "auto":
         if not config.providers:
             raise InvalidRoute("auto classification requires at least one provider")
         classifier_adapter = config.adapter(config.providers[0].dispatch.adapter_id)
         classifier_argv = list(classifier_adapter.argv) + [
             "run", "--provider", "auto", "--dry-run", "--dir", task.cwd,
-            "--name", f"Bonus classification: {task.id}", "--json", classification_prompt(task),
+            "--name", f"Classify: {task.title}", "--json", classification_prompt(task),
         ]
         classified = _call_router(
             router_call, classifier_argv, config, classifier_adapter, phase="classification",
@@ -946,7 +959,7 @@ def dispatch(
     account_id = account.id if account else None
     if not queue.claim(
         task.id, eligibility_key, provider.id, account_id,
-        provider_capabilities=provider.capabilities,
+        provider_capabilities=provider.capabilities, automatic=trigger == "bonus", expected_task=task,
     ):
         raise AlreadyClaimed(f"task is no longer eligible: {task.id}")
 
@@ -995,7 +1008,7 @@ def dispatch(
         )
         launch_argv = list(adapter.argv) + [
             "run", "--provider", provider.dispatch.provider, "--dir", task.cwd,
-            "--name", f"Bonus: {task.id}",
+            "--name", task.title,
         ]
         model = canonical_model(task.model)
         if model:
@@ -1013,7 +1026,7 @@ def dispatch(
         try:
             queue.record(
                 task.id, eligibility_key, status="dispatched", provider_id=provider.id,
-                account_id=account_id, router_job_id=job_id,
+                account_id=account_id, router_job_id=job_id, trigger=trigger,
             )
         except Exception as exc:
             raise AmbiguousDispatch("router launched but dispatch bookkeeping failed") from exc

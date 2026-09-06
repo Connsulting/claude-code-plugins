@@ -2,7 +2,7 @@
 
 ## Trust boundaries
 
-Bonus Drain accepts configuration and low-priority task content, reads usage through
+Bonus Drain accepts configuration and autonomous task content, reads usage through
 bounded adapters, writes normalized cache and SQLite state, and asks `agent-router` to
 launch a concrete provider. It does not execute a provider directly.
 
@@ -60,8 +60,8 @@ requirement.
 Bonus Drain preserves the established two-tab background-jobs viewer. Request threads read
 persisted usage snapshots and SQLite, and inspect local systemd timer metadata; they never call
 a provider API, activation command, or router for a GET. The separate
-`bonus-drain-refresh.timer` owns bounded usage refresh. Force is always an explicit button
-action. Concrete and `auto` Force both delegate to the shared router-only kickoff service.
+`bonus-drain-refresh.timer` owns bounded usage refresh. Run now is always an explicit button
+action. Concrete and `auto` Run now both delegate to the shared router-only kickoff service.
 
 The viewer defaults to:
 
@@ -95,10 +95,10 @@ Every tailnet member that can reach the exact viewer URL is therefore an operato
 the intended trust model, not a second authentication layer.
 
 Mutations remain absent unless `mutations_enabled` is explicitly true. When enabled,
-enable/disable and Force require exact Host, exact HTTPS Origin, JSON body limits, safe task
+enable/disable and Run now require exact Host, exact HTTPS Origin, JSON body limits, safe task
 and provider IDs. Exact Origin plus JSON-only request handling prevents a public page from
 submitting a simple cross-site browser request without altering the established frontend.
-Force then uses the shared router-only kickoff path and still enforces active state,
+Run now then uses the shared router-only kickoff path and still enforces active state,
 compatibility, and atomic claims.
 
 ### Tailscale Serve example
@@ -111,7 +111,7 @@ sudo tailscale serve --bg --https=8766 http://127.0.0.1:8766
 ```
 
 Open `https://EXACT_NODE_NAME:8766/`; Tailscale Serve must preserve that Host. Set
-`mutations_enabled: true` for enable/disable and Force. No login step is required. Disable the
+`mutations_enabled: true` for enable/disable and Run now. No login step is required. Disable the
 proxy with:
 
 ```sh
@@ -127,3 +127,16 @@ symlink. The stable wrapper and systemd templates are hashed in an ownership rec
 Install refuses foreign files/symlinks. Uninstall preflights every owned version, wrapper,
 and unit; it refuses unknown or changed material and never removes XDG config, cache, queue,
 or operator state.
+
+## Async work preview and edits
+
+Queued task edits share the existing exact Host/HTTPS Origin and JSON-only boundary. Edit
+requests are capped at 64 KiB; other mutations remain capped at 4 KiB. Dependency changes are
+validated in the same write transaction as the contract update. Claims recheck dependencies,
+automatic execution policy, and the selected contract before activation or routing.
+
+`viewer.preview: true` displays a copied-queue banner and rejects dispatch both in the viewer
+and the shared dispatcher. Preview setup additionally replaces all external adapters with
+rejecting executables and retargets database, cache, and activation paths to a private copy.
+Editing or requeueing there changes only that copy. No runtime installation or automatic
+scheduler is implied by running a preview.

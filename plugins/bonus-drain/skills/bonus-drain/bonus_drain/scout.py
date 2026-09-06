@@ -128,7 +128,7 @@ def plan_tick(
         availability[(account.provider_id, account.id)] = reader.count_eligible(
             anchor,
             provider_id=provider.id,
-            capabilities=provider.capabilities,
+            capabilities=provider.capabilities, automatic=True,
         )
     plan = build_plan(config, snapshots, eligible_count=availability, now_epoch=now)
     allocations: dict[tuple[str, str], tuple[Any, ...]] = {}
@@ -147,7 +147,7 @@ def plan_tick(
         candidates = list(reader.eligible_tasks(
             batch.resets_at,
             provider_id=provider.id,
-            capabilities=provider.capabilities,
+            capabilities=provider.capabilities, automatic=True,
         ))
         batch_slots: list[int] = []
         for _index in range(batch.batch_size):
@@ -310,6 +310,7 @@ def run_once(
                     config, queue, task_id=task.id,
                     eligibility_key=batch.eligibility_key,
                     requested_provider=batch.provider_id,
+                    trigger="bonus",
                     router_call=router_call, activation_call=activation_call,
                 ))
             except AmbiguousDispatch as exc:

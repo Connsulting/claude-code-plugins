@@ -23,7 +23,11 @@ CREATE TABLE IF NOT EXISTS tasks (
   mcp                   TEXT,
   use_implement         INTEGER NOT NULL DEFAULT 0 CHECK (use_implement IN (0,1)),
   allowed_providers_json TEXT,
-  required_capabilities_json TEXT
+  required_capabilities_json TEXT,
+  execution_mode        TEXT NOT NULL DEFAULT 'bonus' CHECK (execution_mode IN ('manual','bonus')),
+  source_ref            TEXT,
+  work_group            TEXT,
+  depends_on_json       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS runs (
@@ -39,7 +43,8 @@ CREATE TABLE IF NOT EXISTS runs (
   engine          TEXT,
   provider_id     TEXT,
   account_id      TEXT,
-  router_job_id   TEXT
+  router_job_id   TEXT,
+  trigger         TEXT
 );
 
 CREATE TABLE IF NOT EXISTS dispatch_claims (

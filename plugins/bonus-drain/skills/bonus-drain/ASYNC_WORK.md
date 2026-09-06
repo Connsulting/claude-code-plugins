@@ -1,0 +1,89 @@
+# Async Work
+
+Plan in a thread, hand off a concrete contract, queue it, start it, and review the result.
+Bonus Drain is the optional spare-capacity scheduler for the same queue. The executable,
+installation paths, database identity, router, and release version keep their existing names.
+
+## Execution policy
+
+- **Manual:** queue until explicitly started with `run-now` or the viewer's Run now button.
+- **Bonus:** also eligible for the automatic bonus scheduler when its capacity gates permit.
+
+New `add` commands default to Manual. Existing database rows, legacy imports, and callers of
+the compatibility Python `add_task` API that omit the field retain Bonus semantics. New
+programmatic clients should always pass `execution_mode` explicitly. Changing priority never
+changes execution policy. Paused tasks cannot run. Manual start does not bypass dependencies,
+recurrence cooldown, provider compatibility, atomic claims, or activation leases.
+
+## Dependencies
+
+Use `--depends-on parent-id,other-parent-id` on add, or edit the prerequisite list in the UI.
+The graph can branch and join. A child becomes ready only when **every prerequisite is done**.
+Failed and skipped prerequisites leave it waiting; they do not launch a child or mark it failed.
+A waiting child creates no run, consumes no claim, and does not call the router.
+
+Prerequisites must be existing one-off tasks. Children may be one-off or recurring; a recurring
+child uses those completed one-off prerequisites for each recurrence. Recurring prerequisites
+are deliberately rejected until an explicit rule exists for which occurrence satisfies a child.
+Self-dependencies and cycles are rejected transactionally. Readiness is checked again during
+claiming, including for Run now. A Manual child stays parked when its parents complete. A Bonus
+child waits for a subsequent normal scheduler tick; completion does not launch a cascade.
+
+Use task dependencies for workflow ordering. The task's textual precondition still describes
+external checks performed by the runner. If a runner discovers its precondition is false, it
+records skipped under the existing lifecycle contract.
+
+## Thread handoff and editing
+
+```sh
+bonus-drain add --id build-report --title 'Build Report' --kind oneoff \
+  --size small --cwd /absolute/project --goal 'Produce the agreed report' \
+  --execution-mode manual --source-ref 'THREAD_OR_PLAN_REFERENCE' \
+  --work-group 'Report work' --depends-on gather-evidence --json
+bonus-drain readiness build-report --json
+bonus-drain edit build-report --changes '{"goal":"Produce the revised report","execution_mode":"bonus"}' --json
+bonus-drain run-now build-report auto --json
+```
+
+The source reference is a link or opaque reference, not an instruction to fetch arbitrary
+thread contents. The stored task contract must remain self-contained. Only HTTP(S) source
+references become links in the viewer; other references are displayed as text.
+
+Editing allows title, priority, size, cwd, goal, context, constraints, precondition, done_when,
+execution_mode, source_ref, work_group, and depends_on. Active claims and already-run one-off
+contracts cannot be edited. A failed/skipped task must first be explicitly requeued. Existing
+requeue behavior still removes the matching run history; append-only retry attempts are deferred.
+
+The viewer shows readiness, execution mode, work group, source reference, and prerequisite
+progress, with filters for each workflow facet. Editing pauses page refresh. Actual new
+launches record manual or bonus provenance; terminal events inherit it. Old rows remain
+origin unknown. The scheduled value is reserved for future queue-backed timer integration.
+
+## Calendar scheduling
+
+`bg-schedule` still owns exact times and calendar recurrence. General queue handoffs should
+use this skill; timed jobs remain on the Schedules tab. This branch does not install or change
+that external skill. Unifying timers by having them start a queued task ID is a follow-up;
+the queue's existing weekly/monthly cooldowns are not exact calendar schedules.
+
+## Isolated review preview
+
+From the repository root, create a new private destination using SQLite's online backup API:
+
+```sh
+python3 scripts/preview-async-work.py --source-config /absolute/live/config.json \
+  --destination /absolute/new/private-preview --host EXACT_TAILSCALE_HOST:PORT --examples
+```
+
+Run the source viewer with **both** `BONUS_DRAIN_CONFIG=/absolute/new/private-preview/config.json`
+and `BONUS_DRAIN_BIN=/absolute/worktree/plugins/bonus-drain/skills/bonus-drain/bin/bonus-drain`.
+The second variable keeps compatibility wrappers on the same branch. Start only the viewer:
+`python3 plugins/bonus-drain/skills/bonus-drain/services/jobs-viewer/server.py --port PORT`.
+Front its loopback listener with a separately owned Tailscale Serve HTTPS port.
+
+The preview has a copy of tasks, run history, and cached capacity. Copied running rows are
+historical snapshot evidence, not proof that this preview owns those jobs. Four clearly labeled
+example tasks demonstrate a dependency chain without inferring dependencies for real work.
+All execution is disabled. Task edits and requeues affect the copy. Do not enable a scout or
+refresher against it. Stop the preview process and remove only its Tailscale Serve port when
+review finishes; keep the copied state until its owner chooses to discard it.

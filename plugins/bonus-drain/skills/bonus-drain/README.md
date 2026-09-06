@@ -1,4 +1,4 @@
-# Bonus Drain runtime
+# Async Work / Bonus Drain runtime
 
 Bonus Drain queues low-priority work and spends only configured provider capacity
 that would otherwise expire. It is a Python-standard-library runtime with one stable
@@ -102,7 +102,7 @@ The configuration graph is versioned and uses IDs for all relationships:
   [SECURITY.md](SECURITY.md).
 
 The installed viewer preserves the existing `background jobs` frontend unchanged, including
-the Bonus Drain and scheduled tabs. Its Force buttons delegate to the shared router-only kickoff service.
+the Bonus Drain and scheduled tabs. Its Run now buttons delegate to the shared router-only kickoff service.
 There is no application-auth configuration or login flow.
 
 After installation, expand the operator home and replace every illustrative
@@ -190,7 +190,7 @@ The refresher is the only component that runs configured usage adapters. Scout, 
 `plan`, and viewer requests read normalized cache and SQLite only. The viewer's gated,
 nearest-reset drain summary represents this tick's paced scout allocation. Its remaining
 queue is the complete eligible provider/capability inventory, so stale or closed cache gates
-do not hide concrete Force targets. Force is manual and bypasses pacing only; it still checks
+do not hide concrete Run now targets. Run now is manual and bypasses pacing only; it still checks
 active state, compatibility, atomic claims, and the configured `agent-router` path.
 
 To run the remote service after its profile is reviewed:
@@ -282,3 +282,9 @@ recognized only when its cache-tagged name maps to a manifest-owned Python sourc
 unknown source, executable, configuration, and arbitrary files still fail ownership.
 Move operator additions elsewhere and retry; do not delete the state directories as part
 of runtime removal.
+
+## Async work and dependencies
+
+New CLI tasks default to Manual execution; existing tasks keep Bonus scheduling.
+Tasks can carry source references, work groups, and one-off prerequisites.
+See [ASYNC_WORK.md](ASYNC_WORK.md) for the contract and commands.

@@ -614,7 +614,9 @@ def validate_config(
     cache_dir = _safe_path(cache_value, "cache_dir", base) if cache_value else default_cache_dir(env)
 
     viewer = dict(_require_mapping(data.get("viewer", {}), "viewer"))
-    _reject_unknown(viewer, {"bind", "mutations_enabled", "remote"}, "viewer")
+    _reject_unknown(viewer, {"bind", "mutations_enabled", "remote", "preview"}, "viewer")
+    if not isinstance(viewer.get("preview", False), bool):
+        raise ConfigError("viewer.preview must be boolean")
     remote = viewer.get("remote")
     if remote is not None:
         remote_map = _require_mapping(remote, "viewer.remote")

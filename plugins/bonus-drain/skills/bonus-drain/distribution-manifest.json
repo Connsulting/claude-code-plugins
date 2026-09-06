@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "include": [
+    "ASYNC_WORK.md",
     "MIGRATION.md",
     "README.md",
     "SECURITY.md",

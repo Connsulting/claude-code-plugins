@@ -87,13 +87,14 @@ UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
 ALLOWED_HOSTS: tuple[str, ...] = ("127.0.0.1", "localhost")
 ALLOWED_ORIGINS: tuple[str, ...] = ()
 MUTATIONS_ENABLED = False
+PREVIEW = False
 VIEWER_BIND = "127.0.0.1"
 
 
 def configure_request_boundary() -> None:
     """Load the secretless Tailscale boundary used by the HTTP handler."""
 
-    global ALLOWED_HOSTS, ALLOWED_ORIGINS, DB_PATH, MUTATIONS_ENABLED, VIEWER_BIND
+    global ALLOWED_HOSTS, ALLOWED_ORIGINS, DB_PATH, MUTATIONS_ENABLED, VIEWER_BIND, PREVIEW
     cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
     viewer = cfg.viewer
     bind = str(viewer.get("bind", "127.0.0.1"))
@@ -115,6 +116,7 @@ def configure_request_boundary() -> None:
     DB_PATH = cfg.database
     MUTATIONS_ENABLED = viewer.get("mutations_enabled") is True
     VIEWER_BIND = bind
+    PREVIEW = viewer.get("preview") is True
 
 
 # ===========================================================================
@@ -539,14 +541,21 @@ def _remaining_snapshot(cycle: int) -> list[dict] | None:
             return None
         tasks_by_id = {task.get("id"): task for task in tasks if isinstance(task, dict)}
         remaining = []
-        for task_id in task_ids:
+        readiness = payload.get("readiness", {})
+        visible_ids = list(task_ids)
+        for task_id, status in readiness.items():
+            if task_id not in visible_ids and status.get("state") in {"ready", "waiting", "cooldown"}:
+                visible_ids.append(task_id)
+        for task_id in visible_ids:
             task = tasks_by_id.get(task_id)
-            providers = values.get(task_id)
+            providers = values.get(task_id, [])
             if task is None or not isinstance(providers, list):
                 continue
             task = dict(task)
             task["eligible_providers"] = [str(provider) for provider in providers]
+            task["readiness"] = readiness.get(task_id, {"state": "ready", "ready": True, "reason": "Ready to run manually", "dependencies": []})
             remaining.append(task)
+        remaining.sort(key=lambda task: (task["priority"], task["kind"] == "recurring", task.get("created_at", ""), task["id"]))
         return remaining
     except Exception:
         return None
@@ -590,7 +599,7 @@ def get_recent_runs(limit: int = 80) -> list[dict]:
         with _db() as cx:
             rows = cx.execute(
                 """SELECT r.ts, r.task, COALESCE(t.title, r.task) AS title, r.kind,
-                          r.status, r.engine, r.cycle, r.summary, r.branch
+                          r.status, r.engine, r.cycle, r.summary, r.branch, r.trigger
                    FROM runs r LEFT JOIN tasks t ON t.id = r.task
                    ORDER BY r.ts DESC LIMIT ?""",
                 (limit,),
@@ -697,7 +706,9 @@ RUN_ENGINES = ("claude", "codex", "grok", "auto")
 
 
 def run_task_now(task_id: str, engine: str) -> tuple[bool, str]:
-    """Force-dispatch through the shared router-only kickoff service."""
+    """Start through the shared router-only kickoff service."""
+    if PREVIEW:
+        return False, "Preview: execution is disabled; edits affect only the copied queue"
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", task_id):
         return False, "invalid task id"
     if engine not in RUN_ENGINES:
@@ -1125,6 +1136,69 @@ def schedule_badge(kind: str, last_ts: str | None) -> str:
             f'{ico("calendar")}<span class="qmeta-label">{esc(short)}</span></span>')
 
 
+def _work_meta(t: dict) -> str:
+    status = t.get("readiness", {})
+    state = status.get("state", "ready")
+    mode = t.get("execution_mode", "bonus")
+    label = "Manual · waits for you" if mode == "manual" else "Bonus · automatic when capacity allows"
+    source = t.get("source_ref") or ""
+    source_html = ""
+    if source:
+        from urllib.parse import urlsplit
+        try:
+            parsed = urlsplit(source)
+        except ValueError:
+            parsed = urlsplit("")
+        if parsed.scheme in {"https", "http"} and parsed.netloc:
+            source_html = f'<a class="source-link" href="{esc(source)}" target="_blank" rel="noopener noreferrer">Source thread / plan ↗</a>'
+        else:
+            source_html = f'<span class="dimtxt">Source: {esc(source)}</span>'
+    group = f'<span class="work-group">{esc(t["work_group"])}</span>' if t.get("work_group") else ""
+    dependencies = status.get("dependencies", [])
+    edges = "".join(f'<li><span class="dep-dot {"done" if d["satisfied"] else "waiting"}"></span>{esc(d["title"])} <code>{esc(d["id"])}</code> <span class="dimtxt">{esc(d["status"])}</span></li>' for d in dependencies)
+    dependency_html = f'<details class="dependencies"><summary>{sum(d["satisfied"] for d in dependencies)}/{len(dependencies)} prerequisites complete</summary><ul>{edges}</ul></details>' if dependencies else ""
+    return f'<div class="work-meta"><span class="work-state {esc(state)}">{esc(state)}</span><span>{esc(label)}</span>{group}{source_html}</div><div class="readiness-reason">{esc(status.get("reason", "Ready to run manually"))}</div>{dependency_html}'
+
+
+def _edit_button(t: dict) -> str:
+    if not MUTATIONS_ENABLED:
+        return ""
+    fields = {key: t.get(key) for key in ("id", "title", "priority", "size", "cwd", "goal", "context", "constraints", "precondition", "done_when", "execution_mode", "source_ref", "work_group", "depends_on")}
+    return f'<button class="task-edit" data-contract="{esc(json.dumps(fields))}" aria-label="Edit {esc(t["title"])}">Edit</button>'
+
+
+def _editor_dialog() -> str:
+    try:
+        with _db() as connection:
+            prerequisites = connection.execute(
+                "SELECT t.id,t.title,(SELECT status FROM runs r WHERE r.task=t.id "
+                "ORDER BY rowid_pk DESC LIMIT 1) AS status FROM tasks t "
+                "WHERE t.kind='oneoff' ORDER BY t.title,t.id"
+            ).fetchall()
+    except sqlite3.Error:
+        prerequisites = []
+    options = "".join(f'<option value="{esc(t["id"])}">{esc(t["title"])} · {esc(t["status"] or "queued")} [{esc(t["id"])}]</option>' for t in prerequisites)
+    fields = "".join(f'<label>{label}<textarea name="{key}" rows="{rows}"></textarea></label>' for key, label, rows in (
+        ("goal", "Goal", 3), ("context", "Context", 3), ("constraints", "Constraints / authority", 3),
+        ("precondition", "Precondition", 2), ("done_when", "Done when", 2)))
+    return f"""<dialog id="work-editor" class="work-editor" aria-labelledby="edit-title">
+      <form id="work-edit-form">
+        <div class="editor-heading"><h2 id="edit-title">Edit queued task</h2><button type="button" id="edit-close" aria-label="Close editor">×</button></div>
+        <p id="edit-task-id" class="dimtxt"></p>
+        <label>Title<input name="title" required></label>
+        <div class="editor-grid"><label>Execution<select name="execution_mode"><option value="manual">Manual — wait for me</option><option value="bonus">Bonus — use spare capacity</option></select></label>
+        <label>Priority<select name="priority">{"".join(f'<option value="{n}">P{n}</option>' for n in range(5))}</select></label></div>
+        <div class="editor-grid"><label>Work group<input name="work_group" placeholder="e.g. Release preparation"></label><label>Size<select name="size"><option value="">Unknown (legacy)</option>{"".join(f'<option>{size}</option>' for size in SIZE_LEVEL)}</select></label></div>
+        <label>Source thread / plan<input name="source_ref" placeholder="Link or thread reference"></label>
+        <label>Find prerequisites<input id="dependency-search" type="search" placeholder="Search by title or task ID"></label>
+        <label>Depends on<select name="depends_on" multiple size="6">{options}</select></label>
+        <p class="dimtxt">Every prerequisite must be a one-off task that finishes done. Failed and skipped tasks keep this task waiting.</p>
+        <label>Working directory<input name="cwd" required></label>{fields}
+        <p id="edit-error" role="alert"></p>
+        <div class="editor-actions"><button type="button" id="edit-cancel">Cancel</button><button type="submit" id="edit-save">Save changes</button></div>
+      </form></dialog>"""
+
+
 def _run_buttons(t: dict) -> str:
     """The force-dispatch buttons that replaced the old single "Run now".
 
@@ -1134,11 +1208,18 @@ def _run_buttons(t: dict) -> str:
 
     Auto asks agent-router which engine fits, then bonus-drain launches on it."""
     tid = esc(t["id"])
-    providers = set(t.get("eligible_providers") or _legacy_providers(t))
+    providers = set(t.get("eligible_providers", _legacy_providers(t)))
+    blocked = "Preview: execution disabled" if PREVIEW else (t.get("readiness", {}).get("reason", "Waiting") if not t.get("readiness", {}).get("ready", True) else "")
+    if not blocked and "eligible_providers" in t and not providers:
+        blocked = "No compatible provider configured"
+    if not MUTATIONS_ENABLED:
+        blocked = "Viewer is read-only"
 
     def attrs(provider: str, label: str) -> tuple[str, str, str]:
+        if blocked:
+            return " unavailable", f' disabled title="{esc(blocked)}"', esc(blocked)
         if provider in providers:
-            text = f"Force-dispatch on {label} now"
+            text = f"Run now on {label}"
             return "", f' title="{text}"', text
         text = f"This task is not eligible for {label}"
         return " unavailable", f' disabled title="{text}"', text
@@ -1148,16 +1229,16 @@ def _run_buttons(t: dict) -> str:
     grok_cls, grok_attrs, grok_aria = attrs("grok", "Grok")
     return f"""
               <span class="runset">
-                <span class="runlbl">force</span>
+                <span class="runlbl">run now</span>
                 <button class="task-run ionly{claude_cls}" data-task-id="{tid}" data-engine="claude"
                         aria-label="{claude_aria}" {claude_attrs}>{busy_button(ico("claude"))}</button>
                 <button class="task-run ionly{codex_cls}" data-task-id="{tid}" data-engine="codex"
                         aria-label="{codex_aria}" {codex_attrs}>{busy_button(ico("codex"))}</button>
                 <button class="task-run ionly{grok_cls}" data-task-id="{tid}" data-engine="grok"
                         aria-label="{grok_aria}" {grok_attrs}>{busy_button(ico("grok"))}</button>
-                <button class="task-run ionly" data-task-id="{tid}" data-engine="auto"
+                <button class="task-run ionly" {'disabled' if blocked else ''} data-task-id="{tid}" data-engine="auto"
                         aria-label="Let agent-router pick the engine, then dispatch"
-                        title="Let agent-router pick the engine, then dispatch">{busy_button(ico("auto"))}</button>
+                        title="{esc(blocked) if blocked else 'Choose an engine automatically and run now'}">{busy_button(ico("auto"))}</button>
               </span>"""
 
 
@@ -1749,7 +1830,7 @@ def _pacing_strip(anchor, gates: dict, dispatches: list[float], batch: int) -> s
     </div>"""
 
 
-QUEUE_FILTER_GROUPS = ("kind", "provider", "priority", "size")
+QUEUE_FILTER_GROUPS = ("kind", "provider", "priority", "size", "state", "mode", "workgroup")
 PROVIDER_LABELS = {"claude": "Claude", "codex": "Codex", "grok": "Grok"}
 
 
@@ -1763,7 +1844,7 @@ def _facet_size(t: dict) -> str:
 
 
 def _facet_providers(t: dict) -> list[str]:
-    have = set(t.get("eligible_providers") or _legacy_providers(t))
+    have = set(t.get("eligible_providers", _legacy_providers(t)))
     return [p for p in PROVIDER_LABELS if p in have]
 
 
@@ -1786,6 +1867,9 @@ def _queue_filters(remaining: list[dict]) -> str:
         counts[group][value] = counts[group].get(value, 0) + 1
 
     for t in remaining:
+        bump("state", t.get("readiness", {}).get("state", "ready"))
+        bump("mode", t.get("execution_mode", "bonus"))
+        bump("workgroup", t.get("work_group") or "ungrouped")
         bump("kind", _facet_kind(t))
         bump("size", _facet_size(t))
         bump("priority", str(t["priority"]))
@@ -1815,7 +1899,8 @@ def _queue_filters(remaining: list[dict]) -> str:
         ]),
     ]
 
-    blocks = []
+    groups = [(g, label, [(v, esc(v), v) for v in sorted(counts[g])]) for g, label in (("state", "readiness"), ("mode", "execution"), ("workgroup", "work group"))] + groups
+    blocks, secondary = [], []
     for group, label, options in groups:
         # A single-value facet cannot filter anything, so it is a control that does nothing.
         if len(options) < 2:
@@ -1832,11 +1917,14 @@ def _queue_filters(remaining: list[dict]) -> str:
         # The group name is spoken, not printed. Printing four labels cost ~200px, which is
         # exactly what the fourth group needed to stay on one row, and the marks are the same
         # ones the rows below carry - the label was naming what you can already see.
-        blocks.append(
+        target = blocks if group in {"state", "mode", "workgroup"} else secondary
+        target.append(
             '<div class="fgrp" role="group" aria-label="filter by ' + esc(label) + '">'
             + "".join(chips) + "</div>"
         )
 
+    if secondary:
+        blocks.append('<details class="filter-more"><summary>More filters</summary><div class="filter-extra">' + "".join(secondary) + "</div></details>")
     if not blocks:
         return ""
     return (
@@ -1858,9 +1946,9 @@ def render_bonus_body() -> str:
     disabled = get_disabled()
     inflight = get_inflight()
 
-    n_claude = sum("claude" in set(r.get("eligible_providers") or _legacy_providers(r)) for r in remaining)
-    n_codex = sum("codex" in set(r.get("eligible_providers") or _legacy_providers(r)) for r in remaining)
-    n_grok = sum("grok" in set(r.get("eligible_providers") or _legacy_providers(r)) for r in remaining)
+    n_claude = sum("claude" in set(r.get("eligible_providers", _legacy_providers(r))) for r in remaining)
+    n_codex = sum("codex" in set(r.get("eligible_providers", _legacy_providers(r))) for r in remaining)
+    n_grok = sum("grok" in set(r.get("eligible_providers", _legacy_providers(r))) for r in remaining)
     n_weekly = sum(
         1 for r in remaining
         if r.get("kind") == "recurring" and r.get("cadence") == "weekly"
@@ -1885,7 +1973,7 @@ def render_bonus_body() -> str:
     cards.extend(_codex_cards(gates, codex, n_codex, coord, x_batch))
     cards.extend(_grok_cards(gates, grok, n_grok, coord, g_batch))
     scout_at = next_scout()
-    scout_note = (f"next scout {rel(scout_at)}" if scout_at else "next scout unavailable")
+    scout_note = (f"bonus scheduler {rel(scout_at)}" if scout_at else "bonus scheduler timing unavailable")
 
     lead_secs = int(_f(gates.get("lead_hours"), DRAIN_LEAD_MAX_HOURS)) * 3600
     cards = _drain_order(cards)
@@ -1893,7 +1981,7 @@ def render_bonus_body() -> str:
     v_sub = f"{v_sub} &middot; {esc(scout_note)}" if v_sub else esc(scout_note)
 
     subline = " · ".join([
-        "leftover-token backlog", f"{n_weekly} weekly", f"{n_oneoff} one-offs",
+        "plan → queue → run → review", f"{n_weekly} weekly", f"{n_oneoff} one-offs",
     ])
 
     # --- in flight ------------------------------------------------------------------
@@ -1937,7 +2025,8 @@ def render_bonus_body() -> str:
             goal_short = goal if len(goal) <= 170 else goal[:170] + "…"
             rows.append(f"""
           <div class="qrow" data-kind="{_facet_kind(t)}" data-priority="{esc(pri)}"
-               data-size="{esc(_facet_size(t))}" data-providers="{" ".join(_facet_providers(t))}">
+               data-state="{esc(t.get("readiness", {}).get("state", "ready"))}" data-mode="{esc(t.get("execution_mode", "bonus"))}"
+               data-workgroup="{esc(t.get("work_group") or "ungrouped")}" data-size="{esc(_facet_size(t))}" data-providers="{" ".join(_facet_providers(t))}">
             <span class="qn">{i}</span>
             <div class="qmain">
               <div class="qtitle">{esc(t["title"])}</div>
@@ -1946,8 +2035,9 @@ def render_bonus_body() -> str:
                 <span class="qrepo" title="{esc(t.get("cwd", ""))}">{cwd}</span></div>
               <div class="qsub" title="{esc(goal)}">{esc(goal_short)}</div>
               <div class="qdesc" hidden>{esc(goal)}</div>
+              {_work_meta(t)}
             </div>
-            <div class="qact">{_run_buttons(t)}
+            <div class="qact">{_edit_button(t)}{_run_buttons(t)}
               <button class="task-toggle ionly" data-task-id="{esc(t["id"])}" data-active="0"
                       aria-label="Disable this job" title="Disable this job"
                       >{busy_button(ico("ban"))}</button>
@@ -1956,7 +2046,7 @@ def render_bonus_body() -> str:
         rows.append('<p class="empty" id="qnone" hidden>no remaining jobs match these filters.</p>')
         queue = "".join(rows)
     else:
-        queue = '<p class="empty">nothing remaining this cycle — queue drained (or none eligible yet).</p>'
+        queue = '<p class="empty">No queued work. Add a task from a planning thread.</p>'
 
     # --- run log --------------------------------------------------------------------
     this_cycle = sum(1 for r in runs if r.get("cycle") == cycle)
@@ -1981,7 +2071,7 @@ def render_bonus_body() -> str:
             <span class="lstat" style="--c:{sc}">{esc(r["status"])}</span>
             <span class="ltitle">{esc(r["title"])}</span>
             {engine_display}
-            <span class="lnote">{esc(r.get("summary") or "")}</span>
+            <span class="lnote"><span class="run-trigger">{esc(r.get("trigger") or "origin unknown")}</span> {esc(r.get("summary") or "")}</span>
             <span class="laction">{retry}</span>
           </div>""")
         runlog = "".join(lrows)
@@ -2016,7 +2106,7 @@ def render_bonus_body() -> str:
         disabled_sec = f"""
       <details class="sec fold">
         <summary class="sech"><span><i class="caret"></i>disabled · {len(disabled)}</span>
-          <span class="note">excluded from every drain pick</span></summary>
+          <span class="note">paused; excluded from execution</span></summary>
         <div class="card flat">{"".join(drows)}</div>
       </details>"""
     else:
@@ -2030,22 +2120,37 @@ def render_bonus_body() -> str:
     <div class="mfold mfold-wrap" data-fold="header">
     <div class="hd mfold-sum">
       <div>
-        <h1><i class="caret"></i>bonus-drain</h1>
+        <h1><i class="caret"></i>Async Work</h1>
         <div class="sub">{esc(subline)}</div>
       </div>
-      <span class="mfold-hint {v_tone}">{esc(v_label)}</span>
-    </div>
-    <div class="mfold-body">
-    <div class="vbar {v_tone}"><span class="vdot"></span>
-      <div class="vmain"><b>{esc(v_label)}</b>
-        <div class="vtext">{v_text}</div>
-        <div class="vsub">{v_sub}</div></div>
+      <span class="dimtxt">your async work queue</span>
     </div>
     </div>
+    {'<div class="preview-banner">PREVIEW · copied queue · edits stay here · execution disabled</div>' if PREVIEW else ''}
+    <div class="work-summary"><span><b>{len(remaining)}</b> queued</span><span><b>{sum(t.get("readiness", {}).get("state", "ready") == "ready" for t in remaining)}</b> ready</span><span><b>{sum(t.get("readiness", {}).get("state") == "waiting" for t in remaining)}</b> waiting on dependencies</span><span><b>{len(inflight)}</b> running</span></div>
+    {flight}
+
+    <div class="sec">
+      <div class="sech"><span>queued · priority order</span>
+        <span class="note"><span id="qcount">{len(remaining)} job{"" if len(remaining) == 1 else "s"}</span>
+          · readiness and execution mode are independent</span></div>
+      {_queue_filters(remaining)}
+      <div id="qlist">{queue}</div>
     </div>
+
+    <div class="sec">
+      <div class="sech"><span>results / run history</span>
+        <span class="note">{this_cycle} ran this cycle · {len(remaining)} queued
+          ({ico("claude")}{n_claude} Claude · {ico("codex")}{n_codex} Codex ·
+          {ico("grok")}{n_grok} Grok)</span></div>
+      <div class="card flat">{runlog}</div>
+    </div>
+    {disabled_sec}
+    <details class="sec capacity-fold"><summary class="sech">Bonus Drain · automatic capacity</summary>
+    <div class="vbar {v_tone}"><span class="vdot"></span><div class="vmain"><b>{esc(v_label)}</b><div class="vtext">{v_text}</div><div class="vsub">{v_sub}</div></div></div>
     {_rotation(cards)}
     <div class="rows mfold" data-fold="drain">
-      <div class="rowhd mfold-sum"><span><i class="caret"></i>drain order</span>
+      <div class="rowhd mfold-sum"><span><i class="caret"></i>bonus capacity</span>
         <span>{esc(scout_note)} &middot; {len(remaining)} jobs &middot;
           {ico("claude")}{n_claude} Claude &middot; {ico("codex")}{n_codex} Codex &middot;
           {ico("grok")}{n_grok} Grok eligible</span></div>
@@ -2053,25 +2158,9 @@ def render_bonus_body() -> str:
       {"".join(_account_row(c) for c in cards)}
       </div>
     </div>
-    {flight}
-
-    <div class="sec">
-      <div class="sech"><span>remaining this week · drain order</span>
-        <span class="note"><span id="qcount">{len(remaining)} job{"" if len(remaining) == 1 else "s"}</span>
-          · one-offs before recurring inside each band</span></div>
-      {_queue_filters(remaining)}
-      <div id="qlist">{queue}</div>
-    </div>
-
-    <div class="sec">
-      <div class="sech"><span>run log</span>
-        <span class="note">{this_cycle} ran this cycle · {len(remaining)} still eligible
-          ({ico("claude")}{n_claude} Claude · {ico("codex")}{n_codex} Codex ·
-          {ico("grok")}{n_grok} Grok)</span></div>
-      <div class="card flat">{runlog}</div>
-    </div>
-    {disabled_sec}
-    <footer>refreshes every 60s · cycle {cycle}</footer>
+    </details>
+    <footer>refreshes every 60s · editing pauses refresh</footer>
+    {_editor_dialog()}
     <dialog id="qmodal" class="qmodal" aria-labelledby="qmodal-title" tabindex="-1">
       <form method="dialog" class="qmodal-hd">
         <h2 id="qmodal-title" class="qmodal-title"></h2>
@@ -2666,10 +2755,69 @@ table.grid{width:100%;border-collapse:collapse;font-size:12px}
 }
 """
 
+CSS += """
+.preview-banner{border:1px solid var(--acc);padding:12px 16px;border-radius:8px;color:var(--acc);margin:18px 0}
+.filter-more{font-size:11px;color:var(--dim)}.filter-more summary{cursor:pointer;padding:5px}.filter-extra{display:flex;flex-wrap:wrap;gap:10px;padding-top:10px}.filter-more[open]{flex-basis:100%}
+.work-summary{display:flex;gap:12px;flex-wrap:wrap;margin:22px 0 28px}.work-summary>span{padding:12px 16px;border:1px solid var(--line);border-radius:8px}.work-summary b{font-size:22px;margin-right:8px}
+.work-meta{display:flex;gap:9px;align-items:center;flex-wrap:wrap;font-size:11px;margin:9px 0;color:var(--dim)}.work-state{padding:3px 7px;border:1px solid currentColor;border-radius:5px;text-transform:capitalize}.work-state.ready,.dep-dot.done{color:#82c9a1}.work-state.waiting,.dep-dot.waiting{color:#e1b56e}.work-group{color:var(--fg)}.source-link{color:var(--acc);text-decoration:none}.readiness-reason{font-size:11px;color:var(--dim);margin:6px 0}.dependencies{font-size:11px;margin-top:8px}.dependencies summary{cursor:pointer;color:var(--acc)}.dependencies ul{padding:5px 0;list-style:none}.dependencies li{padding:5px 0}.dependencies code{color:var(--dim);font-size:10px}.dep-dot{display:inline-block;width:6px;height:6px;background:currentColor;border-radius:50%;margin-right:6px}.task-edit{border:1px solid var(--line);border-radius:6px;padding:8px 10px;background:transparent;color:var(--fg);cursor:pointer}.run-trigger{display:inline-block;font-size:10px;color:var(--acc);margin-right:10px}.qact{flex-wrap:wrap}.capacity-fold>summary{cursor:pointer;padding:18px 0}.work-editor{width:min(720px,94vw);max-height:88vh;padding:24px;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:12px}.work-editor::backdrop{background:#000b}.work-editor label{display:flex;flex-direction:column;gap:7px;margin:14px 0;font-size:12px}.work-editor input,.work-editor textarea,.work-editor select{box-sizing:border-box;width:100%;padding:10px;color:var(--fg);background:var(--card,#181b1d);border:1px solid #454545;border-radius:5px;font:inherit}.editor-grid{display:grid;grid-template-columns:1fr 1fr;gap:15px}.editor-heading,.editor-actions{display:flex;justify-content:space-between;gap:12px;align-items:center}.work-editor button{background:transparent;color:var(--fg);border:1px solid #555;border-radius:6px;padding:10px;cursor:pointer}#edit-save{background:var(--acc);color:#171717}#edit-error{color:#e78888}.work-editor .dimtxt{font-size:11px;line-height:1.7}.editor-actions{justify-content:flex-end;margin-top:18px}.qrow{scroll-margin-top:20px}
+@media(max-width:640px){.work-summary{gap:6px}.work-summary>span{padding:9px;font-size:10px}.work-summary b{font-size:16px}.qrow{grid-template-columns:20px minmax(0,1fr)!important}.qact{grid-column:2;justify-content:flex-start!important;margin-top:9px}.work-meta,.readiness-reason,.dependencies{font-size:10px}.runset{margin-left:5px}.work-editor{padding:16px}.editor-grid{grid-template-columns:1fr}.qmain{min-width:0}.work-meta{overflow-wrap:anywhere}.dependencies code{display:block;margin-left:12px}}
+"""
+
 SCRIPT = """
 <script>
 (function(){
   var KEY='jobsViewerTab';
+  setInterval(function(){if(!document.querySelector('dialog[open]'))location.reload()},60000);
+  (function(){
+    var dlg=document.getElementById('work-editor'), form=document.getElementById('work-edit-form');
+    if(!dlg||!form)return;
+    var original={};
+    document.querySelectorAll('.task-edit').forEach(function(button){button.addEventListener('click',function(){
+      original=JSON.parse(button.dataset.contract);
+      document.getElementById('edit-task-id').textContent=original.id;
+      document.getElementById('edit-error').textContent='';
+      Array.from(form.elements).forEach(function(input){if(input.name){
+        var value=original[input.name];
+        if(input.tagName==='SELECT'&&!input.multiple){
+          Array.from(input.querySelectorAll('option[data-legacy]')).forEach(function(option){option.remove()});
+          if(value!=null&&!Array.from(input.options).some(function(option){return option.value===String(value)})){
+            var legacy=new Option(String(value)+' (legacy)',String(value));legacy.dataset.legacy='1';input.add(legacy);
+          }
+        }
+        if(input.name==='depends_on')Array.from(input.options).forEach(function(option){option.selected=(value||[]).includes(option.value);option.disabled=option.value===original.id;option.hidden=false});
+        else input.value=value==null?'':value;
+      }});
+      document.getElementById('dependency-search').value='';
+      dlg.showModal();
+    })});
+    document.getElementById('dependency-search').addEventListener('input',function(event){
+      var query=event.target.value.toLowerCase();
+      Array.from(form.elements.depends_on.options).forEach(function(option){option.hidden=!option.selected&&!option.textContent.toLowerCase().includes(query)});
+    });
+    function close(){dlg.close()}
+    document.getElementById('edit-close').addEventListener('click',close);
+    document.getElementById('edit-cancel').addEventListener('click',close);
+    form.addEventListener('submit',async function(event){
+      event.preventDefault();var changes={};
+      Array.from(form.elements).forEach(function(input){
+        if(!input.name)return;
+        var value=input.value;
+        if(input.name==='priority')value=Number(value);
+        else if(input.name==='depends_on')value=Array.from(input.selectedOptions).map(function(option){return option.value}).sort();
+        else if(value==='')value=null;
+        var before=original[input.name];if(before===''||before===undefined)before=null;
+        if(input.name==='depends_on'&&!before)before=[];
+        if(JSON.stringify(value)!==JSON.stringify(before))changes[input.name]=value;
+      });
+      if(!Object.keys(changes).length){close();return}
+      var save=document.getElementById('edit-save');save.disabled=true;
+      try{
+        var response=await fetch('/api/bonus/task/edit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:original.id,changes:changes})});
+        var result=await response.json();if(!response.ok)throw new Error(result.message||'Could not save');
+        location.reload();
+      }catch(error){document.getElementById('edit-error').textContent=error.message;save.disabled=false}
+    });
+  })();
   function show(t){
     var tabs=document.querySelectorAll('.tab');
     var panes=document.querySelectorAll('.pane');
@@ -2777,7 +2925,7 @@ SCRIPT = """
   (function(){
     var bar=document.getElementById('qfilters'),list=document.getElementById('qlist');
     if(!bar||!list)return;
-    var GROUPS=['kind','provider','priority','size'],FKEY='bonusQueueFilters';
+    var GROUPS=['kind','provider','priority','size','state','mode','workgroup'],FKEY='bonusQueueFilters';
     var chips=Array.prototype.slice.call(bar.querySelectorAll('.fchip'));
     var rows=Array.prototype.slice.call(list.querySelectorAll('.qrow'));
     var bands=Array.prototype.slice.call(list.querySelectorAll('.band'));
@@ -2887,7 +3035,7 @@ SCRIPT = """
     }
     list.addEventListener('click',function(ev){
       if(!mobile())return;
-      if(ev.target.closest('.qact'))return;
+      if(ev.target.closest('.qact, a, button, details, summary'))return;
       openRow(ev.target.closest('#qlist .qrow'));
     });
     list.addEventListener('keydown',function(ev){
@@ -2917,17 +3065,17 @@ SCRIPT = """
 # the typeface. No other asset is remote.
 PAGE = """<!doctype html><html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="60"><title>{title}</title>
+<title>{title}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>{css}</style>
 </head><body>""" + ICON_SPRITE + """<div class="wrap">
 <div class="topbar">
-  <span class="brand">background jobs</span>
+  <span class="brand">async work</span>
   <div class="tabs">
-    <button class="tab active" data-tab="bonus">01 bonus-drain</button>
-    <button class="tab" data-tab="schedule">02 scheduled</button>
+    <button class="tab active" data-tab="bonus">01 work queue</button>
+    <button class="tab" data-tab="schedule">02 schedules</button>
   </div>
 </div>
 <div class="pane active" data-pane="bonus">{bonus}</div>
@@ -2944,7 +3092,7 @@ def render_page() -> bytes:
         schedule = render_schedule_body()
     except Exception as e:
         schedule = f'<h1>scheduled jobs</h1><p class="empty">error: {esc(e)}</p>'
-    return PAGE.format(title="background jobs", css=CSS, script=SCRIPT,
+    return PAGE.format(title="Async Work", css=CSS, script=SCRIPT,
                        bonus=bonus, schedule=schedule).encode("utf-8")
 
 
@@ -2963,7 +3111,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 body = render_page()
             except Exception as e:  # never 500 the whole page on a data hiccup
-                body = PAGE.format(title="background jobs", css=CSS, script="",
+                body = PAGE.format(title="Async Work", css=CSS, script="",
                                    bonus=f'<p class="empty">error: {esc(e)}</p>',
                                    schedule="").encode()
             self._send(HTTPStatus.OK, body)
@@ -2997,6 +3145,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._bad_request()
                 return
             ok, message = set_task_active(task_id, active)
+        elif self.path == "/api/bonus/task/edit":
+            payload = self._read_json()
+            if payload is None:
+                return
+            task_id, changes = payload.get("id"), payload.get("changes")
+            if not isinstance(task_id, str) or not isinstance(changes, dict):
+                self._bad_request()
+                return
+            try:
+                cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
+                QueueDB(cfg.database).edit_task(task_id, changes)
+                ok, message = True, "saved"
+            except (QueueError, graph_config.ConfigError) as exc:
+                ok, message = False, str(exc)
         elif self.path == "/api/bonus/task/run":
             payload = self._read_json()
             if payload is None:
@@ -3027,7 +3189,8 @@ class Handler(BaseHTTPRequestHandler):
             if self._one_header("Content-Type") != "application/json":
                 raise ValueError
             length = int(self.headers.get("Content-Length", "0"))
-            if length <= 0 or length > 4096:
+            limit = 65536 if self.path == "/api/bonus/task/edit" else 4096
+            if length <= 0 or length > limit:
                 raise ValueError
             payload = json.loads(self.rfile.read(length))
             if not isinstance(payload, dict):

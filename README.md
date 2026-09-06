@@ -35,10 +35,11 @@ Learning compounding system that extracts knowledge from conversations and makes
 
 See [plugins/compound-learning/README.md](plugins/compound-learning/README.md) for setup and configuration.
 
-### bonus-drain
+### bonus-drain / Async Work
 
 A standalone queue, capacity planner, usage-cache refresher, scout, dispatcher, and secure
-localhost viewer for opportunistic low-priority work. Providers, plans, accounts, limits,
+localhost viewer for autonomous async work. Tasks support manual starts, dependencies,
+source references, and optional automatic Bonus scheduling. Providers, plans, accounts, limits,
 resets, and adapters are generic JSON configuration; dispatch goes through
 `agent-router`.
 

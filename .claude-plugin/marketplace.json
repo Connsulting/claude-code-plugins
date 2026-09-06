@@ -20,7 +20,7 @@
     },
     {
       "name": "bonus-drain",
-      "description": "Queue and safely dispatch low-priority work against independently paced provider capacity",
+      "description": "Queue autonomous async work with dependencies and optional Bonus capacity scheduling",
       "source": "./plugins/bonus-drain",
       "category": "productivity"
     },

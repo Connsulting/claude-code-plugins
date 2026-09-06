@@ -1,13 +1,18 @@
 ---
 name: bonus-drain
-description: Manage and run a low-priority bonus backlog funded only by independently configured provider capacity that would otherwise expire. Use for "bonus background task", "add to bonus backlog", "drain leftover tokens", "if there are tokens spare do this", or "kick bonus work now". Add mode validates autonomy and queues work; run performs one cache-gated scout tick; manual dispatch preserves claims and router-only launch. Not for urgent or interactive work.
+description: Queue, edit, and execute autonomous async work planned in threads. Use for "queue this", "park this for later", "add to my work queue", "run this queued task", and bonus-capacity work. New tasks wait for a manual start unless automatic Bonus execution is authorized. Dependencies gate every launch; all execution uses agent-router. Use bg-schedule for exact calendar timing.
 ---
 
-# Bonus Drain
+# Async Work / Bonus Drain
 
-Bonus Drain is an opportunistic queue, not a completion promise. It may leave all work
-queued when usage is unknown, stale, ahead of pace, outside a reset lead window, or already
-in flight. Never reinterpret a closed gate as spare capacity.
+Async Work is the queue for autonomous work handed off from planning threads. Bonus Drain
+is its opportunistic automatic scheduling policy. Queueing a task does not authorize an
+immediate launch. New tasks default to `manual`; choose `bonus` only when the user authorizes
+execution with spare capacity. Existing tasks retain their Bonus policy.
+
+Automatic Bonus scheduling may leave work queued when usage is unknown, stale, ahead of pace,
+outside a reset lead window, or already in flight. Never reinterpret a closed gate as spare
+capacity. Manual start bypasses pacing while preserving dependency and execution checks.
 
 Use the installed command at `${BONUS_DRAIN_BIN:-$HOME/.local/bin/bonus-drain}`. Config,
 state, and cache follow XDG. Source-tree shell files are compatibility wrappers only; do not
@@ -54,18 +59,21 @@ or lifecycle ownership is unsafe. Do not repair live state implicitly.
 
 An item is eligible for this queue only when all are true:
 
-- low priority and safe to skip for a week;
+- for `bonus` execution only: low priority and safe to skip for a week;
 - independently executable from a concrete cwd and goal;
 - completion can be demonstrated;
 - ambiguity can be resolved conservatively without expanding authority;
 - required credentials/tools are references already present in the environment;
 - no user decision is required during execution.
 
-Reject or redirect urgent work, interactive design, broad cleanup, unclear publishing,
-production changes, and tasks whose success depends on another person's response.
+The task must be independently executable with clear authority. Redirect interactive design,
+unclear publishing authority, and work that requires a person's response during execution.
+Ordinary planned work may use Manual execution even when it is not safely skippable for a week.
 
 Capture at least: stable ID, title, kind (`oneoff` or `recurring`), priority, size, cwd, goal,
-context, constraints, precondition, done-when, and compatible provider/task routing. Priority
+context, constraints, precondition, done-when, and compatible provider/task routing. Also capture
+execution mode, source thread/plan reference when available, a work group when useful, and
+explicit prerequisite task IDs. Never infer dependencies or authorization from similar titles. Priority
 is urgency/drain order; size is the best available estimate of autonomous scope and effort.
 Estimate size before previewing or adding the task:
 
@@ -74,7 +82,7 @@ Estimate size before previewing or adding the task:
 - `medium`: multi-file work or several evidence paths; roughly 1–3 hours.
 - `large`: cross-module, integration/E2E, or substantial research; roughly 3–8 hours.
 - `huge`: broader than one workday or highly uncertain; split it when possible, and reject it
-  when it cannot remain one autonomous, safely skippable job.
+  when it cannot remain one autonomous job (safely skippable when using Bonus).
 
 When between sizes, choose the larger. `unknown` is display-only for legacy/null rows and is
 never valid on add. Prefer `mcp=none` unless the task demonstrably needs a named server. Mark
@@ -89,7 +97,9 @@ Preview the validated task, then add it with the CLI and its required estimate:
 
 ```sh
 bonus-drain add --id TASK_ID --title "TASK TITLE" --kind oneoff --priority 2 \
-  --size medium --cwd /absolute/project/path --goal "CONCRETE GOAL" --json
+  --size medium --cwd /absolute/project/path --goal "CONCRETE GOAL" \
+  --execution-mode manual --source-ref "THREAD_OR_PLAN_REFERENCE" \
+  --work-group "WORK GROUP" --depends-on PREREQUISITE_ID --json
 ```
 
 After adding, read the canonical JSON task back by ID:
@@ -121,9 +131,23 @@ run, never a provider-reset or manual-dispatch cycle: weekly jobs cool down for 
 days and monthly jobs for at least 28 days. A recurring task absent during that cooldown stays
 null until it is separately eligible for an authorized upcoming-only estimate.
 
-## Mode: run
+## Mode: edit and inspect
 
-`run` means one normal scout tick:
+Read `ASYNC_WORK.md` for dependencies, editing, run provenance, and the review UI. A dependency
+is satisfied only by a successful (`done`) one-off prerequisite; failed, skipped, running, and
+missing prerequisites keep the child waiting. Self-dependencies, cycles, missing IDs, and
+recurring prerequisites are rejected. Both Manual and Bonus execution enforce dependencies.
+
+Use `bonus-drain readiness TASK_ID --json` to explain readiness and
+`bonus-drain edit TASK_ID --changes '{"execution_mode":"manual","depends_on":["PARENT_ID"]}' --json`
+to update a queued contract. Read back with `contract-task`. A live claimed task cannot be
+edited; finish or reconcile it before revising it. Successful prerequisites do not auto-start
+a Manual child.
+
+## Mode: automatic bonus run
+
+An explicit request to run a queued task uses `run-now TASK_ID`, not a scout tick.
+"Run bonus drain" means one normal scout tick:
 
 1. Read eligible count without provider I/O.
 2. Read normalized cached account snapshots and build independent gates.
@@ -183,7 +207,7 @@ the matching terminal history and claim atomically; it is not an automatic retry
 
 - Ten-minute cache refresh: `bonus-drain-refresh.timer`.
 - Hourly scout: `bonus-drain-scout.timer`.
-- Optional viewer: the established two-tab background-jobs UI. Force is manual and delegates
+- Optional viewer: the established two-tab background-jobs UI. Run now is manual and delegates
   only to the shared `kick_task` to `agent-router` path. Tailscale Serve is the sole access
   boundary; there is no application login. Exact Host/HTTPS Origin and JSON-only checks
   protect browser mutations; see `SECURITY.md` before remote use.

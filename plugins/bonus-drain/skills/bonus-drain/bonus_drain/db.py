@@ -141,6 +141,10 @@ class Task:
     allowed_providers: tuple[str, ...] = ()
     required_capabilities: tuple[str, ...] = ()
     size: str | None = None
+    execution_mode: str = "bonus"
+    source_ref: str | None = None
+    work_group: str | None = None
+    depends_on: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -171,6 +175,10 @@ class Task:
             "mcp": self.mcp,
             "use_implement": int(self.use_implement),
             "size": self.size,
+            "execution_mode": self.execution_mode,
+            "source_ref": self.source_ref,
+            "work_group": self.work_group,
+            "depends_on": list(self.depends_on),
         }
 
     def legacy_contract_dict(self) -> dict[str, Any]:
@@ -196,6 +204,7 @@ class RunEvent:
     account_id: str | None
     router_job_id: str | None
     engine: str | None = None
+    trigger: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -323,9 +332,14 @@ class QueueDB:
             "allowed_providers_json": "TEXT",
             "required_capabilities_json": "TEXT",
             "size": "TEXT",
+            "execution_mode": "TEXT NOT NULL DEFAULT 'bonus'",
+            "source_ref": "TEXT",
+            "work_group": "TEXT",
+            "depends_on_json": "TEXT",
         }
         run_columns = {
             "engine": "TEXT",
+            "trigger": "TEXT",
             "router_job_id": "TEXT",
             "eligibility_key": "TEXT",
             "provider_id": "TEXT",
@@ -392,7 +406,9 @@ class QueueDB:
             model=row["model"], mcp=row["mcp"], use_implement=bool(row["use_implement"]),
             allowed_providers=_json_tuple(row["allowed_providers_json"]),
             required_capabilities=_json_tuple(row["required_capabilities_json"]),
-            size=row["size"],
+            size=row["size"], execution_mode=row["execution_mode"],
+            source_ref=row["source_ref"], work_group=row["work_group"],
+            depends_on=_json_tuple(row["depends_on_json"]),
         )
 
     @staticmethod
@@ -402,7 +418,7 @@ class QueueDB:
             rowid_pk=int(row["rowid_pk"]), task=row["task"], kind=row["kind"], cycle=int(row["cycle"]),
             eligibility_key=row["eligibility_key"], status=row["status"], ts=row["ts"],
             branch=row["branch"], summary=row["summary"], provider_id=provider_id,
-            account_id=row["account_id"], router_job_id=row["router_job_id"], engine=row["engine"],
+            account_id=row["account_id"], router_job_id=row["router_job_id"], engine=row["engine"], trigger=row["trigger"],
         )
 
     @staticmethod
@@ -445,19 +461,23 @@ class QueueDB:
             "required": json.dumps(list(required)) if required else None,
             "size": size,
         }
+        parameters.update(self._work_fields(values))
         self.initialize()
         try:
-            with self._connect() as connection:
+            with self._transaction() as connection:
+                self._validate_dependencies(connection, item_id, parameters["depends_on_json"])
                 connection.execute(
                     """
                     INSERT INTO tasks(
                       id,title,kind,priority,cadence,cwd,goal,context,constraints,
                       precondition,done_when,created_at,active,claude_only,model,mcp,
-                      use_implement,allowed_providers_json,required_capabilities_json,size
+                      use_implement,allowed_providers_json,required_capabilities_json,size,
+                      execution_mode,source_ref,work_group,depends_on_json
                     ) VALUES(
                       :id,:title,:kind,:priority,:cadence,:cwd,:goal,:context,:constraints,
                       :precondition,:done_when,:created_at,:active,:claude_only,:model,:mcp,
-                      :use_implement,:allowed,:required,:size
+                      :use_implement,:allowed,:required,:size,
+                      :execution_mode,:source_ref,:work_group,:depends_on_json
                     )
                     """, parameters,
                 )
@@ -466,6 +486,119 @@ class QueueDB:
         task = self.task(item_id)
         assert task is not None
         return task
+
+    @staticmethod
+    def _work_fields(values: Mapping[str, Any]) -> dict[str, Any]:
+        mode = values.get("execution_mode", "bonus")  # legacy programmatic/import callers
+        if not isinstance(mode, str) or mode not in {"manual", "bonus"}:
+            raise QueueError("execution_mode must be manual or bonus")
+        dependencies = values.get("depends_on", ())
+        if not isinstance(dependencies, (list, tuple)) or any(not isinstance(x, str) for x in dependencies):
+            raise QueueError("depends_on must be a list of task IDs")
+        for dependency in dependencies:
+            _require_task_id(dependency)
+        for field in ("source_ref", "work_group"):
+            if values.get(field) is not None and not isinstance(values[field], str):
+                raise QueueError(f"{field} must be text")
+        return {"execution_mode": mode, "source_ref": values.get("source_ref"),
+                "work_group": values.get("work_group"),
+                "depends_on_json": json.dumps(sorted(set(dependencies)))}
+
+    @staticmethod
+    def _validate_dependencies(connection: sqlite3.Connection, task_id: str, raw: str) -> None:
+        dependencies = json.loads(raw)
+        graph = {row["id"]: row for row in connection.execute(
+            "SELECT id,kind,depends_on_json FROM tasks"
+        )}
+        for dependency in dependencies:
+            if dependency == task_id:
+                raise QueueError("a task cannot depend on itself")
+            if dependency not in graph:
+                raise QueueError(f"unknown prerequisite: {dependency}")
+            if graph[dependency]["kind"] != "oneoff":
+                raise QueueError("prerequisites must be one-off tasks in this version")
+        pending, seen = list(dependencies), set()
+        while pending:
+            node = pending.pop()
+            if node == task_id:
+                raise QueueError("dependency cycle rejected")
+            if node in seen:
+                continue
+            seen.add(node)
+            if node in graph:
+                pending.extend(_json_tuple(graph[node]["depends_on_json"]))
+
+    @staticmethod
+    def _dependency_statuses(connection: sqlite3.Connection, task: Task) -> list[dict[str, Any]]:
+        result = []
+        for dependency in task.depends_on:
+            parent = connection.execute("SELECT title,kind FROM tasks WHERE id=?", (dependency,)).fetchone()
+            last = connection.execute("SELECT status FROM runs WHERE task=? ORDER BY rowid_pk DESC LIMIT 1", (dependency,)).fetchone()
+            claimed = connection.execute("SELECT 1 FROM dispatch_claims WHERE task_id=?", (dependency,)).fetchone()
+            status = "missing" if parent is None else ("running" if claimed else (last[0] if last else "queued"))
+            if parent and parent["kind"] != "oneoff":
+                status = "unsupported recurrence"
+            result.append({"id": dependency, "title": parent["title"] if parent else dependency,
+                           "status": status, "satisfied": status == "done"})
+        return result
+
+    def readiness(self, task_id: str) -> dict[str, Any]:
+        self.initialize()
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row is None:
+                raise QueueError(f"unknown task: {task_id}")
+            task = self._task_from_row(row)
+            dependencies = self._dependency_statuses(connection, task)
+            waiting = [d for d in dependencies if not d["satisfied"]]
+            last = connection.execute("SELECT status FROM runs WHERE task=? ORDER BY rowid_pk DESC LIMIT 1", (task_id,)).fetchone()
+            claimed = connection.execute("SELECT 1 FROM dispatch_claims WHERE task_id=?", (task_id,)).fetchone()
+            state, reason = "ready", "Ready to run manually"
+            if not task.active:
+                state, reason = "paused", "Paused"
+            elif claimed or (last and last[0] == "dispatched"):
+                state, reason = "running", "Run is active or requires reconciliation"
+            elif task.kind == "oneoff" and last:
+                state, reason = last[0], f"Last run: {last[0]}"
+            elif waiting:
+                state, reason = "waiting", "Waiting for " + ", ".join(d["id"] for d in waiting)
+            elif not self._eligible_in_connection(connection, task, 0):
+                state, reason = "cooldown", "Waiting for recurrence cooldown"
+            return {"state": state, "ready": state == "ready", "reason": reason,
+                    "dependencies": dependencies, "execution_mode": task.execution_mode}
+
+    def edit_task(self, task_id: str, changes: Mapping[str, Any]) -> Task:
+        allowed = {"title", "priority", "size", "cwd", "goal", "context", "constraints",
+                   "precondition", "done_when", "execution_mode", "source_ref", "work_group", "depends_on"}
+        if not changes or set(changes) - allowed:
+            raise QueueError("edit requires supported task contract fields")
+        self.initialize()
+        with self._transaction() as connection:
+            row = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if row is None:
+                raise QueueError(f"unknown task: {task_id}")
+            task = self._task_from_row(row)
+            last = connection.execute("SELECT status FROM runs WHERE task=? ORDER BY rowid_pk DESC LIMIT 1", (task_id,)).fetchone()
+            if connection.execute("SELECT 1 FROM dispatch_claims WHERE task_id=?", (task_id,)).fetchone() or (last and (task.kind == "oneoff" or last[0] == "dispatched")):
+                raise QueueError("only queued tasks can be edited; requeue failed work first")
+            merged = {**task.to_dict(), **changes}
+            fields = self._work_fields(merged)
+            self._validate_dependencies(connection, task_id, fields["depends_on_json"])
+            for key, value in changes.items():
+                if key in {"execution_mode", "source_ref", "work_group", "depends_on"}:
+                    continue
+                if key == "priority":
+                    if type(value) is not int or value not in range(5):
+                        raise QueueError("priority must be from 0 through 4")
+                elif key == "size":
+                    value = require_task_size(value)
+                elif value is not None and not isinstance(value, str):
+                    raise QueueError(f"{key} must be text")
+                if key in {"title", "cwd", "goal"} and not (value or "").strip():
+                    raise QueueError(f"{key} cannot be empty")
+                fields[key] = value
+            connection.execute("UPDATE tasks SET " + ",".join(f"{key}=?" for key in fields) + " WHERE id=?", (*fields.values(), task_id))
+        return self.task(task_id)
 
     def task(self, task_id: str) -> Task | None:
         self.initialize()
@@ -496,6 +629,8 @@ class QueueDB:
     @staticmethod
     def _eligible_in_connection(connection: sqlite3.Connection, task: Task, cycle: int) -> bool:
         if not task.active:
+            return False
+        if any(not d["satisfied"] for d in QueueDB._dependency_statuses(connection, task)):
             return False
         if connection.execute("SELECT 1 FROM dispatch_claims WHERE task_id=? LIMIT 1", (task.id,)).fetchone():
             return False
@@ -544,7 +679,7 @@ class QueueDB:
     def eligible_tasks(
         self, cycle: int, *, provider_id: str | None = None, capabilities: Iterable[str] = (),
         portable_only: bool = False, exclusive_only: bool = False, task_id: str | None = None,
-        claude_priority: bool = False, limit: int | None = None,
+        claude_priority: bool = False, limit: int | None = None, automatic: bool = False,
     ) -> list[Task]:
         self.initialize()
         with self._connect() as connection:
@@ -553,6 +688,8 @@ class QueueDB:
             for row in rows:
                 task = self._task_from_row(row)
                 if task_id and task.id != task_id:
+                    continue
+                if automatic and task.execution_mode != "bonus":
                     continue
                 exclusive = task_requires_legacy_exclusive(task)
                 if portable_only and exclusive:
@@ -581,7 +718,7 @@ class QueueDB:
 
     def claim(
         self, task_id: str, eligibility_key: str, provider_id: str, account_id: str | None,
-        *, provider_capabilities: Iterable[str] = (),
+        *, provider_capabilities: Iterable[str] = (), automatic: bool = False, expected_task: Task | None = None,
     ) -> bool:
         if not eligibility_key or not provider_id or provider_id == "auto":
             return False
@@ -593,6 +730,10 @@ class QueueDB:
                 if row is None:
                     return False
                 task = self._task_from_row(row)
+                if expected_task is not None and task != expected_task:
+                    return False
+                if automatic and task.execution_mode != "bonus":
+                    return False
                 if not self._provider_compatible(task, provider_id, provider_capabilities):
                     return False
                 if not self._eligible_in_connection(connection, task, cycle):
@@ -809,9 +950,11 @@ class QueueDB:
         provider_id: str | None = None, account_id: str | None = None, kind: str | None = None,
         cycle: int | None = None, ts: str | None = None, branch: str | None = None,
         summary: str | None = None, router_job_id: str | None = None,
-        timestamp: str | None = None,
+        timestamp: str | None = None, trigger: str | None = None,
         release_activation: Callable[[], None] | None = None,
     ) -> RunEvent:
+        if trigger not in {None, "manual", "bonus", "scheduled"}:
+            raise QueueError("invalid run trigger")
         if status not in VALID_STATUSES:
             raise QueueError(f"invalid run status: {status}")
         if provider_id == "auto":
@@ -822,11 +965,19 @@ class QueueDB:
         needs_release = False
 
         def resolve(connection: sqlite3.Connection) -> None:
-            nonlocal resolved_kind, provider_id, account_id
+            nonlocal resolved_kind, provider_id, account_id, trigger
             task_row = connection.execute("SELECT kind FROM tasks WHERE id=?", (task_id,)).fetchone()
             resolved_kind = kind or (task_row["kind"] if task_row else None)
             if resolved_kind not in {"oneoff", "recurring"}:
                 raise QueueError("record kind must be oneoff or recurring")
+            if eligibility_key and trigger is None:
+                previous = connection.execute(
+                    "SELECT trigger FROM runs WHERE task=? AND eligibility_key=? "
+                    "AND trigger IS NOT NULL ORDER BY rowid_pk DESC LIMIT 1",
+                    (task_id, eligibility_key),
+                ).fetchone()
+                if previous:
+                    trigger = previous[0]
             if eligibility_key:
                 claim_row = connection.execute(
                     """SELECT provider_id,account_id FROM dispatch_claims
@@ -849,10 +1000,10 @@ class QueueDB:
             cursor = connection.execute(
                     """INSERT INTO runs(
                          task,kind,cycle,eligibility_key,status,ts,branch,summary,engine,
-                         provider_id,account_id,router_job_id
-                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                         provider_id,account_id,router_job_id,trigger
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (task_id, resolved_kind, resolved_cycle, eligibility_key, status, ts or timestamp or utc_now(),
-                     branch, summary, provider_id, provider_id, account_id, router_job_id),
+                     branch, summary, provider_id, provider_id, account_id, router_job_id, trigger),
                 )
             if status in TERMINAL_STATUSES:
                 if eligibility_key is None:

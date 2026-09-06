@@ -49,6 +49,7 @@
       "properties": {
         "bind": {"type": "string", "default": "127.0.0.1"},
         "mutations_enabled": {"type": "boolean", "default": false},
+        "preview": {"type": "boolean", "default": false},
         "remote": {
           "type": "object",
           "additionalProperties": false,

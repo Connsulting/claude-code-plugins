@@ -1,7 +1,7 @@
-# Bonus Drain
+# Async Work / Bonus Drain
 
 Bonus Drain is a self-contained queue, planner, scout, usage-cache refresher, dispatcher,
-and viewer for opportunistic low-priority work. Provider names, plans, accounts,
+and viewer for autonomous async work, with optional opportunistic Bonus scheduling. Provider names, plans, accounts,
 limits, reset windows, usage readers, activation rules, and dispatch bindings are validated
 JSON data. The planner does not contain provider-name branches.
 
@@ -163,9 +163,9 @@ possible activation adapter, not a core dependency.
 
 ## Viewer
 
-Bonus Drain ships the established two-tab background-jobs viewer: the Bonus Drain console
+Bonus Drain ships the established two-tab background-jobs viewer: the Async Work queue
 and scheduled systemd jobs. Its HTML and interactions are preserved from the standalone
-viewer while Force dispatch now delegates to the shared router-only kickoff service.
+viewer while Run now dispatch now delegates to the shared router-only kickoff service.
 
 ```sh
 BONUS_DRAIN_CONFIG="${BONUS_DRAIN_CONFIG}" bonus-drain viewer --port 8766
@@ -182,7 +182,7 @@ The dependency ensures refresh is scheduled before the viewer, not that cache is
 fresh. Page rendering reads cached usage, SQLite, and local systemd timer metadata. It does
 not call provider APIs from a request.
 
-Force is never automatic and bypasses pacing only. It still requires an active compatible
+Run now is never automatic and bypasses pacing only. It still requires an active compatible
 task and an atomic claim. Concrete-provider and `auto` buttons both use the shared
 `kick_task` service; `auto` asks `agent-router` to classify before the one launch.
 
@@ -282,3 +282,9 @@ For the runtime contracts and command reference, see
 [`skills/bonus-drain/README.md`](skills/bonus-drain/README.md),
 [`skills/bonus-drain/SECURITY.md`](skills/bonus-drain/SECURITY.md), and
 [`skills/bonus-drain/MIGRATION.md`](skills/bonus-drain/MIGRATION.md).
+
+## Async work and dependencies
+
+New CLI tasks default to Manual execution; existing tasks keep Bonus scheduling.
+Tasks can carry source references, work groups, and one-off prerequisites.
+See [ASYNC_WORK.md](skills/bonus-drain/ASYNC_WORK.md) for the contract and commands.

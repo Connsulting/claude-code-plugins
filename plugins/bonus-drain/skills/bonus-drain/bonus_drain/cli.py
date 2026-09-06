@@ -131,6 +131,10 @@ def _task_values(args: argparse.Namespace) -> dict[str, Any]:
         return bool(raw)
 
     return {
+        "execution_mode": args.execution_mode,
+        "source_ref": args.source_ref,
+        "work_group": args.work_group,
+        "depends_on": [x.strip() for x in (args.depends_on or "").split(",") if x.strip()],
         "id": args.id,
         "title": args.title,
         "kind": args.kind,
@@ -297,6 +301,7 @@ def _command(args: argparse.Namespace) -> int:
                 ]
                 for task in candidates
             }
+            snapshot["readiness"] = {task.id: queue.readiness(task.id) for task in tasks_by_id.values()}
             _json(snapshot)
         else:
             _human_queue_status(queue, cycle)
@@ -305,6 +310,17 @@ def _command(args: argparse.Namespace) -> int:
         _cfg, queue = _queue(args)
         records = [event.to_dict() for event in queue.runs(limit=args.limit, task_id=args.task)]
         _json({"runs": records}) if args.json else [print(f"{row['ts']}\t{row['task']}\t{row['status']}") for row in records]
+        return 0
+    if command == "edit":
+        _cfg, queue = _queue(args)
+        changes = json.loads(args.changes)
+        if not isinstance(changes, dict):
+            raise CLIError("changes must be a JSON object")
+        _json({"task": queue.edit_task(args.task, changes).to_dict()})
+        return 0
+    if command == "readiness":
+        _cfg, queue = _queue(args)
+        _json(queue.readiness(args.task))
         return 0
     if command == "requeue":
         _cfg, queue = _queue(args)
@@ -606,6 +622,10 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--context"); add.add_argument("--constraints"); add.add_argument("--precondition")
     add.add_argument("--done-when", dest="done_when"); add.add_argument("--claude-only", type=int, default=0)
     add.add_argument("--model"); add.add_argument("--mcp"); add.add_argument("--use-implement", type=int, default=0)
+    add.add_argument("--execution-mode", choices=("manual", "bonus"), default="manual")
+    add.add_argument("--source-ref"); add.add_argument("--work-group"); add.add_argument("--depends-on")
+    edit = sub.add_parser("edit"); _add_common(edit); _add_json(edit); edit.add_argument("task"); edit.add_argument("--changes", required=True)
+    ready = sub.add_parser("readiness"); _add_common(ready); _add_json(ready); ready.add_argument("task")
     add.add_argument("--providers"); add.add_argument("--capabilities")
 
     for name in ("eligible", "count-eligible"):

@@ -60,19 +60,11 @@ class JobsViewerContractTests(unittest.TestCase):
             connection.close()
 
     def test_existing_ui_is_preserved_without_login_or_generic_viewer_copy(self) -> None:
-        expected_frontend_hashes = {
-            "CSS": "8c76d577e44e344f5b83c5fca507382593920faedb56526b379eadabf769280b",
-            "ICON_SPRITE": "333ef2163122e3450f95ea008ef6eaaad6ecb8f2562244bfb02e6317a4c06a03",
-            "SCRIPT": "1d8b73dfc68ad1701442d9d920ff39e0381ccc33f55fbc55d006913a006b3d8c",
-            "PAGE": "69071b11da43869de11c5211fe5fed4a976f38f6499c4b70ce9205845b4033de",
-        }
+        # This branch intentionally changes layout, copy and editor behavior. Keep the
+        # established icon system and assert the new behavior in test_async_work_viewer.
         self.assertEqual(
-            {
-                name: hashlib.sha256(getattr(self.viewer, name).encode()).hexdigest()
-                for name in expected_frontend_hashes
-            },
-            expected_frontend_hashes,
-            "the established frontend is a byte-for-byte compatibility contract",
+            hashlib.sha256(self.viewer.ICON_SPRITE.encode()).hexdigest(),
+            "333ef2163122e3450f95ea008ef6eaaad6ecb8f2562244bfb02e6317a4c06a03",
         )
         with (
             mock.patch.object(self.viewer, "render_bonus_body", return_value='<button class="task-run" data-engine="claude">force</button>'),
@@ -80,7 +72,7 @@ class JobsViewerContractTests(unittest.TestCase):
         ):
             page = self.viewer.render_page().decode()
         for marker in (
-            "background jobs", "01 bonus-drain", "02 scheduled", "jobsViewerTab",
+            "async work", "01 work queue", "02 schedules", "jobsViewerTab",
             'class="task-run"', 'data-engine="claude"', "scheduled body",
         ):
             self.assertIn(marker, page)
@@ -149,7 +141,8 @@ class JobsViewerContractTests(unittest.TestCase):
         ):
             remaining = self.viewer.get_remaining(123)
         self.assertEqual(remaining[0]["eligible_providers"], ["claude", "codex"])
-        buttons = self.viewer._run_buttons(remaining[0])
+        with mock.patch.object(self.viewer, "MUTATIONS_ENABLED", True):
+            buttons = self.viewer._run_buttons(remaining[0])
         self.assertIn('data-engine="claude"', buttons)
         self.assertIn('data-engine="codex"', buttons)
         self.assertIn('data-engine="grok"', buttons)
@@ -351,8 +344,8 @@ class JobsViewerContractTests(unittest.TestCase):
                 text=True, timeout=30, check=False,
             )
         self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertIn("01 bonus-drain", completed.stdout)
-        self.assertIn("02 scheduled", completed.stdout)
+        self.assertIn("01 work queue", completed.stdout)
+        self.assertIn("02 schedules", completed.stdout)
         self.assertIn('class="task-run"', completed.stdout)
         self.assertNotRegex(completed.stdout.lower(), r"sign in|access secret|authentication required")
 
@@ -459,7 +452,7 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertIn('aria-label="unknown size estimate"', upcoming_row("Unexpected upcoming"))
         self.assertNotIn(unexpected, body)
 
-        run_start = body.index("<span>run log</span>")
+        run_start = body.index("<span>results / run history</span>")
         disabled_start = body.index("<span><i class=\"caret\"></i>disabled")
         history_section = body[run_start:disabled_start]
         disabled_section = body[disabled_start:body.index("<footer>", disabled_start)]
@@ -579,7 +572,7 @@ class JobsViewerContractTests(unittest.TestCase):
 
         drained = self._bonus_body([])
         self.assertNotIn('id="qfilters"', drained)
-        self.assertIn("queue drained", drained)
+        self.assertIn("No queued work", drained)
 
     def test_selecting_filters_hides_rows_and_renumbers_the_queue_in_a_browser(self) -> None:
         chrome = shutil.which("google-chrome") or shutil.which("google-chrome-stable")
@@ -657,7 +650,7 @@ class JobsViewerContractTests(unittest.TestCase):
         body = self._bonus_body(self.QUEUE_FIXTURE)
         self.assertIn('class="mfold mfold-wrap" data-fold="header"', body)
         self.assertIn('class="hd mfold-sum"', body)
-        self.assertIn('class="mfold-hint idle"', body)
+        self.assertIn('class="work-summary"', body)
         self.assertIn('class="tl mfold" data-fold="rotation"', body)
         self.assertIn('class="rows mfold" data-fold="drain"', body)
         self.assertIn('class="rowhd mfold-sum"', body)
@@ -665,14 +658,13 @@ class JobsViewerContractTests(unittest.TestCase):
         vbar_at = body.index('class="vbar idle"')
         rotation_at = body.index('data-fold="rotation"')
         drain_at = body.index('data-fold="drain"')
-        remaining_at = body.index("remaining this week")
-        self.assertLess(header_at, vbar_at)
+        remaining_at = body.index("queued · priority order")
+        self.assertLess(header_at, remaining_at)
+        self.assertLess(remaining_at, vbar_at)
         self.assertLess(vbar_at, rotation_at)
         self.assertLess(rotation_at, drain_at)
-        self.assertLess(drain_at, remaining_at)
-        # The verdict lives in the header's fold body, and the account rows live in drain's.
-        self.assertIn('class="mfold-body"', body[vbar_at - 80:vbar_at])
-        self.assertIn("<i class=\"caret\"></i>drain order", body)
+        self.assertIn('class="sec capacity-fold"', body)
+        self.assertIn("<i class=\"caret\"></i>bonus capacity", body)
         self.assertIn("<i class=\"caret\"></i>rotation", body)
 
         css, script = self.viewer.CSS, self.viewer.SCRIPT
