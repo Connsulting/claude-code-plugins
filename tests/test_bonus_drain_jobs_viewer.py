@@ -650,7 +650,7 @@ class JobsViewerContractTests(unittest.TestCase):
         body = self._bonus_body(self.QUEUE_FIXTURE)
         self.assertIn('class="mfold mfold-wrap" data-fold="header"', body)
         self.assertIn('class="hd mfold-sum"', body)
-        self.assertIn('class="work-summary"', body)
+        self.assertNotIn('class="work-summary"', body)
         self.assertIn('class="tl mfold" data-fold="rotation"', body)
         self.assertIn('class="rows mfold" data-fold="drain"', body)
         self.assertIn('class="rowhd mfold-sum"', body)

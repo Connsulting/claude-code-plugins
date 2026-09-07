@@ -1885,7 +1885,7 @@ def _queue_filters(remaining: list[dict]) -> str:
     ]
 
     groups = [(g, label, [(v, esc(v), v) for v in sorted(counts[g])]) for g, label in (("state", "readiness"), ("mode", "execution"), ("workgroup", "work group"))] + groups
-    blocks, secondary = [], []
+    blocks = []
     for group, label, options in groups:
         # A single-value facet cannot filter anything, so it is a control that does nothing.
         if len(options) < 2:
@@ -1902,14 +1902,11 @@ def _queue_filters(remaining: list[dict]) -> str:
         # The group name is spoken, not printed. Printing four labels cost ~200px, which is
         # exactly what the fourth group needed to stay on one row, and the marks are the same
         # ones the rows below carry - the label was naming what you can already see.
-        target = blocks if group in {"state", "mode", "workgroup"} else secondary
-        target.append(
+        blocks.append(
             '<div class="fgrp" role="group" aria-label="filter by ' + esc(label) + '">'
             + "".join(chips) + "</div>"
         )
 
-    if secondary:
-        blocks.append('<details class="filter-more"><summary>More filters</summary><div class="filter-extra">' + "".join(secondary) + "</div></details>")
     if not blocks:
         return ""
     return (
@@ -2112,7 +2109,6 @@ def render_bonus_body() -> str:
     </div>
     </div>
     {'<div class="preview-banner">PREVIEW · copied queue and usage snapshot · execution disabled</div>' if PREVIEW else ''}
-    <div class="work-summary"><span><b>{len(remaining)}</b> queued</span><span><b>{sum(t.get("readiness", {}).get("state", "ready") == "ready" for t in remaining)}</b> ready</span><span><b>{sum(t.get("readiness", {}).get("state") == "waiting" for t in remaining)}</b> waiting on dependencies</span><span><b>{len(inflight)}</b> running</span></div>
     <div class="vbar {v_tone}"><span class="vdot"></span><div class="vmain"><b>{esc(v_label)}</b><div class="vtext">{v_text}</div><div class="vsub">{v_sub}</div></div></div>
     {_rotation(cards)}
     <div class="rows mfold" data-fold="drain">
@@ -2576,7 +2572,7 @@ footer{margin:34px 0 0;font-size:10.5px;color:var(--dim2);letter-spacing:.04em}
 .fchip .sizeblocks{height:12px}
 .fchip .sizeblocks i{width:4px;height:9px;opacity:.28}
 .fchip .sizeblocks i.on{opacity:.92}
-.fchip i{font-style:normal;font-size:10px;color:var(--dim2);font-variant-numeric:tabular-nums}
+.fchip i{font-style:normal;font-size:inherit;color:var(--dim2);font-variant-numeric:tabular-nums}
 /* Selected is a lift in weight, not the accent: amber on this page means LIVE, and a selected
    filter is neither live nor an account state. */
 .fchip.on{border-color:rgba(233,231,226,.52);background:rgba(255,255,255,.10);color:var(--fg)}
@@ -2739,10 +2735,10 @@ table.grid{width:100%;border-collapse:collapse;font-size:12px}
 
 CSS += """
 .preview-banner{border:1px solid var(--acc);padding:12px 16px;border-radius:8px;color:var(--acc);margin:18px 0}
-.filter-more{font-size:11px;color:var(--dim)}.filter-more summary{cursor:pointer;padding:5px}.filter-extra{display:flex;flex-wrap:wrap;gap:10px;padding-top:10px}.filter-more[open]{flex-basis:100%}
-.work-summary{display:flex;gap:12px;flex-wrap:wrap;margin:22px 0 28px}.work-summary>span{padding:12px 16px;border:1px solid var(--line);border-radius:8px}.work-summary b{font-size:22px;margin-right:8px}
+
+
 .work-meta{display:flex;gap:9px;align-items:center;flex-wrap:wrap;font-size:11px;margin:9px 0;color:var(--dim)}.work-state{padding:3px 7px;border:1px solid currentColor;border-radius:5px;text-transform:capitalize}.work-state.ready,.dep-dot.done{color:#82c9a1}.work-state.waiting,.dep-dot.waiting{color:#e1b56e}.work-group{color:var(--fg)}.source-link{color:var(--acc);text-decoration:none}.readiness-reason{font-size:11px;color:var(--dim);margin:6px 0}.dependencies{font-size:11px;margin-top:8px}.dependencies summary{cursor:pointer;color:var(--acc)}.dependencies ul{padding:5px 0;list-style:none}.dependencies li{padding:5px 0}.dependencies code{color:var(--dim);font-size:10px}.dep-dot{display:inline-block;width:6px;height:6px;background:currentColor;border-radius:50%;margin-right:6px}.run-trigger{display:inline-block;font-size:10px;color:var(--acc);margin-right:10px}.qact{flex-wrap:wrap}.qrow{scroll-margin-top:20px}
-@media(max-width:640px){.work-summary{gap:6px}.work-summary>span{padding:9px;font-size:10px}.work-summary b{font-size:16px}.qrow{grid-template-columns:20px minmax(0,1fr)!important}.qact{grid-column:2;justify-content:flex-start!important;margin-top:9px}.work-meta,.readiness-reason,.dependencies{font-size:10px}.runset{margin-left:5px}.qmain{min-width:0}.work-meta{overflow-wrap:anywhere}.dependencies code{display:block;margin-left:12px}}
+@media(max-width:640px){.qrow{grid-template-columns:20px minmax(0,1fr)!important}.qact{grid-column:2;justify-content:flex-start!important;margin-top:9px}.work-meta,.readiness-reason,.dependencies{font-size:10px}.runset{margin-left:5px}.qmain{min-width:0}.work-meta{overflow-wrap:anywhere}.dependencies code{display:block;margin-left:12px}}
 """
 
 SCRIPT = """
