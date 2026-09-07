@@ -248,6 +248,23 @@ class BlockAnchorExtension(Extension):
         md.treeprocessors.register(BlockAnchorTreeprocessor(md), "block_anchor", 5)
 
 
+class ExternalLinkTreeprocessor(Treeprocessor):
+    """Open rendered HTTP(S) links separately without changing page anchors."""
+
+    def run(self, root):
+        for el in root.iter("a"):
+            href = el.get("href", "")
+            if re.match(r"^https?://", href, re.IGNORECASE):
+                el.set("target", "_blank")
+                el.set("rel", "noopener noreferrer")
+        return None
+
+
+class ExternalLinkExtension(Extension):
+    def extendMarkdown(self, md):
+        md.treeprocessors.register(ExternalLinkTreeprocessor(md), "external_links", 4)
+
+
 def load_comments(md_path: Path) -> dict:
     sidecar = md_path.with_suffix(md_path.suffix + ".comments.json")
     if not sidecar.exists():
@@ -787,6 +804,7 @@ def _make_md() -> markdown.Markdown:
             "sane_lists",
             "codehilite",
             BlockAnchorExtension(),
+            ExternalLinkExtension(),
         ],
         extension_configs={
             "toc": {"slugify": slugify_unicode, "permalink": False},
