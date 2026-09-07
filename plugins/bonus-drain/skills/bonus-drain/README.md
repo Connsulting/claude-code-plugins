@@ -285,6 +285,6 @@ of runtime removal.
 
 ## Async work and dependencies
 
-New CLI tasks default to Manual execution; existing tasks keep Bonus scheduling.
+Every ready task is eligible for Bonus capacity; `run-now` accelerates an individual task.
 Tasks can carry source references, 15-character work groups, and one-off prerequisites.
 See [ASYNC_WORK.md](ASYNC_WORK.md) for the contract and commands.

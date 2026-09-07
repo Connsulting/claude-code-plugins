@@ -145,7 +145,6 @@ class Task:
     allowed_providers: tuple[str, ...] = ()
     required_capabilities: tuple[str, ...] = ()
     size: str | None = None
-    execution_mode: str = "bonus"
     source_ref: str | None = None
     work_group: str | None = None
     depends_on: tuple[str, ...] = ()
@@ -179,7 +178,6 @@ class Task:
             "mcp": self.mcp,
             "use_implement": int(self.use_implement),
             "size": self.size,
-            "execution_mode": self.execution_mode,
             "source_ref": self.source_ref,
             "work_group": self.work_group,
             "depends_on": list(self.depends_on),
@@ -336,7 +334,6 @@ class QueueDB:
             "allowed_providers_json": "TEXT",
             "required_capabilities_json": "TEXT",
             "size": "TEXT",
-            "execution_mode": "TEXT NOT NULL DEFAULT 'bonus'",
             "source_ref": "TEXT",
             "work_group": "TEXT",
             "depends_on_json": "TEXT",
@@ -410,7 +407,7 @@ class QueueDB:
             model=row["model"], mcp=row["mcp"], use_implement=bool(row["use_implement"]),
             allowed_providers=_json_tuple(row["allowed_providers_json"]),
             required_capabilities=_json_tuple(row["required_capabilities_json"]),
-            size=row["size"], execution_mode=row["execution_mode"],
+            size=row["size"],
             source_ref=row["source_ref"], work_group=row["work_group"],
             depends_on=_json_tuple(row["depends_on_json"]),
         )
@@ -476,12 +473,12 @@ class QueueDB:
                       id,title,kind,priority,cadence,cwd,goal,context,constraints,
                       precondition,done_when,created_at,active,claude_only,model,mcp,
                       use_implement,allowed_providers_json,required_capabilities_json,size,
-                      execution_mode,source_ref,work_group,depends_on_json
+                      source_ref,work_group,depends_on_json
                     ) VALUES(
                       :id,:title,:kind,:priority,:cadence,:cwd,:goal,:context,:constraints,
                       :precondition,:done_when,:created_at,:active,:claude_only,:model,:mcp,
                       :use_implement,:allowed,:required,:size,
-                      :execution_mode,:source_ref,:work_group,:depends_on_json
+                      :source_ref,:work_group,:depends_on_json
                     )
                     """, parameters,
                 )
@@ -493,9 +490,6 @@ class QueueDB:
 
     @staticmethod
     def _work_fields(values: Mapping[str, Any], *, validate_work_group: bool = True) -> dict[str, Any]:
-        mode = values.get("execution_mode", "bonus")  # legacy programmatic/import callers
-        if not isinstance(mode, str) or mode not in {"manual", "bonus"}:
-            raise QueueError("execution_mode must be manual or bonus")
         dependencies = values.get("depends_on", ())
         if not isinstance(dependencies, (list, tuple)) or any(not isinstance(x, str) for x in dependencies):
             raise QueueError("depends_on must be a list of task IDs")
@@ -505,10 +499,11 @@ class QueueDB:
             if values.get(field) is not None and not isinstance(values[field], str):
                 raise QueueError(f"{field} must be text")
         work_group = values.get("work_group")
+        if isinstance(work_group, str) and work_group.lower().replace("-", " ") == "soak obs":
+            work_group = "Soak Obs"
         if validate_work_group and work_group is not None and len(work_group) > WORK_GROUP_MAX_LENGTH:
             raise QueueError(f"work_group must be at most {WORK_GROUP_MAX_LENGTH} characters")
-        return {"execution_mode": mode, "source_ref": values.get("source_ref"),
-                "work_group": work_group,
+        return {"source_ref": values.get("source_ref"), "work_group": work_group,
                 "depends_on_json": json.dumps(sorted(set(dependencies)))}
 
     @staticmethod
@@ -560,7 +555,7 @@ class QueueDB:
             waiting = [d for d in dependencies if not d["satisfied"]]
             last = connection.execute("SELECT status FROM runs WHERE task=? ORDER BY rowid_pk DESC LIMIT 1", (task_id,)).fetchone()
             claimed = connection.execute("SELECT 1 FROM dispatch_claims WHERE task_id=?", (task_id,)).fetchone()
-            state, reason = "ready", "Ready to run manually"
+            state, reason = "ready", "Ready to run"
             if not task.active:
                 state, reason = "paused", "Paused"
             elif claimed or (last and last[0] == "dispatched"):
@@ -572,11 +567,11 @@ class QueueDB:
             elif not self._eligible_in_connection(connection, task, 0):
                 state, reason = "cooldown", "Waiting for recurrence cooldown"
             return {"state": state, "ready": state == "ready", "reason": reason,
-                    "dependencies": dependencies, "execution_mode": task.execution_mode}
+                    "dependencies": dependencies}
 
     def edit_task(self, task_id: str, changes: Mapping[str, Any]) -> Task:
         allowed = {"title", "priority", "size", "cwd", "goal", "context", "constraints",
-                   "precondition", "done_when", "execution_mode", "source_ref", "work_group", "depends_on"}
+                   "precondition", "done_when", "source_ref", "work_group", "depends_on"}
         if not changes or set(changes) - allowed:
             raise QueueError("edit requires supported task contract fields")
         self.initialize()
@@ -594,7 +589,7 @@ class QueueDB:
             fields = self._work_fields(merged, validate_work_group="work_group" in changes)
             self._validate_dependencies(connection, task_id, fields["depends_on_json"])
             for key, value in changes.items():
-                if key in {"execution_mode", "source_ref", "work_group", "depends_on"}:
+                if key in {"source_ref", "work_group", "depends_on"}:
                     continue
                 if key == "priority":
                     if type(value) is not int or value not in range(5):
@@ -698,8 +693,6 @@ class QueueDB:
                 task = self._task_from_row(row)
                 if task_id and task.id != task_id:
                     continue
-                if automatic and task.execution_mode != "bonus":
-                    continue
                 exclusive = task_requires_legacy_exclusive(task)
                 if portable_only and exclusive:
                     continue
@@ -740,8 +733,6 @@ class QueueDB:
                     return False
                 task = self._task_from_row(row)
                 if expected_task is not None and task != expected_task:
-                    return False
-                if automatic and task.execution_mode != "bonus":
                     return False
                 if not self._provider_compatible(task, provider_id, provider_capabilities):
                     return False

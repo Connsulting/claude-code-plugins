@@ -75,16 +75,16 @@ def main():
     queue.initialize()
     if args.examples:
         examples = (
-            ('preview-01-plan', 'Example: agree the plan', (), 'manual'),
-            ('preview-02-build', 'Example: build the change', ('preview-01-plan',), 'manual'),
-            ('preview-03-review', 'Example: review the result', ('preview-01-plan', 'preview-02-build'), 'manual'),
-            ('preview-04-research', 'Example: spare-capacity research', (), 'bonus'),
+            ('preview-01-plan', 'Example: agree the plan', ()),
+            ('preview-02-build', 'Example: build the change', ('preview-01-plan',)),
+            ('preview-03-review', 'Example: review the result', ('preview-01-plan', 'preview-02-build')),
+            ('preview-04-research', 'Example: spare-capacity research', ()),
         )
-        for task_id, title, dependencies, mode in examples:
+        for task_id, title, dependencies in examples:
             queue.add_task(dict(id=task_id, title=title, kind='oneoff', priority=0, size='small',
-                                cwd=str(ROOT), goal='Preview example only. Inspect the execution mode and dependency states.',
+                                cwd=str(ROOT), goal='Preview example only. Inspect readiness and dependency states.',
                                 constraints='Demo fixture. Do not execute.', done_when='Preview reviewed.',
-                                execution_mode=mode, work_group='Preview examples', source_ref='Preview fixture',
+                                work_group='Preview examples', source_ref='Preview fixture',
                                 depends_on=dependencies))
         queue.record('preview-01-plan', 'preview/manual/2000000000', status='done', provider_id='preview',
                      summary='Demo fixture: prerequisite marked done to illustrate readiness.', trigger='manual')

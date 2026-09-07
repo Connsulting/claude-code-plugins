@@ -24,7 +24,6 @@ CREATE TABLE IF NOT EXISTS tasks (
   use_implement         INTEGER NOT NULL DEFAULT 0 CHECK (use_implement IN (0,1)),
   allowed_providers_json TEXT,
   required_capabilities_json TEXT,
-  execution_mode        TEXT NOT NULL DEFAULT 'bonus' CHECK (execution_mode IN ('manual','bonus')),
   source_ref            TEXT,
   work_group            TEXT,
   depends_on_json       TEXT

@@ -1,18 +1,18 @@
 ---
 name: bonus-drain
-description: Queue, edit, and execute autonomous async work planned in threads. Use for "queue this", "park this for later", "add to my work queue", "run this queued task", and bonus-capacity work. New tasks wait for a manual start unless automatic Bonus execution is authorized. Dependencies gate every launch; all execution uses agent-router. Use bg-schedule for exact calendar timing.
+description: Queue, edit, and execute autonomous async work planned in threads. Use for "queue this", "park this for later", "add to my work queue", "run this queued task", and bonus-capacity work. Ready work is automatically eligible when Bonus capacity is available; an explicit start accelerates one task. Dependencies gate every launch; all execution uses agent-router. Use bg-schedule for exact calendar timing.
 ---
 
 # Async Work / Bonus Drain
 
 Async Work is the queue for autonomous work handed off from planning threads. Bonus Drain
-is its opportunistic automatic scheduling policy. Queueing a task does not authorize an
-immediate launch. New tasks default to `manual`; choose `bonus` only when the user authorizes
-execution with spare capacity. Existing tasks retain their Bonus policy.
+is its opportunistic automatic scheduling policy. Every ready task in the queue is eligible
+when spare capacity is available. Queueing a task does not authorize an immediate launch;
+an explicit start accelerates that one task without changing its contract.
 
 Automatic Bonus scheduling may leave work queued when usage is unknown, stale, ahead of pace,
 outside a reset lead window, or already in flight. Never reinterpret a closed gate as spare
-capacity. Manual start bypasses pacing while preserving dependency and execution checks.
+capacity. An explicit start bypasses pacing while preserving dependency and execution checks.
 
 Use the installed command at `${BONUS_DRAIN_BIN:-$HOME/.local/bin/bonus-drain}`. Config,
 state, and cache follow XDG. Source-tree shell files are compatibility wrappers only; do not
@@ -59,7 +59,6 @@ or lifecycle ownership is unsafe. Do not repair live state implicitly.
 
 An item is eligible for this queue only when all are true:
 
-- for `bonus` execution only: low priority and safe to skip for a week;
 - independently executable from a concrete cwd and goal;
 - completion can be demonstrated;
 - ambiguity can be resolved conservatively without expanding authority;
@@ -68,15 +67,17 @@ An item is eligible for this queue only when all are true:
 
 The task must be independently executable with clear authority. Redirect interactive design,
 unclear publishing authority, and work that requires a person's response during execution.
-Ordinary planned work may use Manual execution even when it is not safely skippable for a week.
+Every queued task must be safe to leave queued until capacity permits or Brian explicitly
+accelerates it.
 
 Capture at least: stable ID, title, kind (`oneoff` or `recurring`), priority, size, cwd, goal,
 context, constraints, precondition, done-when, and compatible provider/task routing. Also capture
-execution mode, source thread/plan reference when available, a work group when useful, and
-explicit prerequisite task IDs. Never infer dependencies or authorization from similar titles. Priority
-is urgency/drain order; size is the best available estimate of autonomous scope and effort.
+source thread/plan reference when available, a work group when useful, and explicit prerequisite
+task IDs. Never infer dependencies or authorization from similar titles. Priority is urgency/drain
+order; size is the best available estimate of autonomous scope and effort.
 Work groups are optional navigation labels, not task titles: use them only for a meaningful
-cross-task cluster and keep each at 15 characters or fewer.
+cross-task cluster and keep each at 15 characters or fewer. Use title case; the soak-observation
+group is `Soak Obs`.
 Estimate size before previewing or adding the task:
 
 - `tiny`: one deterministic action or edit plus one quick proof; roughly under 15 minutes.
@@ -100,7 +101,7 @@ Preview the validated task, then add it with the CLI and its required estimate:
 ```sh
 bonus-drain add --id TASK_ID --title "TASK TITLE" --kind oneoff --priority 2 \
   --size medium --cwd /absolute/project/path --goal "CONCRETE GOAL" \
-  --execution-mode manual --source-ref "THREAD_OR_PLAN_REFERENCE" \
+  --source-ref "THREAD_OR_PLAN_REFERENCE" \
   --work-group "WORK GROUP" --depends-on PREREQUISITE_ID --json
 ```
 
@@ -138,13 +139,13 @@ null until it is separately eligible for an authorized upcoming-only estimate.
 Read `ASYNC_WORK.md` for dependencies, editing, run provenance, and the review UI. A dependency
 is satisfied only by a successful (`done`) one-off prerequisite; failed, skipped, running, and
 missing prerequisites keep the child waiting. Self-dependencies, cycles, missing IDs, and
-recurring prerequisites are rejected. Both Manual and Bonus execution enforce dependencies.
+recurring prerequisites are rejected. Both automatic and explicit launches enforce dependencies.
 
 Use `bonus-drain readiness TASK_ID --json` to explain readiness and
-`bonus-drain edit TASK_ID --changes '{"execution_mode":"manual","depends_on":["PARENT_ID"]}' --json`
+`bonus-drain edit TASK_ID --changes '{"depends_on":["PARENT_ID"]}' --json`
 to update a queued contract. Read back with `contract-task`. A live claimed task cannot be
 edited; finish or reconcile it before revising it. Successful prerequisites do not auto-start
-a Manual child.
+a child; it becomes eligible for either normal capacity dispatch or an explicit acceleration.
 
 ## Mode: automatic bonus run
 
@@ -175,9 +176,9 @@ Running or unknown jobs remain held; missing status and elapsed time do not prov
 Inspect the `reconciliation` list in scout JSON. `--dry-run` only proposes queue repairs.
 Ambiguous claims still require operator reconciliation and are never cleared automatically.
 
-## Mode: manual dispatch
+## Mode: explicit acceleration
 
-Manual dispatch is a one-task bypass of capacity pacing, not of queue safety. Keep normal
+An explicit acceleration is a one-task bypass of capacity pacing, not of queue safety. Keep normal
 eligibility, compatibility, atomic claim, concrete router launch, activation-lease, and
 terminal-record contracts. CLI `auto` may classify immediately before its one concrete launch;
 the viewer never accepts `auto`. Do not loop or retry ambiguous launches.

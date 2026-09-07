@@ -1,7 +1,7 @@
 {
   "name": "bonus-drain",
-  "version": "0.3.1",
-  "description": "Plan, queue, and run autonomous async work with dependencies and optional Bonus capacity scheduling.",
+  "version": "0.3.2",
+  "description": "Plan, queue, and run autonomous async work with dependencies and capacity-aware automatic dispatch.",
   "author": {
     "name": "Connsulting"
   },
@@ -14,8 +14,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Async Work",
-    "shortDescription": "Queue autonomous work and choose when it runs.",
-    "longDescription": "Hand off work from planning threads, track dependencies, start tasks manually, or let Bonus Drain use spare provider capacity.",
+    "shortDescription": "Queue autonomous work and accelerate it when needed.",
+    "longDescription": "Hand off prioritized work from planning threads, track dependencies, let Bonus Drain use spare provider capacity, or accelerate an eligible task.",
     "developerName": "Connsulting",
     "category": "Productivity",
     "capabilities": [
@@ -23,9 +23,9 @@
       "Write"
     ],
     "defaultPrompt": [
-      "Queue this task for me to start later.",
+      "Queue this task as Async Work.",
       "Show my work queue and task dependencies.",
-      "Check whether Bonus Drain is ready to run."
+      "Check whether Bonus Drain can dispatch queued work."
     ],
     "brandColor": "#6D5BD0"
   }

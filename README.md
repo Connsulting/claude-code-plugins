@@ -38,8 +38,9 @@ See [plugins/compound-learning/README.md](plugins/compound-learning/README.md) f
 ### bonus-drain / Async Work
 
 A standalone queue, capacity planner, usage-cache refresher, scout, dispatcher, and secure
-localhost viewer for autonomous async work. Tasks support manual starts, dependencies,
-source references, and optional automatic Bonus scheduling. Providers, plans, accounts, limits,
+localhost viewer for autonomous async work. Ready tasks can be accelerated with an explicit
+start or launched automatically by Bonus capacity; they also support dependencies and source
+references. Providers, plans, accounts, limits,
 resets, and adapters are generic JSON configuration; dispatch goes through
 `agent-router`.
 

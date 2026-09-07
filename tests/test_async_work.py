@@ -1,4 +1,4 @@
-"""Async queue contracts: manual admission, dependency safety and editable handoffs."""
+"""Async queue contracts: shared eligibility, dependency safety and editable handoffs."""
 import json
 import sqlite3
 import sys
@@ -27,20 +27,18 @@ class AsyncWorkTests(unittest.TestCase):
     def finish(self, task_id, status='done'):
         return self.queue.record(task_id, 'account/manual/2000000000', status=status, provider_id='alpha')
 
-    def test_manual_tasks_can_be_claimed_but_never_automatically(self):
-        self.queue.edit_task('a', {'execution_mode': 'manual'})
-        self.assertEqual(self.queue.count_eligible(0, automatic=True), 0)
-        self.assertFalse(self.queue.claim('a', 'account/limit/2000000000', 'alpha', 'account', automatic=True))
-        self.assertTrue(self.queue.claim('a', 'account/manual/2000000000', 'alpha', 'account'))
+    def test_every_ready_task_is_eligible_for_automatic_capacity(self):
+        self.assertEqual(self.queue.count_eligible(0, automatic=True), 1)
+        self.assertTrue(self.queue.claim('a', 'account/limit/2000000000', 'alpha', 'account', automatic=True))
 
-    def test_cli_new_work_defaults_manual(self):
+    def test_cli_new_work_has_no_execution_mode_contract(self):
         with mock.patch.object(cli, '_json') as output:
             self.assertEqual(cli.main(['add', '--database', str(self.queue.path), '--id', 'new', '--title', 'New', '--kind', 'oneoff', '--size', 'small', '--cwd', '/tmp', '--goal', 'proof', '--json']), 0)
-        self.assertEqual(self.queue.task('new').execution_mode, 'manual')
+        self.assertNotIn('execution_mode', self.queue.task('new').to_dict())
 
     def test_all_dependencies_must_succeed_before_claim(self):
         self.add('b')
-        self.add('child', depends_on=['a', 'b'], execution_mode='manual')
+        self.add('child', depends_on=['a', 'b'])
         self.finish('a')
         self.assertEqual(self.queue.readiness('child')['state'], 'waiting')
         self.assertFalse(self.queue.claim('child', 'account/manual/2000000000', 'alpha', 'account'))
@@ -85,14 +83,15 @@ class AsyncWorkTests(unittest.TestCase):
         self.assertFalse(self.queue.claim('a', 'account/manual/2000000000', 'alpha', 'account', expected_task=old))
 
     def test_handoff_roundtrip_and_validation(self):
-        task = self.queue.edit_task('a', {'source_ref': 'https://example.test/plan', 'work_group': 'Release', 'execution_mode': 'manual'})
+        task = self.queue.edit_task('a', {'source_ref': 'https://example.test/plan', 'work_group': 'Release'})
         self.assertEqual(task.legacy_contract_dict()['work_group'], 'Release')
-        for changes in ({'execution_mode': 'now'}, {'priority': True}, {'depends_on': 'a'}, {'goal': ''}, {'cwd': None}):
+        for changes in ({'execution_mode': 'bonus'}, {'priority': True}, {'depends_on': 'a'}, {'goal': ''}, {'cwd': None}):
             with self.assertRaises(db.QueueError):
                 self.queue.edit_task('a', changes)
 
     def test_work_group_is_a_compact_navigation_label(self):
         self.queue.edit_task('a', {'work_group': 'Curie v0.8.7'})
+        self.assertEqual(self.queue.edit_task('a', {'work_group': 'soak-obs'}).work_group, 'Soak Obs')
         with self.assertRaisesRegex(db.QueueError, 'at most 15 characters'):
             self.queue.edit_task('a', {'work_group': 'Curie v0.8.7 hardening'})
         with self.assertRaisesRegex(db.QueueError, 'at most 15 characters'):
@@ -104,12 +103,18 @@ class AsyncWorkTests(unittest.TestCase):
         self.add('old')
         self.assertIsNone(self.finish('old').trigger)
 
-    def test_migration_preserves_legacy_bonus_mode(self):
+    def test_migration_keeps_existing_work_metadata(self):
         with sqlite3.connect(self.queue.path) as connection:
-            for column in ('execution_mode', 'source_ref', 'work_group', 'depends_on_json'):
+            for column in ('source_ref', 'work_group', 'depends_on_json'):
                 connection.execute(f'ALTER TABLE tasks DROP COLUMN {column}')
         self.queue.initialize()
-        self.assertEqual(self.queue.task('a').execution_mode, 'bonus')
+        self.assertIsNone(self.queue.task('a').source_ref)
+
+    def test_legacy_execution_column_is_ignored(self):
+        with sqlite3.connect(self.queue.path) as connection:
+            connection.execute("ALTER TABLE tasks ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'manual'")
+        self.queue.initialize()
+        self.assertNotIn('execution_mode', self.queue.task('a').to_dict())
 
 
 class DispatchReadinessTests(unittest.TestCase):
@@ -127,30 +132,27 @@ class DispatchReadinessTests(unittest.TestCase):
         router.assert_not_called()
         activation.assert_not_called()
 
-    def test_bonus_trigger_rejects_manual_task_even_with_fresh_selection(self):
+    def test_automatic_trigger_accepts_any_ready_task(self):
         f = self.fixture
-        f.queue.edit_task('portable', {'execution_mode': 'manual'})
-        router = mock.Mock()
-        with self.assertRaises(dispatcher.InvalidRoute):
-            dispatcher.dispatch(f.config, f.queue, task_id='portable', eligibility_key='alpha-account/limit/2000000000', requested_provider='alpha', trigger='bonus', router_call=router)
-        router.assert_not_called()
+        result = dispatcher.dispatch(f.config, f.queue, task_id='portable', eligibility_key='alpha-account/limit/2000000000', requested_provider='alpha', trigger='bonus', router_call=f._router)
+        self.assertEqual(result.task_id, 'portable')
 
 
 class ScoutWorkflowTests(unittest.TestCase):
-    def test_normal_ticks_select_only_ready_bonus_work_and_record_bonus_origin(self):
+    def test_automatic_capacity_sees_all_ready_work_and_records_bonus_origin(self):
         fixture = kick_tests.KickContractTests()
         fixture.setUp()
         self.addCleanup(fixture.tearDown)
         queue = fixture.queue
-        queue.edit_task('portable', {'execution_mode': 'manual'})
         queue.add_task(dict(id='waiting', title='Waiting', cwd='/tmp', goal='proof', depends_on=['portable']))
-        queue.add_task(dict(id='bonus-ready', title='Ready', cwd='/tmp', goal='proof', execution_mode='bonus'))
+        queue.add_task(dict(id='other-ready', title='Ready', cwd='/tmp', goal='proof'))
+        self.assertEqual({task.id for task in queue.eligible_tasks(0, automatic=True)}, {'portable', 'other-ready'})
         config = replace(fixture.config, adapters=(replace(fixture.config.adapters[0], argv=('/bin/true',)),))
         snapshots = {(provider, provider+'-account'): usage.UsageSnapshot(provider, provider+'-account', kick_tests.NOW,
             {provider+'-weekly': {'used_percent': 20, 'resets_at': kick_tests.NOW+1000}}) for provider in ('alpha', 'beta')}
         with mock.patch.object(scout, 'read_all', return_value=snapshots):
             report = scout.run_once(config, queue, now_epoch=kick_tests.NOW, router_call=fixture._router)
-        self.assertEqual([result.task_id for result in report.dispatched], ['bonus-ready'])
-        self.assertEqual(queue.runs(task_id='bonus-ready')[0].trigger, 'bonus')
-        self.assertEqual(queue.runs(task_id='portable'), [])
+        self.assertEqual({result.task_id for result in report.dispatched}, {'portable', 'other-ready'})
+        self.assertEqual(queue.runs(task_id='portable')[0].trigger, 'bonus')
+        self.assertEqual(queue.runs(task_id='other-ready')[0].trigger, 'bonus')
         self.assertEqual(queue.runs(task_id='waiting'), [])

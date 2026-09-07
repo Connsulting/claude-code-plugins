@@ -131,7 +131,6 @@ def _task_values(args: argparse.Namespace) -> dict[str, Any]:
         return bool(raw)
 
     return {
-        "execution_mode": args.execution_mode,
         "source_ref": args.source_ref,
         "work_group": args.work_group,
         "depends_on": [x.strip() for x in (args.depends_on or "").split(",") if x.strip()],
@@ -622,7 +621,6 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--context"); add.add_argument("--constraints"); add.add_argument("--precondition")
     add.add_argument("--done-when", dest="done_when"); add.add_argument("--claude-only", type=int, default=0)
     add.add_argument("--model"); add.add_argument("--mcp"); add.add_argument("--use-implement", type=int, default=0)
-    add.add_argument("--execution-mode", choices=("manual", "bonus"), default="manual")
     add.add_argument("--source-ref"); add.add_argument("--work-group"); add.add_argument("--depends-on")
     edit = sub.add_parser("edit"); _add_common(edit); _add_json(edit); edit.add_argument("task"); edit.add_argument("--changes", required=True)
     ready = sub.add_parser("readiness"); _add_common(ready); _add_json(ready); ready.add_argument("task")

@@ -1163,8 +1163,6 @@ def schedule_badge(kind: str, last_ts: str | None) -> str:
 def _work_meta(t: dict) -> str:
     status = t.get("readiness", {})
     state = status.get("state", "ready")
-    mode = t.get("execution_mode", "bonus")
-    label = "Manual · waits for you" if mode == "manual" else "Bonus · automatic when capacity allows"
     source = t.get("source_ref") or ""
     source_html = ""
     if source:
@@ -1181,7 +1179,7 @@ def _work_meta(t: dict) -> str:
     dependencies = status.get("dependencies", [])
     edges = "".join(f'<li><span class="dep-dot {"done" if d["satisfied"] else "waiting"}"></span>{esc(d["title"])} <code>{esc(d["id"])}</code> <span class="dimtxt">{esc(d["status"])}</span></li>' for d in dependencies)
     dependency_html = f'<details class="dependencies"><summary>{sum(d["satisfied"] for d in dependencies)}/{len(dependencies)} prerequisites complete</summary><ul>{edges}</ul></details>' if dependencies else ""
-    return f'<div class="work-meta"><span class="work-state {esc(state)}">{esc(state)}</span><span>{esc(label)}</span>{group}{source_html}</div><div class="readiness-reason">{esc(status.get("reason", "Ready to run manually"))}</div>{dependency_html}'
+    return f'<div class="work-meta"><span class="work-state {esc(state)}">{esc(state)}</span>{group}{source_html}</div><div class="readiness-reason">{esc(status.get("reason", "Ready to run"))}</div>{dependency_html}'
 
 
 def _run_buttons(t: dict) -> str:
@@ -2021,7 +2019,7 @@ def render_bonus_body() -> str:
             goal_short = goal if len(goal) <= 170 else goal[:170] + "…"
             rows.append(f"""
           <div class="qrow" data-kind="{_facet_kind(t)}" data-priority="{esc(pri)}"
-               data-state="{esc(t.get("readiness", {}).get("state", "ready"))}" data-mode="{esc(t.get("execution_mode", "bonus"))}"
+               data-state="{esc(t.get("readiness", {}).get("state", "ready"))}"
                data-workgroup="{esc(t.get("work_group") or "ungrouped")}" data-size="{esc(_facet_size(t))}" data-providers="{" ".join(_facet_providers(t))}">
             <span class="qn">{i}</span>
             <div class="qmain">
@@ -2139,7 +2137,7 @@ def render_bonus_body() -> str:
     <div class="sec">
       <div class="sech"><span>queued · priority order</span>
         <span class="note"><span id="qcount">{len(remaining)} job{"" if len(remaining) == 1 else "s"}</span>
-          · readiness and execution mode are independent</span></div>
+          · readiness is checked before every launch</span></div>
       {_queue_filters(remaining)}
       <div id="qlist">{queue}</div>
     </div>

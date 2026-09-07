@@ -925,8 +925,6 @@ def dispatch(
     readiness = queue.readiness(task_id)
     if not readiness["ready"]:
         raise AlreadyClaimed(readiness["reason"])
-    if trigger == "bonus" and task.execution_mode != "bonus":
-        raise InvalidRoute("manual tasks require an explicit start")
     if requested_provider == "auto":
         if not config.providers:
             raise InvalidRoute("auto classification requires at least one provider")
