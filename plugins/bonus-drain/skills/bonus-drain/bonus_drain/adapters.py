@@ -155,6 +155,7 @@ def execute_adapter(
     config: RuntimeConfig,
     environ: Mapping[str, str] | None = None,
     expect_json: bool = True,
+    accepted_exit_codes: tuple[int, ...] = (0,),
 ) -> Any:
     """Execute a validated adapter without a shell and return its JSON value.
 
@@ -209,7 +210,7 @@ def execute_adapter(
         stdout = completed.stdout.decode("utf-8", errors="replace")
         stderr = completed.stderr.decode("utf-8", errors="replace")
         secrets = list(secret_values.values())
-        if completed.returncode != 0:
+        if completed.returncode not in accepted_exit_codes:
             detail = next(
                 (line for line in reversed(stderr.splitlines() + stdout.splitlines()) if line.strip()),
                 "no diagnostic",

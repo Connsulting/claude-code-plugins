@@ -17,6 +17,7 @@ from .dispatcher import (
     dispatch,
 )
 from .planner import PlanResult, build_plan
+from .reconcile import reconcile_inflight
 from .usage import read_all
 
 
@@ -30,6 +31,7 @@ class ScoutReport:
     errors: tuple[dict[str, str], ...]
     blockers: tuple[dict[str, Any], ...] = ()
     router_preflight: tuple[dict[str, Any], ...] = ()
+    reconciliation: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -41,6 +43,7 @@ class ScoutReport:
             "errors": list(self.errors),
             "blockers": list(self.blockers),
             "router_preflight": list(self.router_preflight),
+            "reconciliation": list(self.reconciliation),
         }
 
 
@@ -266,6 +269,9 @@ def run_once(
             now, dry_run, plan, (), (), (error,), (blocker,), router_preflight,
         )
 
+    reconciliation = reconcile_inflight(
+        config, queue, dry_run=dry_run, activation_call=activation_call,
+    )
     inflight = queue.inflight_details(now_epoch=now)
     if inflight:
         blocker = {
@@ -274,7 +280,7 @@ def run_once(
             "runs": inflight,
         }
         return ScoutReport(
-            now, dry_run, plan, (), (), (), (blocker,), router_preflight,
+            now, dry_run, plan, (), (), (), (blocker,), router_preflight, reconciliation,
         )
 
     unavailable = [item for item in router_preflight if not item["available"]]
@@ -290,7 +296,7 @@ def run_once(
             "message": f"router preflight failed: {item['executable']}",
         } for item in unavailable)
         return ScoutReport(
-            now, dry_run, plan, (), (), router_errors, blockers, router_preflight,
+            now, dry_run, plan, (), (), router_errors, blockers, router_preflight, reconciliation,
         )
 
     for batch in plan.batches:  # already nearest-reset-first
@@ -323,5 +329,5 @@ def run_once(
 
     return ScoutReport(
         now, dry_run, plan, tuple(dispatched), tuple(previews), tuple(errors),
-        (), router_preflight,
+        (), router_preflight, reconciliation,
     )

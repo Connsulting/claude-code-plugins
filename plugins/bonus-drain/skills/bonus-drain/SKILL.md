@@ -167,6 +167,12 @@ bonus-drain scout --json
 Do not loop to empty the queue. systemd owns later ticks. A zero-dispatch result with explicit
 closed reasons is successful operation.
 
+Before the in-flight gate, scout checks router status and records `failed` for a positively
+terminal worker that omitted its terminal event, using the existing claim/lease lifecycle.
+Running or unknown jobs remain held; missing status and elapsed time do not prove exit.
+Inspect the `reconciliation` list in scout JSON. `--dry-run` only proposes queue repairs.
+Ambiguous claims still require operator reconciliation and are never cleared automatically.
+
 ## Mode: manual dispatch
 
 Manual dispatch is a one-task bypass of capacity pacing, not of queue safety. Keep normal

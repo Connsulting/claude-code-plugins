@@ -147,6 +147,16 @@ Within one priority, eligible tasks are oldest-waiting-first; a recurring task s
 when its cooldown ends. Before any claim, scout reports queue reconciliation blockers, global
 in-flight runs with their ages, and the resolved executable identity for every router needed by
 the tick. A lifecycle or router failure stops the tick once instead of failing each selected task.
+Before applying the in-flight gate, each normal scout tick checks the configured router's
+status report. An exact provider/job match freshly reported as `completed` or `failed`,
+without a queue terminal event, is recorded as `failed` through the same lifecycle path as
+the record CLI. This releases its claim and applicable activation lease without asserting
+task completion or retrying it. Running, unknown, missing, duplicate, and unqueryable jobs
+remain blocked; age alone never proves that a worker ended. The router's most recent 1,000
+jobs are queried once per adapter with a maximum 30-second timeout; jobs outside that window
+require operator reconciliation. Scout JSON includes the decisions in `reconciliation`,
+and `--dry-run` reports `would_fail` without changing the queue or releasing activation.
+Existing ambiguous claims still stop the scout before any automatic reconciliation.
 Normalized usage requires explicit provider/account identity and capture time. Missing Grok
 utilization stays unknown. Source and installed wrappers ignore caller `PYTHONPATH`/cwd
 packages; timed-out collector and rotator process groups are terminated with descendants.
