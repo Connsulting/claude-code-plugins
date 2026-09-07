@@ -30,6 +30,10 @@ RECURRING_COOLDOWNS_SECONDS = {
     "monthly": 28 * 24 * 60 * 60,
 }
 
+# Work groups are queue-navigation labels, not another place for a task title.  Keeping them
+# short makes the work-group facet practical beside the readiness chips on narrow screens.
+WORK_GROUP_MAX_LENGTH = 15
+
 
 def is_safe_task_id(value: Any) -> bool:
     """Return whether a task id is safe for DB identity and positional CLI use."""
@@ -488,7 +492,7 @@ class QueueDB:
         return task
 
     @staticmethod
-    def _work_fields(values: Mapping[str, Any]) -> dict[str, Any]:
+    def _work_fields(values: Mapping[str, Any], *, validate_work_group: bool = True) -> dict[str, Any]:
         mode = values.get("execution_mode", "bonus")  # legacy programmatic/import callers
         if not isinstance(mode, str) or mode not in {"manual", "bonus"}:
             raise QueueError("execution_mode must be manual or bonus")
@@ -500,8 +504,11 @@ class QueueDB:
         for field in ("source_ref", "work_group"):
             if values.get(field) is not None and not isinstance(values[field], str):
                 raise QueueError(f"{field} must be text")
+        work_group = values.get("work_group")
+        if validate_work_group and work_group is not None and len(work_group) > WORK_GROUP_MAX_LENGTH:
+            raise QueueError(f"work_group must be at most {WORK_GROUP_MAX_LENGTH} characters")
         return {"execution_mode": mode, "source_ref": values.get("source_ref"),
-                "work_group": values.get("work_group"),
+                "work_group": work_group,
                 "depends_on_json": json.dumps(sorted(set(dependencies)))}
 
     @staticmethod
@@ -582,7 +589,9 @@ class QueueDB:
             if connection.execute("SELECT 1 FROM dispatch_claims WHERE task_id=?", (task_id,)).fetchone() or (last and (task.kind == "oneoff" or last[0] == "dispatched")):
                 raise QueueError("only queued tasks can be edited; requeue failed work first")
             merged = {**task.to_dict(), **changes}
-            fields = self._work_fields(merged)
+            # Old imported groups may be longer.  Preserve them until their group is explicitly
+            # revised; otherwise an unrelated queued-contract edit would be unexpectedly blocked.
+            fields = self._work_fields(merged, validate_work_group="work_group" in changes)
             self._validate_dependencies(connection, task_id, fields["depends_on_json"])
             for key, value in changes.items():
                 if key in {"execution_mode", "source_ref", "work_group", "depends_on"}:

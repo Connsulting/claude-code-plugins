@@ -296,5 +296,5 @@ For the runtime contracts and command reference, see
 ## Async work and dependencies
 
 New CLI tasks default to Manual execution; existing tasks keep Bonus scheduling.
-Tasks can carry source references, work groups, and one-off prerequisites.
+Tasks can carry source references, 15-character work groups, and one-off prerequisites.
 See [ASYNC_WORK.md](skills/bonus-drain/ASYNC_WORK.md) for the contract and commands.

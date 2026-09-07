@@ -512,6 +512,17 @@ class JobsViewerContractTests(unittest.TestCase):
                 self.assertIn(f'role="group" aria-label="filter by {label}"', bar)
                 self.assertIn(f'class="fchip fall on" data-group="{group}" data-value=""', bar)
 
+        # The original facets stay together. Readiness and work-group navigation occupy a
+        # dedicated second row, rather than joining the primary row and making it wrap.
+        primary = bar[bar.index('qfilter-primary'):bar.index('qfilter-secondary')]
+        secondary = bar[bar.index('qfilter-secondary'):bar.index('id="qfreset"')]
+        self.assertIn('data-group="kind"', primary)
+        self.assertIn('data-group="size"', primary)
+        self.assertNotIn('data-group="state"', primary)
+        self.assertNotIn('data-group="workgroup"', primary)
+        self.assertIn('qfilter-secondary', secondary)
+        self.assertNotIn('data-group="mode"', bar)
+
         # Every chip but priority is its glyph plus a count, and the words that would have
         # labelled it survive as the title and the accessible name.
         self.assertIn(
@@ -573,6 +584,30 @@ class JobsViewerContractTests(unittest.TestCase):
         drained = self._bonus_body([])
         self.assertNotIn('id="qfilters"', drained)
         self.assertIn("No queued work", drained)
+
+    def test_readiness_and_work_group_filters_have_a_second_row(self) -> None:
+        remaining = [
+            dict(self.QUEUE_FIXTURE[0], readiness={"state": "ready"}, work_group="Research"),
+            dict(self.QUEUE_FIXTURE[1], readiness={"state": "waiting"}, work_group="Quality"),
+            dict(self.QUEUE_FIXTURE[2], readiness={"state": "cooldown"}, work_group="Quality"),
+        ]
+        body = self._bonus_body(remaining)
+        bar = body[body.index('id="qfilters"'):body.index('id="qlist"')]
+        primary = bar[bar.index('qfilter-primary'):bar.index('qfilter-secondary')]
+        secondary = bar[bar.index('qfilter-secondary'):bar.index('id="qfreset"')]
+
+        self.assertIn('role="group" aria-label="filter by readiness"', secondary)
+        self.assertIn('data-value="ready"', secondary)
+        self.assertIn('data-value="waiting"', secondary)
+        self.assertIn('data-value="cooldown"', secondary)
+        self.assertIn('aria-label="Ready" title="Ready">Ready', secondary)
+        self.assertIn('aria-label="Waiting" title="Waiting">Waiting', secondary)
+        self.assertIn('aria-label="Cool Down" title="Cool Down">Cool Down', secondary)
+        self.assertIn('role="group" aria-label="filter by work group"', secondary)
+        self.assertIn('data-value="Research"', secondary)
+        self.assertIn('data-value="Quality"', secondary)
+        self.assertNotIn('data-group="state"', primary)
+        self.assertNotIn('data-group="workgroup"', primary)
 
     def test_selecting_filters_hides_rows_and_renumbers_the_queue_in_a_browser(self) -> None:
         chrome = shutil.which("google-chrome") or shutil.which("google-chrome-stable")

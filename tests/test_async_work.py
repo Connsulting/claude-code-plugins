@@ -91,6 +91,13 @@ class AsyncWorkTests(unittest.TestCase):
             with self.assertRaises(db.QueueError):
                 self.queue.edit_task('a', changes)
 
+    def test_work_group_is_a_compact_navigation_label(self):
+        self.queue.edit_task('a', {'work_group': 'Curie v0.8.7'})
+        with self.assertRaisesRegex(db.QueueError, 'at most 15 characters'):
+            self.queue.edit_task('a', {'work_group': 'Curie v0.8.7 hardening'})
+        with self.assertRaisesRegex(db.QueueError, 'at most 15 characters'):
+            self.add('long-group', work_group='Curie v0.8.7 hardening')
+
     def test_run_trigger_propagates_to_terminal_and_legacy_stays_unknown(self):
         self.queue.record('a', 'account/manual/2000000000', status='dispatched', provider_id='alpha', trigger='manual')
         self.assertEqual(self.finish('a').trigger, 'manual')

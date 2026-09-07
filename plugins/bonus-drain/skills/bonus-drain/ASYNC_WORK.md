@@ -53,6 +53,8 @@ Editing allows title, priority, size, cwd, goal, context, constraints, precondit
 execution_mode, source_ref, work_group, and depends_on. Active claims and already-run one-off
 contracts cannot be edited. A failed/skipped task must first be explicitly requeued. Existing
 requeue behavior still removes the matching run history; append-only retry attempts are deferred.
+Use a work group only when it forms a useful cross-task cluster, and keep its name to 15
+characters or fewer so the queue filter stays compact.
 
 The viewer shows readiness, execution mode, work group, source reference, and prerequisite
 progress, with filters for each workflow facet. Rotation and provider usage remain visible above the queue.

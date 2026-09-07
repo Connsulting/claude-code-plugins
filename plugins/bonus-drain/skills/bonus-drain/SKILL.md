@@ -75,6 +75,8 @@ context, constraints, precondition, done-when, and compatible provider/task rout
 execution mode, source thread/plan reference when available, a work group when useful, and
 explicit prerequisite task IDs. Never infer dependencies or authorization from similar titles. Priority
 is urgency/drain order; size is the best available estimate of autonomous scope and effort.
+Work groups are optional navigation labels, not task titles: use them only for a meaningful
+cross-task cluster and keep each at 15 characters or fewer.
 Estimate size before previewing or adding the task:
 
 - `tiny`: one deterministic action or edit plus one quick proof; roughly under 15 minutes.

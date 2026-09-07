@@ -1815,8 +1815,9 @@ def _pacing_strip(anchor, gates: dict, dispatches: list[float], batch: int) -> s
     </div>"""
 
 
-QUEUE_FILTER_GROUPS = ("kind", "provider", "priority", "size", "state", "mode", "workgroup")
+QUEUE_FILTER_GROUPS = ("kind", "provider", "priority", "size", "state", "workgroup")
 PROVIDER_LABELS = {"claude": "Claude", "codex": "Codex", "grok": "Grok"}
+READINESS_LABELS = {"cooldown": "Cool Down", "ready": "Ready", "waiting": "Waiting"}
 
 
 def _facet_kind(t: dict) -> str:
@@ -1853,7 +1854,6 @@ def _queue_filters(remaining: list[dict]) -> str:
 
     for t in remaining:
         bump("state", t.get("readiness", {}).get("state", "ready"))
-        bump("mode", t.get("execution_mode", "bonus"))
         bump("workgroup", t.get("work_group") or "ungrouped")
         bump("kind", _facet_kind(t))
         bump("size", _facet_size(t))
@@ -1884,34 +1884,48 @@ def _queue_filters(remaining: list[dict]) -> str:
         ]),
     ]
 
-    groups = [(g, label, [(v, esc(v), v) for v in sorted(counts[g])]) for g, label in (("state", "readiness"), ("mode", "execution"), ("workgroup", "work group"))] + groups
-    blocks = []
-    for group, label, options in groups:
-        # A single-value facet cannot filter anything, so it is a control that does nothing.
-        if len(options) < 2:
-            continue
-        chips = ['<button type="button" class="fchip fall on" data-group="' + group
-                 + '" data-value="" aria-pressed="true">all</button>']
-        for value, glyph, name in options:
-            chips.append(
-                '<button type="button" class="fchip" data-group="' + group
-                + '" data-value="' + esc(value) + '" aria-pressed="false"'
-                + ' aria-label="' + esc(name) + '" title="' + esc(name) + '">'
-                + glyph + "<i>" + str(counts[group][value]) + "</i></button>"
+    # Keep the stable queue facets together. Readiness and grouping are newer, secondary ways
+    # to narrow work, so they deliberately form their own line below rather than extending the
+    # primary row until it wraps unpredictably.
+    secondary_groups = [
+        (g, label, [(v, esc(READINESS_LABELS.get(v, v.title())), READINESS_LABELS.get(v, v.title()))
+                    for v in sorted(counts[g])])
+        if g == "state" else
+        (g, label, [(v, esc(v), v) for v in sorted(counts[g])])
+        for g, label in (("state", "readiness"), ("workgroup", "work group"))
+    ]
+    def render_groups(items: list[tuple[str, str, list[tuple[str, str, str]]]]) -> str:
+        rendered = []
+        for group, label, options in items:
+            # A single-value facet cannot filter anything, so it is a control that does nothing.
+            if len(options) < 2:
+                continue
+            chips = ['<button type="button" class="fchip fall on" data-group="' + group
+                     + '" data-value="" aria-pressed="true">all</button>']
+            for value, glyph, name in options:
+                chips.append(
+                    '<button type="button" class="fchip" data-group="' + group
+                    + '" data-value="' + esc(value) + '" aria-pressed="false"'
+                    + ' aria-label="' + esc(name) + '" title="' + esc(name) + '">'
+                    + glyph + "<i>" + str(counts[group][value]) + "</i></button>"
+                )
+            # The group name is spoken, not printed. Printing four labels cost ~200px, which is
+            # exactly what the fourth group needed to stay on one row, and the marks are the same
+            # ones the rows below carry - the label was naming what you can already see.
+            rendered.append(
+                '<div class="fgrp" role="group" aria-label="filter by ' + esc(label) + '">'
+                + "".join(chips) + "</div>"
             )
-        # The group name is spoken, not printed. Printing four labels cost ~200px, which is
-        # exactly what the fourth group needed to stay on one row, and the marks are the same
-        # ones the rows below carry - the label was naming what you can already see.
-        blocks.append(
-            '<div class="fgrp" role="group" aria-label="filter by ' + esc(label) + '">'
-            + "".join(chips) + "</div>"
-        )
+        return "".join(rendered)
 
-    if not blocks:
+    primary = render_groups(groups)
+    secondary = render_groups(secondary_groups)
+    if not primary and not secondary:
         return ""
     return (
         '\n      <div class="qfilters" id="qfilters" role="group" aria-label="Filter remaining jobs">'
-        + "".join(blocks)
+        + '<div class="qfilter-row qfilter-primary">' + primary + '</div>'
+        + '<div class="qfilter-row qfilter-secondary">' + secondary + '</div>'
         + '<button type="button" class="freset" id="qfreset" hidden'
         + ' title="Clear every filter" aria-label="Clear every filter">clear</button>'
         + "</div>"
@@ -2558,8 +2572,10 @@ footer{margin:34px 0 0;font-size:10.5px;color:var(--dim2);letter-spacing:.04em}
    multiple is unusable on the phone this page is mostly read on. `all` is a chip of its own so
    the cleared state is something you press, not something you deduce. */
 [hidden]{display:none!important}
-.qfilters{display:flex;flex-wrap:wrap;align-items:center;gap:9px 16px;
+.qfilters{display:flex;flex-direction:column;align-items:stretch;gap:8px;
   padding:9px 12px;background:var(--panel);border:1px solid var(--line)}
+.qfilter-row{display:flex;flex-wrap:wrap;align-items:center;gap:9px 16px}
+.qfilter-secondary{padding-top:8px;border-top:1px solid var(--line2)}
 .fgrp{display:flex;align-items:center;gap:4px;flex-wrap:wrap;min-width:0}
 /* Groups are separated by a rule rather than a heading: the marks name themselves, and the
    only thing a reader needs is where one facet ends and the next begins. */
@@ -2582,7 +2598,7 @@ footer{margin:34px 0 0;font-size:10.5px;color:var(--dim2);letter-spacing:.04em}
 .freset:hover{color:var(--acc2)}
 #qlist{margin-top:2px}
 @media(max-width:640px){
-  .qfilters{gap:8px 12px}
+  .qfilter-row{gap:8px 12px}
   .fgrp+.fgrp{border-left:0;padding-left:0}
   .freset{margin-left:0}
 }
@@ -2853,7 +2869,7 @@ SCRIPT = """
   (function(){
     var bar=document.getElementById('qfilters'),list=document.getElementById('qlist');
     if(!bar||!list)return;
-    var GROUPS=['kind','provider','priority','size','state','mode','workgroup'],FKEY='bonusQueueFilters';
+    var GROUPS=['kind','provider','priority','size','state','workgroup'],FKEY='bonusQueueFilters';
     var chips=Array.prototype.slice.call(bar.querySelectorAll('.fchip'));
     var rows=Array.prototype.slice.call(list.querySelectorAll('.qrow'));
     var bands=Array.prototype.slice.call(list.querySelectorAll('.band'));
