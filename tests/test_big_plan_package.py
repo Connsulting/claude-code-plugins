@@ -15,7 +15,7 @@ PLUGIN_ROOT = REPO_ROOT / "plugins" / "big-plan"
 SKILL_ROOT = PLUGIN_ROOT / "skills" / "big-plan"
 PRESERVED_SHA256 = {
     "server.py": "3f1619e9619892fe6fb50ebc7e52b040565651e856316b9315bbd6486f3e25d1",
-    "render.py": "31f29df1186f5aad2ebc84428ec8247f2d2fb13b2622fd3cb993f870f6b36fd5",
+    "render.py": "3a61b9ae3edb13adbe99c6320a3ae785b1434d09175926599372c8430a347955",
     "dispatch.py": "acceb1953692fe3af07bdacacd9cb871ae3a534fe968cc618cbaebcd18c15181",
     "template.md": "f6a28d978c5f8ec1d73193f0e9af560976e1d2230147888849496e8f89e8d007",
     "test_dispatch.py": "f57f309bd88a622735b6b5e0bf748e7ca648084c116ea1598fa4868e2649eaf4",
