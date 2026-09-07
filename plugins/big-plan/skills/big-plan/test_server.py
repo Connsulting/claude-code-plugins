@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -69,6 +70,36 @@ class SidebarControlsTest(unittest.TestCase):
         self.assertIn('class="comments-toggle sidebar-handle" aria-controls="comments-rail"', page)
         self.assertIn('<aside class="toc-rail" id="toc-rail"', page)
         self.assertIn('<aside class="comments-rail" id="comments-rail"', page)
+
+
+class ExternalLinkRenderTest(unittest.TestCase):
+    def test_http_links_open_in_a_new_tab_but_page_anchors_do_not(self) -> None:
+        page = render.render_html(
+            "## Section\n\n[HTTP](http://example.com/docs) and "
+            "[HTTPS](https://example.net/docs)\n",
+            "Plan",
+            {},
+        )
+
+        for url, label in (
+            ("http://example.com/docs", "HTTP"),
+            ("https://example.net/docs", "HTTPS"),
+        ):
+            self.assertRegex(
+                page,
+                rf'<a(?=[^>]*href="{re.escape(url)}")'
+                r'(?=[^>]*target="_blank")'
+                r'(?=[^>]*rel="noopener noreferrer")[^>]*>'
+                rf'{label}</a>',
+            )
+        self.assertNotRegex(
+            page,
+            r'<a class="anchor-link" href="#section"[^>]+(?:target|rel)=',
+        )
+        self.assertNotRegex(
+            page,
+            r'<a href="#section"[^>]+(?:target|rel)=',
+        )
 
 
 class ContentWidthTest(unittest.TestCase):
