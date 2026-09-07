@@ -14,9 +14,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ROOT = REPO_ROOT / "plugins" / "big-plan"
 SKILL_ROOT = PLUGIN_ROOT / "skills" / "big-plan"
 PRESERVED_SHA256 = {
-    "server.py": "3f1619e9619892fe6fb50ebc7e52b040565651e856316b9315bbd6486f3e25d1",
+    "server.py": "d7da6699e77b2841520a3f2e804785d9075b13c1ccd4a99b33ba5f3bbe4a1d49",
     "render.py": "3a61b9ae3edb13adbe99c6320a3ae785b1434d09175926599372c8430a347955",
-    "dispatch.py": "acceb1953692fe3af07bdacacd9cb871ae3a534fe968cc618cbaebcd18c15181",
+    "dispatch.py": "074437541a5cb8a1d94aee011a53b86c14a5ce73102385eabdf5dda88b62f8a1",
     "template.md": "f6a28d978c5f8ec1d73193f0e9af560976e1d2230147888849496e8f89e8d007",
     "test_dispatch.py": "f57f309bd88a622735b6b5e0bf748e7ca648084c116ea1598fa4868e2649eaf4",
     "assets/app.js": "017ef2e255681cd41d296a525625df8778593f8126a27a3efd4245389ab1f37f",
