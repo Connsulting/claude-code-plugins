@@ -1,6 +1,6 @@
 # Big Plan Plugin Example
 
-This promoted example exercises the existing Big Plan review UI without changing its renderer or assets.
+This promoted example exercises the Big Plan review UI, including an optional note attached to a selected decision.
 
 > [!NOTE]
 > Comment on any anchored block, react from the rail, and use the controls below to verify the phone review flow.
@@ -9,6 +9,7 @@ This promoted example exercises the existing Big Plan review UI without changing
 
 - [x] Preserve the existing renderer and UI assets byte-for-byte
 - [ ] Choose a rollout option
+- [ ] Choose a decision and add a note
 - [ ] Send one feedback batch to the authoring session
 
 ## Delivery Flow
@@ -36,7 +37,18 @@ Which interactions should we exercise?
 - Add an anchored comment
 - Toggle a task checkbox
 - Choose a decision
+- Choose a decision and add a note
 - Send the feedback batch
+```
+
+## Decision Note Test
+
+Choose **Review in stages**, then add a note such as: `Start with the phone flow; I will test the desktop layout tomorrow.` Blur the note field or press Ctrl/Cmd+Enter. Refresh the page and confirm both the selection and note remain. Change the selection and verify the note follows that decision; clearing the selection clears its saved note too.
+
+```decide
+How should this note interaction be tested?
+- Review in stages
+- Review everything now
 ```
 
 ## Compare the Access Paths

@@ -1,6 +1,6 @@
 # Big Plan
 
-Big Plan serves repository Markdown plans in the same commentable, phone-friendly UI used by the original service. The renderer, server, feedback dispatcher, JavaScript, and CSS are copied unchanged.
+Big Plan serves repository Markdown plans in a commentable, phone-friendly UI. Decision cards support selecting supplied options (or an "Other" option) and saving an optional note with that selection.
 
 ## Install
 

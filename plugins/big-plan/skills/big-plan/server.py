@@ -975,6 +975,9 @@ class Handler(BaseHTTPRequestHandler):
             q = (payload.get("question") or "").strip()
             if q:
                 new_comment["question"] = q
+            note = (payload.get("note") or "").strip()
+            if note:
+                new_comment["note"] = note
             data["comments"].append(new_comment)
             save_sidecar(md_path, data)
             self._send_json(HTTPStatus.CREATED, new_comment)

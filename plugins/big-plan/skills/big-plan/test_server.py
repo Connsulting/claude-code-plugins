@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import os
 import re
 import sys
@@ -114,6 +115,27 @@ class ContentWidthTest(unittest.TestCase):
             "  width: 100%;",
             style,
         )
+
+
+class DecisionNoteRenderTest(unittest.TestCase):
+    def test_selected_decision_restores_its_note(self) -> None:
+        question = "Which rollout should we use?"
+        anchor = "d-" + hashlib.md5(question.encode("utf-8")).hexdigest()[:10]
+        page = render.render_html(
+            "```decide\nWhich rollout should we use?\n- Staged\n- Full\n```",
+            "Plan",
+            {"comments": [{
+                "type": "decision",
+                "anchor": anchor,
+                "choices": ["Staged"],
+                "note": "Begin with the phone review.",
+                "timestamp": "2026-09-08T00:00:00+00:00",
+            }]},
+        )
+
+        self.assertIn('class="decide-note-input"', page)
+        self.assertIn("Begin with the phone review.", page)
+        self.assertIn('value="Staged" checked', page)
 
 
 if __name__ == "__main__":

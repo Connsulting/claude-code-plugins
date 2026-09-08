@@ -449,6 +449,7 @@ def render_decide_card(block: dict, comments: dict) -> str:
     multi = block["kind"] == "decide-multi"
 
     latest_choices: set[str] = set()
+    latest_note = ""
     decisions = [
         c for c in comments.get("comments", [])
         if c.get("type") == "decision"
@@ -462,6 +463,7 @@ def render_decide_card(block: dict, comments: dict) -> str:
             latest_choices = {str(x) for x in latest["choices"]}
         elif latest.get("choice"):
             latest_choices = {str(latest["choice"])}
+        latest_note = str(latest.get("note") or "")
 
     input_type = "checkbox" if multi else "radio"
     name = "decide-" + anchor
@@ -508,6 +510,11 @@ def render_decide_card(block: dict, comments: dict) -> str:
         f'<span class="decide-saved" hidden>saved</span>'
         f"</div>"
         f'<div class="decide-options">{"".join(opts_parts)}</div>'
+        f'<label class="decide-note-label">'
+        f'<span>Add a note about this choice <span class="decide-optional">(optional)</span></span>'
+        f'<textarea class="decide-note-input" rows="2" '
+        f'placeholder="Why this option, a condition, or a follow-up...">{html.escape(latest_note)}</textarea>'
+        f"</label>"
         f"</div>"
     )
 
