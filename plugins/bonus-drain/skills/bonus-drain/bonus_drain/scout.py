@@ -112,6 +112,75 @@ def _router_preflight(config: RuntimeConfig, plan: PlanResult) -> tuple[dict[str
     return tuple(result)
 
 
+def _inflight_index(
+    queue: QueueDB, now_epoch: int,
+) -> tuple[dict[str, int], dict[tuple[str, str], int]]:
+    """Count non-terminal runs by provider and by (provider, account)."""
+
+    by_provider: dict[str, int] = {}
+    by_account: dict[tuple[str, str], int] = {}
+    for run in queue.inflight_details(now_epoch=now_epoch):
+        provider_id = run.get("provider_id")
+        account_id = run.get("account_id")
+        if not isinstance(provider_id, str) or not provider_id:
+            continue
+        by_provider[provider_id] = by_provider.get(provider_id, 0) + 1
+        if isinstance(account_id, str) and account_id:
+            key = (provider_id, account_id)
+            by_account[key] = by_account.get(key, 0) + 1
+    return by_provider, by_account
+
+
+def _apply_inflight_caps(plan: PlanResult, queue: QueueDB, *, now_epoch: int) -> PlanResult:
+    """Subtract already-running jobs from this tick, per provider.
+
+    A running job tightens that provider's cap; it does not block other providers.
+    Running work on a sibling account of the same provider blocks a switch so a
+    shared credential is not moved under live jobs.
+    """
+
+    by_provider, by_account = _inflight_index(queue, now_epoch)
+    if not by_provider:
+        return plan
+    closed = dict(plan.closed)
+    gates_by_key = {(gate.provider_id, gate.account_id): gate for gate in plan.gates}
+    kept = []
+    for batch in plan.batches:
+        sibling = next(
+            (
+                account_id
+                for (provider_id, account_id), count in by_account.items()
+                if provider_id == batch.provider_id and account_id != batch.account_id and count > 0
+            ),
+            None,
+        )
+        key = (batch.provider_id, batch.account_id)
+        if sibling is not None:
+            reason = f"provider inflight on {sibling}"
+            closed[key] = reason
+            gates_by_key[key] = replace(
+                gates_by_key[key], open=False, reason=reason, batch_size=0,
+            )
+            continue
+        cap = min(
+            batch.batch_size,
+            max(0, batch.surplus_jobs - by_provider.get(batch.provider_id, 0)),
+        )
+        if cap <= 0:
+            reason = "provider inflight at surplus cap"
+            closed[key] = reason
+            gates_by_key[key] = replace(
+                gates_by_key[key], open=False, reason=reason, batch_size=0,
+            )
+            continue
+        if cap != batch.batch_size:
+            batch = replace(batch, batch_size=cap)
+            gates_by_key[key] = replace(gates_by_key[key], batch_size=cap)
+        kept.append(batch)
+    gates = tuple(gates_by_key[(gate.provider_id, gate.account_id)] for gate in plan.gates)
+    return PlanResult(tuple(kept), closed, gates, plan.generated_at)
+
+
 def plan_tick(
     config: RuntimeConfig,
     queue: QueueDB,
@@ -134,6 +203,7 @@ def plan_tick(
             capabilities=provider.capabilities, automatic=True,
         )
     plan = build_plan(config, snapshots, eligible_count=availability, now_epoch=now)
+    plan = _apply_inflight_caps(plan, queue, now_epoch=now)
     allocations: dict[tuple[str, str], tuple[Any, ...]] = {}
 
     # Build a capacity-expanded bipartite graph and find an augmenting-path matching. Processing
@@ -246,15 +316,13 @@ def run_once(
     now = int(time.time() if now_epoch is None else now_epoch)
     queue = queue or QueueDB(config.database)
     queue.initialize()
-    tick = plan_tick(config, queue, cache_root, now_epoch=now)
-    plan = tick.plan
-    router_preflight = _router_preflight(config, plan)
     dispatched: list[DispatchResult] = []
     previews: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
 
     lifecycle_report = db.doctor(queue)
     if not lifecycle_report.ok:
+        tick = plan_tick(config, queue, cache_root, now_epoch=now)
         message = "; ".join(lifecycle_report.diagnostics)
         blocker = {
             "kind": "reconciliation_required",
@@ -266,22 +334,16 @@ def run_once(
             "message": message or "queue lifecycle requires reconciliation",
         }
         return ScoutReport(
-            now, dry_run, plan, (), (), (error,), (blocker,), router_preflight,
+            now, dry_run, tick.plan, (), (), (error,), (blocker,),
+            _router_preflight(config, tick.plan),
         )
 
     reconciliation = reconcile_inflight(
         config, queue, dry_run=dry_run, activation_call=activation_call,
     )
-    inflight = queue.inflight_details(now_epoch=now)
-    if inflight:
-        blocker = {
-            "kind": "inflight",
-            "message": "global scout concurrency policy blocks while any drain job is non-terminal",
-            "runs": inflight,
-        }
-        return ScoutReport(
-            now, dry_run, plan, (), (), (), (blocker,), router_preflight, reconciliation,
-        )
+    tick = plan_tick(config, queue, cache_root, now_epoch=now)
+    plan = tick.plan
+    router_preflight = _router_preflight(config, plan)
 
     unavailable = [item for item in router_preflight if not item["available"]]
     if unavailable:

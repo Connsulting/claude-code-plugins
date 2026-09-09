@@ -118,6 +118,23 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertEqual((tone, label), ("live", "draining"))
         self.assertIn("Grok", text)
 
+    def test_verdict_lists_every_dispatching_provider(self) -> None:
+        grok = self.viewer._grok_cards(
+            {}, {"weekly_percent": 50, "weekly_reset": 2_000_000_000}, 4, "grok", 1,
+        )[0]
+        claude = self.viewer._claude_cards(
+            {"acct": [{"label": "Business", "u7": 48, "r7": 2_000_000_000}],
+             "active": "Business", "selected": "Business"},
+            None, 3, "claude", 4,
+        )[0]
+        tone, label, text, sub = self.viewer._verdict([grok, claude], "grok", 30 * 3600)
+        self.assertEqual((tone, label), ("live", "2 draining"))
+        self.assertIn("dchip", text)
+        self.assertIn("Grok", text)
+        self.assertIn("Business", text)
+        self.assertIn("1/6", text)
+        self.assertIn("4/6", sub)
+
     def test_ready_status_uses_planner_reserve_and_next_scout_is_systemd_backed(self) -> None:
         with mock.patch.object(self.viewer.time, "time", return_value=1_000):
             card = {

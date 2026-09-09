@@ -1569,17 +1569,27 @@ def _verdict(cards: list[dict], coord: str, lead_secs: int) -> tuple[str, str, s
     """
     if not cards:
         return "idle", "no usage signal", "No account is reporting usage.", ""
-    drain = next((c for c in cards if c["batch"] > 0), None)
-    if drain is not None:
-        into = (dur(lead_secs - (_f(drain["r7"]) - time.time()))
-                if drain.get("r7") else "")
-        sub = f'batch {drain["batch"]}/{drain["batch_n"]}'
-        if into:
-            sub += f" &middot; {into} into its window"
-        if drain["u7"] is not None:
-            sub += f' &middot; {_f(drain["u7"]):g}% of a {_f(drain["ceiling"]):g} ceiling'
-        return ("live", "draining",
-                f'{ico(drain["engine"])}{esc(drain["name"])} is dispatching.', sub)
+    draining = [c for c in cards if c["batch"] > 0]
+    if draining:
+        chips = "".join(
+            f'<span class="dchip">{ico(c["engine"])}'
+            f'<span class="dname">{esc(c["name"])}</span>'
+            f'<span class="dbatch">{int(c["batch"])}/{int(c["batch_n"])}</span></span>'
+            for c in draining
+        )
+        subs = []
+        for drain in draining:
+            bit = f'{drain["name"]} batch {int(drain["batch"])}/{int(drain["batch_n"])}'
+            if drain["u7"] is not None:
+                bit += f' · {_f(drain["u7"]):g}% of {_f(drain["ceiling"]):g}'
+            subs.append(bit)
+        sub = " · ".join(subs)
+        if len(draining) == 1:
+            drain = draining[0]
+            return ("live", "draining",
+                    f'{ico(drain["engine"])}{esc(drain["name"])} is dispatching.', sub)
+        return ("live", f"{len(draining)} draining",
+                f'<span class="dchips">{chips}</span>', sub)
 
     live = [c for c in cards if c["windows"] > 0 and c["u7"] is not None]
     # Prefer an open account that still has budget: if one exists it is the account the next tick
@@ -1630,7 +1640,7 @@ def _claude_cards(gates: dict, usage: dict | None, n_elig: int, coord: str, batc
         # coordinator names this engine the single card IS the selected account. The rotator
         # store has no `selected` label to match against in this shape, and without this the
         # card never carries the batch: it would render "did not dispatch" mid-dispatch.
-        if coord == "claude":
+        if coord == "claude" or batch > 0:
             selected = "claude"
 
     cards = []
@@ -1654,12 +1664,12 @@ def _claude_cards(gates: dict, usage: dict | None, n_elig: int, coord: str, batc
             "tag": tag, "engine": "claude",
             "u5": a.get("u5"), "u7": a.get("u7"), "ceiling": _f(a.get("ceiling"), 98),
             "hot": hot, "r7": a.get("r7"), "windows": windows, "opens_in": opens,
-            "ppw": ppw, "batch": batch if (is_sel and coord == "claude") else 0,
+            "ppw": ppw, "batch": batch if is_sel else 0,
             "batch_n": int(_f(gates.get("batch_n"), 6)),
             "eligible": n_elig, "elig_label": "eligible", "lead_h": lead,
             "active": is_active,
             "live": is_sel or a["label"] == active,
-            "draining": is_sel and coord == "claude",
+            "draining": is_sel and (coord == "claude" or batch > 0),
             "behind": selected if (selected and not is_sel and windows > 0) else "",
         })
     return cards
@@ -1688,7 +1698,7 @@ def _codex_cards(gates: dict, cx: dict | None, n_codex: int, coord: str, batch: 
         active = "codex"
         # Same single-account reasoning as _claude_cards: no `selected` label exists in this
         # shape, so without this the one card never carries the batch it is actually running.
-        if coord == "codex":
+        if coord == "codex" or batch > 0:
             selected = "codex"
 
     cards = []
@@ -1717,7 +1727,7 @@ def _codex_cards(gates: dict, cx: dict | None, n_codex: int, coord: str, batch: 
             "u7": a.get("u7"), "ceiling": _f(a.get("ceiling"), 98),
             "r7": a.get("r7"), "windows": windows, "opens_in": opens,
             "ppw": _f(gates.get("codex_pct_per_window"), 2.5),
-            "batch": batch if (coord == "codex" and is_sel) else 0,
+            "batch": batch if is_sel else 0,
             "batch_n": int(_f(gates.get("batch_n"), 6)),
             "eligible": n_codex, "elig_label": "jobs", "lead_h": lead,
             "active": is_active,
@@ -1725,7 +1735,7 @@ def _codex_cards(gates: dict, cx: dict | None, n_codex: int, coord: str, batch: 
             # represented by `batch`/the draining tag, so a closed drain window must not make
             # the active Codex account look inactive.
             "live": is_sel or is_active,
-            "draining": is_sel and coord == "codex",
+            "draining": is_sel and (coord == "codex" or batch > 0),
             "behind": selected if (selected and not is_sel and windows > 0) else "",
         })
     return cards
@@ -1752,12 +1762,12 @@ def _grok_cards(gates: dict, grok: dict | None, n_grok: int,
         "ceiling": _f(gates.get("grok_ceiling"), 98), "r7": reset,
         "windows": windows, "opens_in": opens,
         "ppw": _f(gates.get("grok_pct_per_window"), 2.5),
-        "batch": batch if coord == "grok" else 0,
+        "batch": batch,
         "batch_n": int(_f(gates.get("batch_n"), 6)),
         "eligible": n_grok, "elig_label": "jobs", "lead_h": lead,
         # Grok has one configured subscription, so it is always the active account. Whether
         # a batch is currently landing on it is separately represented by `live`/`batch`.
-        "active": True, "live": True, "draining": coord == "grok", "behind": "",
+        "active": True, "live": True, "draining": coord == "grok" or batch > 0, "behind": "",
     }]
 
 
@@ -2395,6 +2405,12 @@ a{color:var(--acc2);text-decoration:none}
 .vbar.live .vmain>b{color:var(--acc2)}
 .vtext{font-size:14.5px;margin-top:5px}
 .vsub{font-size:11px;color:var(--dim);letter-spacing:.04em;margin-top:4px}
+.dchips{display:flex;flex-wrap:wrap;gap:8px;margin-top:2px}
+.dchip{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);
+  background:rgba(255,255,255,.03);padding:7px 10px;font-size:13px}
+.dchip .dname{letter-spacing:.02em}
+.dchip .dbatch{font-size:11px;letter-spacing:.08em;color:var(--acc2);
+  text-transform:uppercase}
 
 /* rotation timeline -------------------------------------------------------------------
    The one element four independent cards cannot be: each can state its own reset, but only a
