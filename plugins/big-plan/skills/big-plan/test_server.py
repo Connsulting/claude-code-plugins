@@ -140,6 +140,14 @@ class AtxHeadingRenderTest(unittest.TestCase):
         self.assertNotIn("<h1", body)
         self.assertIn("A PR #1234 mid-line", body)
 
+    def test_six_hashes_head_but_seven_do_not(self) -> None:
+        """The lookahead also drops the stock h6 for 7+ hashes, as CommonMark does."""
+        self.assertIn('<h6 id="six-hashes">six hashes</h6>', self.body("###### six hashes\n"))
+
+        body = self.body("####### seven hashes\n")
+        self.assertNotIn("<h6", body)
+        self.assertIn("####### seven hashes", body)
+
     def test_hash_reference_inside_a_fence_stays_literal(self) -> None:
         body = self.body("Intro\n\n```text\n#1234 fenced\n```\n")
 
