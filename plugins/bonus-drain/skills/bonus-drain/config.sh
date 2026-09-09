@@ -53,7 +53,7 @@ export DRAIN_LEAD_MAX_HOURS="${DRAIN_LEAD_MAX_HOURS:-72}"
 export WINDOW_HOURS="${WINDOW_HOURS:-5}"
 export PCT_PER_WINDOW="${PCT_PER_WINDOW:-2.5}"
 export EST_PCT_PER_JOB="${EST_PCT_PER_JOB:-0.75}"
-export BATCH_N="${BATCH_N:-6}"
+export BATCH_N="${BATCH_N:-4}"
 
 export BONUS_MODEL="${BONUS_MODEL:-opus[1m]}"
 export CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"

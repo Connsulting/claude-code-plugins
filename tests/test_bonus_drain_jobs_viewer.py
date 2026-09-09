@@ -90,6 +90,9 @@ class JobsViewerContractTests(unittest.TestCase):
         )[0]
         grok = self.viewer._grok_cards({}, {"weekly_percent": 22}, 0, "", 0)[0]
 
+        self.assertEqual(claude["name"], "Claude · Business")
+        self.assertEqual(codex["name"], "Codex · Personal")
+        self.assertEqual(grok["name"], "Grok")
         for card in (claude, codex, grok):
             with self.subTest(account=card["name"]):
                 self.assertTrue(card["active"])
@@ -109,6 +112,25 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertIn('bar lg draining', self.viewer._account_row(draining))
         self.assertIn('@keyframes drainshimmer', self.viewer.CSS)
 
+    def test_next_tick_plan_shimmers_codex_even_when_claude_is_coordinator(self) -> None:
+        """A planned Codex batch is a real next-tick dispatch, not a Claude-only coordinator."""
+        gates = {
+            "codex_acct": [{"label": "Personal", "u7": 70}],
+            "codex_active": "Personal",
+            "account_gates": {
+                "codex-personal": {
+                    "account_id": "codex-personal", "provider_id": "codex",
+                    "open": True, "batch_size": 2,
+                },
+            },
+        }
+        card = self.viewer._codex_cards(gates, None, 4, "claude", 0)[0]
+        self.assertEqual(card["name"], "Codex · Personal")
+        self.assertTrue(card["draining"])
+        self.assertIn("tag acc", card["tag"])
+        self.assertIn("draining", card["tag"])
+        self.assertIn('bar lg draining', self.viewer._account_row(card))
+
     def test_live_grok_ledger_batch_shimmers_and_drives_the_verdict(self) -> None:
         grok = self.viewer._grok_cards(
             {}, {"weekly_percent": 50, "weekly_reset": 2_000_000_000}, 4, "grok", 2,
@@ -118,13 +140,30 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertEqual((tone, label), ("live", "draining"))
         self.assertIn("Grok", text)
 
+    def test_verdict_lists_every_dispatching_provider(self) -> None:
+        grok = self.viewer._grok_cards(
+            {}, {"weekly_percent": 50, "weekly_reset": 2_000_000_000}, 4, "grok", 1,
+        )[0]
+        claude = self.viewer._claude_cards(
+            {"acct": [{"label": "Business", "u7": 48, "r7": 2_000_000_000}],
+             "active": "Business", "selected": "Business"},
+            None, 3, "claude", 4,
+        )[0]
+        tone, label, text, sub = self.viewer._verdict([grok, claude], "grok", 30 * 3600)
+        self.assertEqual((tone, label), ("live", "dispatching"))
+        self.assertIn("dchip", text)
+        self.assertIn("Grok", text)
+        self.assertIn("Business", text)
+        self.assertIn("1/4", text)
+        self.assertIn("4/4", sub)
+
     def test_ready_status_uses_planner_reserve_and_next_scout_is_systemd_backed(self) -> None:
         with mock.patch.object(self.viewer.time, "time", return_value=1_000):
             card = {
                 "batch": 0, "u7": 68, "ceiling": 99, "windows": 3,
                 "opens_in": None, "hot": None, "eligible": 1, "behind": "",
             }
-        self.assertEqual(self.viewer._card_state(card), ("ready · 31 pts headroom", "acc"))
+        self.assertEqual(self.viewer._card_state(card), ("async · 31 pts remaining", "acc"))
         with mock.patch.object(self.viewer, "list_timers", return_value=[
             {"unit": "other.timer", "next": 1},
             {"unit": "bonus-drain-scout.timer", "next": 2_000},
@@ -154,13 +193,16 @@ class JobsViewerContractTests(unittest.TestCase):
         response = SimpleNamespace(stdout=(
             "lead_hours=30\n"
             '{"gates":[{"provider_id":"grok","open":true,"batch_size":6,'
-            '"resets_at":2000000000}]}\n'
+            '"resets_at":2000000000}],'
+            '"allocations":[{"task_id":"t1","provider_id":"grok",'
+            '"account_id":"grok-personal"}]}\n'
         ))
         with mock.patch.object(self.viewer.subprocess, "run", return_value=response) as run:
             gates = self.viewer.get_gates(4, 4, 4, None, None)
         self.assertIn("gates --json", run.call_args.args[0][2])
         self.assertEqual(gates["grok_batch"], 6)
         self.assertEqual(gates["coordinator"], "grok")
+        self.assertEqual(gates["allocations"], {"t1": "grok"})
 
     def test_secretless_force_requires_exact_browser_boundary_and_json(self) -> None:
         self.viewer.ALLOWED_HOSTS = (self.HOST,)
@@ -478,7 +520,7 @@ class JobsViewerContractTests(unittest.TestCase):
         },
     ]
 
-    def _bonus_body(self, remaining, runs=None):
+    def _bonus_body(self, remaining, runs=None, gates=None):
         with (
             mock.patch.object(self.viewer, "get_usage", return_value=None),
             mock.patch.object(self.viewer, "get_codex_usage", return_value=None),
@@ -488,7 +530,10 @@ class JobsViewerContractTests(unittest.TestCase):
             mock.patch.object(self.viewer, "get_recent_runs", return_value=runs or []),
             mock.patch.object(self.viewer, "get_disabled", return_value=[]),
             mock.patch.object(self.viewer, "get_inflight", return_value=[]),
-            mock.patch.object(self.viewer, "get_gates", return_value={"coordinator": "none"}),
+            mock.patch.object(
+                self.viewer, "get_gates",
+                return_value=gates if gates is not None else {"coordinator": "none"},
+            ),
             mock.patch.object(self.viewer, "_claude_cards", return_value=[]),
             mock.patch.object(self.viewer, "_codex_cards", return_value=[]),
             mock.patch.object(self.viewer, "_grok_cards", return_value=[]),
@@ -690,12 +735,11 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertIn('class="rows mfold" data-fold="drain"', body)
         self.assertIn('class="rowhd mfold-sum"', body)
         header_at = body.index('data-fold="header"')
-        vbar_at = body.index('class="vbar idle"')
         rotation_at = body.index('data-fold="rotation"')
         drain_at = body.index('data-fold="drain"')
         remaining_at = body.index("queued · priority order")
-        self.assertLess(header_at, vbar_at)
-        self.assertLess(vbar_at, rotation_at)
+        self.assertNotIn('class="vbar', body)
+        self.assertLess(header_at, rotation_at)
         self.assertLess(rotation_at, drain_at)
         self.assertLess(drain_at, remaining_at)
         self.assertNotIn('class="sec capacity-fold"', body)
@@ -703,6 +747,35 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertNotIn('id="work-editor"', body)
         self.assertIn("<i class=\"caret\"></i>usage · provider capacity", body)
         self.assertIn("<i class=\"caret\"></i>rotation", body)
+        self.assertIn("async scheduler", body)
+        self.assertNotIn("bonus scheduler", body)
+        self.assertIn("next ", body)
+        self.assertNotIn("Grok eligible", body)
+        drain_hdr = body[body.index("usage · provider capacity"):body.index("queued · priority order")]
+        self.assertIn('class="rowplan"', drain_hdr)
+        self.assertIn('class="nxt"', drain_hdr)
+        self.assertIn('href="#i-claude"', drain_hdr)
+        self.assertIn('href="#i-codex"', drain_hdr)
+        self.assertIn('href="#i-grok"', drain_hdr)
+        self.assertNotIn("eligible", drain_hdr)
+        self.assertIn(".rowplan{display:inline-flex;align-items:center", self.viewer.CSS)
+        self.assertIn(".rowhd .nxt .ico{width:1.25em;height:1.25em", self.viewer.CSS)
+
+    def test_queued_jobs_show_a_next_scout_chip_when_planned(self) -> None:
+        now = 2_000_000_000
+        scout_at = now + 30 * 60
+        gates = {"coordinator": "none", "allocations": {"weekly-claude": "claude"}}
+        with (
+            mock.patch.object(self.viewer.time, "time", return_value=now),
+            mock.patch.object(self.viewer, "next_scout", return_value=scout_at),
+        ):
+            body = self._bonus_body(self.QUEUE_FIXTURE, gates=gates)
+        claude_row = body[body.index("Weekly Claude sweep"):body.index("One-off Codex refactor")]
+        self.assertIn('class="qkick"', claude_row)
+        self.assertIn('href="#i-claude"', claude_row)
+        self.assertIn("in 30m", claude_row)
+        codex_row = body[body.index("One-off Codex refactor"):body.index("One-off Claude audit")]
+        self.assertNotIn('class="qkick"', codex_row)
 
         css, script = self.viewer.CSS, self.viewer.SCRIPT
         self.assertIn(".mfold-sum .caret{display:none}", css)

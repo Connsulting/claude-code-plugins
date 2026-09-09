@@ -62,6 +62,33 @@ DB_PATH = Path(os.environ.get(
 DRAIN_LEAD_MAX_HOURS = int(os.environ.get("DRAIN_LEAD_MAX_HOURS", "30"))
 
 
+def _gate_for_card(gates: dict, account_id: str, engine: str, label: str) -> dict:
+    table = gates.get("account_gates") or {}
+    if not isinstance(table, dict):
+        return {}
+    for key in (account_id, f"{engine}-{str(label).lower()}", str(label).lower()):
+        gate = table.get(key)
+        if isinstance(gate, dict):
+            return gate
+    needle = str(label).lower().replace(" ", "-")
+    for gate in table.values():
+        if isinstance(gate, dict) and str(gate.get("account_id") or "").endswith(needle):
+            return gate
+    return {}
+
+
+def _config_urgency_hours(provider_id: str) -> int | None:
+    try:
+        c = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
+        plan_provider = {p.id: p.provider_id for p in c.plans}
+        hours = {int(lim.urgency_seconds // 3600)
+                 for lim in c.limits if plan_provider.get(lim.plan_id) == provider_id
+                 and getattr(lim, "urgency_seconds", 0)}
+    except Exception:
+        return None
+    return hours.pop() if len(hours) == 1 else None
+
+
 def _config_lead_hours(provider_id: str) -> int | None:
     """Lead window for `provider_id`, read from the validated config the planner gates on.
 
@@ -399,7 +426,7 @@ def get_gates(n_elig: int, n_codex: int, n_grok: int,
     key = (n_elig, n_codex, n_grok, grok_json, codex_json)
     if _gates_cache["val"] is not None and _gates_cache["key"] == key and now - _gates_cache["t"] < 60:
         return _gates_cache["val"]
-    out: dict = {"acct": [], "codex_acct": []}
+    out: dict = {"acct": [], "codex_acct": [], "allocations": {}}
     try:
         cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
         result = subprocess.run(
@@ -441,9 +468,15 @@ def get_gates(n_elig: int, n_codex: int, n_grok: int,
         # `gates --json` is the current planning boundary. These fields preserve the viewer's
         # display metadata, while shimmer remains driven by durable in-flight runs below.
         gates = gate_payload.get("gates", []) if gate_payload else []
+        account_gates = {}
         candidates = []
         for gate in gates:
-            if not isinstance(gate, dict) or not gate.get("open"):
+            if not isinstance(gate, dict):
+                continue
+            account_id = gate.get("account_id")
+            if isinstance(account_id, str) and account_id:
+                account_gates[account_id] = gate
+            if not gate.get("open"):
                 continue
             provider = gate.get("provider_id")
             if provider not in RUN_ENGINES:
@@ -452,9 +485,24 @@ def get_gates(n_elig: int, n_codex: int, n_grok: int,
             out[f"{provider}_batch"] = max(int(_f(out.get(f"{provider}_batch"))), batch)
             if batch > 0:
                 candidates.append(gate)
+        out["account_gates"] = account_gates
         if candidates:
             next_gate = min(candidates, key=lambda gate: _f(gate.get("resets_at")) or float("inf"))
             out["coordinator"] = next_gate["provider_id"]
+        planned: dict[str, str] = {}
+        raw_alloc = gate_payload.get("allocations") if gate_payload else None
+        if isinstance(raw_alloc, list):
+            for item in raw_alloc:
+                if not isinstance(item, dict):
+                    continue
+                task_id = item.get("task_id")
+                provider = item.get("provider_id")
+                if (
+                    isinstance(task_id, str) and task_id
+                    and provider in ("claude", "codex", "grok")
+                ):
+                    planned[task_id] = provider
+        out["allocations"] = planned
     except Exception:
         pass
     if PREVIEW:
@@ -1127,6 +1175,19 @@ def busy_button(inner: str) -> str:
     return inner + ico("spin", "spin")
 
 
+def _kick_chip(task: dict, planned: dict, scout_at: float | None) -> str:
+    """Next-scout snapshot for a queued job the current tick has actually reserved."""
+
+    engine = planned.get(task.get("id") or "")
+    if engine not in ("claude", "codex", "grok"):
+        return ""
+    when = rel(scout_at) if scout_at else "at next scout"
+    return (
+        f'<span class="qkick" title="snapshot of the next scout; usage between now and then can change this">'
+        f'{ico(engine)}{esc(when)}</span>'
+    )
+
+
 def size_badge(size: str | None) -> str:
     """Five-block capacity mark, with a visible fallback for legacy NULL rows."""
     label = size if size in SIZE_LEVEL else "unknown"
@@ -1256,34 +1317,66 @@ def _card_name(engine: str, label: str) -> str:
     """Both rotators use the same account labels, so with four cards up a bare "Personal" names
     two different budgets. Prefix the engine, except on the single-budget fallback cards whose
     label already IS the engine."""
-    return label if label == engine else f"{engine} · {label}"
+    titled = engine[:1].upper() + engine[1:] if engine else engine
+    if not label or label == engine:
+        return titled
+    return f"{titled} · {label}"
+
+
+def _planned_batch(gates: dict, account_id: str, engine: str, label: str) -> int:
+    gate = _gate_for_card(gates, account_id, engine, label)
+    if not gate.get("open"):
+        return 0
+    return max(0, int(_f(gate.get("batch_size"))))
+
+
+def _account_draining(
+    gates: dict, account_id: str, engine: str, label: str, *,
+    selected: bool, coord: str, inflight: int,
+) -> bool:
+    """Shimmer every account the next tick will actually dispatch on, not only the coordinator."""
+    if _planned_batch(gates, account_id, engine, label) > 0:
+        return True
+    return bool(selected) and (coord == engine or inflight > 0)
+
+
+def _card_surplus(c: dict) -> float | None:
+    if c.get("u7") is None or not _f(c.get("r7")):
+        return None
+    hours = max(0.0, (_f(c["r7"]) - time.time()) / 3600.0)
+    remaining = max(0.0, _f(c["ceiling"]) - _f(c["u7"]))
+    return remaining - 0.5 * hours
 
 
 def _card_state(c: dict) -> tuple[str, str]:
     """The one-line verdict in a card's top-right, in the same precedence the gates apply:
     drain window timing -> weekly ceiling. Each line names the rule
     that is actually holding, so a stalled drain explains itself without opening the scout log."""
+    kind = "bonus drain" if c.get("urgent") else "async"
     if c["batch"] > 0:
-        return f'dispatching · batch {c["batch"]}/{c["batch_n"]}', "acc"
+        return f'{kind} · batch {c["batch"]}/{c["batch_n"]}', "acc"
     # Unknown is not zero. A missing reading must never render as a full budget.
     if c["u7"] is None:
         return "unknown · no usage reading", "dim"
-    # Exhaustion outranks window timing: an account with nothing left is dead whether or not its
-    # drain window happens to be open, and "closed · drain window" would hide that entirely.
     if _f(c["u7"]) >= 100:
         return "spent · weekly exhausted", "warn"
+    if c["u7"] >= c["ceiling"]:
+        return "capped · ceiling reached", "warn"
+    if c.get("behind"):
+        return f'queued · behind {c["behind"]}', "dim"
+    if c.get("urgent"):
+        return "bonus drain · at floor", "dim"
     if c["windows"] <= 0:
         return ("closed · drain window" if c["opens_in"] is not None
                 else "closed · no reset signal"), "dim"
-    if c["u7"] >= c["ceiling"]:
-        return "capped · ceiling reached", "warn"
     if c["eligible"] <= 0:
         return "open · nothing eligible", "dim"
-    # Only one Claude account drains per tick (the open one whose reset is nearest), so an open
-    # account that was not selected is queued behind another rather than held by a gate.
-    if c.get("behind"):
-        return f'queued · behind {c["behind"]}', "dim"
-    return f"ready · {max(0, _f(c['ceiling']) - _f(c['u7'])):g} pts headroom", "acc"
+    surplus = _card_surplus(c)
+    if surplus is not None and surplus <= 0:
+        return f"{kind} · at floor", "dim"
+    if surplus is not None:
+        return f"{kind} · {surplus:.0f} pts surplus", "acc"
+    return f"{kind} · {max(0, _f(c['ceiling']) - _f(c['u7'])):g} pts remaining", "acc"
 
 
 def _week(c: dict) -> dict:
@@ -1388,16 +1481,13 @@ def _rotation(cards: list[dict]) -> str:
     def pos(t):
         return max(0.0, min(100.0, 100.0 * (t - now) / week))
 
-    # Window spans, so a lane can be told which parts of its own window it shares with a sibling.
-    # Only same-engine accounts contend: a Claude window overlapping a Codex one costs nothing,
-    # because they drain on separate coordinators.
+    # Only the 24h bonus-drain window is painted. Async Work is open all week, so a
+    # lead-length bar would fill every lane and say nothing.
     spans = {}
     for c in cards:
         reset = _f(c.get("r7"))
-        # Per-engine lead: Claude and Codex have separate drain-lead settings, and the lane
-        # must draw the window the rotator will actually honour for THAT engine.
-        lead = int(_f(c.get("lead_h"), DRAIN_LEAD_MAX_HOURS))
-        spans[id(c)] = (max(now, reset - lead * 3600), reset) if reset > now else None
+        urg_h = int(_f(c.get("urgency_h"))) or 24
+        spans[id(c)] = (max(now, reset - urg_h * 3600), reset) if reset > now else None
 
     lanes = []
     for c in cards:
@@ -1415,15 +1505,20 @@ def _rotation(cards: list[dict]) -> str:
                 if hi > lo:
                     ov.append(f'<i class="overlap" style="left:{pos(lo):.1f}%;'
                               f'width:{pos(hi) - pos(lo):.1f}%"></i>')
-            cls = "win" + (" live" if c["batch"] > 0 else "")
+            cls = "win urgent" + (" live" if c["batch"] > 0 else "")
             if c["u7"] is not None and _f(c["u7"]) >= 100:
                 cls += " spent"
             elif c["u7"] is None:
                 cls += " unk"
-            if c["windows"] > 0:
-                label = "draining" if c["batch"] > 0 else "open"
+            urg_h = int(_f(c.get("urgency_h"))) or 24
+            card_reset = _f(c.get("r7"))
+            urg_start = card_reset - urg_h * 3600
+            if card_reset > now and now >= urg_start:
+                label = "bonus drain"
+            elif card_reset > now:
+                label = f'opens {dur(urg_start - now)}'
             else:
-                label = f'opens {dur(c["opens_in"])}' if c["opens_in"] is not None else ""
+                label = ""
             bits.append(f'<i class="{cls}" style="left:{w0:.1f}%;width:{max(0.0, w1 - w0):.1f}%">'
                         + (f"<b>{esc(label)}</b>" if label else "") + "</i>")
             bits.extend(ov)
@@ -1444,19 +1539,19 @@ def _rotation(cards: list[dict]) -> str:
                    f'{"now" if i == 0 else f"+{i}d"}</span>' for i in range(7))
     # Name the lead only when every engine agrees on it; with Claude and Codex on different
     # leads there is no single number that describes the lanes.
-    seen = {int(_f(c.get("lead_h"), DRAIN_LEAD_MAX_HOURS)) for c in cards}
-    leads = f"{seen.pop()}h " if len(seen) == 1 else ""
+    seen = {int(_f(c.get("urgency_h"))) or 24 for c in cards}
+    urg = f"{seen.pop()}h " if len(seen) == 1 else ""
     return f"""
     <div class="tl mfold" data-fold="rotation">
       <div class="tlhead mfold-sum"><span><i class="caret"></i>rotation &middot; next 7 days</span>
-        <span class="rt">{leads}drain window before each reset</span></div>
+        <span class="rt">{urg}bonus drain before each reset</span></div>
       <div class="mfold-body">
       <div class="tlgrid">
         <div class="tldays">{days}</div>
         {"".join(lanes)}
       </div>
       <div class="tlfoot">
-        <span><i class="sw w"></i>drain window</span>
+        <span><i class="sw w"></i>bonus drain</span>
         <span><i class="sw r"></i>weekly reset</span>
         <span><i class="sw u"></i>unknown reading</span>
         <span class="wn"><i class="sw ov"></i>windows overlap, one waits</span>
@@ -1569,23 +1664,52 @@ def _verdict(cards: list[dict], coord: str, lead_secs: int) -> tuple[str, str, s
     """
     if not cards:
         return "idle", "no usage signal", "No account is reporting usage.", ""
-    drain = next((c for c in cards if c["batch"] > 0), None)
-    if drain is not None:
-        into = (dur(lead_secs - (_f(drain["r7"]) - time.time()))
-                if drain.get("r7") else "")
-        sub = f'batch {drain["batch"]}/{drain["batch_n"]}'
-        if into:
-            sub += f" &middot; {into} into its window"
-        if drain["u7"] is not None:
-            sub += f' &middot; {_f(drain["u7"]):g}% of a {_f(drain["ceiling"]):g} ceiling'
-        return ("live", "draining",
-                f'{ico(drain["engine"])}{esc(drain["name"])} is dispatching.', sub)
+    def _chips(items: list[dict]) -> str:
+        return "".join(
+            f'<span class="dchip">{ico(c["engine"])}'
+            f'<span class="dname">{esc(c["name"])}</span>'
+            f'<span class="dbatch">{int(c["batch"])}/{int(c["batch_n"])}</span></span>'
+            for c in items
+        )
+
+    bonus = [c for c in cards if c.get("urgent") and c["batch"] > 0]
+    async_disp = [c for c in cards if not c.get("urgent") and c["batch"] > 0]
+    if bonus or async_disp:
+        shown = bonus + async_disp
+        subs = []
+        for drain in shown:
+            kind = "bonus drain" if drain.get("urgent") else "async"
+            bit = f'{kind} · {drain["name"]} batch {int(drain["batch"])}/{int(drain["batch_n"])}'
+            if drain["u7"] is not None:
+                bit += f' · {_f(drain["u7"]):g}% of {_f(drain["ceiling"]):g}'
+            subs.append(bit)
+        sub = " · ".join(subs)
+        if len(shown) == 1:
+            drain = shown[0]
+            label = "bonus drain" if drain.get("urgent") else "draining"
+            return ("live", label,
+                    f'{ico(drain["engine"])}{esc(drain["name"])} is dispatching.', sub)
+        lines = []
+        if bonus:
+            lines.append(
+                f'<div class="vline"><span class="vlbl">bonus drain</span>'
+                f'<span class="dchips">{_chips(bonus)}</span></div>'
+            )
+        if async_disp:
+            lines.append(
+                f'<div class="vline"><span class="vlbl">async</span>'
+                f'<span class="dchips">{_chips(async_disp)}</span></div>'
+            )
+        return ("live", "dispatching", "".join(lines), sub)
 
     live = [c for c in cards if c["windows"] > 0 and c["u7"] is not None]
     # Prefer an open account that still has budget: if one exists it is the account the next tick
     # could actually dispatch on, so its gate is the interesting one. Falling back to a spent or
     # capped account keeps the line honest when every open window is dead.
-    spendable = [c for c in live if _f(c["u7"]) < _f(c["ceiling"])]
+    spendable = [
+        c for c in live
+        if _f(c["u7"]) < _f(c["ceiling"]) and (_card_surplus(c) or 0) > 0
+    ]
     if live:
         near = min(spendable or live, key=lambda c: _f(c.get("r7")) or float("inf"))
         state, _ = _card_state(near)
@@ -1630,7 +1754,7 @@ def _claude_cards(gates: dict, usage: dict | None, n_elig: int, coord: str, batc
         # coordinator names this engine the single card IS the selected account. The rotator
         # store has no `selected` label to match against in this shape, and without this the
         # card never carries the batch: it would render "did not dispatch" mid-dispatch.
-        if coord == "claude":
+        if coord == "claude" or batch > 0:
             selected = "claude"
 
     cards = []
@@ -1642,25 +1766,32 @@ def _claude_cards(gates: dict, usage: dict | None, n_elig: int, coord: str, batc
             opens = ahead if ahead > 0 else None
         is_sel = a["label"] == selected
         is_active = a["label"] == active
+        account_id = f"claude-{str(a['label']).lower()}"
+        draining = _account_draining(
+            gates, account_id, "claude", a["label"],
+            selected=is_sel, coord=coord, inflight=batch,
+        )
         # At most ONE tag: "draining" already implies the rotator is pinned here, so stacking
         # "active" beside it only wraps the header row and knocks the cards out of alignment.
         tag = ""
-        if is_sel:
+        if draining:
             tag = '<span class="tag acc">draining</span>'
         elif is_active and len(accounts) > 1:
             tag = '<span class="tag">active</span>'
         cards.append({
-            "name": _card_name("claude", a["label"]), "account_id": f"claude-{str(a['label']).lower()}",
+            "name": _card_name("claude", a["label"]), "account_id": account_id,
             "tag": tag, "engine": "claude",
             "u5": a.get("u5"), "u7": a.get("u7"), "ceiling": _f(a.get("ceiling"), 98),
             "hot": hot, "r7": a.get("r7"), "windows": windows, "opens_in": opens,
-            "ppw": ppw, "batch": batch if (is_sel and coord == "claude") else 0,
-            "batch_n": int(_f(gates.get("batch_n"), 6)),
+            "ppw": ppw, "batch": batch if is_sel else 0,
+            "batch_n": int(_f(gates.get("batch_n"), 4)),
             "eligible": n_elig, "elig_label": "eligible", "lead_h": lead,
             "active": is_active,
             "live": is_sel or a["label"] == active,
-            "draining": is_sel and coord == "claude",
+            "draining": draining,
             "behind": selected if (selected and not is_sel and windows > 0) else "",
+            "urgent": bool(_gate_for_card(gates, f"claude-{str(a['label']).lower()}", "claude", a["label"]).get("urgent")),
+            "urgency_h": _config_urgency_hours("claude") or 0,
         })
     return cards
 
@@ -1688,7 +1819,7 @@ def _codex_cards(gates: dict, cx: dict | None, n_codex: int, coord: str, batch: 
         active = "codex"
         # Same single-account reasoning as _claude_cards: no `selected` label exists in this
         # shape, so without this the one card never carries the batch it is actually running.
-        if coord == "codex":
+        if coord == "codex" or batch > 0:
             selected = "codex"
 
     cards = []
@@ -1700,16 +1831,21 @@ def _codex_cards(gates: dict, cx: dict | None, n_codex: int, coord: str, batch: 
             opens = ahead if ahead > 0 else None
         is_active = a["label"] == active
         is_sel = a["label"] == selected
+        account_id = f"codex-{str(a['label']).lower()}"
+        draining = _account_draining(
+            gates, account_id, "codex", a["label"],
+            selected=is_sel, coord=coord, inflight=batch,
+        )
         # At most ONE tag, same rule as the Claude cards: "draining" already implies the
         # rotator is pinned here, so stacking "active" beside it wraps the header row.
-        if is_sel:
+        if draining:
             tag = '<span class="tag acc">draining</span>'
         elif is_active and len(accounts) > 1:
             tag = '<span class="tag">active</span>'
         else:
             tag = ""
         cards.append({
-            "name": _card_name("codex", a["label"]), "account_id": f"codex-{str(a['label']).lower()}",
+            "name": _card_name("codex", a["label"]), "account_id": account_id,
             "tag": tag, "engine": "codex",
             # hot=None, deliberately, even where config carries a 5h knob: the ChatGPT plan has
             # no 5h window, so there is no second budget and nothing to draw as one.
@@ -1717,16 +1853,18 @@ def _codex_cards(gates: dict, cx: dict | None, n_codex: int, coord: str, batch: 
             "u7": a.get("u7"), "ceiling": _f(a.get("ceiling"), 98),
             "r7": a.get("r7"), "windows": windows, "opens_in": opens,
             "ppw": _f(gates.get("codex_pct_per_window"), 2.5),
-            "batch": batch if (coord == "codex" and is_sel) else 0,
-            "batch_n": int(_f(gates.get("batch_n"), 6)),
+            "batch": batch if is_sel else 0,
+            "batch_n": int(_f(gates.get("batch_n"), 4)),
             "eligible": n_codex, "elig_label": "jobs", "lead_h": lead,
             "active": is_active,
             # The usage bar is gold for the active subscription. A live batch is separately
             # represented by `batch`/the draining tag, so a closed drain window must not make
             # the active Codex account look inactive.
             "live": is_sel or is_active,
-            "draining": is_sel and coord == "codex",
+            "draining": draining,
             "behind": selected if (selected and not is_sel and windows > 0) else "",
+            "urgent": bool(_gate_for_card(gates, f"codex-{str(a['label']).lower()}", "codex", a["label"]).get("urgent")),
+            "urgency_h": _config_urgency_hours("codex") or 0,
         })
     return cards
 
@@ -1746,18 +1884,26 @@ def _grok_cards(gates: dict, grok: dict | None, n_grok: int,
     if windows <= 0 and reset:
         ahead = _f(reset) - time.time() - lead * 3600
         opens = ahead if ahead > 0 else None
+    draining = _account_draining(
+        gates, "grok-personal", "grok", "Grok",
+        selected=coord == "grok" or batch > 0, coord=coord, inflight=batch,
+    )
     return [{
-        "name": "Grok", "account_id": "grok-personal", "tag": "", "engine": "grok",
+        "name": "Grok", "account_id": "grok-personal",
+        "tag": '<span class="tag acc">draining</span>' if draining else "",
+        "engine": "grok",
         "u5": None, "hot": None, "u7": grok.get("weekly_percent"),
         "ceiling": _f(gates.get("grok_ceiling"), 98), "r7": reset,
         "windows": windows, "opens_in": opens,
         "ppw": _f(gates.get("grok_pct_per_window"), 2.5),
-        "batch": batch if coord == "grok" else 0,
-        "batch_n": int(_f(gates.get("batch_n"), 6)),
+        "batch": batch,
+        "batch_n": int(_f(gates.get("batch_n"), 4)),
         "eligible": n_grok, "elig_label": "jobs", "lead_h": lead,
         # Grok has one configured subscription, so it is always the active account. Whether
         # a batch is currently landing on it is separately represented by `live`/`batch`.
-        "active": True, "live": True, "draining": coord == "grok", "behind": "",
+        "active": True, "live": True, "draining": draining, "behind": "",
+        "urgent": bool(_gate_for_card(gates, "grok-personal", "grok", "Grok").get("urgent")),
+        "urgency_h": _config_urgency_hours("grok") or 0,
     }]
 
 
@@ -1949,9 +2095,8 @@ def render_bonus_body() -> str:
     )
     n_oneoff = sum(1 for r in remaining if r.get("kind") == "oneoff")
     gates = get_gates(len(remaining), n_codex, n_grok, grok, codex)
-    # A plan identifies the provider currently owning an open drain window; the ledger says how
-    # many child jobs remain in flight. The window owns shimmer, while only the ledger can claim
-    # that a batch is dispatching in the status copy.
+    # Only in-flight jobs count as a live batch. The scout plan's batch_size is what the
+    # *next* tick may launch; mixing it in made idle accounts look like 6/6 running.
     live_batches = {
         engine: sum(1 for job in inflight if job.get("engine") == engine)
         for engine in RUN_ENGINES
@@ -1967,12 +2112,13 @@ def render_bonus_body() -> str:
     cards.extend(_codex_cards(gates, codex, n_codex, coord, x_batch))
     cards.extend(_grok_cards(gates, grok, n_grok, coord, g_batch))
     scout_at = next_scout()
-    scout_note = (f"bonus scheduler {rel(scout_at)}" if scout_at else "bonus scheduler timing unavailable")
+    when = f"async scheduler {rel(scout_at)}" if scout_at else "async scheduler timing unavailable"
+    nxt = " ".join(
+        f'<span class="nxt">{ico(engine)}{int(_f(gates.get(f"{engine}_batch")))}</span>'
+        for engine in ("claude", "codex", "grok")
+    )
 
-    lead_secs = int(_f(gates.get("lead_hours"), DRAIN_LEAD_MAX_HOURS)) * 3600
     cards = _drain_order(cards)
-    v_tone, v_label, v_text, v_sub = _verdict(cards, coord, lead_secs)
-    v_sub = f"{v_sub} &middot; {esc(scout_note)}" if v_sub else esc(scout_note)
 
     subline = " · ".join([
         "plan → queue → run → review", f"{n_weekly} weekly", f"{n_oneoff} one-offs",
@@ -2001,6 +2147,7 @@ def render_bonus_body() -> str:
         flight = ""
 
     # --- remaining queue ------------------------------------------------------------
+    planned = gates.get("allocations") if isinstance(gates.get("allocations"), dict) else {}
     if remaining:
         band_counts: dict = {}
         for t in remaining:
@@ -2023,7 +2170,7 @@ def render_bonus_body() -> str:
                data-workgroup="{esc(t.get("work_group") or "ungrouped")}" data-size="{esc(_facet_size(t))}" data-providers="{" ".join(_facet_providers(t))}">
             <span class="qn">{i}</span>
             <div class="qmain">
-              <div class="qtitle">{esc(t["title"])}</div>
+              <div class="qtitle">{esc(t["title"])}{_kick_chip(t, planned, scout_at)}</div>
               <div class="qmeta">{size_badge(t.get("size"))}
                 {schedule_badge(t["kind"], t.get("last_ts"))}
                 <span class="qrepo" title="{esc(t.get("cwd", ""))}">{cwd}</span></div>
@@ -2121,13 +2268,10 @@ def render_bonus_body() -> str:
     </div>
     </div>
     {'<div class="preview-banner">PREVIEW · copied queue and usage snapshot · execution disabled</div>' if PREVIEW else ''}
-    <div class="vbar {v_tone}"><span class="vdot"></span><div class="vmain"><b>{esc(v_label)}</b><div class="vtext">{v_text}</div><div class="vsub">{v_sub}</div></div></div>
     {_rotation(cards)}
     <div class="rows mfold" data-fold="drain">
       <div class="rowhd mfold-sum"><span><i class="caret"></i>usage · provider capacity</span>
-        <span>{esc(scout_note)} &middot; {len(remaining)} jobs &middot;
-          {ico("claude")}{n_claude} Claude &middot; {ico("codex")}{n_codex} Codex &middot;
-          {ico("grok")}{n_grok} Grok eligible</span></div>
+        <span class="rowplan">{esc(when)} · next {nxt}</span></div>
       <div class="mfold-body">
       {"".join(_account_row(c) for c in cards)}
       </div>
@@ -2395,6 +2539,16 @@ a{color:var(--acc2);text-decoration:none}
 .vbar.live .vmain>b{color:var(--acc2)}
 .vtext{font-size:14.5px;margin-top:5px}
 .vsub{font-size:11px;color:var(--dim);letter-spacing:.04em;margin-top:4px}
+.dchips{display:flex;flex-wrap:wrap;gap:8px;margin-top:2px}
+.dchip{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--line);
+  background:rgba(255,255,255,.03);padding:7px 10px;font-size:13px}
+.dchip .dname{letter-spacing:.02em}
+.dchip .dbatch{font-size:11px;letter-spacing:.08em;color:var(--acc2);
+  text-transform:uppercase}
+.vline{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:6px}
+.vline:first-child{margin-top:2px}
+.vlbl{font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);
+  min-width:7.5em}
 
 /* rotation timeline -------------------------------------------------------------------
    The one element four independent cards cannot be: each can state its own reset, but only a
@@ -2417,6 +2571,8 @@ a{color:var(--acc2);text-decoration:none}
 .win{position:absolute;top:0;bottom:0;background:oklch(0.80 0.14 78 / .16);
   border-left:1px solid oklch(0.80 0.14 78 / .5)}
 .win.live{background:oklch(0.80 0.14 78 / .34)}
+.win.urgent{background:oklch(0.72 0.17 40 / .28);border-left:1px solid oklch(0.72 0.17 40 / .7);
+  pointer-events:none}
 .win.spent{background:oklch(0.72 0.17 40 / .18);border-left-color:oklch(0.72 0.17 40 / .6)}
 .win.unk{background:repeating-linear-gradient(135deg,
   oklch(0.66 0.045 250 / .34) 0 5px, transparent 5px 10px);
@@ -2447,9 +2603,10 @@ a{color:var(--acc2);text-decoration:none}
    The accounts are a queue, not four peers: one per engine drains per tick, picked by nearest
    reset. A row states that ordering instead of asking you to rebuild it from four corners. */
 .rows{border:1px solid var(--line);background:var(--panel);margin-top:12px}
-.rowhd{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:11px 16px;
-  border-bottom:1px solid var(--line);font-size:10.5px;letter-spacing:.12em;
+.rowhd{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;padding:11px 16px;
+  border-bottom:1px solid var(--line);font-size:12.5px;letter-spacing:.12em;
   text-transform:uppercase;color:var(--dim2)}
+.rowplan{display:inline-flex;align-items:center;flex-wrap:wrap;column-gap:8px;line-height:1}
 .arow{border-top:1px solid var(--line2)}
 .arow:first-of-type{border-top:0}
 .arow>summary{list-style:none;cursor:pointer}
@@ -2610,7 +2767,15 @@ footer{margin:34px 0 0;font-size:10.5px;color:var(--dim2);letter-spacing:.04em}
 .qrow.off{opacity:.62;padding:12px 16px}
 .qn{width:20px;font-size:11.5px;color:var(--dim2);padding-top:1px;flex:none}
 .qmain{flex:1 1 300px;min-width:0}
-.qtitle{font-size:13.5px;line-height:1.35}
+.qtitle{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13.5px;line-height:1.35}
+.qkick{display:inline-flex;align-items:center;gap:4px;flex:none;font-size:10.5px;
+  letter-spacing:.02em;color:var(--acc2);border:1px solid oklch(0.80 0.14 78 / .35);
+  border-radius:999px;padding:1px 8px 1px 6px;white-space:nowrap}
+.qkick .ico{width:12px;height:12px;margin-right:0;opacity:.9;vertical-align:0}
+.rowhd .nxt{display:inline-flex;align-items:center;gap:4px;margin-left:0;
+  line-height:1;vertical-align:middle;text-transform:none;letter-spacing:.04em;
+  font-variant-numeric:tabular-nums}
+.rowhd .nxt .ico{width:1.25em;height:1.25em;margin-right:0;vertical-align:0}
 .qsub{font-size:11.5px;color:var(--dim2);margin-top:8px;line-height:1.5;text-wrap:pretty}
 .qmodal{background:var(--panel);color:var(--fg);border:1px solid var(--line);padding:0;
   width:min(36rem,calc(100vw - 28px));max-height:min(80vh,720px)}

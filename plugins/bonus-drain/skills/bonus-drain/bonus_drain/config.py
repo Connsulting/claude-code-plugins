@@ -158,6 +158,10 @@ class LimitConfig:
     ceiling_percent: float
     lead_seconds: int
     batch_size: int
+    max_percent_per_window: float = 0.0
+    estimated_percent_per_job: float | None = None
+    pacing_window_seconds: int = 3_600
+    urgency_seconds: int = 0
 
 
 @dataclass(frozen=True)
@@ -176,6 +180,7 @@ class RuntimeConfig:
     pr_exceptions: tuple[Mapping[str, Any], ...]
     usage_max_age_seconds: int = 3_600
     cache_dir: Path = Path(".")
+    max_jobs: int | None = None
 
     @property
     def state_dir(self) -> Path:
@@ -347,7 +352,7 @@ def validate_config(
     data = _require_mapping(raw, "config")
     _reject_unknown(data, {
         "schema_version", "database", "cache_dir", "record_command",
-        "usage_max_age_seconds", "secret_refs", "adapters", "providers", "plans",
+        "usage_max_age_seconds", "max_jobs", "secret_refs", "adapters", "providers", "plans",
         "accounts", "limits", "viewer", "pr_exceptions",
     }, "config")
     _reject_inline_secrets(data)
@@ -588,20 +593,44 @@ def validate_config(
     for index, row in enumerate(limit_rows):
         _reject_unknown(row, {
             "id", "plan_id", "window_seconds", "ceiling_percent", "lead_seconds",
-            "batch_size",
+            "batch_size", "max_percent_per_window", "estimated_percent_per_job",
+            "pacing_window_seconds", "urgency_seconds",
         }, f"limits[{index}]")
         item_id = _identifier(row.get("id"), f"limits[{index}].id")
         plan_id = _identifier(row.get("plan_id"), f"limits[{index}].plan_id")
         if plan_id not in plan_by_id:
             raise ConfigError(f"limit {item_id} references missing plan {plan_id}")
+        estimate_raw = row.get("estimated_percent_per_job")
+        estimate = None if estimate_raw is None else _number(
+            estimate_raw, f"limits[{index}].estimated_percent_per_job",
+            minimum=0.000001, maximum=100,
+        )
+        window_seconds = _integer(row.get("window_seconds"), f"limits[{index}].window_seconds", minimum=1)
+        urgency_seconds = _integer(
+            row.get("urgency_seconds", 0), f"limits[{index}].urgency_seconds", minimum=0,
+        )
+        if urgency_seconds > window_seconds:
+            raise ConfigError(
+                f"limits[{index}].urgency_seconds must be at most window_seconds"
+            )
         limits.append(
             LimitConfig(
                 item_id,
                 plan_id,
-                _integer(row.get("window_seconds"), f"limits[{index}].window_seconds", minimum=1),
+                window_seconds,
                 _number(row.get("ceiling_percent"), f"limits[{index}].ceiling_percent", minimum=0, maximum=100),
                 _integer(row.get("lead_seconds"), f"limits[{index}].lead_seconds", minimum=1),
                 _integer(row.get("batch_size"), f"limits[{index}].batch_size", minimum=1),
+                _number(
+                    row.get("max_percent_per_window", 0),
+                    f"limits[{index}].max_percent_per_window", minimum=0, maximum=100,
+                ),
+                estimate,
+                _integer(
+                    row.get("pacing_window_seconds", 3_600),
+                    f"limits[{index}].pacing_window_seconds", minimum=1,
+                ),
+                urgency_seconds,
             )
         )
 
@@ -681,6 +710,10 @@ def validate_config(
         pr_exceptions=tuple(pr_exceptions),
         usage_max_age_seconds=_integer(data.get("usage_max_age_seconds", 3_600), "usage_max_age_seconds", minimum=1),
         cache_dir=cache_dir,
+        max_jobs=(
+            None if data.get("max_jobs") is None
+            else _integer(data.get("max_jobs"), "max_jobs", minimum=1)
+        ),
     )
 
 

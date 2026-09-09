@@ -6,9 +6,9 @@ The runtime has no new dependency or service. The existing scout tick reconciles
 goal joins, queues a short coordinator task when needed, then applies ordinary
 capacity policy. `goal tick` performs reconciliation only; it never calls a model.
 
-This release uses Bonus scheduling. An explicit `run-now TASK` still accelerates
-only that eligible task. The global scout in-flight guard remains in force, including
-for unrelated jobs; a ready goal turn may wait for that guard and spare capacity.
+Goals use the existing Async Work scheduler and Bonus capacity policy. An explicit
+`run-now TASK` still accelerates only that eligible task. Per-provider in-flight caps
+and the configured global job cap apply to ready goal turns as ordinary queue jobs.
 `max_inflight` additionally caps this goal's new managed jobs at the atomic claim
 boundary. Existing linked tasks keep their original scheduling and contracts.
 

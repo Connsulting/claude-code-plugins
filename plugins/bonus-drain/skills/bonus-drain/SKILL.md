@@ -11,7 +11,7 @@ when spare capacity is available. Queueing a task does not authorize an immediat
 an explicit start accelerates that one task without changing its contract.
 
 Automatic Bonus scheduling may leave work queued when usage is unknown, stale, ahead of pace,
-outside a reset lead window, or already in flight. Never reinterpret a closed gate as spare
+at the remaining-headroom floor, or already in flight. Never reinterpret a closed gate as spare
 capacity. An explicit start bypasses pacing while preserving dependency and execution checks.
 
 Use the installed command at `${BONUS_DRAIN_BIN:-$HOME/.local/bin/bonus-drain}`. Config,

@@ -103,6 +103,50 @@ class ExternalLinkRenderTest(unittest.TestCase):
         )
 
 
+class AtxHeadingRenderTest(unittest.TestCase):
+    """A leading # is a heading only when a space or tab follows it."""
+
+    def body(self, md_text: str) -> str:
+        return render._convert(md_text)[0]
+
+    def test_pr_reference_starting_a_paragraph_is_not_a_heading(self) -> None:
+        body = self.body("#2391's ground was taken\n")
+
+        self.assertNotIn("<h1", body)
+        self.assertIn("#2391's ground was taken", body)
+
+    def test_pr_reference_starting_a_bullet_is_not_a_heading(self) -> None:
+        body = self.body("- #2391's ground in a bullet\n")
+
+        self.assertNotIn("<h1", body)
+        self.assertRegex(body, r"<li[^>]*>#2391's ground in a bullet</li>")
+
+    def test_real_headings_still_render(self) -> None:
+        body = self.body("# Top\n\n## Section\n\n> ### Quoted\n\n- #### In a list\n")
+
+        self.assertIn('<h1 id="top">Top</h1>', body)
+        self.assertIn('<h2 id="section">Section</h2>', body)
+        self.assertIn('<h3 id="quoted">Quoted</h3>', body)
+        self.assertIn('<h4 id="in-a-list">In a list</h4>', body)
+
+    def test_closing_hashes_are_still_stripped(self) -> None:
+        body = self.body("## Trailing hashes ##\n")
+
+        self.assertIn('<h2 id="trailing-hashes">Trailing hashes</h2>', body)
+
+    def test_mid_line_hashtag_is_untouched(self) -> None:
+        body = self.body("A PR #1234 mid-line\n")
+
+        self.assertNotIn("<h1", body)
+        self.assertIn("A PR #1234 mid-line", body)
+
+    def test_hash_reference_inside_a_fence_stays_literal(self) -> None:
+        body = self.body("Intro\n\n```text\n#1234 fenced\n```\n")
+
+        self.assertNotIn("<h1", body)
+        self.assertIn("#1234 fenced", body)
+
+
 class ContentWidthTest(unittest.TestCase):
     def test_content_can_use_a_wide_desktop_viewport(self) -> None:
         style = STYLE_PATH.read_text()

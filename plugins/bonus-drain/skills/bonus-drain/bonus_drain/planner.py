@@ -19,6 +19,9 @@ class PlanBatch:
     resets_at: int
     eligibility_key: str
     limit_ids: tuple[str, ...]
+    surplus: float = 0.0
+    surplus_jobs: int = 0
+    urgent: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -37,6 +40,7 @@ class GateDecision:
     resets_at: int | None
     eligibility_key: str | None
     limit_ids: tuple[str, ...]
+    urgent: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -120,8 +124,118 @@ def _limit_admission(limit: LimitConfig, reading: Any, now_epoch: int) -> tuple[
     if used >= limit.ceiling_percent:
         return 0, reset, f"at ceiling for limit {limit.id}"
 
+    drainable = _surplus_above_floor(limit, used, remaining)
+    if drainable <= 0:
+        return 0, reset, f"at reserve target for limit {limit.id}"
+
     allowed = limit.batch_size
+    if limit.estimated_percent_per_job is not None:
+        allowed = min(allowed, math.floor(drainable / limit.estimated_percent_per_job))
+        if allowed <= 0:
+            return 0, reset, f"remaining budget is below one job estimate for limit {limit.id}"
+    elif limit.max_percent_per_window > 0:
+        # A remaining-headroom floor is a hard safety boundary. Without a job-cost
+        # estimate, one launch could cross it, so missing accounting is not spare
+        # capacity.
+        return 0, reset, f"cannot enforce reserve without a job estimate for limit {limit.id}"
     return allowed, reset, None
+
+
+def _surplus_above_floor(limit: LimitConfig, used: float, remaining_seconds: int) -> float:
+    """Weekly-percent points sitting above the remaining-headroom floor."""
+
+    reserve = 0.0
+    if limit.max_percent_per_window > 0:
+        reserve = min(
+            limit.ceiling_percent,
+            limit.max_percent_per_window * (remaining_seconds / limit.pacing_window_seconds),
+        )
+    return limit.ceiling_percent - used - reserve
+
+
+def _account_urgency_seconds(config: RuntimeConfig, account: AccountConfig) -> int:
+    limits = config.limits_for_plan(account.plan_id)
+    return max((limit.urgency_seconds for limit in limits), default=0) if limits else 0
+
+
+def _is_urgent(reset: int | None, now_epoch: int, urgency_seconds: int) -> bool:
+    if reset is None or urgency_seconds <= 0:
+        return False
+    remaining = reset - now_epoch
+    return 0 < remaining <= urgency_seconds
+
+
+def _one_batch_per_provider(
+    config: RuntimeConfig,
+    now_epoch: int,
+    provisional: list[PlanBatch],
+    closed: dict[tuple[str, str], str],
+    gates_by_key: dict[tuple[str, str], GateDecision],
+) -> list[PlanBatch]:
+    """One account per provider: last-day pin, else highest surplus.
+
+    Accounts in the last ``urgency_seconds`` own the provider even at the floor,
+    so the sibling cannot steal the final day. Otherwise equalize by surplus.
+    """
+
+    open_by_account = {(batch.provider_id, batch.account_id): batch for batch in provisional}
+    kept: list[PlanBatch] = []
+    for provider_id in {account.provider_id for account in config.accounts}:
+        accounts = [account for account in config.accounts if account.provider_id == provider_id]
+        urgent: list[tuple[int, AccountConfig]] = []
+        for account in accounts:
+            gate = gates_by_key.get((provider_id, account.id))
+            if gate is None:
+                continue
+            reset = gate.resets_at
+            if _is_urgent(reset, now_epoch, _account_urgency_seconds(config, account)):
+                urgent.append((int(reset), account))
+        if urgent:
+            winner = min(urgent, key=lambda item: (item[0], item[1].id))[1]
+        else:
+            open_batches = [
+                open_by_account[key]
+                for account in accounts
+                if (key := (provider_id, account.id)) in open_by_account
+            ]
+            if not open_batches:
+                continue
+            winner_batch = max(
+                open_batches,
+                key=lambda batch: (batch.surplus, -batch.resets_at, batch.account_id),
+            )
+            winner = next(account for account in accounts if account.id == winner_batch.account_id)
+        winner_key = (provider_id, winner.id)
+        winner_batch = open_by_account.get(winner_key)
+        winner_gate = gates_by_key[winner_key]
+        urgent_winner = _is_urgent(
+            winner_gate.resets_at, now_epoch, _account_urgency_seconds(config, winner),
+        )
+        gates_by_key[winner_key] = GateDecision(
+            winner_gate.provider_id, winner_gate.account_id, winner_gate.plan_id,
+            winner_gate.open, winner_gate.reason, winner_gate.batch_size,
+            winner_gate.resets_at, winner_gate.eligibility_key, winner_gate.limit_ids,
+            urgent_winner,
+        )
+        if winner_batch is not None:
+            kept.append(PlanBatch(
+                winner_batch.provider_id, winner_batch.account_id, winner_batch.plan_id,
+                winner_batch.batch_size, winner_batch.resets_at, winner_batch.eligibility_key,
+                winner_batch.limit_ids, winner_batch.surplus, winner_batch.surplus_jobs,
+                urgent_winner,
+            ))
+        for account in accounts:
+            if account.id == winner.id:
+                continue
+            key = (provider_id, account.id)
+            gate = gates_by_key[key]
+            reason = f"queued behind {winner.id}"
+            closed[key] = reason
+            gates_by_key[key] = GateDecision(
+                gate.provider_id, gate.account_id, gate.plan_id, False, reason, 0,
+                gate.resets_at, gate.eligibility_key, gate.limit_ids, False,
+            )
+    return kept
 
 
 def build_plan(
@@ -166,15 +280,23 @@ def build_plan(
             reason = "plan has no limits"
         batch_sizes: list[int] = []
         resets: list[tuple[int, str]] = []
+        surpluses: list[float] = []
         if reason is None:
             readings = _usage_limits(snapshot)
             for limit in limits:
                 allowed, reset, limit_reason = _limit_admission(limit, readings.get(limit.id), now)
+                if reset:
+                    resets.append((reset, limit.id))
                 if limit_reason:
                     reason = limit_reason
                     break
+                reading = readings.get(limit.id)
+                used = _finite_number(
+                    reading.get("used_percent") if isinstance(reading, Mapping) else None,
+                    minimum=0, maximum=100,
+                ) or 0.0
                 batch_sizes.append(allowed)
-                resets.append((reset, limit.id))
+                surpluses.append(_surplus_above_floor(limit, used, reset - now))
 
         available = _available(eligible_count, account.provider_id, account.id)
         if reason is None and available <= 0:
@@ -189,11 +311,14 @@ def build_plan(
             continue
 
         nearest_reset, nearest_limit = min(resets, key=lambda item: (item[0], item[1]))
-        size = min(available, min(batch_sizes))
+        surplus_jobs = min(batch_sizes)
+        size = min(available, surplus_jobs)
         eligibility_key = f"{account.id}/{nearest_limit}/{nearest_reset}"
         batch = PlanBatch(
             account.provider_id, account.id, account.plan_id, size, nearest_reset,
             eligibility_key, tuple(limit.id for limit in limits),
+            min(surpluses) if surpluses else 0.0,
+            surplus_jobs,
         )
         provisional.append(batch)
         gates_by_key[key] = GateDecision(
@@ -201,6 +326,7 @@ def build_plan(
             nearest_reset, eligibility_key, tuple(limit.id for limit in limits),
         )
 
+    provisional = _one_batch_per_provider(config, now, provisional, closed, gates_by_key)
     provisional.sort(key=lambda batch: (batch.resets_at, batch.provider_id, batch.account_id))
 
     # A scalar count describes one shared portable queue.  Allocate it in the same
@@ -220,7 +346,8 @@ def build_plan(
                 continue
             allocated.append(PlanBatch(
                 batch.provider_id, batch.account_id, batch.plan_id, size, batch.resets_at,
-                batch.eligibility_key, batch.limit_ids,
+                batch.eligibility_key, batch.limit_ids, batch.surplus, batch.surplus_jobs,
+                batch.urgent,
             ))
             if size != batch.batch_size:
                 key = (batch.provider_id, batch.account_id)

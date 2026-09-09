@@ -19,6 +19,11 @@
     "cache_dir": {"type": "string", "minLength": 1},
     "record_command": {"$ref": "#/$defs/argv"},
     "usage_max_age_seconds": {"type": "integer", "minimum": 1},
+    "max_jobs": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Maximum concurrent jobs across providers, including in-flight. Omitted means no global cap."
+    },
     "secret_refs": {
       "type": "array",
       "items": {"$ref": "#/$defs/secretRef"}
@@ -166,7 +171,24 @@
         "window_seconds": {"type": "integer", "minimum": 1},
         "ceiling_percent": {"type": "number", "minimum": 0, "maximum": 100},
         "lead_seconds": {"type": "integer", "minimum": 1},
-        "batch_size": {"type": "integer", "minimum": 1}
+        "batch_size": {"type": "integer", "minimum": 1},
+        "max_percent_per_window": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Weekly-percent points that must remain for each remaining pacing window; zero disables the remaining-headroom floor."
+        },
+        "estimated_percent_per_job": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 100
+        },
+        "pacing_window_seconds": {"type": "integer", "minimum": 1},
+        "urgency_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Last-N-seconds same-provider pin (bonus drain). Zero disables. Must not exceed window_seconds."
+        }
       }
     }
   }
