@@ -253,6 +253,12 @@ def _record_line(
 
 
 def _pr_policy(config: RuntimeConfig, task: Task) -> str:
+    from .goals import coordinator_contract
+    goal = coordinator_contract(QueueDB(config.database), task)
+    if goal and goal['merge_policy'] == 'merge':
+        return ('This goal coordinator may merge verified PRs within the recorded goal authority. '
+                'Check exact heads, required checks, reviews, dependencies, and cleanup first. '
+                'This grant does not extend to task drivers or unrelated repositories and deployments.')
     cwd = Path(task.cwd).expanduser().resolve(strict=False)
     for exception in config.pr_exceptions:
         root = Path(str(exception["path"])).expanduser().resolve(strict=False)
@@ -294,6 +300,23 @@ def render_prompt(
     ):
         if value:
             sections.append(f"{label}:\n{value}")
+    from .goals import coordinator_contract
+    goal = coordinator_contract(QueueDB(config.database), task)
+    if goal:
+        # Bind every goal mutation to the same queue as the terminal command. A custom
+        # record adapter need not itself support the goal verbs; the shipped CLI does.
+        executable = str(Path(__file__).resolve().parents[1] / 'bin' / 'bonus-drain')
+        common = ['--database', str(config.database)]
+        if config.source_path is not None:
+            common.extend(['--config', str(config.source_path)])
+        commands = []
+        for label, action in (('read', 'show'), ('decision', 'advance'), ('operation', 'operation')):
+            argv = [executable, 'goal', action, goal['id'], *common, '--json']
+            if action != 'show':
+                argv.extend(['--turn', task.id, '--file', '<private-json-file>'])
+            commands.append(f'Goal {label} command: ' + shlex.join(argv))
+        sections.append('Use these exact runtime/config/database bindings for this goal; '
+                        'replace only the file placeholder when needed.\n' + '\n'.join(commands))
     if task.kind == "oneoff":
         contract = [
             "--- ASYNC TASK EXECUTION CONTRACT ---",

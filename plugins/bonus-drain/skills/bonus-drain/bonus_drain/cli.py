@@ -196,6 +196,33 @@ def _resolve_secret(cfg: config_module.RuntimeConfig, ref_id: str) -> str | None
 
 def _command(args: argparse.Namespace) -> int:
     command = args.command
+    if command == "goal":
+        from .goals import GoalStore
+        _cfg, queue = _queue(args)
+        store = GoalStore(queue)
+        action = args.goal_command
+        if action in {"create", "advance", "operation"}:
+            value = json.loads(Path(args.file).read_text(encoding="utf-8"))
+            if not isinstance(value, dict):
+                raise CLIError("goal input file must contain one JSON object")
+        if action == "create":
+            result = store.create(value, now=_now(args))
+        elif action == "show":
+            result = store.show(args.goal_id)
+        elif action == "list":
+            result = {"goals": store.list()}
+        elif action == "tick":
+            result = {"updates": store.tick(args.goal_id, now=_now(args), dry_run=args.dry_run)}
+        elif action == "advance":
+            result = store.advance(args.goal_id, args.turn, value, now=_now(args))
+        elif action == "resume":
+            result = store.resume(args.goal_id, args.revision, args.message, now=_now(args), max_turns=args.max_turns, deadline=args.deadline)
+        elif action in {"steer", "pause"}:
+            result = store.steer(args.goal_id, args.revision, args.message, now=_now(args), pause=action == "pause")
+        elif action == "operation":
+            result = store.operation(args.goal_id, args.turn, value)
+        _json(result)
+        return 0
     if command == "version":
         print(__version__)
         return 0
@@ -608,6 +635,25 @@ def _add_filters(subparser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = JSONArgumentParser(prog="bonus-drain")
     sub = parser.add_subparsers(dest="command", required=True, parser_class=JSONArgumentParser)
+
+    goal = sub.add_parser("goal")
+    goal_sub = goal.add_subparsers(dest="goal_command", required=True, parser_class=JSONArgumentParser)
+    for name in ("create", "show", "list", "tick", "advance", "resume", "steer", "pause", "operation"):
+        item = goal_sub.add_parser(name); _add_common(item); _add_json(item)
+        if name in {"show", "advance", "resume", "steer", "pause", "operation"}:
+            item.add_argument("goal_id")
+        if name == "tick":
+            item.add_argument("goal_id", nargs="?"); item.add_argument("--dry-run", action="store_true")
+        if name in {"create", "advance", "operation"}:
+            item.add_argument("--file", required=True)
+        if name in {"advance", "operation"}:
+            item.add_argument("--turn", required=True)
+        if name in {"resume", "steer", "pause"}:
+            item.add_argument("--revision", type=int, required=True); item.add_argument("--message", required=True)
+        if name == "resume":
+            item.add_argument("--max-turns", type=int); item.add_argument("--deadline", type=int)
+        if name not in {"show", "list"}:
+            item.add_argument("--now", type=int)
 
     sub.add_parser("version")
     init = sub.add_parser("init"); _add_common(init); _add_json(init)

@@ -44,6 +44,10 @@ references. Providers, plans, accounts, limits,
 resets, and adapters are generic JSON configuration; dispatch goes through
 `agent-router`.
 
+The included Long Horizon skill coordinates entire goals through those jobs, with
+stacked or authorized merged PRs, combined E2E, and further fix rounds. The coordinator
+ends its turn while the runtime waits for a registered dependency join.
+
 **Install with Claude Code:**
 
 ```text

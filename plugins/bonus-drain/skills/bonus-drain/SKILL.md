@@ -138,6 +138,11 @@ null until it is separately eligible for an authorized upcoming-only estimate.
 
 ## Mode: edit and inspect
 
+For a whole outcome spanning jobs, PR joins, and repeated acceptance/fix rounds, use
+the plugin's [Long Horizon skill](../long-horizon/SKILL.md) and [GOALS.md](GOALS.md).
+It uses this same queue and dispatcher. A goal is durable waiting state; its short
+coordinator jobs finish between joins, so an idle coordinator holds no dispatch claim.
+
 Read `ASYNC_WORK.md` for dependencies, editing, run provenance, and the review UI. A dependency
 is satisfied only by a successful (`done`) one-off prerequisite; failed, skipped, running, and
 missing prerequisites keep the child waiting. Self-dependencies, cycles, missing IDs, and
