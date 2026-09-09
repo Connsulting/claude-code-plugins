@@ -759,7 +759,7 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertIn('href="#i-grok"', drain_hdr)
         self.assertNotIn("eligible", drain_hdr)
         self.assertIn(".rowplan{display:inline-flex;align-items:center", self.viewer.CSS)
-        self.assertIn(".rowhd .nxt .ico{width:1em;height:1em", self.viewer.CSS)
+        self.assertIn(".rowhd .nxt .ico{width:1.25em;height:1.25em", self.viewer.CSS)
 
     def test_queued_jobs_show_a_next_scout_chip_when_planned(self) -> None:
         now = 2_000_000_000
