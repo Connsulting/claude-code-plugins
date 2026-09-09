@@ -1434,16 +1434,13 @@ def _rotation(cards: list[dict]) -> str:
     def pos(t):
         return max(0.0, min(100.0, 100.0 * (t - now) / week))
 
-    # Window spans, so a lane can be told which parts of its own window it shares with a sibling.
-    # Only same-engine accounts contend: a Claude window overlapping a Codex one costs nothing,
-    # because they drain on separate coordinators.
+    # Only the 24h bonus-drain window is painted. Async Work is open all week, so a
+    # lead-length bar would fill every lane and say nothing.
     spans = {}
     for c in cards:
         reset = _f(c.get("r7"))
-        # Per-engine lead: Claude and Codex have separate drain-lead settings, and the lane
-        # must draw the window the rotator will actually honour for THAT engine.
-        lead = int(_f(c.get("lead_h"), DRAIN_LEAD_MAX_HOURS))
-        spans[id(c)] = (max(now, reset - lead * 3600), reset) if reset > now else None
+        urg_h = int(_f(c.get("urgency_h"))) or 24
+        spans[id(c)] = (max(now, reset - urg_h * 3600), reset) if reset > now else None
 
     lanes = []
     for c in cards:
@@ -1461,24 +1458,22 @@ def _rotation(cards: list[dict]) -> str:
                 if hi > lo:
                     ov.append(f'<i class="overlap" style="left:{pos(lo):.1f}%;'
                               f'width:{pos(hi) - pos(lo):.1f}%"></i>')
-            cls = "win" + (" live" if c["batch"] > 0 else "")
+            cls = "win urgent" + (" live" if c["batch"] > 0 else "")
             if c["u7"] is not None and _f(c["u7"]) >= 100:
                 cls += " spent"
             elif c["u7"] is None:
                 cls += " unk"
-            if c["windows"] > 0:
-                label = "draining" if c["batch"] > 0 else "open"
+            urg_h = int(_f(c.get("urgency_h"))) or 24
+            card_reset = _f(c.get("r7"))
+            urg_start = card_reset - urg_h * 3600
+            if card_reset > now and now >= urg_start:
+                label = "bonus drain"
+            elif card_reset > now:
+                label = f'opens {dur(urg_start - now)}'
             else:
-                label = f'opens {dur(c["opens_in"])}' if c["opens_in"] is not None else ""
+                label = ""
             bits.append(f'<i class="{cls}" style="left:{w0:.1f}%;width:{max(0.0, w1 - w0):.1f}%">'
                         + (f"<b>{esc(label)}</b>" if label else "") + "</i>")
-            urg_h = int(_f(c.get("urgency_h")))
-            card_reset = _f(c.get("r7"))
-            if urg_h and card_reset > now:
-                u0, u1 = pos(max(now, card_reset - urg_h * 3600)), pos(card_reset)
-                bits.append(
-                    f'<i class="win urgent" style="left:{u0:.1f}%;width:{max(0.0, u1 - u0):.1f}%"></i>'
-                )
             bits.extend(ov)
 
             spent = c["u7"] is not None and _f(c["u7"]) >= _f(c["ceiling"])
@@ -1497,19 +1492,19 @@ def _rotation(cards: list[dict]) -> str:
                    f'{"now" if i == 0 else f"+{i}d"}</span>' for i in range(7))
     # Name the lead only when every engine agrees on it; with Claude and Codex on different
     # leads there is no single number that describes the lanes.
-    seen = {int(_f(c.get("lead_h"), DRAIN_LEAD_MAX_HOURS)) for c in cards}
-    leads = f"{seen.pop()}h " if len(seen) == 1 else ""
+    seen = {int(_f(c.get("urgency_h"))) or 24 for c in cards}
+    urg = f"{seen.pop()}h " if len(seen) == 1 else ""
     return f"""
     <div class="tl mfold" data-fold="rotation">
       <div class="tlhead mfold-sum"><span><i class="caret"></i>rotation &middot; next 7 days</span>
-        <span class="rt">{leads}drain window before each reset</span></div>
+        <span class="rt">{urg}bonus drain before each reset</span></div>
       <div class="mfold-body">
       <div class="tlgrid">
         <div class="tldays">{days}</div>
         {"".join(lanes)}
       </div>
       <div class="tlfoot">
-        <span><i class="sw w"></i>drain window</span>
+        <span><i class="sw w"></i>bonus drain</span>
         <span><i class="sw r"></i>weekly reset</span>
         <span><i class="sw u"></i>unknown reading</span>
         <span class="wn"><i class="sw ov"></i>windows overlap, one waits</span>
@@ -2057,10 +2052,7 @@ def render_bonus_body() -> str:
     scout_at = next_scout()
     scout_note = (f"bonus scheduler {rel(scout_at)}" if scout_at else "bonus scheduler timing unavailable")
 
-    lead_secs = int(_f(gates.get("lead_hours"), DRAIN_LEAD_MAX_HOURS)) * 3600
     cards = _drain_order(cards)
-    v_tone, v_label, v_text, v_sub = _verdict(cards, coord, lead_secs)
-    v_sub = f"{v_sub} &middot; {esc(scout_note)}" if v_sub else esc(scout_note)
 
     subline = " · ".join([
         "plan → queue → run → review", f"{n_weekly} weekly", f"{n_oneoff} one-offs",
@@ -2209,7 +2201,6 @@ def render_bonus_body() -> str:
     </div>
     </div>
     {'<div class="preview-banner">PREVIEW · copied queue and usage snapshot · execution disabled</div>' if PREVIEW else ''}
-    <div class="vbar {v_tone}"><span class="vdot"></span><div class="vmain"><b>{esc(v_label)}</b><div class="vtext">{v_text}</div><div class="vsub">{v_sub}</div></div></div>
     {_rotation(cards)}
     <div class="rows mfold" data-fold="drain">
       <div class="rowhd mfold-sum"><span><i class="caret"></i>usage · provider capacity</span>
