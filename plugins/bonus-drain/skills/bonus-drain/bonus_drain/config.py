@@ -161,6 +161,7 @@ class LimitConfig:
     max_percent_per_window: float = 0.0
     estimated_percent_per_job: float | None = None
     pacing_window_seconds: int = 3_600
+    urgency_seconds: int = 0
 
 
 @dataclass(frozen=True)
@@ -592,7 +593,7 @@ def validate_config(
         _reject_unknown(row, {
             "id", "plan_id", "window_seconds", "ceiling_percent", "lead_seconds",
             "batch_size", "max_percent_per_window", "estimated_percent_per_job",
-            "pacing_window_seconds",
+            "pacing_window_seconds", "urgency_seconds",
         }, f"limits[{index}]")
         item_id = _identifier(row.get("id"), f"limits[{index}].id")
         plan_id = _identifier(row.get("plan_id"), f"limits[{index}].plan_id")
@@ -603,11 +604,19 @@ def validate_config(
             estimate_raw, f"limits[{index}].estimated_percent_per_job",
             minimum=0.000001, maximum=100,
         )
+        window_seconds = _integer(row.get("window_seconds"), f"limits[{index}].window_seconds", minimum=1)
+        urgency_seconds = _integer(
+            row.get("urgency_seconds", 0), f"limits[{index}].urgency_seconds", minimum=0,
+        )
+        if urgency_seconds > window_seconds:
+            raise ConfigError(
+                f"limits[{index}].urgency_seconds must be at most window_seconds"
+            )
         limits.append(
             LimitConfig(
                 item_id,
                 plan_id,
-                _integer(row.get("window_seconds"), f"limits[{index}].window_seconds", minimum=1),
+                window_seconds,
                 _number(row.get("ceiling_percent"), f"limits[{index}].ceiling_percent", minimum=0, maximum=100),
                 _integer(row.get("lead_seconds"), f"limits[{index}].lead_seconds", minimum=1),
                 _integer(row.get("batch_size"), f"limits[{index}].batch_size", minimum=1),
@@ -620,6 +629,7 @@ def validate_config(
                     row.get("pacing_window_seconds", 3_600),
                     f"limits[{index}].pacing_window_seconds", minimum=1,
                 ),
+                urgency_seconds,
             )
         )
 

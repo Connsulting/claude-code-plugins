@@ -136,14 +136,14 @@ def _two_account_config() -> SimpleNamespace:
         ),
         limits=(
             config_module.LimitConfig(
-                "claude-personal-weekly", "claude-personal-plan", 604_800, 95, 259_200, 6,
+                "claude-personal-weekly", "claude-personal-plan", 604_800, 95, 604_800, 6,
                 max_percent_per_window=0.5, estimated_percent_per_job=1.0,
-                pacing_window_seconds=HOUR,
+                pacing_window_seconds=HOUR, urgency_seconds=24 * HOUR,
             ),
             config_module.LimitConfig(
-                "claude-business-weekly", "claude-business-plan", 604_800, 99, 259_200, 6,
+                "claude-business-weekly", "claude-business-plan", 604_800, 99, 604_800, 6,
                 max_percent_per_window=0.5, estimated_percent_per_job=1.0,
-                pacing_window_seconds=HOUR,
+                pacing_window_seconds=HOUR, urgency_seconds=24 * HOUR,
             ),
         ),
         viewer={},
@@ -176,7 +176,7 @@ class SameProviderAccountSelectionTests(unittest.TestCase):
         )
         self.assertEqual([batch.account_id for batch in plan.batches], ["claude-business"])
         self.assertEqual(plan.batches[0].batch_size, 4)
-        self.assertEqual(plan.closed[("claude", "claude-personal")], "at reserve target for limit claude-personal-weekly")
+        self.assertEqual(plan.closed[("claude", "claude-personal")], "queued behind claude-business")
 
     def test_both_above_floor_keeps_the_larger_surplus(self) -> None:
         from bonus_drain.usage import UsageSnapshot
@@ -201,3 +201,102 @@ class SameProviderAccountSelectionTests(unittest.TestCase):
         self.assertEqual([batch.account_id for batch in plan.batches], ["claude-business"])
         self.assertEqual(plan.batches[0].batch_size, 6)
         self.assertEqual(plan.closed[("claude", "claude-personal")], "queued behind claude-business")
+
+    def test_last_day_pins_the_sooner_reset_even_with_less_surplus(self) -> None:
+        from bonus_drain.usage import UsageSnapshot
+
+        config = _two_account_config()
+        snapshots = {
+            ("claude", "claude-personal"): UsageSnapshot(
+                "claude", "claude-personal", NOW,
+                {"claude-personal-weekly": {"used_percent": 70, "resets_at": NOW + 29 * HOUR}},
+            ),
+            ("claude", "claude-business"): UsageSnapshot(
+                "claude", "claude-business", NOW,
+                {"claude-business-weekly": {"used_percent": 85, "resets_at": NOW + 20 * HOUR}},
+            ),
+        }
+        plan = build_plan(
+            config, snapshots,
+            eligible_count={("claude", "claude-personal"): 6, ("claude", "claude-business"): 6},
+            now_epoch=NOW,
+        )
+        self.assertEqual([batch.account_id for batch in plan.batches], ["claude-business"])
+        self.assertTrue(plan.batches[0].urgent)
+        self.assertEqual(plan.closed[("claude", "claude-personal")], "queued behind claude-business")
+
+    def test_last_day_at_floor_still_blocks_the_sibling(self) -> None:
+        from bonus_drain.usage import UsageSnapshot
+
+        config = _two_account_config()
+        snapshots = {
+            ("claude", "claude-personal"): UsageSnapshot(
+                "claude", "claude-personal", NOW,
+                {"claude-personal-weekly": {"used_percent": 70, "resets_at": NOW + 29 * HOUR}},
+            ),
+            ("claude", "claude-business"): UsageSnapshot(
+                "claude", "claude-business", NOW,
+                {"claude-business-weekly": {"used_percent": 89, "resets_at": NOW + 20 * HOUR}},
+            ),
+        }
+        # business remaining 10, floor 10 → at floor but still in last 24h.
+        plan = build_plan(
+            config, snapshots,
+            eligible_count={("claude", "claude-personal"): 6, ("claude", "claude-business"): 6},
+            now_epoch=NOW,
+        )
+        self.assertEqual(plan.batches, ())
+        self.assertEqual(plan.closed[("claude", "claude-personal")], "queued behind claude-business")
+        self.assertTrue(next(g for g in plan.gates if g.account_id == "claude-business").urgent)
+
+    def test_new_week_surplus_loses_to_sibling_still_in_last_day(self) -> None:
+        from bonus_drain.usage import UsageSnapshot
+
+        config = _two_account_config()
+        snapshots = {
+            ("claude", "claude-business"): UsageSnapshot(
+                "claude", "claude-business", NOW,
+                {"claude-business-weekly": {"used_percent": 0, "resets_at": NOW + 168 * HOUR}},
+            ),
+            ("claude", "claude-personal"): UsageSnapshot(
+                "claude", "claude-personal", NOW,
+                {"claude-personal-weekly": {"used_percent": 80, "resets_at": NOW + 9 * HOUR}},
+            ),
+        }
+        plan = build_plan(
+            config, snapshots,
+            eligible_count={("claude", "claude-personal"): 6, ("claude", "claude-business"): 6},
+            now_epoch=NOW,
+        )
+        self.assertEqual([batch.account_id for batch in plan.batches], ["claude-personal"])
+        self.assertTrue(plan.batches[0].urgent)
+        self.assertEqual(plan.closed[("claude", "claude-business")], "queued behind claude-personal")
+
+
+class RecurringCycleEligibilityTests(unittest.TestCase):
+    def test_weekly_task_cannot_rerun_on_the_same_reset_cycle(self) -> None:
+        import tempfile
+        from bonus_drain import db as bonus_db
+
+        reset = NOW + 40 * HOUR
+        with tempfile.TemporaryDirectory() as temporary:
+            queue = bonus_db.QueueDB(Path(temporary) / "queue.db")
+            queue.initialize()
+            queue.add_task({
+                "id": "weekly-job",
+                "title": "Weekly job",
+                "kind": "recurring",
+                "cadence": "weekly",
+                "priority": 2,
+                "cwd": "/tmp",
+                "goal": "run weekly",
+                "active": True,
+            })
+            queue.record(
+                "weekly-job", f"alpha/weekly/{reset}",
+                status="done", provider_id="alpha", account_id="alpha-account",
+                cycle=reset, ts="2020-01-01T00:00:00Z",
+            )
+            self.assertEqual(queue.eligible_tasks(reset), [])
+            later = queue.eligible_tasks(reset + 7 * 24 * HOUR)
+            self.assertEqual([task.id for task in later], ["weekly-job"])

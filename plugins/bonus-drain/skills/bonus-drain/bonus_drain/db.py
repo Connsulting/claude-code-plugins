@@ -640,6 +640,11 @@ class QueueDB:
             return False
         if task.kind == "oneoff":
             return connection.execute("SELECT 1 FROM runs WHERE task=? LIMIT 1", (task.id,)).fetchone() is None
+        if cycle > 0 and connection.execute(
+            "SELECT 1 FROM runs WHERE task=? AND cycle=? LIMIT 1", (task.id, int(cycle)),
+        ).fetchone():
+            # One dispatch per weekly/monthly reset. Cooldown still applies across resets.
+            return False
         cooldown = RECURRING_COOLDOWNS_SECONDS.get(task.cadence or "")
         if cooldown is None:
             raise QueueError(f"unsupported recurring cadence: {task.cadence}")

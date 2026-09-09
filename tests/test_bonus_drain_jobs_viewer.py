@@ -128,7 +128,7 @@ class JobsViewerContractTests(unittest.TestCase):
             None, 3, "claude", 4,
         )[0]
         tone, label, text, sub = self.viewer._verdict([grok, claude], "grok", 30 * 3600)
-        self.assertEqual((tone, label), ("live", "2 draining"))
+        self.assertEqual((tone, label), ("live", "dispatching"))
         self.assertIn("dchip", text)
         self.assertIn("Grok", text)
         self.assertIn("Business", text)
@@ -141,7 +141,7 @@ class JobsViewerContractTests(unittest.TestCase):
                 "batch": 0, "u7": 68, "ceiling": 99, "windows": 3,
                 "opens_in": None, "hot": None, "eligible": 1, "behind": "",
             }
-        self.assertEqual(self.viewer._card_state(card), ("ready · 31 pts headroom", "acc"))
+        self.assertEqual(self.viewer._card_state(card), ("async · 31 pts remaining", "acc"))
         with mock.patch.object(self.viewer, "list_timers", return_value=[
             {"unit": "other.timer", "next": 1},
             {"unit": "bonus-drain-scout.timer", "next": 2_000},

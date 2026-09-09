@@ -31,14 +31,15 @@ releases the external pin only after the router job identity and dispatched row 
 an independent token rotator can apply its own five-hour threshold while the job continues. The
 recorded account is the launch account; later handoffs belong to the rotator's decision log.
 
-Once an account enters its configured drain window, Bonus Drain may spend only the
-weekly-percent surplus above a remaining-headroom floor: `max_percent_per_window`
-points for every `pacing_window_seconds` still left until reset. Each provider sizes
-its own tick as `min(batch_size, floor(surplus / estimated_percent_per_job))` with
-one point equal to one job, then subtracts already-running jobs on that provider so
-a live job tightens the cap instead of blocking every other provider. Two open
-accounts of the same provider keep the higher-surplus one; the other waits. A zero
-floor keeps dump-to-ceiling.
+Async Work runs all week: `lead_seconds` equals the weekly window, and admission is
+the remaining-headroom floor (`max_percent_per_window` points per
+`pacing_window_seconds` still left). Each provider sizes its tick as
+`min(batch_size, floor(surplus / estimated_percent_per_job))` with one point equal
+to one job, then subtracts already-running jobs on that provider. Bonus Drain is
+the last `urgency_seconds` (24 hours): the same floor, but a multi-account provider
+pins to the wallet that expires first so leftover is not stranded. Far from expiry,
+same-provider accounts equalize on surplus. Recurring tasks still cool down, and
+each weekly reset key may run only once.
 
 ## Requirements
 

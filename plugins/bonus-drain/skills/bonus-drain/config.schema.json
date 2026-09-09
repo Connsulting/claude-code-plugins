@@ -178,7 +178,12 @@
           "exclusiveMinimum": 0,
           "maximum": 100
         },
-        "pacing_window_seconds": {"type": "integer", "minimum": 1}
+        "pacing_window_seconds": {"type": "integer", "minimum": 1},
+        "urgency_seconds": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Last-N-seconds same-provider pin (bonus drain). Zero disables. Must not exceed window_seconds."
+        }
       }
     }
   }

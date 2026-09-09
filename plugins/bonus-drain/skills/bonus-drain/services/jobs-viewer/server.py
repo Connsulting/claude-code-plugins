@@ -62,6 +62,33 @@ DB_PATH = Path(os.environ.get(
 DRAIN_LEAD_MAX_HOURS = int(os.environ.get("DRAIN_LEAD_MAX_HOURS", "30"))
 
 
+def _gate_for_card(gates: dict, account_id: str, engine: str, label: str) -> dict:
+    table = gates.get("account_gates") or {}
+    if not isinstance(table, dict):
+        return {}
+    for key in (account_id, f"{engine}-{str(label).lower()}", str(label).lower()):
+        gate = table.get(key)
+        if isinstance(gate, dict):
+            return gate
+    needle = str(label).lower().replace(" ", "-")
+    for gate in table.values():
+        if isinstance(gate, dict) and str(gate.get("account_id") or "").endswith(needle):
+            return gate
+    return {}
+
+
+def _config_urgency_hours(provider_id: str) -> int | None:
+    try:
+        c = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
+        plan_provider = {p.id: p.provider_id for p in c.plans}
+        hours = {int(lim.urgency_seconds // 3600)
+                 for lim in c.limits if plan_provider.get(lim.plan_id) == provider_id
+                 and getattr(lim, "urgency_seconds", 0)}
+    except Exception:
+        return None
+    return hours.pop() if len(hours) == 1 else None
+
+
 def _config_lead_hours(provider_id: str) -> int | None:
     """Lead window for `provider_id`, read from the validated config the planner gates on.
 
@@ -441,9 +468,15 @@ def get_gates(n_elig: int, n_codex: int, n_grok: int,
         # `gates --json` is the current planning boundary. These fields preserve the viewer's
         # display metadata, while shimmer remains driven by durable in-flight runs below.
         gates = gate_payload.get("gates", []) if gate_payload else []
+        account_gates = {}
         candidates = []
         for gate in gates:
-            if not isinstance(gate, dict) or not gate.get("open"):
+            if not isinstance(gate, dict):
+                continue
+            account_id = gate.get("account_id")
+            if isinstance(account_id, str) and account_id:
+                account_gates[account_id] = gate
+            if not gate.get("open"):
                 continue
             provider = gate.get("provider_id")
             if provider not in RUN_ENGINES:
@@ -452,6 +485,7 @@ def get_gates(n_elig: int, n_codex: int, n_grok: int,
             out[f"{provider}_batch"] = max(int(_f(out.get(f"{provider}_batch"))), batch)
             if batch > 0:
                 candidates.append(gate)
+        out["account_gates"] = account_gates
         if candidates:
             next_gate = min(candidates, key=lambda gate: _f(gate.get("resets_at")) or float("inf"))
             out["coordinator"] = next_gate["provider_id"]
@@ -1259,31 +1293,43 @@ def _card_name(engine: str, label: str) -> str:
     return label if label == engine else f"{engine} · {label}"
 
 
+def _card_surplus(c: dict) -> float | None:
+    if c.get("u7") is None or not _f(c.get("r7")):
+        return None
+    hours = max(0.0, (_f(c["r7"]) - time.time()) / 3600.0)
+    remaining = max(0.0, _f(c["ceiling"]) - _f(c["u7"]))
+    return remaining - 0.5 * hours
+
+
 def _card_state(c: dict) -> tuple[str, str]:
     """The one-line verdict in a card's top-right, in the same precedence the gates apply:
     drain window timing -> weekly ceiling. Each line names the rule
     that is actually holding, so a stalled drain explains itself without opening the scout log."""
+    kind = "bonus drain" if c.get("urgent") else "async"
     if c["batch"] > 0:
-        return f'dispatching · batch {c["batch"]}/{c["batch_n"]}', "acc"
+        return f'{kind} · batch {c["batch"]}/{c["batch_n"]}', "acc"
     # Unknown is not zero. A missing reading must never render as a full budget.
     if c["u7"] is None:
         return "unknown · no usage reading", "dim"
-    # Exhaustion outranks window timing: an account with nothing left is dead whether or not its
-    # drain window happens to be open, and "closed · drain window" would hide that entirely.
     if _f(c["u7"]) >= 100:
         return "spent · weekly exhausted", "warn"
+    if c["u7"] >= c["ceiling"]:
+        return "capped · ceiling reached", "warn"
+    if c.get("behind"):
+        return f'queued · behind {c["behind"]}', "dim"
+    if c.get("urgent"):
+        return "bonus drain · at floor", "dim"
     if c["windows"] <= 0:
         return ("closed · drain window" if c["opens_in"] is not None
                 else "closed · no reset signal"), "dim"
-    if c["u7"] >= c["ceiling"]:
-        return "capped · ceiling reached", "warn"
     if c["eligible"] <= 0:
         return "open · nothing eligible", "dim"
-    # Only one Claude account drains per tick (the open one whose reset is nearest), so an open
-    # account that was not selected is queued behind another rather than held by a gate.
-    if c.get("behind"):
-        return f'queued · behind {c["behind"]}', "dim"
-    return f"ready · {max(0, _f(c['ceiling']) - _f(c['u7'])):g} pts headroom", "acc"
+    surplus = _card_surplus(c)
+    if surplus is not None and surplus <= 0:
+        return f"{kind} · at floor", "dim"
+    if surplus is not None:
+        return f"{kind} · {surplus:.0f} pts surplus", "acc"
+    return f"{kind} · {max(0, _f(c['ceiling']) - _f(c['u7'])):g} pts remaining", "acc"
 
 
 def _week(c: dict) -> dict:
@@ -1426,6 +1472,13 @@ def _rotation(cards: list[dict]) -> str:
                 label = f'opens {dur(c["opens_in"])}' if c["opens_in"] is not None else ""
             bits.append(f'<i class="{cls}" style="left:{w0:.1f}%;width:{max(0.0, w1 - w0):.1f}%">'
                         + (f"<b>{esc(label)}</b>" if label else "") + "</i>")
+            urg_h = int(_f(c.get("urgency_h")))
+            card_reset = _f(c.get("r7"))
+            if urg_h and card_reset > now:
+                u0, u1 = pos(max(now, card_reset - urg_h * 3600)), pos(card_reset)
+                bits.append(
+                    f'<i class="win urgent" style="left:{u0:.1f}%;width:{max(0.0, u1 - u0):.1f}%"></i>'
+                )
             bits.extend(ov)
 
             spent = c["u7"] is not None and _f(c["u7"]) >= _f(c["ceiling"])
@@ -1569,33 +1622,52 @@ def _verdict(cards: list[dict], coord: str, lead_secs: int) -> tuple[str, str, s
     """
     if not cards:
         return "idle", "no usage signal", "No account is reporting usage.", ""
-    draining = [c for c in cards if c["batch"] > 0]
-    if draining:
-        chips = "".join(
+    def _chips(items: list[dict]) -> str:
+        return "".join(
             f'<span class="dchip">{ico(c["engine"])}'
             f'<span class="dname">{esc(c["name"])}</span>'
             f'<span class="dbatch">{int(c["batch"])}/{int(c["batch_n"])}</span></span>'
-            for c in draining
+            for c in items
         )
+
+    bonus = [c for c in cards if c.get("urgent") and c["batch"] > 0]
+    async_disp = [c for c in cards if not c.get("urgent") and c["batch"] > 0]
+    if bonus or async_disp:
+        shown = bonus + async_disp
         subs = []
-        for drain in draining:
-            bit = f'{drain["name"]} batch {int(drain["batch"])}/{int(drain["batch_n"])}'
+        for drain in shown:
+            kind = "bonus drain" if drain.get("urgent") else "async"
+            bit = f'{kind} · {drain["name"]} batch {int(drain["batch"])}/{int(drain["batch_n"])}'
             if drain["u7"] is not None:
                 bit += f' · {_f(drain["u7"]):g}% of {_f(drain["ceiling"]):g}'
             subs.append(bit)
         sub = " · ".join(subs)
-        if len(draining) == 1:
-            drain = draining[0]
-            return ("live", "draining",
+        if len(shown) == 1:
+            drain = shown[0]
+            label = "bonus drain" if drain.get("urgent") else "draining"
+            return ("live", label,
                     f'{ico(drain["engine"])}{esc(drain["name"])} is dispatching.', sub)
-        return ("live", f"{len(draining)} draining",
-                f'<span class="dchips">{chips}</span>', sub)
+        lines = []
+        if bonus:
+            lines.append(
+                f'<div class="vline"><span class="vlbl">bonus drain</span>'
+                f'<span class="dchips">{_chips(bonus)}</span></div>'
+            )
+        if async_disp:
+            lines.append(
+                f'<div class="vline"><span class="vlbl">async</span>'
+                f'<span class="dchips">{_chips(async_disp)}</span></div>'
+            )
+        return ("live", "dispatching", "".join(lines), sub)
 
     live = [c for c in cards if c["windows"] > 0 and c["u7"] is not None]
     # Prefer an open account that still has budget: if one exists it is the account the next tick
     # could actually dispatch on, so its gate is the interesting one. Falling back to a spent or
     # capped account keeps the line honest when every open window is dead.
-    spendable = [c for c in live if _f(c["u7"]) < _f(c["ceiling"])]
+    spendable = [
+        c for c in live
+        if _f(c["u7"]) < _f(c["ceiling"]) and (_card_surplus(c) or 0) > 0
+    ]
     if live:
         near = min(spendable or live, key=lambda c: _f(c.get("r7")) or float("inf"))
         state, _ = _card_state(near)
@@ -1671,6 +1743,8 @@ def _claude_cards(gates: dict, usage: dict | None, n_elig: int, coord: str, batc
             "live": is_sel or a["label"] == active,
             "draining": is_sel and (coord == "claude" or batch > 0),
             "behind": selected if (selected and not is_sel and windows > 0) else "",
+            "urgent": bool(_gate_for_card(gates, f"claude-{str(a['label']).lower()}", "claude", a["label"]).get("urgent")),
+            "urgency_h": _config_urgency_hours("claude") or 0,
         })
     return cards
 
@@ -1737,6 +1811,8 @@ def _codex_cards(gates: dict, cx: dict | None, n_codex: int, coord: str, batch: 
             "live": is_sel or is_active,
             "draining": is_sel and (coord == "codex" or batch > 0),
             "behind": selected if (selected and not is_sel and windows > 0) else "",
+            "urgent": bool(_gate_for_card(gates, f"codex-{str(a['label']).lower()}", "codex", a["label"]).get("urgent")),
+            "urgency_h": _config_urgency_hours("codex") or 0,
         })
     return cards
 
@@ -1768,6 +1844,8 @@ def _grok_cards(gates: dict, grok: dict | None, n_grok: int,
         # Grok has one configured subscription, so it is always the active account. Whether
         # a batch is currently landing on it is separately represented by `live`/`batch`.
         "active": True, "live": True, "draining": coord == "grok" or batch > 0, "behind": "",
+        "urgent": bool(_gate_for_card(gates, "grok-personal", "grok", "Grok").get("urgent")),
+        "urgency_h": _config_urgency_hours("grok") or 0,
     }]
 
 
@@ -1968,9 +2046,9 @@ def render_bonus_body() -> str:
     }
     live_engines = [engine for engine, count in live_batches.items() if count]
     coord = live_engines[0] if live_engines else gates.get("coordinator", "none")
-    c_batch = live_batches.get("claude", 0)
-    x_batch = live_batches.get("codex", 0)
-    g_batch = live_batches.get("grok", 0)
+    c_batch = max(live_batches.get("claude", 0), int(_f(gates.get("claude_batch"))))
+    x_batch = max(live_batches.get("codex", 0), int(_f(gates.get("codex_batch"))))
+    g_batch = max(live_batches.get("grok", 0), int(_f(gates.get("grok_batch"))))
 
     # --- header + live status pill -------------------------------------------------
     cards = _claude_cards(gates, usage, len(remaining), coord, c_batch)
@@ -2411,6 +2489,10 @@ a{color:var(--acc2);text-decoration:none}
 .dchip .dname{letter-spacing:.02em}
 .dchip .dbatch{font-size:11px;letter-spacing:.08em;color:var(--acc2);
   text-transform:uppercase}
+.vline{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:6px}
+.vline:first-child{margin-top:2px}
+.vlbl{font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--dim);
+  min-width:7.5em}
 
 /* rotation timeline -------------------------------------------------------------------
    The one element four independent cards cannot be: each can state its own reset, but only a
@@ -2433,6 +2515,8 @@ a{color:var(--acc2);text-decoration:none}
 .win{position:absolute;top:0;bottom:0;background:oklch(0.80 0.14 78 / .16);
   border-left:1px solid oklch(0.80 0.14 78 / .5)}
 .win.live{background:oklch(0.80 0.14 78 / .34)}
+.win.urgent{background:oklch(0.72 0.17 40 / .28);border-left:1px solid oklch(0.72 0.17 40 / .7);
+  pointer-events:none}
 .win.spent{background:oklch(0.72 0.17 40 / .18);border-left-color:oklch(0.72 0.17 40 / .6)}
 .win.unk{background:repeating-linear-gradient(135deg,
   oklch(0.66 0.045 250 / .34) 0 5px, transparent 5px 10px);
