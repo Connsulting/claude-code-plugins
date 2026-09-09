@@ -2032,18 +2032,17 @@ def render_bonus_body() -> str:
     )
     n_oneoff = sum(1 for r in remaining if r.get("kind") == "oneoff")
     gates = get_gates(len(remaining), n_codex, n_grok, grok, codex)
-    # A plan identifies the provider currently owning an open drain window; the ledger says how
-    # many child jobs remain in flight. The window owns shimmer, while only the ledger can claim
-    # that a batch is dispatching in the status copy.
+    # Only in-flight jobs count as a live batch. The scout plan's batch_size is what the
+    # *next* tick may launch; mixing it in made idle accounts look like 6/6 running.
     live_batches = {
         engine: sum(1 for job in inflight if job.get("engine") == engine)
         for engine in RUN_ENGINES
     }
     live_engines = [engine for engine, count in live_batches.items() if count]
     coord = live_engines[0] if live_engines else gates.get("coordinator", "none")
-    c_batch = max(live_batches.get("claude", 0), int(_f(gates.get("claude_batch"))))
-    x_batch = max(live_batches.get("codex", 0), int(_f(gates.get("codex_batch"))))
-    g_batch = max(live_batches.get("grok", 0), int(_f(gates.get("grok_batch"))))
+    c_batch = live_batches.get("claude", 0)
+    x_batch = live_batches.get("codex", 0)
+    g_batch = live_batches.get("grok", 0)
 
     # --- header + live status pill -------------------------------------------------
     cards = _claude_cards(gates, usage, len(remaining), coord, c_batch)
