@@ -164,3 +164,66 @@ class ScoutInflightCapTests(unittest.TestCase):
             self.assertEqual(report.errors, ())
             self.assertEqual(len(dispatched), 2)
             self.assertTrue(all(task_id.startswith("next-") for task_id in dispatched))
+
+
+class ScoutMatchingAndGlobalCapTests(unittest.TestCase):
+    def test_portable_work_fills_a_smaller_codex_surplus_instead_of_all_claude_slots(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            queue = db.QueueDB(root / "queue.db")
+            queue.initialize()
+            for index in range(6):
+                queue.add_task(_task(f"portable-{index}"))
+            config = _two_provider_config(queue, root / "cache")
+            snapshots = {
+                ("alpha", "alpha-account"): usage.UsageSnapshot(
+                    "alpha", "alpha-account", NOW,
+                    {"alpha-plan-weekly": {"used_percent": 69, "resets_at": NOW + 40 * HOUR}},
+                ),
+                ("beta", "beta-account"): usage.UsageSnapshot(
+                    "beta", "beta-account", NOW,
+                    {"beta-plan-weekly": {"used_percent": 73, "resets_at": NOW + 40 * HOUR}},
+                ),
+            }
+            # remaining 40h, floor 20. alpha 95-69-20=6; beta 95-73-20=2.
+            with mock.patch.object(scout, "read_all", return_value=snapshots):
+                tick = scout.plan_tick(config, queue, now_epoch=NOW)
+
+            self.assertEqual(len(tick.allocations[("alpha", "alpha-account")]), 4)
+            self.assertEqual(len(tick.allocations[("beta", "beta-account")]), 2)
+
+    def test_global_cap_leaves_room_across_providers_after_inflight(self) -> None:
+        from dataclasses import replace
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            queue = db.QueueDB(root / "queue.db")
+            queue.initialize()
+            for index in range(6):
+                queue.add_task(_task(f"alpha-{index}", "alpha"))
+                queue.add_task(_task(f"beta-{index}", "beta"))
+            config = replace(_two_provider_config(queue, root / "cache"), max_jobs=8)
+            snapshots = {
+                ("alpha", "alpha-account"): usage.UsageSnapshot(
+                    "alpha", "alpha-account", NOW,
+                    {"alpha-plan-weekly": {"used_percent": 69, "resets_at": NOW + 40 * HOUR}},
+                ),
+                ("beta", "beta-account"): usage.UsageSnapshot(
+                    "beta", "beta-account", NOW,
+                    {"beta-plan-weekly": {"used_percent": 69, "resets_at": NOW + 40 * HOUR}},
+                ),
+            }
+            dispatched: list[str] = []
+
+            def fake_dispatch(config, queue, **kwargs):
+                dispatched.append(kwargs["task_id"])
+                return mock.Mock(to_dict=lambda: {"task_id": kwargs["task_id"]})
+
+            with mock.patch.object(scout, "read_all", return_value=snapshots):
+                with mock.patch.object(scout, "dispatch", side_effect=fake_dispatch):
+                    report = scout.run_once(config, queue, now_epoch=NOW)
+
+            self.assertEqual(report.errors, ())
+            self.assertEqual(len(dispatched), 8)
+            self.assertEqual(sum(1 for task_id in dispatched if task_id.startswith("alpha")), 6)
+            self.assertEqual(sum(1 for task_id in dispatched if task_id.startswith("beta")), 2)

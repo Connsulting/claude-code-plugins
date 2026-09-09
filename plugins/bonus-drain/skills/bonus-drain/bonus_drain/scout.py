@@ -181,6 +181,48 @@ def _apply_inflight_caps(plan: PlanResult, queue: QueueDB, *, now_epoch: int) ->
     return PlanResult(tuple(kept), closed, gates, plan.generated_at)
 
 
+def _apply_global_cap(
+    plan: PlanResult, queue: QueueDB, max_jobs: int | None, *, now_epoch: int,
+) -> PlanResult:
+    """Cap new launches so in-flight plus this tick stay at most ``max_jobs``.
+
+    Per-provider ``batch_size`` already limits one engine. This is the cross-provider
+    ceiling. Urgent (last-day) batches take remaining slots first, then nearest reset.
+    """
+
+    if max_jobs is None:
+        return plan
+    by_provider, _by_account = _inflight_index(queue, now_epoch)
+    remaining = max(0, max_jobs - sum(by_provider.values()))
+    closed = dict(plan.closed)
+    gates_by_key = {(gate.provider_id, gate.account_id): gate for gate in plan.gates}
+    ranked = sorted(
+        plan.batches,
+        key=lambda batch: (
+            not batch.urgent, batch.resets_at, batch.provider_id, batch.account_id,
+        ),
+    )
+    kept: list[Any] = []
+    for batch in ranked:
+        key = (batch.provider_id, batch.account_id)
+        if remaining <= 0:
+            reason = "global job cap reached"
+            closed[key] = reason
+            gates_by_key[key] = replace(
+                gates_by_key[key], open=False, reason=reason, batch_size=0,
+            )
+            continue
+        cap = min(batch.batch_size, remaining)
+        if cap != batch.batch_size:
+            batch = replace(batch, batch_size=cap)
+            gates_by_key[key] = replace(gates_by_key[key], batch_size=cap)
+        kept.append(batch)
+        remaining -= cap
+    kept.sort(key=lambda batch: (batch.resets_at, batch.provider_id, batch.account_id))
+    gates = tuple(gates_by_key[(gate.provider_id, gate.account_id)] for gate in plan.gates)
+    return PlanResult(tuple(kept), closed, gates, plan.generated_at)
+
+
 def plan_tick(
     config: RuntimeConfig,
     queue: QueueDB,
@@ -204,6 +246,7 @@ def plan_tick(
         )
     plan = build_plan(config, snapshots, eligible_count=availability, now_epoch=now)
     plan = _apply_inflight_caps(plan, queue, now_epoch=now)
+    plan = _apply_global_cap(plan, queue, config.max_jobs, now_epoch=now)
     allocations: dict[tuple[str, str], tuple[Any, ...]] = {}
 
     # Build a capacity-expanded bipartite graph and find an augmenting-path matching. Processing
@@ -236,11 +279,18 @@ def plan_tick(
 
     slot_task: dict[int, str] = {}
 
+    def batch_fill(slot: int) -> int:
+        batch_index = slot_batch[slot]
+        return sum(1 for taken, _task in slot_task.items() if slot_batch[taken] == batch_index)
+
     def augment(task_id: str, seen_slots: set[int], seen_tasks: set[str]) -> bool:
         if task_id in seen_tasks:
             return False
         seen_tasks.add(task_id)
-        for slot in task_slots.get(task_id, ()):
+        # Prefer emptier provider batches so portable work cannot fill Claude's
+        # six slots and leave a Codex surplus with nothing to run.
+        ordered = sorted(task_slots.get(task_id, ()), key=lambda slot: (batch_fill(slot), slot))
+        for slot in ordered:
             if slot in seen_slots:
                 continue
             seen_slots.add(slot)

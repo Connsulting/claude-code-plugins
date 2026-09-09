@@ -98,29 +98,16 @@ def _queue(args: argparse.Namespace, *, graph_required: bool = False) -> tuple[c
     return cfg, queue
 
 
-def _cycle_for_plan(cfg: config_module.RuntimeConfig, snapshots: Mapping[Any, Any], now: int) -> int:
-    resets: list[int] = []
-    for account in cfg.accounts:
-        snapshot = snapshots.get((account.provider_id, account.id))
-        if snapshot is None:
-            continue
-        for reading in getattr(snapshot, "limits", {}).values():
-            reset = reading.get("resets_at") if isinstance(reading, Mapping) else None
-            if isinstance(reset, (int, float)) and not isinstance(reset, bool) and int(reset) > now:
-                resets.append(int(reset))
-    return db.hour_round(min(resets)) if resets else db.hour_round(now)
-
-
-def _plan(args: argparse.Namespace) -> tuple[config_module.RuntimeConfig, db.QueueDB, planner.PlanResult]:
+def _tick(args: argparse.Namespace) -> tuple[config_module.RuntimeConfig, db.QueueDB, scout.TickPlan]:
     cfg, queue = _queue(args, graph_required=True)
     queue.initialize()
     now = _now(args)
-    snapshots = usage.read_all(cfg, now_epoch=now)
-    cycle = _cycle_for_plan(cfg, snapshots, now)
-    result = planner.build_plan(
-        cfg, snapshots, eligible_count=queue.count_eligible(cycle), now_epoch=now,
-    )
-    return cfg, queue, result
+    return cfg, queue, scout.plan_tick(cfg, queue, now_epoch=now)
+
+
+def _plan(args: argparse.Namespace) -> tuple[config_module.RuntimeConfig, db.QueueDB, planner.PlanResult]:
+    cfg, queue, tick = _tick(args)
+    return cfg, queue, tick.plan
 
 
 def _task_values(args: argparse.Namespace) -> dict[str, Any]:
@@ -362,8 +349,20 @@ def _command(args: argparse.Namespace) -> int:
             _json({"ok": True, "task": args.task, "active": command == "activate"})
         return 0
     if command == "gates":
-        _cfg, _queue_obj, result = _plan(args)
-        _json({"generated_at": result.generated_at, "gates": [gate.to_dict() for gate in result.gates]})
+        _cfg, _queue_obj, tick = _tick(args)
+        _json({
+            "generated_at": tick.plan.generated_at,
+            "gates": [gate.to_dict() for gate in tick.plan.gates],
+            "allocations": [
+                {
+                    "task_id": task.id,
+                    "provider_id": provider_id,
+                    "account_id": account_id,
+                }
+                for (provider_id, account_id), tasks in tick.allocations.items()
+                for task in tasks
+            ],
+        })
         return 0
     if command == "plan":
         _cfg, _queue_obj, result = _plan(args)

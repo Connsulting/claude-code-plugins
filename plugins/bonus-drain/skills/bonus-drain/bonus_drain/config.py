@@ -180,6 +180,7 @@ class RuntimeConfig:
     pr_exceptions: tuple[Mapping[str, Any], ...]
     usage_max_age_seconds: int = 3_600
     cache_dir: Path = Path(".")
+    max_jobs: int | None = None
 
     @property
     def state_dir(self) -> Path:
@@ -351,7 +352,7 @@ def validate_config(
     data = _require_mapping(raw, "config")
     _reject_unknown(data, {
         "schema_version", "database", "cache_dir", "record_command",
-        "usage_max_age_seconds", "secret_refs", "adapters", "providers", "plans",
+        "usage_max_age_seconds", "max_jobs", "secret_refs", "adapters", "providers", "plans",
         "accounts", "limits", "viewer", "pr_exceptions",
     }, "config")
     _reject_inline_secrets(data)
@@ -709,6 +710,10 @@ def validate_config(
         pr_exceptions=tuple(pr_exceptions),
         usage_max_age_seconds=_integer(data.get("usage_max_age_seconds", 3_600), "usage_max_age_seconds", minimum=1),
         cache_dir=cache_dir,
+        max_jobs=(
+            None if data.get("max_jobs") is None
+            else _integer(data.get("max_jobs"), "max_jobs", minimum=1)
+        ),
     )
 
 

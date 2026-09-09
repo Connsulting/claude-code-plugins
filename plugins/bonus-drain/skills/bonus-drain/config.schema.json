@@ -19,6 +19,11 @@
     "cache_dir": {"type": "string", "minLength": 1},
     "record_command": {"$ref": "#/$defs/argv"},
     "usage_max_age_seconds": {"type": "integer", "minimum": 1},
+    "max_jobs": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Maximum concurrent jobs across providers, including in-flight. Omitted means no global cap."
+    },
     "secret_refs": {
       "type": "array",
       "items": {"$ref": "#/$defs/secretRef"}
