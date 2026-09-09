@@ -106,6 +106,31 @@ def _config_lead_hours(provider_id: str) -> int | None:
         return None
     return hours.pop() if len(hours) == 1 else None
 
+
+def _config_floor_params(provider_id: str) -> tuple[float, int] | None:
+    """Remaining-headroom floor for `provider_id`, if every limit agrees.
+
+    The bar's floor tick has to be the same number the planner gates on. A disagreement
+    across a provider's limits means no single tick is true, so we omit a shared rate.
+    """
+    try:
+        c = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
+        plan_provider = {p.id: p.provider_id for p in c.plans}
+        params = {
+            (float(lim.max_percent_per_window), int(lim.pacing_window_seconds))
+            for lim in c.limits if plan_provider.get(lim.plan_id) == provider_id
+        }
+    except Exception:
+        return None
+    return params.pop() if len(params) == 1 else None
+
+
+def _card_floor_fields(provider_id: str) -> dict:
+    params = _config_floor_params(provider_id)
+    if params is None:
+        return {"floor_ppw": 0.5, "pacing_s": 3600}
+    return {"floor_ppw": params[0], "pacing_s": params[1]}
+
 CLAUDE_ACCOUNTS_STORE = Path(os.environ.get(
     "BONUS_ACCOUNTS_STORE", str(Path.home() / ".config" / "bonus-drain" / "accounts" / "claude")
 ))
@@ -1291,7 +1316,7 @@ def _legacy_providers(task: dict) -> list[str]:
     return ["claude", "codex", "grok"] if task.get("engine_class") in ("codex-ok", "grok-ok") else ["claude"]
 
 
-def _bar(pct, mark=None, cls="", time_mark=None, style="") -> str:
+def _bar(pct, mark=None, cls="", time_mark=None, style="", *, floor_mark=None) -> str:
     """A usage bar with an optional threshold tick (the ceiling, or the 5h throttle line).
     The tick is the whole point of this shape over a plain progress bar: it shows how much of
     the distance to the gate has been spent, not just how much has been used."""
@@ -1301,9 +1326,14 @@ def _bar(pct, mark=None, cls="", time_mark=None, style="") -> str:
         tick = f'<i class="mark" style="left:{max(0.0, min(100.0, _f(mark))):.1f}%"></i>'
     progress = ""
     if time_mark is not None:
-        progress = f'<i class="wk" style="left:{max(0.0, min(100.0, _f(time_mark))):.1f}%"></i>'
+        progress = (f'<i class="wk" style="left:{max(0.0, min(100.0, _f(time_mark))):.1f}%" '
+                    f'title="week elapsed"></i>')
+    floor = ""
+    if floor_mark is not None:
+        floor = (f'<span class="fl" style="left:{max(0.0, min(100.0, _f(floor_mark))):.1f}%" '
+                 f'title="floor"></span>')
     return (f'<div class="bar {cls}"{" " + style if style else ""}>'
-            f'<i class="fill" style="width:{pct:.1f}%"></i>{tick}{progress}</div>')
+            f'<i class="fill" style="width:{pct:.1f}%"></i>{tick}{progress}{floor}</div>')
 
 
 def _f(v, default: float = 0.0) -> float:
@@ -1340,12 +1370,39 @@ def _account_draining(
     return bool(selected) and (coord == engine or inflight > 0)
 
 
+def _floor_rate(c: dict) -> tuple[float, float] | None:
+    """(max_percent_per_window, pacing_window_seconds). None if the floor is off."""
+    if "floor_ppw" in c:
+        rate = _f(c.get("floor_ppw"))
+        window = _f(c.get("pacing_s"), 3600)
+        if rate <= 0 or window <= 0:
+            return None
+        return rate, window
+    return 0.5, 3600.0
+
+
+def _reserve_points(c: dict) -> float:
+    """Weekly-percent points that must remain until reset. Matches planner._surplus_above_floor."""
+    rate = _floor_rate(c)
+    if rate is None or not _f(c.get("r7")):
+        return 0.0
+    ppw, window = rate
+    remaining_s = max(0.0, _f(c["r7"]) - time.time())
+    return min(_f(c["ceiling"]), ppw * (remaining_s / window))
+
+
+def _floor_usage(c: dict) -> float | None:
+    """Usage-bar position of the remaining-headroom floor."""
+    if _floor_rate(c) is None or not _f(c.get("r7")) > time.time():
+        return None
+    return max(0.0, min(100.0, _f(c["ceiling"]) - _reserve_points(c)))
+
+
 def _card_surplus(c: dict) -> float | None:
     if c.get("u7") is None or not _f(c.get("r7")):
         return None
-    hours = max(0.0, (_f(c["r7"]) - time.time()) / 3600.0)
     remaining = max(0.0, _f(c["ceiling"]) - _f(c["u7"]))
-    return remaining - 0.5 * hours
+    return remaining - _reserve_points(c)
 
 
 def _card_state(c: dict) -> tuple[str, str]:
@@ -1391,7 +1448,7 @@ def _week(c: dict) -> dict:
 
     An unknown reading yields nothing here, for the same reason it yields no usage bar.
     """
-    out = {"known": False, "elapsed": None, "headroom": None}
+    out = {"known": False, "elapsed": None, "headroom": None, "floor": None}
     if c["u7"] is None:
         return out
     now = time.time()
@@ -1401,7 +1458,8 @@ def _week(c: dict) -> dict:
     week = 7 * 86400.0
     left = max(0.0, min(week, reset - now))
     out.update(known=True, elapsed=100.0 * (1.0 - left / week),
-               headroom=max(0.0, _f(c["ceiling"]) - _f(c["u7"])))
+               headroom=max(0.0, _f(c["ceiling"]) - _f(c["u7"])),
+               floor=_floor_usage(c))
     return out
 
 
@@ -1586,7 +1644,7 @@ def _account_row(c: dict) -> str:
         # The stripe identifies the active subscription. Movement means this account owns the
         # current drain window; a child job may have already finished between scout ticks.
         bar = _bar(u7, ceiling, "lg" + (" draining" if c.get("draining") else " idle"),
-                   p["elapsed"], _pace_color(c, p))
+                   p["elapsed"], _pace_color(c, p), floor_mark=p.get("floor"))
     else:
         fig = '<span class="fig unk"><b>?</b> of ' + f'{ceiling:g} ceiling</span>'
         bar = '<div class="bar lg unknown"></div>'
@@ -1595,8 +1653,11 @@ def _account_row(c: dict) -> str:
         pace = ('<span class="paceline"><span class="unk">no spend reading</span>'
                 '<b class="nil">nothing to compare</b></span>')
     else:
+        floor_bit = ""
+        if p.get("floor") is not None:
+            floor_bit = f' &middot; <span class="fln">floor {p["floor"]:.0f}%</span>'
         pace = (f'<span class="paceline"><span>{u7:g}% spent &middot; '
-                f'{p["elapsed"]:.0f}% of week gone</span>'
+                f'{p["elapsed"]:.0f}% of week gone{floor_bit}</span>'
                 f'<b>{p["headroom"]:.0f} pts left</b></span>')
 
     # --- when cell -----------------------------------------------------------------------
@@ -1615,6 +1676,8 @@ def _account_row(c: dict) -> str:
           ("headroom", f"{max(0.0, ceiling - u7):.1f}%" if known else "n/a", "")]
     if p["known"]:
         wk.append(("week elapsed", f'{p["elapsed"]:.1f}%', ""))
+        if p.get("floor") is not None:
+            wk.append(("floor", f'{p["floor"]:.1f}%', ""))
     if c["r7"]:
         wk.append(("reset in", dur(_f(c["r7"]) - time.time()), ""))
 
@@ -1737,6 +1800,7 @@ def _claude_cards(gates: dict, usage: dict | None, n_elig: int, coord: str, batc
     "claude" number would show a weekly percentage that belongs to neither). One card from
     usage.sh otherwise."""
     lead = _config_lead_hours("claude") or int(_f(gates.get("lead_hours"), DRAIN_LEAD_MAX_HOURS))
+    floor_fields = _card_floor_fields("claude")
     win_h = int(_f(gates.get("window_hours"), 5))
     hot = _f(gates.get("five_hour_max"), 75)
     ppw = _f(gates.get("pct_per_window"), 2.5)
@@ -1792,6 +1856,7 @@ def _claude_cards(gates: dict, usage: dict | None, n_elig: int, coord: str, batc
             "behind": selected if (selected and not is_sel and windows > 0) else "",
             "urgent": bool(_gate_for_card(gates, f"claude-{str(a['label']).lower()}", "claude", a["label"]).get("urgent")),
             "urgency_h": _config_urgency_hours("claude") or 0,
+            **floor_fields,
         })
     return cards
 
@@ -1806,6 +1871,7 @@ def _codex_cards(gates: dict, cx: dict | None, n_codex: int, coord: str, batch: 
     the provider credential store holds, which is the account the configured activator selected.
     Drawing the batch on both cards would claim work is landing somewhere it cannot."""
     lead = _config_lead_hours("codex") or int(_f(gates.get("codex_lead_hours"), DRAIN_LEAD_MAX_HOURS))
+    floor_fields = _card_floor_fields("codex")
     win_h = int(_f(gates.get("window_hours"), 5))
     accounts = gates.get("codex_acct") or []
     active = gates.get("codex_active") or ""
@@ -1865,6 +1931,7 @@ def _codex_cards(gates: dict, cx: dict | None, n_codex: int, coord: str, batch: 
             "behind": selected if (selected and not is_sel and windows > 0) else "",
             "urgent": bool(_gate_for_card(gates, f"codex-{str(a['label']).lower()}", "codex", a["label"]).get("urgent")),
             "urgency_h": _config_urgency_hours("codex") or 0,
+            **floor_fields,
         })
     return cards
 
@@ -1878,6 +1945,7 @@ def _grok_cards(gates: dict, grok: dict | None, n_grok: int,
     grok = grok or {}
     lead = _config_lead_hours("grok") or int(_f(gates.get("grok_lead_hours", gates.get("lead_hours")),
                                                DRAIN_LEAD_MAX_HOURS))
+    floor_fields = _card_floor_fields("grok")
     reset = grok.get("weekly_reset")
     windows = windows_until_reset(reset, lead, int(_f(gates.get("window_hours"), 5)))
     opens = None
@@ -1904,6 +1972,7 @@ def _grok_cards(gates: dict, grok: dict | None, n_grok: int,
         "active": True, "live": True, "draining": draining, "behind": "",
         "urgent": bool(_gate_for_card(gates, "grok-personal", "grok", "Grok").get("urgent")),
         "urgency_h": _config_urgency_hours("grok") or 0,
+        **floor_fields,
     }]
 
 
@@ -2452,6 +2521,8 @@ CSS = """
   --fg:#e9e7e2; --dim:rgba(233,231,226,.66); --dim2:rgba(233,231,226,.54);
   --acc:oklch(0.80 0.14 78); --acc2:oklch(0.86 0.11 78);
   --ok:oklch(0.78 0.13 155); --warn:oklch(0.72 0.17 40);
+  /* Floor tick: cool steel, unused by pace (red/green) or LIVE amber. */
+  --floor:oklch(0.72 0.08 230);
   --mono:'Geist Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
 }
 *{box-sizing:border-box}
@@ -2509,6 +2580,15 @@ a{color:var(--acc2);text-decoration:none}
 .bar .wk::before{content:"";position:absolute;left:-3.5px;top:-4px;width:0;height:0;
   border-left:3.5px solid transparent;border-right:3.5px solid transparent;
   border-top:4px solid rgba(233,231,226,.8)}
+/* Remaining-headroom floor. Opposite caret (clock hangs from above, floor sits below) so
+   the two ticks still read when they sit a couple of points apart, which they often do.
+   Cool steel so it is not a second grey tick and does not fight pace fill or LIVE amber. */
+.bar .fl{position:absolute;top:0;bottom:-4px;display:block;width:1px;min-width:1px;max-width:1px;
+  padding:0;margin:0;border:0;font-size:0;line-height:0;background:var(--floor);z-index:3}
+.bar .fl::before{content:"";position:absolute;left:-3.5px;bottom:-4px;width:0;height:0;
+  padding:0;box-sizing:content-box;
+  border-left:3.5px solid transparent;border-right:3.5px solid transparent;
+  border-bottom:4px solid var(--floor)}
 .bar.unknown{background:repeating-linear-gradient(135deg,
   oklch(0.66 0.045 250 / .38) 0 5px, rgba(255,255,255,.05) 5px 10px)}
 /* Idle keeps its recessive grey only where there is no pacing colour to show; where there is,
@@ -2630,11 +2710,12 @@ a{color:var(--acc2);text-decoration:none}
 .abudget .fig b{font-weight:400;color:var(--fg);font-size:15px}
 .abudget .fig.unk,.abudget .fig.unk b{color:oklch(0.66 0.045 250)}
 .abudget .bar{margin-top:7px}
-.paceline{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-top:8px;
+.paceline{display:flex;justify-content:space-between;align-items:baseline;gap:10px;margin-top:12px;
   font-size:10.5px;letter-spacing:.04em;color:var(--dim2);font-variant-numeric:tabular-nums}
 .paceline b{font-weight:400;white-space:nowrap;color:var(--dim)}
 .paceline .unk{color:oklch(0.66 0.045 250)}
 .paceline b.nil{color:oklch(0.66 0.045 250)}
+.paceline .fln{color:var(--floor)}
 .awhen{text-align:right;font-variant-numeric:tabular-nums;min-width:0}
 .awhen .t{font-size:20px;letter-spacing:-.01em;display:block;line-height:1.1}
 .awhen .t.acc{color:var(--acc2)}

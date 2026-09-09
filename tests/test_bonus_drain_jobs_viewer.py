@@ -112,6 +112,41 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertIn('bar lg draining', self.viewer._account_row(draining))
         self.assertIn('@keyframes drainshimmer', self.viewer.CSS)
 
+    def test_usage_bar_marks_week_elapsed_above_and_floor_below(self) -> None:
+        """Clock caret hangs from above; floor caret sits below in a different colour."""
+        now = 1_000_000
+        reset = now + 84 * 3600  # half a 168h week left
+        card = {
+            "name": "Grok", "engine": "grok", "tag": "",
+            "u7": 40, "ceiling": 90, "r7": reset,
+            "windows": 3, "opens_in": None, "batch": 0, "batch_n": 4,
+            "eligible": 1, "behind": "", "urgent": False, "active": True,
+            "draining": False, "floor_ppw": 0.5, "pacing_s": 3600,
+        }
+        with mock.patch.object(self.viewer.time, "time", return_value=now):
+            row = self.viewer._account_row(card)
+        self.assertIn('class="wk" style="left:50.0%"', row)
+        self.assertIn('class="fl" style="left:48.0%"', row)
+        self.assertIn('<span class="fl"', row)
+        self.assertIn("floor 48%", row)
+        self.assertIn(">floor</span>", row)
+        self.assertIn('title="week elapsed"', row)
+        self.assertIn('title="floor"', row)
+        self.assertIn(".bar .fl::before", self.viewer.CSS)
+        self.assertIn("border-bottom:4px solid var(--floor)", self.viewer.CSS)
+        self.assertIn("--floor:oklch(0.72 0.08 230)", self.viewer.CSS)
+
+    def test_card_surplus_uses_configured_floor_rate(self) -> None:
+        now = 1_000_000
+        reset = now + 10 * 3600
+        card = {"u7": 50, "ceiling": 90, "r7": reset, "floor_ppw": 1.0, "pacing_s": 3600}
+        with mock.patch.object(self.viewer.time, "time", return_value=now):
+            self.assertEqual(self.viewer._card_surplus(card), 30.0)
+        disabled = dict(card, floor_ppw=0)
+        with mock.patch.object(self.viewer.time, "time", return_value=now):
+            self.assertEqual(self.viewer._card_surplus(disabled), 40.0)
+            self.assertIsNone(self.viewer._floor_usage(disabled))
+
     def test_next_tick_plan_shimmers_codex_even_when_claude_is_coordinator(self) -> None:
         """A planned Codex batch is a real next-tick dispatch, not a Claude-only coordinator."""
         gates = {
