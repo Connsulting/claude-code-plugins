@@ -2271,7 +2271,7 @@ def render_bonus_body() -> str:
     {_rotation(cards)}
     <div class="rows mfold" data-fold="drain">
       <div class="rowhd mfold-sum"><span><i class="caret"></i>usage · provider capacity</span>
-        <span>{esc(when)} · next {nxt}</span></div>
+        <span class="rowplan">{esc(when)} · next {nxt}</span></div>
       <div class="mfold-body">
       {"".join(_account_row(c) for c in cards)}
       </div>
@@ -2603,9 +2603,10 @@ a{color:var(--acc2);text-decoration:none}
    The accounts are a queue, not four peers: one per engine drains per tick, picked by nearest
    reset. A row states that ordering instead of asking you to rebuild it from four corners. */
 .rows{border:1px solid var(--line);background:var(--panel);margin-top:12px}
-.rowhd{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:11px 16px;
+.rowhd{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;padding:11px 16px;
   border-bottom:1px solid var(--line);font-size:10.5px;letter-spacing:.12em;
   text-transform:uppercase;color:var(--dim2)}
+.rowplan{display:inline-flex;align-items:center;flex-wrap:wrap;column-gap:8px;line-height:1}
 .arow{border-top:1px solid var(--line2)}
 .arow:first-of-type{border-top:0}
 .arow>summary{list-style:none;cursor:pointer}
@@ -2771,9 +2772,10 @@ footer{margin:34px 0 0;font-size:10.5px;color:var(--dim2);letter-spacing:.04em}
   letter-spacing:.02em;color:var(--acc2);border:1px solid oklch(0.80 0.14 78 / .35);
   border-radius:999px;padding:1px 8px 1px 6px;white-space:nowrap}
 .qkick .ico{width:12px;height:12px;margin-right:0;opacity:.9;vertical-align:0}
-.rowhd .nxt{display:inline-flex;align-items:center;gap:3px;margin-left:8px;
-  text-transform:none;letter-spacing:.04em;font-variant-numeric:tabular-nums}
-.rowhd .nxt .ico{margin-right:0}
+.rowhd .nxt{display:inline-flex;align-items:center;gap:3px;margin-left:0;
+  line-height:1;vertical-align:middle;text-transform:none;letter-spacing:.04em;
+  font-variant-numeric:tabular-nums}
+.rowhd .nxt .ico{width:1em;height:1em;margin-right:0;vertical-align:0}
 .qsub{font-size:11.5px;color:var(--dim2);margin-top:8px;line-height:1.5;text-wrap:pretty}
 .qmodal{background:var(--panel);color:var(--fg);border:1px solid var(--line);padding:0;
   width:min(36rem,calc(100vw - 28px));max-height:min(80vh,720px)}
