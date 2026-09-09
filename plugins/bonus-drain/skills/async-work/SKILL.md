@@ -12,3 +12,7 @@ preflight, task contract, dependency rules, and dispatch lifecycle. Read
 Queueing alone does not authorize an immediate launch. Every ready task is eligible for Bonus
 capacity; use an explicit start only to accelerate it. Use the same stable `bonus-drain` CLI and
 queue; never create another queue for this skill name. Runtime installation remains a separate action.
+
+For coordinating an entire work group through PR integration, combined E2E and additional
+fix rounds, use this plugin's [Long Horizon skill](../long-horizon/SKILL.md). Its goal
+records and short coordination jobs use the same queue and capacity controls.

@@ -1,5 +1,9 @@
 # Async Work
 
+For whole-goal coordination across jobs, PR stacks/merges, and repeated combined
+acceptance, see [Long Horizon goals](GOALS.md). It uses this same queue; work groups
+remain navigation labels unless explicitly linked to a goal contract.
+
 Plan in a thread, hand off a concrete contract, queue it, start it, and review the result.
 Bonus Drain is the optional spare-capacity scheduler for the same queue. The executable,
 installation paths, database identity, router, and release version keep their existing names.
@@ -47,8 +51,12 @@ references become links in the viewer; other references are displayed as text.
 
 Editing allows title, priority, size, cwd, goal, context, constraints, precondition, done_when,
 source_ref, work_group, and depends_on. Active claims and already-run one-off
-contracts cannot be edited. A failed/skipped task must first be explicitly requeued. Existing
-requeue behavior still removes the matching run history; append-only retry attempts are deferred.
+contracts cannot be edited. For ordinary tasks outside managed goals, a failed/skipped
+task must first be explicitly requeued; that operation removes its matching run history.
+Goal-owned jobs retain all attempts and reject requeue: create a fresh follow-up with
+the failure evidence instead. Coordinator and acceptance execution contracts are frozen;
+only their priority, size and active controls remain editable. See [GOALS.md](GOALS.md)
+for replacing an obsolete, unlaunched verifier without changing its proof subject.
 Use a work group only when it forms a useful cross-task cluster, and keep its name to 15
 characters or fewer so the queue filter stays compact. Use title case; the soak-observation
 group is `Soak Obs`.

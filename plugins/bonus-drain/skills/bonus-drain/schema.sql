@@ -92,3 +92,54 @@ CREATE TABLE IF NOT EXISTS usage_history (
 );
 CREATE INDEX IF NOT EXISTS idx_usage_history_account
   ON usage_history(account_id, limit_id, ts);
+
+-- Goals are waiting records, never long-lived dispatch claims. Every coordination turn
+-- is an ordinary one-off task and uses the existing router/claim/terminal lifecycle.
+CREATE TABLE IF NOT EXISTS goals (
+  id TEXT PRIMARY KEY,
+  contract_json TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL CHECK (state IN ('waiting','queued','paused','finishing','complete')),
+  turn INTEGER NOT NULL DEFAULT 0,
+  coordinator_task TEXT REFERENCES tasks(id),
+  wait_json TEXT NOT NULL DEFAULT '[]',
+  candidate_json TEXT,
+  summary TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS goal_members (
+  goal_id TEXT NOT NULL REFERENCES goals(id),
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  role TEXT NOT NULL CHECK (role IN ('implementation','integration','acceptance','existing')),
+  managed INTEGER NOT NULL,
+  candidate_json TEXT,
+  contract_hash TEXT,
+  PRIMARY KEY(goal_id, task_id),
+  UNIQUE(task_id)
+);
+CREATE TABLE IF NOT EXISTS goal_turns (
+  goal_id TEXT NOT NULL REFERENCES goals(id),
+  turn INTEGER NOT NULL,
+  task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id),
+  contract_hash TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  decision_json TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(goal_id, turn)
+);
+CREATE TABLE IF NOT EXISTS goal_steering (
+  goal_id TEXT NOT NULL REFERENCES goals(id),
+  revision INTEGER NOT NULL,
+  message TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(goal_id, revision)
+);
+CREATE TABLE IF NOT EXISTS goal_operations (
+  goal_id TEXT NOT NULL REFERENCES goals(id),
+  key TEXT NOT NULL,
+  turn_task TEXT NOT NULL REFERENCES tasks(id),
+  intent_json TEXT NOT NULL,
+  receipt_json TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(goal_id, key)
+);

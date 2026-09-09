@@ -105,7 +105,11 @@ The configuration graph is versioned and uses IDs for all relationships:
 - `secret_refs[]` names externally injected values. Credential-shaped inline fields,
   shell interpolation, dangling references, duplicate IDs, and direct-provider dispatch
   are rejected.
-- `pr_exceptions[]` is the only place to grant repository-specific push behavior.
+- `pr_exceptions[]` grants ordinary task repository-specific push/PR behavior.
+  An explicitly authorized Long Horizon goal with `merge_policy: merge` additionally
+  grants its registered, unchanged coordinator permission to merge verified PRs within
+  the recorded authority. Task drivers retain their own restrictions; goal membership
+  or task prose alone does not grant that exception. See [GOALS.md](GOALS.md).
 - `viewer` binds to loopback. Remote access requires a secretless trusted loopback proxy,
   exact Host/HTTPS Origin values, and an explicit mutations flag. See
   [SECURITY.md](SECURITY.md).

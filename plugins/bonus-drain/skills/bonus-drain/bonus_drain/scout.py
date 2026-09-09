@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from . import db
+from . import db, goals
 from .config import RuntimeConfig
 from .db import QueueDB, hour_round, task_requires_legacy_exclusive
 from .dispatcher import (
@@ -32,6 +32,7 @@ class ScoutReport:
     blockers: tuple[dict[str, Any], ...] = ()
     router_preflight: tuple[dict[str, Any], ...] = ()
     reconciliation: tuple[dict[str, Any], ...] = ()
+    goal_updates: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -44,6 +45,7 @@ class ScoutReport:
             "blockers": list(self.blockers),
             "router_preflight": list(self.router_preflight),
             "reconciliation": list(self.reconciliation),
+            "goal_updates": list(self.goal_updates),
         }
 
 
@@ -391,6 +393,7 @@ def run_once(
     reconciliation = reconcile_inflight(
         config, queue, dry_run=dry_run, activation_call=activation_call,
     )
+    goal_updates = tuple(goals.GoalStore(queue).tick(now=now, dry_run=dry_run))
     tick = plan_tick(config, queue, cache_root, now_epoch=now)
     plan = tick.plan
     router_preflight = _router_preflight(config, plan)
@@ -408,7 +411,7 @@ def run_once(
             "message": f"router preflight failed: {item['executable']}",
         } for item in unavailable)
         return ScoutReport(
-            now, dry_run, plan, (), (), router_errors, blockers, router_preflight, reconciliation,
+            now, dry_run, plan, (), (), router_errors, blockers, router_preflight, reconciliation, goal_updates,
         )
 
     for batch in plan.batches:  # already nearest-reset-first
@@ -441,5 +444,5 @@ def run_once(
 
     return ScoutReport(
         now, dry_run, plan, tuple(dispatched), tuple(previews), tuple(errors),
-        (), router_preflight, reconciliation,
+        (), router_preflight, reconciliation, goal_updates,
     )

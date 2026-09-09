@@ -298,3 +298,9 @@ For the runtime contracts and command reference, see
 Every ready task is eligible for Bonus capacity; `run-now` accelerates an individual task.
 Tasks can carry source references, 15-character work groups, and one-off prerequisites.
 See [ASYNC_WORK.md](skills/bonus-drain/ASYNC_WORK.md) for the contract and commands.
+
+The bundled [Long Horizon skill](skills/long-horizon/SKILL.md) coordinates whole goals
+through those jobs, stacked or authorized merged PRs, combined acceptance, and further
+fix rounds. Durable joins leave the coordinator idle between short queue jobs. See
+[GOALS.md](skills/bonus-drain/GOALS.md) for goal contracts, commands, bounds, and recovery.
+Existing groups are linked by explicit task IDs without rewriting their contracts.

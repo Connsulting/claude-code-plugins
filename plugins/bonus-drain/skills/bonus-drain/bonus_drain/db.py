@@ -427,6 +427,15 @@ class QueueDB:
         return Claim(**dict(row))
 
     def add_task(self, values: Mapping[str, Any]) -> Task:
+        self.initialize()
+        try:
+            with self._transaction() as connection:
+                return self._insert_task(connection, values)
+        except sqlite3.IntegrityError as exc:
+            raise QueueError(f"task insert rejected for {values.get('id')}: {exc}") from exc
+
+    def _insert_task(self, connection: sqlite3.Connection, values: Mapping[str, Any]) -> Task:
+        """Validate and insert within the caller's transaction (including goal decisions)."""
         item_id = str(values.get("id") or "")
         _require_task_id(item_id)
         kind = str(values.get("kind", "oneoff"))
@@ -463,30 +472,24 @@ class QueueDB:
             "size": size,
         }
         parameters.update(self._work_fields(values))
-        self.initialize()
-        try:
-            with self._transaction() as connection:
-                self._validate_dependencies(connection, item_id, parameters["depends_on_json"])
-                connection.execute(
-                    """
-                    INSERT INTO tasks(
-                      id,title,kind,priority,cadence,cwd,goal,context,constraints,
-                      precondition,done_when,created_at,active,claude_only,model,mcp,
-                      use_implement,allowed_providers_json,required_capabilities_json,size,
-                      source_ref,work_group,depends_on_json
-                    ) VALUES(
-                      :id,:title,:kind,:priority,:cadence,:cwd,:goal,:context,:constraints,
-                      :precondition,:done_when,:created_at,:active,:claude_only,:model,:mcp,
-                      :use_implement,:allowed,:required,:size,
-                      :source_ref,:work_group,:depends_on_json
-                    )
-                    """, parameters,
-                )
-        except sqlite3.IntegrityError as exc:
-            raise QueueError(f"task insert rejected for {item_id}: {exc}") from exc
-        task = self.task(item_id)
-        assert task is not None
-        return task
+        self._validate_dependencies(connection, item_id, parameters["depends_on_json"])
+        connection.execute(
+            """
+            INSERT INTO tasks(
+              id,title,kind,priority,cadence,cwd,goal,context,constraints,
+              precondition,done_when,created_at,active,claude_only,model,mcp,
+              use_implement,allowed_providers_json,required_capabilities_json,size,
+              source_ref,work_group,depends_on_json
+            ) VALUES(
+              :id,:title,:kind,:priority,:cadence,:cwd,:goal,:context,:constraints,
+              :precondition,:done_when,:created_at,:active,:claude_only,:model,:mcp,
+              :use_implement,:allowed,:required,:size,
+              :source_ref,:work_group,:depends_on_json
+            )
+            """, parameters,
+        )
+        row = connection.execute("SELECT * FROM tasks WHERE id=?", (item_id,)).fetchone()
+        return self._task_from_row(row)
 
     @staticmethod
     def _work_fields(values: Mapping[str, Any], *, validate_work_group: bool = True) -> dict[str, Any]:
@@ -545,6 +548,7 @@ class QueueDB:
         return result
 
     def readiness(self, task_id: str) -> dict[str, Any]:
+        from .goals import task_admitted
         self.initialize()
         with self._connect() as connection:
             row = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
@@ -564,18 +568,22 @@ class QueueDB:
                 state, reason = last[0], f"Last run: {last[0]}"
             elif waiting:
                 state, reason = "waiting", "Waiting for " + ", ".join(d["id"] for d in waiting)
+            elif not task_admitted(connection, task_id):
+                state, reason = "waiting", "Goal admission is held by its state, deadline, coordinator, or concurrency bound"
             elif not self._eligible_in_connection(connection, task, 0):
                 state, reason = "cooldown", "Waiting for recurrence cooldown"
             return {"state": state, "ready": state == "ready", "reason": reason,
                     "dependencies": dependencies}
 
     def edit_task(self, task_id: str, changes: Mapping[str, Any]) -> Task:
+        from .goals import guard_contract_edit
         allowed = {"title", "priority", "size", "cwd", "goal", "context", "constraints",
                    "precondition", "done_when", "source_ref", "work_group", "depends_on"}
         if not changes or set(changes) - allowed:
             raise QueueError("edit requires supported task contract fields")
         self.initialize()
         with self._transaction() as connection:
+            guard_contract_edit(connection, task_id, set(changes))
             row = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             if row is None:
                 raise QueueError(f"unknown task: {task_id}")
@@ -633,6 +641,9 @@ class QueueDB:
     @staticmethod
     def _eligible_in_connection(connection: sqlite3.Connection, task: Task, cycle: int) -> bool:
         if not task.active:
+            return False
+        from .goals import task_admitted
+        if not task_admitted(connection, task.id):
             return False
         if any(not d["satisfied"] for d in QueueDB._dependency_statuses(connection, task)):
             return False
@@ -1167,9 +1178,11 @@ class QueueDB:
         return result
 
     def requeue(self, task_id: str, eligibility_key: str | None = None) -> bool:
+        from .goals import guard_history
         _require_task_id(task_id)
         self.initialize()
         with self._transaction() as connection:
+            guard_history(connection, task_id)
             task_row = connection.execute("SELECT kind FROM tasks WHERE id=?", (task_id,)).fetchone()
             if task_row is None:
                 raise QueueError(f"no such task: {task_id}")
@@ -1273,11 +1286,13 @@ class QueueDB:
         self._update_task(task_id, "active", int(active))
 
     def _update_task(self, task_id: str, column: str, value: Any) -> None:
+        from .goals import guard_contract_edit
         _require_task_id(task_id)
         if column not in {"priority", "model", "mcp", "allowed_providers_json", "active"}:
             raise QueueError("unsafe task update")
         self.initialize()
         with self._transaction() as connection:
+            guard_contract_edit(connection, task_id, {column})
             cursor = connection.execute(f"UPDATE tasks SET {column}=? WHERE id=?", (value, task_id))
             if cursor.rowcount != 1:
                 raise QueueError(f"no such task: {task_id}")
