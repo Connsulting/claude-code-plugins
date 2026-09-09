@@ -66,7 +66,7 @@ The sidecar records four comment types. All share `id`, `anchor`, `type`, `autho
 
 - `text` (default): `text` (string). Free-form comment captured via the "+" button. Stacks (multiple text comments per anchor are allowed).
 - `reaction`: `emoji` (one of 👍 👎 🤔). Captured by tapping a reaction button on any anchored block. Stacks. Tap an existing chip to delete it (no confirmation).
-- `decision`: `choices` (string[]), optional `question` (string). Captured by tapping options in a `decide` / `decide-multi` block; saved automatically on change. The server replaces any prior unresolved decision on the same anchor, so the sidecar holds at most one open decision per card. Tapping a selected radio again clears the selection (and the sidecar entry).
+- `decision`: `choices` (string[]), optional `question` (string), and optional `note` (string). Captured by tapping options in a `decide` / `decide-multi` block; saved automatically on change. A note can explain the selected option(s), condition the decision, or name follow-up work. The server replaces any prior unresolved decision on the same anchor, so the sidecar holds at most one open decision per card. Tapping a selected radio again clears the selection (and the sidecar entry).
 - `status`: legacy. Task checkbox taps now mutate the source .md directly (see Task checkboxes below), so new sessions won't write status comments. Existing `status` entries in older sidecars are accepted but not rendered.
 
 ### Replies (threads)
@@ -88,7 +88,7 @@ Every text/decision/status comment has a `✓` resolve button and a `×` delete 
 Beyond plain markdown, plans can use these block conventions:
 
 - **Task checkboxes**: `- [ ] Set up Postgres` / `- [x] Done`. Rendered as tappable checkboxes. Tapping a checkbox mutates the source .md (flips `[ ]` <-> `[x]` on that line) via `POST /api/task/<rel>` with `{line, checked}`. The marker carries `data-md-line` from render time so the server hits the exact line.
-- **Decision blocks**: a fenced block with info-string `decide` (radio) or `decide-multi` (checkbox). First non-list line is the question; bullets are options. Every card automatically appends an "Other..." row with a text input — pick it and type a custom choice, hit Enter (or blur) to save.
+- **Decision blocks**: a fenced block with info-string `decide` (radio) or `decide-multi` (checkbox). First non-list line is the question; bullets are options. Every card automatically appends an "Other..." row with a text input and an optional note field. Select the option(s), then blur the note field or press Ctrl/Cmd+Enter to save the choice and note together.
   ````markdown
   ```decide
   Which database?

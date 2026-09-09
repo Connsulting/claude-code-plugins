@@ -414,13 +414,14 @@
     });
   }
 
-  // -- Decide cards (auto-save on change, "Other..." escape hatch) --
+  // -- Decide cards (auto-save on choice/note change, "Other..." escape hatch) --
   document.querySelectorAll(".decide-card").forEach((card) => {
     const inputs = card.querySelectorAll(
       "input[type=radio], input[type=checkbox]"
     );
     const saved = card.querySelector(".decide-saved");
     const otherInputs = card.querySelectorAll(".decide-other-input");
+    const noteInput = card.querySelector(".decide-note-input");
 
     function readOtherValue(toggle) {
       const row = toggle.closest(".decide-option");
@@ -442,6 +443,7 @@
         }
       }
       const question = (card.querySelector(".decide-q") || {}).textContent || "";
+      const note = noteInput ? noteInput.value.trim() : "";
       try {
         const res = await fetch(apiBase, {
           method: "POST",
@@ -452,6 +454,7 @@
             choices,
             question: question.trim(),
             multi,
+            note,
           }),
         });
         if (!res.ok) throw new Error("save failed: " + res.status);
@@ -488,6 +491,21 @@
       // (which would toggle the radio/checkbox).
       input.addEventListener("click", (e) => e.stopPropagation());
     });
+
+    // Notes attach to selected option(s), not a free-standing comment.
+    if (noteInput) {
+      noteInput.addEventListener("change", () => {
+        const hasChoice = card.querySelector("input[type=radio]:checked, input[type=checkbox]:checked");
+        if (hasChoice) save();
+      });
+      noteInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+          e.preventDefault();
+          const hasChoice = card.querySelector("input[type=radio]:checked, input[type=checkbox]:checked");
+          if (hasChoice) save();
+        }
+      });
+    }
 
     // Radios have no native "clear" — let the user tap a selected radio to
     // unselect it (which triggers the save handler with no checked inputs).
@@ -836,7 +854,8 @@
     if (c.type === "decision") {
       const choices = (c.choices && c.choices.length ? c.choices : [c.choice]).filter(Boolean);
       const q = c.question ? `${c.question} -> ` : "decision -> ";
-      return `(decision ${ts}) ${q}${choices.join(", ")}`;
+      const note = c.note ? ` (note: ${c.note})` : "";
+      return `(decision ${ts}) ${q}${choices.join(", ")}${note}`;
     }
     if (c.type === "status") {
       const state = c.checked ? "done" : "open";
@@ -987,12 +1006,13 @@
     }
     if (c.type === "decision") {
       const choices = (c.choices && c.choices.length ? c.choices : [c.choice]).filter(Boolean);
+      const note = c.note ? '<div class="comment-note">' + escapeHtml(c.note) + "</div>" : "";
       return (
         '<div class="comment decision" data-id="' + cid + '"' + answered + ">" +
         '<div class="comment-meta"><span class="ts">' + ts + "</span>" +
         rep + resolve + del + "</div>" +
         '<div class="comment-body"><strong>Decided:</strong> ' +
-        escapeHtml(choices.join(", ")) + "</div>" + thread + "</div>"
+        escapeHtml(choices.join(", ")) + "</div>" + note + thread + "</div>"
       );
     }
     if (c.type === "status") {

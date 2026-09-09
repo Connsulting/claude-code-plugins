@@ -78,6 +78,8 @@ order; size is the best available estimate of autonomous scope and effort.
 Work groups are optional navigation labels, not task titles: use them only for a meaningful
 cross-task cluster and keep each at 15 characters or fewer. Use title case; the soak-observation
 group is `Soak Obs`.
+Before choosing a work group, inspect the groups already used by active tasks and reuse the
+existing label for the same cluster instead of creating a spelling or version variant.
 Estimate size before previewing or adding the task:
 
 - `tiny`: one deterministic action or edit plus one quick proof; roughly under 15 minutes.

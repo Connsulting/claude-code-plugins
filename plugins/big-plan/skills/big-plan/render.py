@@ -29,12 +29,14 @@ import sys
 from pathlib import Path
 
 import markdown
+from markdown.blockprocessors import HashHeaderProcessor
 from markdown.extensions import Extension
 from markdown.extensions.toc import slugify_unicode
 from markdown.treeprocessors import Treeprocessor
 
 
 SECTION_BOUNDARY_LEVEL = 2  # H2 boundaries open/close <details> sections
+HASH_HEADER_PRIORITY = 70  # python-markdown's own "hashheader" priority; fallback only
 
 
 def _asset_version() -> str:
@@ -248,6 +250,40 @@ class BlockAnchorExtension(Extension):
         md.treeprocessors.register(BlockAnchorTreeprocessor(md), "block_anchor", 5)
 
 
+class AtxHashHeaderProcessor(HashHeaderProcessor):
+    """Require a space or tab after the leading #s, the way CommonMark does.
+
+    python-markdown's stock processor treats any line starting with # as a
+    heading, so a plan line like "#2391's ground was taken" renders as an
+    <h1>. Plans here cite PRs and issues as #1234 at the start of lines
+    constantly. The only change from the stock RE is the lookahead after the
+    level group; the header group, trailing-# stripping, and the block-level
+    behavior that lets headings sit inside list items and blockquotes are
+    untouched.
+    """
+
+    RE = re.compile(
+        r"(?:^|\n)(?P<level>#{1,6})(?=[ \t]|\n|$)(?P<header>(?:\\.|[^\\])*?)#*(?:\n|$)"
+    )
+
+
+class AtxHashHeaderExtension(Extension):
+    """Swap the stock hashheader block processor for the CommonMark-strict one.
+
+    Registered under the stock "hashheader" name at its own priority so it
+    replaces rather than shadows it, keeping the processor order intact.
+    """
+
+    def extendMarkdown(self, md):
+        registry = md.parser.blockprocessors
+        priority = HASH_HEADER_PRIORITY
+        for name, value in getattr(registry, "_priority", ()):
+            if name == "hashheader":
+                priority = value
+                break
+        registry.register(AtxHashHeaderProcessor(md.parser), "hashheader", priority)
+
+
 class ExternalLinkTreeprocessor(Treeprocessor):
     """Open rendered HTTP(S) links separately without changing page anchors."""
 
@@ -449,6 +485,7 @@ def render_decide_card(block: dict, comments: dict) -> str:
     multi = block["kind"] == "decide-multi"
 
     latest_choices: set[str] = set()
+    latest_note = ""
     decisions = [
         c for c in comments.get("comments", [])
         if c.get("type") == "decision"
@@ -462,6 +499,7 @@ def render_decide_card(block: dict, comments: dict) -> str:
             latest_choices = {str(x) for x in latest["choices"]}
         elif latest.get("choice"):
             latest_choices = {str(latest["choice"])}
+        latest_note = str(latest.get("note") or "")
 
     input_type = "checkbox" if multi else "radio"
     name = "decide-" + anchor
@@ -508,6 +546,11 @@ def render_decide_card(block: dict, comments: dict) -> str:
         f'<span class="decide-saved" hidden>saved</span>'
         f"</div>"
         f'<div class="decide-options">{"".join(opts_parts)}</div>'
+        f'<label class="decide-note-label">'
+        f'<span>Add a note about this choice <span class="decide-optional">(optional)</span></span>'
+        f'<textarea class="decide-note-input" rows="2" '
+        f'placeholder="Why this option, a condition, or a follow-up...">{html.escape(latest_note)}</textarea>'
+        f"</label>"
         f"</div>"
     )
 
@@ -803,6 +846,7 @@ def _make_md() -> markdown.Markdown:
             "tables",
             "sane_lists",
             "codehilite",
+            AtxHashHeaderExtension(),
             BlockAnchorExtension(),
             ExternalLinkExtension(),
         ],

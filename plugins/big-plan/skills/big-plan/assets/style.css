@@ -977,6 +977,37 @@ dialog button[value="submit"] { background: var(--accent); color: white; border-
   outline-offset: 1px;
   border-color: var(--accent);
 }
+.decide-note-label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 10px 8px 2px;
+  font-size: 13px;
+  color: var(--fg);
+}
+.decide-optional { color: var(--muted); }
+.decide-note-input {
+  box-sizing: border-box;
+  width: 100%;
+  resize: vertical;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+}
+.decide-note-input:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-color: var(--accent);
+}
+.comment.decision .comment-note {
+  margin-top: 5px;
+  white-space: pre-wrap;
+  color: var(--muted);
+}
 /* Task checkboxes derived from `- [ ]` / `- [x]` markdown */
 .task-marker {
   display: inline-flex;
