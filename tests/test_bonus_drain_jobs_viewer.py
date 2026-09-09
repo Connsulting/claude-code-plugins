@@ -719,6 +719,9 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertNotIn('id="work-editor"', body)
         self.assertIn("<i class=\"caret\"></i>usage · provider capacity", body)
         self.assertIn("<i class=\"caret\"></i>rotation", body)
+        self.assertIn("async scheduler", body)
+        self.assertNotIn("bonus scheduler", body)
+        self.assertIn("next Claude 0 · Codex 0 · Grok 0", body)
 
         css, script = self.viewer.CSS, self.viewer.SCRIPT
         self.assertIn(".mfold-sum .caret{display:none}", css)

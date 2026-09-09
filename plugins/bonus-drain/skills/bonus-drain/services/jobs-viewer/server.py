@@ -2049,7 +2049,12 @@ def render_bonus_body() -> str:
     cards.extend(_codex_cards(gates, codex, n_codex, coord, x_batch))
     cards.extend(_grok_cards(gates, grok, n_grok, coord, g_batch))
     scout_at = next_scout()
-    scout_note = (f"bonus scheduler {rel(scout_at)}" if scout_at else "bonus scheduler timing unavailable")
+    when = f"async scheduler {rel(scout_at)}" if scout_at else "async scheduler timing unavailable"
+    nxt = " · ".join(
+        f"{name} {int(_f(gates.get(f'{engine}_batch')))}"
+        for engine, name in (("claude", "Claude"), ("codex", "Codex"), ("grok", "Grok"))
+    )
+    scout_note = f"{when} · next {nxt}"
 
     cards = _drain_order(cards)
 
