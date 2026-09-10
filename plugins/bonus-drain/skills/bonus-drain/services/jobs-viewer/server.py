@@ -1316,7 +1316,7 @@ def _legacy_providers(task: dict) -> list[str]:
     return ["claude", "codex", "grok"] if task.get("engine_class") in ("codex-ok", "grok-ok") else ["claude"]
 
 
-def _bar(pct, mark=None, cls="", time_mark=None, style="", *, floor_mark=None) -> str:
+def _bar(pct, mark=None, cls="", style="", *, floor_mark=None) -> str:
     """A usage bar with an optional threshold tick (the ceiling, or the 5h throttle line).
     The tick is the whole point of this shape over a plain progress bar: it shows how much of
     the distance to the gate has been spent, not just how much has been used."""
@@ -1324,16 +1324,12 @@ def _bar(pct, mark=None, cls="", time_mark=None, style="", *, floor_mark=None) -
     tick = ""
     if mark is not None:
         tick = f'<i class="mark" style="left:{max(0.0, min(100.0, _f(mark))):.1f}%"></i>'
-    progress = ""
-    if time_mark is not None:
-        progress = (f'<i class="wk" style="left:{max(0.0, min(100.0, _f(time_mark))):.1f}%" '
-                    f'title="week elapsed"></i>')
     floor = ""
     if floor_mark is not None:
         floor = (f'<span class="fl" style="left:{max(0.0, min(100.0, _f(floor_mark))):.1f}%" '
                  f'title="floor"></span>')
     return (f'<div class="bar {cls}"{" " + style if style else ""}>'
-            f'<i class="fill" style="width:{pct:.1f}%"></i>{tick}{progress}{floor}</div>')
+            f'<i class="fill" style="width:{pct:.1f}%"></i>{tick}{floor}</div>')
 
 
 def _f(v, default: float = 0.0) -> float:
@@ -1644,7 +1640,7 @@ def _account_row(c: dict) -> str:
         # The stripe identifies the active subscription. Movement means this account owns the
         # current drain window; a child job may have already finished between scout ticks.
         bar = _bar(u7, ceiling, "lg" + (" draining" if c.get("draining") else " idle"),
-                   p["elapsed"], _pace_color(c, p), floor_mark=p.get("floor"))
+                   _pace_color(c, p), floor_mark=p.get("floor"))
     else:
         fig = '<span class="fig unk"><b>?</b> of ' + f'{ceiling:g} ceiling</span>'
         bar = '<div class="bar lg unknown"></div>'
@@ -2573,16 +2569,8 @@ a{color:var(--acc2);text-decoration:none}
    under, neutral grey on it. They fall back to the accent so every other bar is unchanged. */
 .bar .fill{position:absolute;top:0;bottom:0;left:0;background:var(--pace,var(--acc))}
 .bar .mark{position:absolute;top:-3px;bottom:-3px;width:1px;background:rgba(233,231,226,.6)}
-/* Week-elapsed position. It used to be .time-mark: 1px at .25 alpha, on a bar where the taller
-   brighter ceiling tick takes the eye, so nobody ever read it. Same data, given a cap so it is a
-   different SHAPE from the ceiling tick rather than a fainter version of one. */
-.bar .wk{position:absolute;top:-4px;bottom:0;width:1px;background:rgba(233,231,226,.55);z-index:3}
-.bar .wk::before{content:"";position:absolute;left:-3.5px;top:-4px;width:0;height:0;
-  border-left:3.5px solid transparent;border-right:3.5px solid transparent;
-  border-top:4px solid rgba(233,231,226,.8)}
-/* Remaining-headroom floor. Opposite caret (clock hangs from above, floor sits below) so
-   the two ticks still read when they sit a couple of points apart, which they often do.
-   Cool steel so it is not a second grey tick and does not fight pace fill or LIVE amber. */
+/* Remaining-headroom floor. Caret sits below so it is a different shape from the ceiling
+   tick. Cool steel so it is not a second grey tick and does not fight pace fill or LIVE amber. */
 .bar .fl{position:absolute;top:0;bottom:-4px;display:block;width:1px;min-width:1px;max-width:1px;
   padding:0;margin:0;border:0;font-size:0;line-height:0;background:var(--floor);z-index:3}
 .bar .fl::before{content:"";position:absolute;left:-3.5px;bottom:-4px;width:0;height:0;

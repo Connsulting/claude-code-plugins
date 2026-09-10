@@ -112,8 +112,8 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertIn('bar lg draining', self.viewer._account_row(draining))
         self.assertIn('@keyframes drainshimmer', self.viewer.CSS)
 
-    def test_usage_bar_marks_week_elapsed_above_and_floor_below(self) -> None:
-        """Clock caret hangs from above; floor caret sits below in a different colour."""
+    def test_usage_bar_marks_floor_below_and_keeps_week_gone_in_the_pace_line(self) -> None:
+        """Floor caret sits below; week elapsed is copy under the bar, not a second tick."""
         now = 1_000_000
         reset = now + 84 * 3600  # half a 168h week left
         card = {
@@ -125,12 +125,14 @@ class JobsViewerContractTests(unittest.TestCase):
         }
         with mock.patch.object(self.viewer.time, "time", return_value=now):
             row = self.viewer._account_row(card)
-        self.assertIn('class="wk" style="left:50.0%"', row)
+        self.assertNotIn('class="wk"', row)
+        self.assertNotIn('title="week elapsed"', row)
+        self.assertNotIn(".bar .wk", self.viewer.CSS)
         self.assertIn('class="fl" style="left:48.0%"', row)
         self.assertIn('<span class="fl"', row)
         self.assertIn("floor 48%", row)
         self.assertIn(">floor</span>", row)
-        self.assertIn('title="week elapsed"', row)
+        self.assertIn("50% of week gone", row)
         self.assertIn('title="floor"', row)
         self.assertIn(".bar .fl::before", self.viewer.CSS)
         self.assertIn("border-bottom:4px solid var(--floor)", self.viewer.CSS)
