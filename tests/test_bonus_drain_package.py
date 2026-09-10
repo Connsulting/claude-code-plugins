@@ -177,7 +177,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             self.assertIsInstance(manifest.get("description"), str, manifest_path)
             self.assertTrue(manifest["description"].strip(), manifest_path)
             versions.append(manifest["version"])
-        self.assertEqual(versions, ["0.3.3", "0.3.3"])
+        self.assertEqual(versions, ["0.3.2", "0.3.2"])
 
         sys.path.insert(0, str(SKILL_ROOT))
         try:
@@ -185,8 +185,8 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             from bonus_drain import lifecycle
         finally:
             sys.path.pop(0)
-        self.assertEqual(__version__, "0.3.3")
-        self.assertEqual(lifecycle._DEFAULT_VERSION, "0.3.3")
+        self.assertEqual(__version__, "0.3.2")
+        self.assertEqual(lifecycle._DEFAULT_VERSION, "0.3.2")
 
     def test_packaged_viewer_supports_secretless_tailnet_controls(self) -> None:
         example = self.load_json(SKILL_ROOT / "config.example.json")
