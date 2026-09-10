@@ -227,3 +227,37 @@ class ScoutMatchingAndGlobalCapTests(unittest.TestCase):
             self.assertEqual(len(dispatched), 8)
             self.assertEqual(sum(1 for task_id in dispatched if task_id.startswith("alpha")), 6)
             self.assertEqual(sum(1 for task_id in dispatched if task_id.startswith("beta")), 2)
+
+    def test_omitted_global_cap_lets_each_provider_fill_its_own_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            queue = db.QueueDB(root / "queue.db")
+            queue.initialize()
+            for index in range(6):
+                queue.add_task(_task(f"alpha-{index}", "alpha"))
+                queue.add_task(_task(f"beta-{index}", "beta"))
+            config = _two_provider_config(queue, root / "cache")
+            snapshots = {
+                ("alpha", "alpha-account"): usage.UsageSnapshot(
+                    "alpha", "alpha-account", NOW,
+                    {"alpha-plan-weekly": {"used_percent": 69, "resets_at": NOW + 40 * HOUR}},
+                ),
+                ("beta", "beta-account"): usage.UsageSnapshot(
+                    "beta", "beta-account", NOW,
+                    {"beta-plan-weekly": {"used_percent": 69, "resets_at": NOW + 40 * HOUR}},
+                ),
+            }
+            dispatched: list[str] = []
+
+            def fake_dispatch(config, queue, **kwargs):
+                dispatched.append(kwargs["task_id"])
+                return mock.Mock(to_dict=lambda: {"task_id": kwargs["task_id"]})
+
+            with mock.patch.object(scout, "read_all", return_value=snapshots):
+                with mock.patch.object(scout, "dispatch", side_effect=fake_dispatch):
+                    report = scout.run_once(config, queue, now_epoch=NOW)
+
+            self.assertEqual(report.errors, ())
+            self.assertEqual(len(dispatched), 12)
+            self.assertEqual(sum(1 for task_id in dispatched if task_id.startswith("alpha")), 6)
+            self.assertEqual(sum(1 for task_id in dispatched if task_id.startswith("beta")), 6)

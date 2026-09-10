@@ -632,10 +632,13 @@ def _remaining_snapshot(cycle: int) -> list[dict] | None:
         if not isinstance(payload, dict):
             return None
         values = payload.get("eligible_provider_ids")
+        compatible_values = payload.get("compatible_provider_ids")
         task_ids = payload.get("eligible_task_ids")
         tasks = payload.get("tasks")
         if not isinstance(values, dict) or not isinstance(task_ids, list) or not isinstance(tasks, list):
             return None
+        if compatible_values is not None and not isinstance(compatible_values, dict):
+            compatible_values = None
         tasks_by_id = {task.get("id"): task for task in tasks if isinstance(task, dict)}
         remaining = []
         readiness = payload.get("readiness", {})
@@ -650,6 +653,10 @@ def _remaining_snapshot(cycle: int) -> list[dict] | None:
                 continue
             task = dict(task)
             task["eligible_providers"] = [str(provider) for provider in providers]
+            if isinstance(compatible_values, dict):
+                raw_compatible = compatible_values.get(task_id, [])
+                if isinstance(raw_compatible, list):
+                    task["compatible_providers"] = [str(provider) for provider in raw_compatible]
             task["readiness"] = readiness.get(task_id, {"state": "ready", "ready": True, "reason": "Ready to run manually", "dependencies": []})
             remaining.append(task)
         remaining.sort(key=lambda task: (task["priority"], task["kind"] == "recurring", task.get("created_at", ""), task["id"]))
@@ -2039,8 +2046,16 @@ def _facet_size(t: dict) -> str:
 
 
 def _facet_providers(t: dict) -> list[str]:
-    have = set(t.get("eligible_providers", _legacy_providers(t)))
-    return [p for p in PROVIDER_LABELS if p in have]
+    """Providers the queue filter matches, independent of current readiness.
+
+    Scout-eligible IDs are the run-now constraint. The facet should keep a waiting
+    or cooling-down task under every provider that can run it, the same way
+    priority, size, kind, and work group ignore readiness.
+    """
+    have = t.get("compatible_providers")
+    if have is None:
+        have = t.get("eligible_providers", _legacy_providers(t))
+    return [p for p in PROVIDER_LABELS if p in set(have or ())]
 
 
 def _queue_filters(remaining: list[dict]) -> str:

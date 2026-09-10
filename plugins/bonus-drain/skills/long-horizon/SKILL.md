@@ -55,7 +55,7 @@ Do not stay in a polling conversation, sleep for an hour, monitor routine task C
 repeatedly write status while jobs run. The deterministic scout observes the registered
 join. Partial completions and unchanged polls enqueue zero coordinator turns. A settled
 join, explicit steering, or resumed decision creates one ordinary queue job. Existing
-Capacity pacing, per-provider in-flight caps and the global job cap govern its launch.
+Capacity pacing and per-provider in-flight caps govern its launch. An optional global job cap applies only when configured.
 Do not bypass them to reduce wake latency. Explicit acceleration remains a one-task action.
 
 ## PR dependencies and integration

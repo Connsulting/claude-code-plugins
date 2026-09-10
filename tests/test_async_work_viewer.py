@@ -57,11 +57,15 @@ class AsyncViewerTests(unittest.TestCase):
     def test_waiting_tasks_are_visible_even_without_eligible_provider_ids(self):
         payload = {'tasks': [{'id': 'child', 'title': 'Child', 'priority': 2, 'kind': 'oneoff'}],
                    'eligible_task_ids': [], 'eligible_provider_ids': {},
+                   'compatible_provider_ids': {'child': ['claude']},
                    'readiness': {'child': {'state': 'waiting', 'ready': False, 'reason': 'Waiting for parent'}}}
         with mock.patch.object(self.viewer.subprocess, 'run', return_value=mock.Mock(stdout=json.dumps(payload))):
             tasks = self.viewer._remaining_snapshot(0)
         self.assertEqual(len(tasks), 1)
         self.assertEqual(tasks[0]['readiness']['state'], 'waiting')
+        self.assertEqual(tasks[0]['eligible_providers'], [])
+        self.assertEqual(tasks[0]['compatible_providers'], ['claude'])
+        self.assertEqual(self.viewer._facet_providers(tasks[0]), ['claude'])
         self.viewer.PREVIEW = False
         buttons = self.viewer._run_buttons(tasks[0])
         self.assertEqual(buttons.count(' disabled'), 4)

@@ -667,6 +667,91 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertIn('data-size="large" data-providers="codex grok"', body)
         self.assertIn('data-size="small" data-providers="claude codex"', body)
 
+    def test_provider_filter_includes_waiting_tasks_not_currently_eligible(self) -> None:
+        remaining = [
+            dict(
+                self.QUEUE_FIXTURE[0],
+                readiness={"state": "ready", "ready": True},
+                compatible_providers=["claude"],
+            ),
+            {
+                "id": "waiting-claude", "title": "Waiting Claude child", "kind": "oneoff",
+                "priority": 2, "cadence": None, "cwd": "/tmp/wait", "goal": "wait",
+                "size": "small", "last_ts": None, "eligible_providers": [],
+                "compatible_providers": ["claude"],
+                "readiness": {"state": "waiting", "ready": False, "reason": "Waiting for parent"},
+            },
+            dict(self.QUEUE_FIXTURE[1], readiness={"state": "ready", "ready": True}),
+        ]
+        body = self._bonus_body(remaining)
+        bar = body[body.index('id="qfilters"'):body.index('id="qlist"')]
+        waiting_at = body.index("Waiting Claude child")
+        waiting_row = body[body.rfind('<div class="qrow"', 0, waiting_at):waiting_at]
+        self.assertIn('data-providers="claude"', waiting_row)
+        self.assertIn(
+            f'data-value="claude" aria-pressed="false" '
+            f'aria-label="Claude" title="Claude">'
+            + self.viewer.ico("claude") + "<i>2</i>",
+            bar,
+        )
+        self.assertIn(
+            f'data-value="codex" aria-pressed="false" '
+            f'aria-label="Codex" title="Codex">'
+            + self.viewer.ico("codex") + "<i>1</i>",
+            bar,
+        )
+
+    def test_provider_filter_keeps_waiting_rows_in_a_browser(self) -> None:
+        chrome = shutil.which("google-chrome") or shutil.which("google-chrome-stable")
+        if chrome is None:
+            self.skipTest("Chrome is unavailable")
+        remaining = [
+            dict(
+                self.QUEUE_FIXTURE[0],
+                compatible_providers=["claude"],
+                readiness={"state": "ready", "ready": True},
+            ),
+            {
+                "id": "waiting-claude", "title": "Waiting Claude child", "kind": "oneoff",
+                "priority": 2, "cadence": None, "cwd": "/tmp/wait", "goal": "wait",
+                "size": "small", "last_ts": None, "eligible_providers": [],
+                "compatible_providers": ["claude"],
+                "readiness": {"state": "waiting", "ready": False, "reason": "Waiting for parent"},
+            },
+            dict(self.QUEUE_FIXTURE[1], readiness={"state": "ready", "ready": True}),
+        ]
+        with (
+            mock.patch.object(self.viewer, "render_bonus_body",
+                              return_value=self._bonus_body(remaining)),
+            mock.patch.object(self.viewer, "render_schedule_body", return_value="scheduled body"),
+        ):
+            page = self.viewer.render_page().decode()
+
+        with tempfile.TemporaryDirectory() as work:
+            target = Path(work) / "page.html"
+            target.write_text(
+                page + '<script>document.querySelector('
+                '\'.fchip[data-group="provider"][data-value="claude"]\').click();</script>'
+            )
+            completed = subprocess.run(
+                [
+                    chrome, "--headless=new", "--no-sandbox", "--disable-gpu",
+                    "--disable-dev-shm-usage", "--no-proxy-server",
+                    f"--user-data-dir={work}/profile", "--dump-dom", target.as_uri(),
+                ],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=60, check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        dom = completed.stdout
+        waiting_at = dom.index("Waiting Claude child")
+        waiting_row = dom[dom.rfind('<div class="qrow"', 0, waiting_at):waiting_at]
+        codex_at = dom.index("One-off Codex refactor")
+        codex_row = dom[dom.rfind('<div class="qrow"', 0, codex_at):codex_at]
+        self.assertNotIn("hidden", waiting_row)
+        self.assertIn("hidden", codex_row)
+        self.assertIn(">2 of 3 jobs<", dom)
+
     def test_single_value_facets_and_an_empty_queue_render_no_dead_controls(self) -> None:
         uniform = [dict(t, priority=2, kind="oneoff", cadence=None, size="small",
                         eligible_providers=["claude"]) for t in self.QUEUE_FIXTURE]

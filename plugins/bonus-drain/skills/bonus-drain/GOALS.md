@@ -8,7 +8,7 @@ capacity policy. `goal tick` performs reconciliation only; it never calls a mode
 
 Goals use the existing Async Work scheduler and Bonus capacity policy. An explicit
 `run-now TASK` still accelerates only that eligible task. Per-provider in-flight caps
-and the configured global job cap apply to ready goal turns as ordinary queue jobs.
+and an optional global job cap apply to ready goal turns as ordinary queue jobs.
 `max_inflight` additionally caps this goal's new managed jobs at the atomic claim
 boundary. Existing linked tasks keep their original scheduling and contracts.
 

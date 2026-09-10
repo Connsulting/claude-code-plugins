@@ -314,6 +314,16 @@ def _command(args: argparse.Namespace) -> int:
                 ]
                 for task in candidates
             }
+            # Compatibility is independent of current readiness. The queue viewer
+            # filters by these IDs so a waiting or cooling-down task still appears
+            # under the providers that can run it, matching the other facets.
+            snapshot["compatible_provider_ids"] = {
+                task.id: [
+                    provider.id for provider in cfg.providers
+                    if queue._provider_compatible(task, provider.id, provider.capabilities)
+                ]
+                for task in tasks_by_id.values()
+            }
             snapshot["readiness"] = {task.id: queue.readiness(task.id) for task in tasks_by_id.values()}
             _json(snapshot)
         else:

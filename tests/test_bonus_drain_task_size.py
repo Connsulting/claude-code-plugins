@@ -129,6 +129,29 @@ class TaskSizeContractTests(unittest.TestCase):
             payloads[0]["eligible_provider_ids"]["provider-filtered"],
             ["alpha"],
         )
+        self.assertEqual(
+            payloads[0]["compatible_provider_ids"]["provider-filtered"],
+            ["alpha"],
+        )
+
+    def test_queue_json_keeps_compatible_providers_for_waiting_tasks(self) -> None:
+        self.queue.add_task(_task_values("parent", size="small"))
+        child = _task_values("child", size="small")
+        child["depends_on"] = ["parent"]
+        self.queue.add_task(child)
+        args = type("Args", (), {
+            "command": "queue", "cycle": NOW, "run_limit": 10, "json": True,
+        })()
+        with (
+            mock.patch.object(cli, "_queue", return_value=(_runtime_config(self.database), self.queue)),
+            _capture_cli_json() as payloads,
+        ):
+            self.assertEqual(cli._command(args), 0)
+        self.assertEqual(payloads[0]["readiness"]["child"]["state"], "waiting")
+        self.assertNotIn("child", payloads[0]["eligible_task_ids"])
+        self.assertNotIn("child", payloads[0]["eligible_provider_ids"])
+        self.assertEqual(payloads[0]["compatible_provider_ids"]["child"], ["alpha"])
+        self.assertEqual(payloads[0]["eligible_provider_ids"]["parent"], ["alpha"])
 
     def assert_plain_nullable_size_column(self, database: Path) -> None:
         with sqlite3.connect(database) as connection:
