@@ -1627,10 +1627,10 @@ def _account_row(c: dict) -> str:
     p = _week(c)
     known = c["u7"] is not None
     u7, ceiling = _f(c["u7"]), _f(c["ceiling"])
-    # The stripe answers a distinct, higher-level question from the status copy: which
-    # subscription is currently selected for this provider. Keep that identity visible even
-    # when its usage cache is unknown or its drain window is closed.
-    stripe = "on" if c.get("active") else {"acc": "on", "warn": "warn", "dim": ""}.get(tone, "")
+    # The stripe is which subscription the token rotator currently has active, even
+    # when that account's usage is unknown. Drain windows span the week, so surplus
+    # or an open window must not reuse this gold.
+    stripe = "on" if c.get("active") else {"warn": "warn", "dim": ""}.get(tone, "")
     if not known and not c.get("active"):
         stripe, tone = "unk", "unk"
 

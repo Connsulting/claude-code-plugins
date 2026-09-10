@@ -112,6 +112,27 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertIn('bar lg draining', self.viewer._account_row(draining))
         self.assertIn('@keyframes drainshimmer', self.viewer.CSS)
 
+    def test_gold_stripe_marks_rotator_active_not_open_window(self) -> None:
+        """Drain windows span the week; gold is the rotator pin, not surplus."""
+        now = 1_000_000
+        reset = now + 84 * 3600
+        base = {
+            "name": "Claude · Personal", "engine": "claude", "tag": "",
+            "u7": 20, "ceiling": 95, "r7": reset,
+            "windows": 20, "opens_in": None, "batch": 0, "batch_n": 4,
+            "eligible": 1, "behind": "", "urgent": False,
+            "draining": False, "floor_ppw": 0.5, "pacing_s": 3600,
+        }
+        with mock.patch.object(self.viewer.time, "time", return_value=now):
+            idle = self.viewer._account_row(dict(base, active=False))
+            pinned = self.viewer._account_row(dict(base, name="Claude · Business", active=True))
+            spent = self.viewer._account_row(dict(base, u7=100, active=False))
+        self.assertIn("pts surplus", idle)
+        self.assertNotIn('<i class="stripe on"></i>', idle)
+        self.assertIn('<i class="stripe"></i>', idle)
+        self.assertIn('<i class="stripe on"></i>', pinned)
+        self.assertIn('<i class="stripe warn"></i>', spent)
+
     def test_usage_bar_marks_floor_below_and_keeps_week_gone_in_the_pace_line(self) -> None:
         """Floor caret sits below; week elapsed is copy under the bar, not a second tick."""
         now = 1_000_000
