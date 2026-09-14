@@ -759,6 +759,9 @@
   function initCodeCopy() {
     const blocks = document.querySelectorAll(".content pre");
     blocks.forEach((pre) => {
+      // Mermaid blocks are diagrams: appending a button inside the <pre> races
+      // mermaid.run(), which reads innerHTML and then fails to parse the button.
+      if (pre.classList.contains("mermaid")) return;
       // Host the button on the .hl wrapper (or the pre itself) so it stays
       // pinned while the pre scrolls horizontally.
       const host = pre.closest(".hl") || pre;
