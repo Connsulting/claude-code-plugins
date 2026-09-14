@@ -289,7 +289,9 @@ to make a dependency ready.
 - Ten-minute cache refresh: `bonus-drain-refresh.timer`.
 - Hourly scout: `bonus-drain-scout.timer`.
 - Optional viewer: the established two-tab background-jobs UI. Run now is manual and delegates
-  only to the shared `kick_task` to `agent-router` path. Tailscale Serve is the sole access
+  only to the shared `kick_task` to `agent-router` path. In-flight Mark done / Mark failed
+  records a terminal event through the same `record` path as the CLI and frees the dispatch
+  slot; it does not stop the provider worker. Tailscale Serve is the sole access
   boundary; there is no application login. Exact Host/HTTPS Origin and JSON-only checks
   protect browser mutations; see `SECURITY.md` before remote use.
 - Install/status/doctor/removal: see `README.md`.

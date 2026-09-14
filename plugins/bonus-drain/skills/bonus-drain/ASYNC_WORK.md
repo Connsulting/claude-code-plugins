@@ -108,6 +108,10 @@ group is `Soak Obs`.
 
 The viewer shows readiness, work group, source reference, and prerequisite progress, with
 filters for each workflow facet. Rotation and provider usage remain visible above the queue.
+In flight rows have Mark done and Mark failed buttons. Each action records a structured operator
+outcome against the exact attempt and frees the dispatch slot. Mark done is an explicit operator
+receipt that confirms the done condition and can unblock dependents. Mark failed records that
+verification is still needed. Neither button stops the provider worker.
 Task contracts are edited through planning threads and the CLI; the viewer has no job editor. Actual new
 launches record explicit or automatic provenance plus their attempt identity; terminal events and
 structured outcome evidence inherit it. Old rows remain origin unknown. The scheduled value is
@@ -140,6 +144,6 @@ Front its loopback listener with a separately owned Tailscale Serve HTTPS port.
 The preview has a copy of tasks, run history, and cached capacity. Copied running rows are
 historical snapshot evidence, not proof that this preview owns those jobs. Four clearly labeled
 example tasks demonstrate a dependency chain without inferring dependencies for real work.
-All execution is disabled. Requeues affect the copy. Task editing remains a CLI operation. Do not enable a scout or
+All execution is disabled. Requeues and in-flight done/failed marks affect the copy. Task editing remains a CLI operation. Do not enable a scout or
 refresher against it. Stop the preview process and remove only its Tailscale Serve port when
 review finishes; keep the copied state until its owner chooses to discard it.

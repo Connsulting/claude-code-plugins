@@ -874,6 +874,89 @@ def requeue_task(task_id: str) -> tuple[bool, str]:
     return True, "recovery scheduled"
 
 
+def finish_inflight_task(task_id: str, status: str) -> tuple[bool, str]:
+    """Record a terminal event for an in-flight job so it no longer holds a dispatch slot.
+
+    Same claim/lease path as `bonus-drain record`. Does not stop the provider worker; agent-router
+    has no job-cancel command. The worker may still run until it exits, and a later conflicting
+    terminal record is a reconciliation error rather than a second event.
+    """
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", task_id):
+        return False, "invalid task id"
+    if status not in {"done", "failed"}:
+        return False, "invalid status"
+    try:
+        cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
+        queue = QueueDB(cfg.database, recurrence_timezone=cfg.recurrence_timezone)
+    except (graph_config.ConfigError, OSError, ValueError):
+        return False, "could not finish this job"
+    matches = [run for run in queue.inflight() if run.task == task_id]
+    if not matches:
+        return False, "this job is not in flight"
+    if len(matches) > 1:
+        return False, "multiple in-flight runs; reconcile before finishing"
+    run = matches[0]
+    key = run.eligibility_key or f"legacy/{run.cycle}"
+    account = None
+    if run.account_id:
+        try:
+            account = cfg.account(run.account_id)
+        except graph_config.ConfigError:
+            account = None
+    release_activation = None
+    if account is not None and account.activation_adapter_id:
+        release_activation = lambda: graph_dispatcher._activation(
+            cfg, account, "release", None,
+        )
+    if status == "done":
+        outcome = {
+            "reason": {
+                "code": "done_when_verified",
+                "detail": (
+                    "An operator marked this dispatched run done in the jobs viewer "
+                    "and confirmed the task's done condition."
+                ),
+                "signature": "done_when_verified:jobs_viewer_operator_receipt",
+            },
+            "completion": {
+                "verified": True,
+                "mechanism": "operator_receipt",
+                "evidence": [
+                    (
+                        f"jobs viewer operator receipt for task {run.task}, attempt "
+                        f"{run.attempt_id}, router job {run.router_job_id}"
+                    ),
+                ],
+            },
+        }
+    else:
+        outcome = {
+            "reason": {
+                "code": "verification_needed",
+                "detail": (
+                    "An operator marked this dispatched run failed in the jobs viewer. "
+                    "Completion still needs verification."
+                ),
+                "signature": "verification_needed:jobs_viewer_operator_failure",
+            },
+        }
+    try:
+        queue.record(
+            task_id, key, attempt_id=run.attempt_id,
+            status=status, kind=run.kind, cycle=run.cycle,
+            provider_id=run.provider_id, account_id=run.account_id,
+            router_job_id=run.router_job_id,
+            summary=f"operator marked {status} from the jobs viewer",
+            outcome=outcome,
+            release_activation=release_activation,
+        )
+    except (QueueError, graph_dispatcher.DispatchError) as exc:
+        return False, str(exc)[:500] or "could not finish this job"
+    except (OSError, ValueError):
+        return False, "could not finish this job"
+    return True, status
+
+
 # ===========================================================================
 # Scheduled-timers data access (read-only)
 # ===========================================================================
@@ -1384,6 +1467,30 @@ def _run_buttons(t: dict) -> str:
                         aria-label="Let agent-router pick the engine, then dispatch"
                         title="{esc(blocked) if blocked else 'Choose an engine automatically and run now'}">{busy_button(ico("auto"))}</button>
               </span>"""
+
+
+def _finish_buttons(job: dict) -> str:
+    """Done and failed cutoffs for one in-flight row."""
+    tid = esc(job.get("task") or "")
+    title = job.get("title") or job.get("task") or "this job"
+    if MUTATIONS_ENABLED:
+        extra_cls = ""
+        done_attrs = 'title="Mark done"'
+        fail_attrs = 'title="Mark failed"'
+        done_aria, fail_aria = f"Mark {title} done", f"Mark {title} failed"
+    else:
+        extra_cls = " unavailable"
+        done_attrs = fail_attrs = 'disabled title="Viewer is read-only"'
+        done_aria = fail_aria = "Viewer is read-only"
+    return f"""
+            <span class="flact">
+              <button class="task-finish ionly{extra_cls}" data-task-id="{tid}" data-status="done"
+                      aria-label="{esc(done_aria)}" {done_attrs}
+                      >{busy_button(ico("check"))}</button>
+              <button class="task-finish ionly{extra_cls}" data-task-id="{tid}" data-status="failed"
+                      aria-label="{esc(fail_aria)}" {fail_attrs}
+                      >{busy_button(ico("ban"))}</button>
+            </span>"""
 
 
 def _legacy_providers(task: dict) -> list[str]:
@@ -2284,11 +2391,12 @@ def render_bonus_body() -> str:
             <span class="dimtxt">{esc(Path(j.get("cwd") or "").name or "—")}</span>
             <span class="dimtxt ebadge">{ico(j.get("engine") if j.get("engine") in RUN_ENGINES else "claude")}{esc(j.get("engine") or "claude")}</span>
             <span class="elapsed">{dur(time.time() - started) if started else "—"}</span>
+            {_finish_buttons(j)}
           </div>""")
         flight = f"""
       <div class="sec">
         <div class="sech"><span>in flight · {len(inflight)}</span>
-          <span class="note">detached sessions · reconciled each scout tick</span></div>
+          <span class="note">mark done or failed to free the slot · scout still reconciles workers</span></div>
         <div class="card flat">{"".join(frows)}</div>
       </div>"""
     else:
@@ -2882,6 +2990,7 @@ footer{margin:34px 0 0;font-size:10.5px;color:var(--dim2);letter-spacing:.04em}
 .fl .pdot{width:6px;height:6px;border-radius:50%;background:var(--acc);flex:none;animation:bdpulse 1.6s ease-in-out infinite}
 .fltitle{flex:1 1 240px;font-size:12.5px;min-width:0}
 .elapsed{font-variant-numeric:tabular-nums;font-size:12px}
+.flact{display:inline-flex;gap:5px;align-items:center;flex:none;margin-left:auto}
 
 /* queue filters ------------------------------------------------------------------------
    Chips, not selects: the whole facet is visible at rest with its count, and a native <select>
@@ -2979,11 +3088,14 @@ footer{margin:34px 0 0;font-size:10.5px;color:var(--dim2);letter-spacing:.04em}
    unavailable, so it reads `not-allowed` and dims further - the two must not look alike. */
 .task-run:disabled,.task-toggle:disabled{cursor:wait;opacity:.6}
 .task-run.unavailable{cursor:not-allowed;opacity:.3}
-.task-requeue{display:inline-flex;align-items:center;justify-content:center;min-height:38px;min-width:44px;
+.task-requeue,.task-finish{display:inline-flex;align-items:center;justify-content:center;min-height:38px;min-width:44px;
   padding:0;cursor:pointer;background:none;border:1px solid var(--line);color:var(--dim)}
 .task-requeue:hover:enabled{color:var(--fg);border-color:rgba(233,231,226,.38);background:rgba(255,255,255,.07)}
-.task-requeue:disabled{cursor:wait;opacity:.6}
-.task-requeue .ico{width:18px;height:18px;margin:0}
+.task-finish[data-status="done"]:hover:enabled{color:var(--ok);border-color:oklch(0.78 0.13 155 / .55);background:rgba(255,255,255,.07)}
+.task-finish[data-status="failed"]:hover:enabled{color:var(--warn);border-color:oklch(0.72 0.17 40 / .55);background:rgba(255,255,255,.07)}
+.task-requeue:disabled,.task-finish:disabled{cursor:wait;opacity:.6}
+.task-finish.unavailable{cursor:not-allowed;opacity:.3}
+.task-requeue .ico,.task-finish .ico{width:18px;height:18px;margin:0}
 
 /* run log ----------------------------------------------------------------------------- */
 .lg{display:flex;gap:14px;align-items:baseline;flex-wrap:wrap;padding:9px 16px}
@@ -3064,6 +3176,7 @@ table.grid{width:100%;border-collapse:collapse;font-size:12px}
   .qrow .qact{cursor:auto}
   .qact{width:100%;justify-content:flex-end}
   .lnote{flex-basis:100%}
+  .flact{width:100%;justify-content:flex-end}
   .tldays{margin:0}
   .lane{grid-template-columns:1fr;gap:5px}
   .lane .lname{padding-right:0}
@@ -3139,6 +3252,25 @@ SCRIPT = """
         if(!response.ok)throw new Error(data.message||'requeue failed');
         location.reload();
       }catch(e){b.disabled=false;b.classList.remove('busy');alert('Could not requeue this job: '+e.message);}
+    });
+  });
+  document.querySelectorAll('.task-finish').forEach(function(b){
+    b.addEventListener('click',async function(){
+      var set=b.closest('.flact');
+      var peers=set?Array.prototype.slice.call(set.querySelectorAll('.task-finish')):[b];
+      var wasDisabled=peers.map(function(p){return p.disabled});
+      peers.forEach(function(p){p.disabled=true});
+      b.classList.add('busy');
+      try{
+        var response=await fetch('/api/bonus/task/finish',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:b.dataset.taskId,status:b.dataset.status})});
+        var data=await response.json().catch(function(){return {}});
+        if(!response.ok)throw new Error(data.message||'finish failed');
+        location.reload();
+      }catch(e){
+        peers.forEach(function(p,i){p.disabled=wasDisabled[i]});
+        b.classList.remove('busy');
+        alert('Could not mark this job '+b.dataset.status+': '+e.message);
+      }
     });
   });
   // Phone folds for the header, rotation chart, and drain-order rows. CSS hides the bodies
@@ -3431,6 +3563,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._bad_request()
                 return
             ok, message = requeue_task(task_id)
+        elif self.path == "/api/bonus/task/finish":
+            payload = self._read_json()
+            if payload is None:
+                return
+            task_id, status = payload.get("id"), payload.get("status")
+            if not isinstance(task_id, str) or status not in {"done", "failed"}:
+                self._bad_request()
+                return
+            ok, message = finish_inflight_task(task_id, status)
         else:
             self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
             return
