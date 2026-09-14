@@ -162,7 +162,8 @@ When searching for an existing toggle (for resume/dedup), match on "${SESSION_TA
 
 ## Log to Notion
 
-1. Search database ${DATABASE_ID} for a page titled "${TODAY}". Create one if missing.
+1. Fetch database ${DATABASE_ID} to get its data source URL (collection://...) and title property name. Search that data source (data_source_url) for a page titled "${TODAY}". If missing, create it with notion-create-pages using parent {"type": "data_source_id", "data_source_id": "<that collection id>"} and the title property set to "${TODAY}".
+   NEVER call notion-create-pages without that data source parent: omitting the parent creates an untitled private page at the top level of the workspace, outside the database. If you cannot resolve the data source, output "SKIP: could not resolve database" and stop.
 2. Fetch the page blocks. Look for an H2 "${PROJECT}" and a toggle starting with "${SESSION_TAG}".
 3. If no "${PROJECT}" H2 exists, append one.
 4. If a toggle starting with "${SESSION_TAG}" exists (resumed session):
