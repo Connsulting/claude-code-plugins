@@ -19,8 +19,11 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from .config import AccountConfig, AdapterConfig, ConfigError, ProviderConfig, RuntimeConfig
 from .db import (
+    COMPLETION_MECHANISMS,
     LEGACY_EXCLUSIVE_CAPABILITY,
+    REASON_CODES,
     QueueDB,
+    QueueError,
     Task,
     canonical_model,
     cycle_from_key,
@@ -55,12 +58,27 @@ class AmbiguousDispatch(DispatchError):
 class ActivationUnavailable(DispatchError):
     """Another durable account lease currently owns this provider."""
 
+    def __init__(self, message: str, *, known_not_switched: bool = False):
+        super().__init__(message)
+        self.known_not_switched = known_not_switched
+
 
 _PROVEN_UNSWITCHED_ACTIVATION = "requested account did not become active"
 
 
+def _trusted_unswitched_activation(exc: Exception, adapter_id: str) -> bool:
+    if isinstance(exc, ActivationUnavailable) and exc.known_not_switched:
+        return True
+    expected = (
+        f"account activation activate failed: adapter {adapter_id} exited 1: "
+        f"bonus-drain-account-activation: {_PROVEN_UNSWITCHED_ACTIVATION}"
+    )
+    return str(exc) == expected
+
+
 _MCP_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _MCP_FILE_LIMIT = 1_048_576
+_OUTCOME_FILE_LIMIT = 65_536
 _MCP_SERVER_LIMIT = 64
 _MCP_SELECTION_LIMIT = 32
 _MCP_STALE_SECONDS = 30 * 24 * 60 * 60
@@ -84,6 +102,23 @@ _CODEX_APP_SERVER_MISSING_RE = re.compile(
 )
 
 
+class _DuplicateJSONKey(ValueError):
+    pass
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise _DuplicateJSONKey(key)
+        value[key] = item
+    return value
+
+
+def _strict_json_loads(raw: str | bytes) -> Any:
+    return json.loads(raw, object_pairs_hook=_unique_json_object)
+
+
 @dataclass(frozen=True)
 class DispatchResult:
     task_id: str
@@ -93,6 +128,8 @@ class DispatchResult:
     job_id: str
     prompt: str
     factory_run_id: str | None = None
+    attempt_id: str | None = None
+    dependency_base: Mapping[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -149,7 +186,10 @@ def factory_repo_name(cwd: str) -> str:
 
 
 def factory_run_payload(
-    task: Task, provider: ProviderConfig, router_decision_id: Any,
+    task: Task,
+    provider: ProviderConfig,
+    router_decision_id: Any,
+    attempt_id: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "factory_version": "v1",
@@ -161,6 +201,8 @@ def factory_run_payload(
     }
     if isinstance(router_decision_id, int) and not isinstance(router_decision_id, bool):
         payload["router_decision_id"] = router_decision_id
+    if attempt_id is not None:
+        payload["drain_attempt_id"] = attempt_id
     return payload
 
 
@@ -170,6 +212,7 @@ def record_factory_run(
     run_id: str,
     router_decision_id: Any,
     telemetry_call: Callable[[list[str], dict[str, Any]], Any] | None = None,
+    attempt_id: str | None = None,
 ) -> bool:
     """Create the placeholder runs row for a launched /implement task.
 
@@ -177,7 +220,7 @@ def record_factory_run(
     stderr: the dispatch has already happened and its bookkeeping is authoritative.
     """
     try:
-        payload = factory_run_payload(task, provider, router_decision_id)
+        payload = factory_run_payload(task, provider, router_decision_id, attempt_id)
         if telemetry_call is not None:
             telemetry_call(["record", "run", "--run-id", run_id], payload)
             return True
@@ -236,6 +279,8 @@ def _record_line(
     eligibility_key: str,
     provider_id: str,
     account_id: str | None,
+    attempt_id: str | None = None,
+    outcome_path: Path | None = None,
 ) -> str:
     command = list(config.record_command)
     command.extend(
@@ -251,7 +296,62 @@ def _record_line(
     )
     if account_id:
         command.extend(["--account-id", account_id])
+    if attempt_id:
+        command.extend(["--attempt-id", attempt_id])
+    if outcome_path is not None:
+        command.extend(["--outcome-file", str(outcome_path)])
     command.extend(["--summary", "<one line>"])
+    return shlex.join(command)
+
+
+def _outcome_contract_line() -> str:
+    schema = {
+        "reason": {
+            "code": {"allowed": sorted(REASON_CODES)},
+            "detail": "<non-empty bounded detail>",
+            "signature": "<stable non-secret signature>",
+        },
+        "completion": {
+            "verified": True,
+            "mechanism": {"allowed": sorted(COMPLETION_MECHANISMS)},
+            "evidence": ["<non-empty verification reference>"],
+        },
+        "repository": {
+            "remote": "<exact canonical remote URL>",
+            "target_ref": "refs/heads/<exact target branch>",
+            "target_base_oid": "<full starting commit OID>",
+            "branch_ref": "refs/heads/<exact result branch>",
+            "head_oid": "<full result commit OID>",
+            "integration_state": {"allowed": ["merged", "unmerged"]},
+            "merge_receipt": {
+                "optional": True,
+                "kind": {"allowed": ["merge", "squash"]},
+                "result_oid": "<full verified target result OID>",
+            },
+        },
+    }
+    return "OUTCOME_SCHEMA=" + json.dumps(schema, sort_keys=True, separators=(",", ":"))
+
+
+def _recover_complete_line(
+    config: RuntimeConfig,
+    task: Task,
+    attempt_id: str,
+    outcome_path: Path,
+) -> str:
+    executable = str(Path(__file__).resolve().parents[1] / "bin" / "bonus-drain")
+    command = [
+        executable,
+        "recover-complete",
+        "--database", str(config.database),
+        "--task", task.id,
+        "--from-attempt", attempt_id,
+        "--outcome-file", str(outcome_path),
+        "--summary", "<one line>",
+        "--json",
+    ]
+    if config.source_path is not None:
+        command[2:2] = ["--config", str(config.source_path)]
     return shlex.join(command)
 
 
@@ -283,6 +383,11 @@ def render_prompt(
     provider_id: str,
     account_id: str | None,
     factory_run_id: str | None = None,
+    *,
+    attempt: Any | None = None,
+    outcome_path: Path | None = None,
+    dependency_base: Mapping[str, Any] | None = None,
+    recovery: Mapping[str, Any] | None = None,
 ) -> str:
     """Render one task and the stable terminal-record contract.
 
@@ -292,6 +397,31 @@ def render_prompt(
     """
 
     sections = [f"Goal: {task.goal}"]
+    if dependency_base is not None:
+        encoded_base = json.dumps(
+            dict(dependency_base), sort_keys=True, separators=(",", ":"),
+        )
+        sections.extend([
+            f"DEPENDENCY_BASE={encoded_base}",
+            (
+                "Use this exact verified dependency head for the isolated worktree. "
+                "It overrides /implement's default target-base selection. Confirm the exact "
+                "remote, ref, and object identity; never fall back to another local base."
+            ),
+        ])
+    if attempt is not None:
+        attempt_context = {
+            "attempt_id": attempt.id,
+            "mode": attempt.mode,
+            "ordinal": attempt.ordinal,
+            "origin": attempt.origin,
+        }
+        if recovery:
+            attempt_context["recovery"] = dict(recovery)
+        sections.append(
+            "ATTEMPT_CONTEXT="
+            + json.dumps(attempt_context, sort_keys=True, separators=(",", ":"))
+        )
     for label, value in (
         ("Source thread or plan", task.source_ref),
         ("Work group", task.work_group),
@@ -341,8 +471,8 @@ def render_prompt(
             "If safe progress requires new input or authority, record failed with the blocker before exiting; do not request input or set a blocked status.",
             f"The concrete provider for this accounted run is {provider_id}.",
             "When finished, record exactly one terminal event with this command (replace only the status and summary placeholders):",
-            f"  {_record_line(config, task, eligibility_key, provider_id, account_id)}",
-            "Do not replace the task id or eligibility key and do not stop an idle background session.",
+            f"  {_record_line(config, task, eligibility_key, provider_id, account_id, attempt.id if attempt is not None else None, outcome_path)}",
+            "Do not replace the task id, eligibility key, or attempt id and do not stop an idle background session.",
         ]
     )
     if account_id and config.account(account_id).activation_scope == "launch":
@@ -350,6 +480,46 @@ def render_prompt(
             -3,
             f"The recorded account {account_id} is the launch account, not a run-long account pin; later credential rotation is permitted.",
         )
+    if attempt is not None and outcome_path is not None:
+        contract.extend([
+            (
+                "Before the terminal command, write one JSON outcome object to its exact private "
+                "outcome file. The parseable line below is a field schema, not a literal result: "
+                "choose one allowed reason code and, when done, one allowed completion mechanism."
+            ),
+            _outcome_contract_line(),
+            (
+                "Every terminal result requires reason.code, non-empty reason.detail, and a stable, "
+                "non-secret reason.signature. Status done requires reason.code=done_when_verified, "
+                "completion.verified=true, one supported completion.mechanism, and at least one "
+                "non-empty completion.evidence reference. Failed or skipped results require the "
+                "structured reason and must not claim verified completion."
+            ),
+            (
+                "If this task produces a branch or commit that a dependent task must use, include "
+                "repository with remote, target_ref, target_base_oid, branch_ref, head_oid, and "
+                "integration_state from verified exact Git identity. Include merge_receipt only "
+                "when its merge or squash kind and result_oid are verified. PR presence or state "
+                "does not prove integration, and this handoff grants no push or merge authority."
+            ),
+        ])
+    if attempt is not None and outcome_path is not None and task.kind == "oneoff":
+        contract.extend([
+            (
+                "If a later user message in this same thread continues the work after this "
+                "attempt recorded failed or skipped, retain this task contract and attempt context. "
+                "When the continued work meets done-when, write verified evidence to the same "
+                "private outcome path and invoke the exact command below automatically before replying. "
+                "If it still fails, retain the original terminal evidence and bounded recovery state."
+            ),
+            (
+                "Terminal processing may remove the staging file. Before recover-complete, "
+                "recreate only that exact path as a regular non-symlink file, keep its parent "
+                "directory at mode 0700, set the file to mode 0600, and write one JSON object "
+                "of at most 65536 bytes. Preserve the path; a default 0644 write is rejected."
+            ),
+            f"  {_recover_complete_line(config, task, attempt.id, outcome_path)}",
+        ])
     prompt = "\n\n".join(sections + ["\n".join(contract)])
     if task.use_implement:
         rendered = f"/implement {prompt}\nBACKGROUND_RUN=1"
@@ -393,6 +563,126 @@ def _read_mcp_json(path: Path, label: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise DispatchError(f"{label} must contain an object")
     return value
+
+
+def _private_diagnostic(config: RuntimeConfig, diagnostic: Any) -> str:
+    """Use the router diagnostic redactor for private-file boundary errors."""
+
+    if config.adapters:
+        return _router_diagnostic(config, config.adapters[0], diagnostic)
+    from .adapters import _redact
+
+    return _redact(str(diagnostic), [])[:500]
+
+
+def _outcome_directory(config: RuntimeConfig) -> Path:
+    directory = config.state_dir / "outcomes"
+    try:
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        metadata = directory.lstat()
+    except OSError as exc:
+        raise DispatchError(
+            _private_diagnostic(config, "outcome state directory is unavailable")
+        ) from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+    ):
+        raise DispatchError(
+            _private_diagnostic(config, "outcome state directory must be owned with mode 0700")
+        )
+    return directory
+
+
+def materialize_outcome_file(config: RuntimeConfig, attempt_id: str) -> Path:
+    """Allocate an attempt-scoped private staging file outside the task checkout."""
+
+    directory = _outcome_directory(config)
+    digest = sha256(attempt_id.encode("utf-8")).hexdigest()[:24]
+    descriptor = -1
+    try:
+        descriptor, raw_path = tempfile.mkstemp(
+            prefix=f"attempt-{digest}-", suffix=".json", dir=directory,
+        )
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            descriptor = -1
+            stream.write("{}\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        return Path(raw_path)
+    except OSError as exc:
+        raise DispatchError(
+            _private_diagnostic(config, "private outcome file could not be allocated")
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def read_outcome_file(config: RuntimeConfig, path: Path) -> Mapping[str, Any]:
+    """Read one owned, regular, bounded JSON object without following symlinks."""
+
+    directory = _outcome_directory(config)
+    candidate = path.expanduser()
+    if not candidate.is_absolute():
+        candidate = Path.cwd() / candidate
+    try:
+        if candidate.parent.resolve(strict=True) != directory.resolve(strict=True):
+            raise ValueError("outcome file is not a direct child of the state directory")
+    except (OSError, ValueError) as exc:
+        raise DispatchError(
+            _private_diagnostic(config, "outcome file is outside the private state directory")
+        ) from exc
+
+    descriptor = -1
+    try:
+        before = candidate.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            raise DispatchError("outcome file must be a regular file, not a symlink")
+        if before.st_uid != os.getuid():
+            raise DispatchError("outcome file must be owned by the current user")
+        if stat.S_IMODE(before.st_mode) != 0o600:
+            raise DispatchError("outcome file must have mode 0600")
+        if before.st_size > _OUTCOME_FILE_LIMIT:
+            raise DispatchError(f"outcome file exceeds {_OUTCOME_FILE_LIMIT} bytes")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(candidate, flags)
+        opened = os.fstat(descriptor)
+        if (
+            opened.st_dev != before.st_dev
+            or opened.st_ino != before.st_ino
+            or not stat.S_ISREG(opened.st_mode)
+            or opened.st_uid != os.getuid()
+            or stat.S_IMODE(opened.st_mode) != 0o600
+        ):
+            raise DispatchError("outcome file identity changed while opening")
+        payload = os.read(descriptor, _OUTCOME_FILE_LIMIT + 1)
+        if len(payload) > _OUTCOME_FILE_LIMIT:
+            raise DispatchError(f"outcome file exceeds {_OUTCOME_FILE_LIMIT} bytes")
+        value = _strict_json_loads(payload.decode("utf-8"))
+        if not isinstance(value, Mapping):
+            raise DispatchError("outcome file must contain one JSON object")
+        return value
+    except DispatchError as exc:
+        raise DispatchError(_private_diagnostic(config, exc)) from exc
+    except (OSError, UnicodeError, json.JSONDecodeError, _DuplicateJSONKey) as exc:
+        raise DispatchError(
+            _private_diagnostic(config, "outcome file is not readable JSON")
+        ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def remove_outcome_file(path: Path) -> None:
+    """Remove only the already-validated attempt staging path."""
+
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def _sanitize_mcp_value(value: Any, label: str) -> Any:
@@ -699,8 +989,8 @@ def _completed_router_result(
     stderr = completed.stderr.decode("utf-8", errors="replace") \
         if isinstance(completed.stderr, bytes) else str(completed.stderr or "")
     try:
-        value = json.loads(stdout)
-    except json.JSONDecodeError as exc:
+        value = _strict_json_loads(stdout)
+    except (json.JSONDecodeError, _DuplicateJSONKey) as exc:
         if completed.returncode != 0:
             detail = next(
                 (line for line in reversed(stderr.splitlines() + stdout.splitlines()) if line.strip()),
@@ -840,8 +1130,8 @@ def _call_router(
         return _completed_router_result(result, config=config, adapter=adapter, phase=phase)
     if isinstance(result, str):
         try:
-            result = json.loads(result)
-        except json.JSONDecodeError as exc:
+            result = _strict_json_loads(result)
+        except (json.JSONDecodeError, _DuplicateJSONKey) as exc:
             raise _phase_uncertainty(
                 phase, "agent-router returned successful non-JSON output; launch state is unknown"
             ) from exc
@@ -934,6 +1224,7 @@ def dispatch(
     activation_call: Callable[[str, str], Any] | None = None,
     telemetry_call: Callable[[list[str], dict[str, Any]], Any] | None = None,
     trigger: str = "manual",
+    now_epoch: int | None = None,
 ) -> DispatchResult:
     """Classify if requested, claim, activate, and launch through agent-router once.
 
@@ -948,9 +1239,13 @@ def dispatch(
         raise InvalidRoute(f"unknown task: {task_id}")
     if trigger not in {"manual", "bonus", "scheduled"}:
         raise InvalidRoute("invalid run trigger")
-    readiness = queue.readiness(task_id)
+    readiness = queue.readiness(task_id, now_epoch=now_epoch)
     if not readiness["ready"]:
         raise AlreadyClaimed(readiness["reason"])
+    try:
+        selected_dependency_base = queue.dependency_base(task_id)
+    except QueueError as exc:
+        raise DispatchError(str(exc)) from exc
     if requested_provider == "auto":
         if not config.providers:
             raise InvalidRoute("auto classification requires at least one provider")
@@ -981,13 +1276,16 @@ def dispatch(
         ),
     )
     account_id = account.id if account else None
-    if not queue.claim(
+    attempt = queue.claim(
         task.id, eligibility_key, provider.id, account_id,
         provider_capabilities=provider.capabilities, automatic=trigger == "bonus", expected_task=task,
-    ):
+        now_epoch=now_epoch,
+    )
+    if attempt is None:
         raise AlreadyClaimed(f"task is no longer eligible: {task.id}")
 
     activated = False
+    outcome_path: Path | None = None
     lease_managed = bool(
         account is not None
         and account.activation_adapter_id is not None
@@ -997,7 +1295,53 @@ def dispatch(
     def release_lease() -> None:
         _activation(config, account, "release", None)
 
+    def abort_known_nonlaunch(reason: str) -> None:
+        release_activation: Callable[[], None] | None = None
+        if activated:
+            if lease_managed:
+                release_activation = release_lease
+            elif activation_call is not None:
+                # Injected callbacks have no durable activation lease for QueueDB
+                # to inspect. Prove their cleanup before releasing the exact claim;
+                # a failed cleanup retains ambiguous ownership.
+                try:
+                    _activation(config, account, "release", activation_call)
+                except Exception as cleanup_exc:
+                    queue.mark_attempt_ambiguous(
+                        task.id,
+                        eligibility_key,
+                        attempt.id,
+                        "known-not-launched activation cleanup requires reconciliation: "
+                        f"{str(cleanup_exc)[:500]}",
+                    )
+                    raise AmbiguousDispatch(
+                        "launch did not occur, but account activation cleanup requires reconciliation"
+                    ) from cleanup_exc
+        try:
+            changed = queue.abort_unlaunched_attempt(
+                task.id,
+                eligibility_key,
+                attempt.id,
+                reason,
+                release_activation=release_activation,
+            )
+            if not changed and queue.claim_for(task.id, eligibility_key) is not None:
+                raise QueueError("exact attempt could not be aborted")
+        except Exception as cleanup_exc:
+            queue.mark_attempt_ambiguous(
+                task.id,
+                eligibility_key,
+                attempt.id,
+                f"known-not-launched cleanup requires reconciliation: {str(cleanup_exc)[:500]}",
+            )
+            raise AmbiguousDispatch(
+                "launch did not occur, but cleanup requires reconciliation"
+            ) from cleanup_exc
+        if outcome_path is not None:
+            remove_outcome_file(outcome_path)
+
     try:
+        outcome_path = materialize_outcome_file(config, attempt.id)
         if lease_managed:
             assert account is not None
             try:
@@ -1007,34 +1351,81 @@ def dispatch(
                     provider.id,
                     account.id,
                     lambda: _activation(config, account, "activate", None),
+                    attempt_id=attempt.id,
                 )
             except Exception as exc:
                 incomplete = any(
                     lease.task_id == task.id and lease.eligibility_key == eligibility_key
                     for lease in queue.activation_leases(provider_id=provider.id)
                 )
-                if incomplete and _PROVEN_UNSWITCHED_ACTIVATION in str(exc):
+                assert account.activation_adapter_id is not None
+                if incomplete and _trusted_unswitched_activation(
+                    exc, account.activation_adapter_id,
+                ):
                     # The adapter verified the active account never moved and rolled
                     # the pin back. That is known-not-launched, not post-launch
                     # ambiguity; dropping the unproven lease unblocks the provider.
                     if queue.abandon_unproven_activation(task.id, eligibility_key):
-                        raise ActivationUnavailable(str(exc)) from exc
+                        raise ActivationUnavailable(
+                            str(exc), known_not_switched=True,
+                        ) from exc
                 if incomplete:
-                    queue.mark_ambiguous(
-                        task.id, eligibility_key,
-                        detail=f"account activation requires reconciliation: {str(exc)[:500]}",
+                    queue.mark_attempt_ambiguous(
+                        task.id, eligibility_key, attempt.id,
+                        f"account activation requires reconciliation: {str(exc)[:500]}",
                     )
                     raise AmbiguousDispatch(
                         "account activation outcome is incomplete and requires reconciliation"
                     ) from exc
-                raise ActivationUnavailable(str(exc)) from exc
+                raise ActivationUnavailable(
+                    str(exc), known_not_switched=True,
+                ) from exc
             activated = True
         else:
-            _activation(config, account, "activate", activation_call)
+            try:
+                _activation(config, account, "activate", activation_call)
+            except Exception as exc:
+                if (
+                    isinstance(exc, ActivationUnavailable)
+                    and exc.known_not_switched
+                ):
+                    raise ActivationUnavailable(
+                        str(exc), known_not_switched=True,
+                    ) from exc
+                queue.mark_attempt_ambiguous(
+                    task.id,
+                    eligibility_key,
+                    attempt.id,
+                    f"account activation requires reconciliation: {str(exc)[:500]}",
+                )
+                raise AmbiguousDispatch(
+                    "account activation outcome is incomplete and requires reconciliation"
+                ) from exc
             activated = account is not None and activation_call is not None
+        try:
+            rechecked_dependency_base = queue.dependency_base(task.id)
+        except QueueError as exc:
+            raise KnownDispatchFailure(str(exc)) from exc
+        if rechecked_dependency_base != selected_dependency_base:
+            raise KnownDispatchFailure(
+                "dependency base changed after claim; refusing the router launch"
+            )
         factory_run_id = new_factory_run_id(task) if task.use_implement else None
         prompt = render_prompt(
-            config, task, eligibility_key, provider.id, account_id, factory_run_id,
+            config,
+            task,
+            eligibility_key,
+            provider.id,
+            account_id,
+            factory_run_id,
+            attempt=attempt,
+            outcome_path=outcome_path,
+            dependency_base=rechecked_dependency_base,
+            recovery=(
+                readiness.get("recovery")
+                if isinstance(readiness.get("recovery"), Mapping)
+                else None
+            ),
         )
         launch_argv = list(adapter.argv) + [
             "run", "--provider", provider.dispatch.provider, "--dir", task.cwd,
@@ -1055,7 +1446,8 @@ def dispatch(
             raise AmbiguousDispatch("agent-router response did not contain a job identity")
         try:
             queue.record(
-                task.id, eligibility_key, status="dispatched", provider_id=provider.id,
+                task.id, eligibility_key, attempt_id=attempt.id,
+                status="dispatched", provider_id=provider.id,
                 account_id=account_id, router_job_id=job_id, trigger=trigger,
             )
         except Exception as exc:
@@ -1064,13 +1456,18 @@ def dispatch(
             # After the queue's own dispatched record so a telemetry problem can never
             # leave the claim in a state that looks unlaunched.
             record_factory_run(
-                task, provider, factory_run_id, response.get("log_id"), telemetry_call,
+                task,
+                provider,
+                factory_run_id,
+                response.get("log_id"),
+                telemetry_call,
+                attempt.id,
             )
         if account is not None and account.activation_scope == "launch" and activated:
             try:
                 if lease_managed:
                     queue.release_activation_after_dispatch(
-                        task.id, eligibility_key, release_lease,
+                        task.id, eligibility_key, release_lease, attempt_id=attempt.id,
                     )
                 else:
                     _activation(config, account, "release", activation_call)
@@ -1080,12 +1477,22 @@ def dispatch(
                     "router launched but launch-scoped activation cleanup requires reconciliation"
                 ) from exc
         return DispatchResult(
-            task.id, eligibility_key, provider.id, account_id, job_id, prompt, factory_run_id,
+            task_id=task.id,
+            eligibility_key=eligibility_key,
+            provider_id=provider.id,
+            account_id=account_id,
+            job_id=job_id,
+            prompt=prompt,
+            factory_run_id=factory_run_id,
+            attempt_id=attempt.id,
+            dependency_base=rechecked_dependency_base,
         )
     except AmbiguousDispatch as exc:
         claim = queue.claim_for(task.id, eligibility_key)
-        if claim is not None and claim.state == "claimed":
-            queue.mark_ambiguous(task.id, eligibility_key, detail=str(exc))
+        if claim is not None and claim.attempt_id == attempt.id:
+            queue.mark_attempt_ambiguous(
+                task.id, eligibility_key, attempt.id, str(exc),
+            )
         # Runtime adapter leases remain durable after an ambiguous launch: the task stays
         # non-dispatchable and the active account cannot be switched out from under a job that
         # may exist. Injected test/operator callbacks retain their historical eager release.
@@ -1095,46 +1502,11 @@ def dispatch(
             except Exception:
                 pass
         raise
-    except ActivationUnavailable:
-        queue.release_claim(task.id, eligibility_key, reason="activation unavailable")
+    except ActivationUnavailable as exc:
+        abort_known_nonlaunch(f"activation unavailable: {str(exc)[:500]}")
         raise
     except Exception as exc:
-        if activation_call is not None and activated:
-            try:
-                _activation(config, account, "release", activation_call)
-            except Exception as release_exc:
-                queue.mark_ambiguous(
-                    task.id, eligibility_key,
-                    detail=f"known-not-launched activation cleanup failed: {str(release_exc)[:500]}",
-                )
-                raise AmbiguousDispatch(
-                    "launch did not occur, but account activation cleanup requires reconciliation"
-                ) from release_exc
-        try:
-            if lease_managed and activated:
-                queue.record(
-                    task.id, eligibility_key, status="failed", provider_id=provider.id,
-                    account_id=account_id, summary=f"known not launched: {str(exc)[:500]}",
-                    release_activation=release_lease,
-                )
-                # A positively non-launched attempt is retry-safe. Requeue removes the
-                # temporary failed terminal event after its durable activation cleanup.
-                queue.requeue(task.id, eligibility_key)
-            else:
-                queue.release_claim(task.id, eligibility_key, reason="known launch failure")
-        except Exception as cleanup_exc:
-            claim = queue.claim_for(task.id, eligibility_key)
-            if claim is not None and claim.state == "claimed":
-                queue.mark_ambiguous(
-                    task.id, eligibility_key,
-                    detail=f"known-not-launched cleanup requires reconciliation: {str(cleanup_exc)[:500]}",
-                )
-                raise AmbiguousDispatch(
-                    "launch did not occur, but cleanup requires reconciliation"
-                ) from cleanup_exc
-            raise DispatchError(
-                "launch did not occur, but retry eligibility could not be restored"
-            ) from cleanup_exc
+        abort_known_nonlaunch(f"known launch failure: {str(exc)[:500]}")
         raise KnownDispatchFailure(str(exc)) from exc
 
 
@@ -1147,6 +1519,7 @@ def dispatch_batch(
     provider_id: str,
     router_call: Callable[..., Any] | None = None,
     activation_call: Callable[[str, str], Any] | None = None,
+    now_epoch: int | None = None,
 ) -> tuple[DispatchResult, ...]:
     results: list[DispatchResult] = []
     for task_id in task_ids:
@@ -1155,6 +1528,7 @@ def dispatch_batch(
                 config, queue, task_id=task_id, eligibility_key=eligibility_key,
                 requested_provider=provider_id, router_call=router_call,
                 activation_call=activation_call,
+                now_epoch=now_epoch,
             ))
         except (AlreadyClaimed, KnownDispatchFailure):
             continue

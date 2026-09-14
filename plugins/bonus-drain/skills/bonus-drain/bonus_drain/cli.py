@@ -98,6 +98,26 @@ def _queue(args: argparse.Namespace, *, graph_required: bool = False) -> tuple[c
     return cfg, queue
 
 
+def _terminal_queue(args: argparse.Namespace) -> tuple[config_module.RuntimeConfig, db.QueueDB]:
+    """Bind terminal commands to a supplied config's authoritative database."""
+
+    explicit_config = bool(
+        getattr(args, "config", None) or os.environ.get("BONUS_DRAIN_CONFIG")
+    )
+    return _queue(args, graph_required=explicit_config)
+
+
+def _outcome(args: argparse.Namespace, cfg: config_module.RuntimeConfig) -> tuple[Mapping[str, Any] | None, Path | None]:
+    raw = getattr(args, "outcome_file", None)
+    if raw is None:
+        return None, None
+    path = Path(raw)
+    try:
+        return dispatcher.read_outcome_file(cfg, path), path
+    except dispatcher.DispatchError as exc:
+        raise CLIError(str(exc)) from exc
+
+
 def _tick(args: argparse.Namespace) -> tuple[config_module.RuntimeConfig, db.QueueDB, scout.TickPlan]:
     cfg, queue = _queue(args, graph_required=True)
     queue.initialize()
@@ -242,12 +262,15 @@ def _command(args: argparse.Namespace) -> int:
         _json([task.legacy_contract_dict() for task in queue.contract_tasks(args.id, args.title)])
         return 0
     if command == "record":
-        cfg, queue = _queue(args)
+        cfg, queue = _terminal_queue(args)
         if args.eligibility_key is None and args.cycle is None:
             raise CLIError("record requires --eligibility-key or --cycle")
         key = args.eligibility_key or f"legacy/{args.cycle}"
         claim = queue.claim_for(args.task, key)
-        account_id = args.account_id or (claim.account_id if claim else None)
+        exact_claim = claim is not None and (
+            args.attempt_id is None or claim.attempt_id == args.attempt_id
+        )
+        account_id = args.account_id or (claim.account_id if exact_claim else None)
         release_activation = None
         if args.status in db.TERMINAL_STATUSES and account_id:
             try:
@@ -258,13 +281,33 @@ def _command(args: argparse.Namespace) -> int:
                 release_activation = lambda: dispatcher._activation(
                     cfg, account, "release", None,
                 )
+        outcome, outcome_path = _outcome(args, cfg)
         event = queue.record(
-            args.task, key, status=args.status, provider_id=args.provider_id or args.engine,
+            args.task, key, attempt_id=args.attempt_id, status=args.status,
+            outcome=outcome, provider_id=args.provider_id or args.engine,
             account_id=account_id, kind=args.kind, cycle=args.cycle, ts=args.ts,
             branch=args.branch, summary=args.summary, router_job_id=args.router_job_id,
             release_activation=release_activation,
         )
+        if outcome_path is not None and args.status == "done":
+            dispatcher.remove_outcome_file(outcome_path)
         _json({"run": event.to_dict()}) if args.json else print(f"recorded: {args.task} {args.status}")
+        return 0
+    if command == "recover-complete":
+        cfg, queue = _terminal_queue(args)
+        outcome, outcome_path = _outcome(args, cfg)
+        assert outcome is not None and outcome_path is not None
+        event = queue.recover_complete(
+            args.task,
+            expected_attempt_id=args.from_attempt,
+            expected_legacy_run_rowid=args.from_legacy_run_rowid,
+            outcome=outcome,
+            summary=args.summary,
+        )
+        dispatcher.remove_outcome_file(outcome_path)
+        _json({"run": event.to_dict()}) if args.json else print(
+            f"recorded recovered completion: {args.task}"
+        )
         return 0
     if command == "inflight":
         _cfg, queue = _queue(args)
@@ -288,14 +331,16 @@ def _command(args: argparse.Namespace) -> int:
     if command in {"queue", "queue-status"}:
         cfg, queue = _queue(args)
         cycle = args.cycle or 0
+        now = _now(args)
         if command == "queue" or args.json:
-            snapshot = queue.snapshot(cycle=cycle, run_limit=args.run_limit)
+            snapshot = queue.snapshot(cycle=cycle, run_limit=args.run_limit, now_epoch=now)
             # `pick` has a historical shape that cannot express explicit provider
             # allowlists. Expose the graph-backed eligibility the scout actually uses.
             eligible_ids_by_provider = {
                 provider.id: {
                     task.id for task in queue.eligible_tasks(
                         cycle, provider_id=provider.id, capabilities=provider.capabilities,
+                        now_epoch=now,
                     )
                 }
                 for provider in cfg.providers
@@ -324,7 +369,10 @@ def _command(args: argparse.Namespace) -> int:
                 ]
                 for task in tasks_by_id.values()
             }
-            snapshot["readiness"] = {task.id: queue.readiness(task.id) for task in tasks_by_id.values()}
+            snapshot["readiness"] = {
+                task.id: queue.readiness(task.id, now_epoch=now)
+                for task in tasks_by_id.values()
+            }
             _json(snapshot)
         else:
             _human_queue_status(queue, cycle)
@@ -343,13 +391,32 @@ def _command(args: argparse.Namespace) -> int:
         return 0
     if command == "readiness":
         _cfg, queue = _queue(args)
-        _json(queue.readiness(args.task))
+        _json(queue.readiness(args.task, now_epoch=_now(args)))
         return 0
     if command == "requeue":
         _cfg, queue = _queue(args)
-        changed = queue.requeue(args.task, args.eligibility_key)
-        _json({"ok": True, "changed": changed, "task": args.task}) if args.json else print(f"requeued: {args.task}")
-        return 0
+        decision = queue.requeue(
+            args.task,
+            args.eligibility_key,
+            attempt_id=args.attempt_id,
+            mode=args.mode,
+            now_epoch=_now(args),
+        )
+        accepted = decision.state in {"scheduled", "backoff"}
+        message = (
+            f"recovery {decision.state}: {args.task}"
+            if accepted
+            else str(decision.detail or decision.reason_code or f"recovery {decision.state}")
+        )
+        payload = {
+            "ok": accepted,
+            "changed": accepted,
+            "message": message,
+            "task": args.task,
+            "recovery": decision,
+        }
+        _json(payload) if args.json else print(message)
+        return 0 if accepted else 1
     if command == "set-priority":
         _cfg, queue = _queue(args)
         queue.set_priority(args.task, args.priority)
@@ -678,7 +745,7 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--model"); add.add_argument("--mcp"); add.add_argument("--use-implement", type=int, default=0)
     add.add_argument("--source-ref"); add.add_argument("--work-group"); add.add_argument("--depends-on")
     edit = sub.add_parser("edit"); _add_common(edit); _add_json(edit); edit.add_argument("task"); edit.add_argument("--changes", required=True)
-    ready = sub.add_parser("readiness"); _add_common(ready); _add_json(ready); ready.add_argument("task")
+    ready = sub.add_parser("readiness"); _add_common(ready); _add_json(ready); ready.add_argument("task"); ready.add_argument("--now", type=int)
     add.add_argument("--providers"); add.add_argument("--capabilities")
 
     for name in ("eligible", "count-eligible"):
@@ -692,14 +759,23 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--eligibility-key"); record.add_argument("--cycle", type=int)
     record.add_argument("--status", choices=sorted(db.VALID_STATUSES), required=True)
     record.add_argument("--provider-id"); record.add_argument("--engine"); record.add_argument("--account-id")
+    record.add_argument("--attempt-id"); record.add_argument("--outcome-file")
     record.add_argument("--router-job-id"); record.add_argument("--ts"); record.add_argument("--branch"); record.add_argument("--summary")
+
+    recovered = sub.add_parser("recover-complete"); _add_common(recovered); _add_json(recovered)
+    recovered.add_argument("--task", required=True)
+    source = recovered.add_mutually_exclusive_group(required=True)
+    source.add_argument("--from-attempt")
+    source.add_argument("--from-legacy-run-rowid", type=int)
+    recovered.add_argument("--outcome-file", required=True)
+    recovered.add_argument("--summary", required=True)
 
     inflight = sub.add_parser("inflight"); _add_common(inflight); _add_json(inflight)
     inflight.add_argument("--provider"); inflight.add_argument("--claude", action="store_true"); inflight.add_argument("--codex", action="store_true"); inflight.add_argument("--now", type=int)
     for name in ("queue", "queue-status"):
-        item = sub.add_parser(name); _add_common(item); _add_json(item); item.add_argument("cycle", type=int, nargs="?"); item.add_argument("--run-limit", type=int, default=50)
+        item = sub.add_parser(name); _add_common(item); _add_json(item); item.add_argument("cycle", type=int, nargs="?"); item.add_argument("--run-limit", type=int, default=50); item.add_argument("--now", type=int)
     runs = sub.add_parser("runs"); _add_common(runs); _add_json(runs); runs.add_argument("--limit", type=int, default=50); runs.add_argument("--task")
-    requeue = sub.add_parser("requeue"); _add_common(requeue); _add_json(requeue); requeue.add_argument("task"); requeue.add_argument("--eligibility-key")
+    requeue = sub.add_parser("requeue"); _add_common(requeue); _add_json(requeue); requeue.add_argument("task"); requeue.add_argument("--eligibility-key"); requeue.add_argument("--attempt-id"); requeue.add_argument("--mode", choices=("retry", "verification")); requeue.add_argument("--now", type=int)
     priority = sub.add_parser("set-priority"); _add_common(priority); priority.add_argument("task"); priority.add_argument("priority", type=int)
     size = sub.add_parser("set-size"); _add_common(size); _add_json(size); size.add_argument("task"); size.add_argument("size", choices=db.TASK_SIZES); size.add_argument("--cycle", type=int, required=True)
     model = sub.add_parser("set-model"); _add_common(model); model.add_argument("task"); model.add_argument("model", nargs="?")

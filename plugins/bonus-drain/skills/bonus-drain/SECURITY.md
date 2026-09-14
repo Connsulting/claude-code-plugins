@@ -49,11 +49,30 @@ percentage is unknown capacity. File secret references are opened without follow
 and must be current-user-owned mode-0600 regular files no larger than 65536 bytes; diagnostics
 report only validity, never content.
 
-Claims are made transactionally before routing. A known launch failure releases the claim;
-a terminal record closes it; requeue removes the matching terminal rows and claim in one
-transaction. An ambiguous router response or timeout keeps both the claim and runtime account
-lease closed to prevent a duplicate or account switch. `doctor` reports the reconciliation
-requirement.
+Claims are made transactionally before routing and carry an immutable attempt ID. A terminal
+record may close only the exact matching attempt, claim, and activation ownership; a late or
+mismatched attempt cannot release a successor. A proved-not-launched failure retains an `aborted`
+attempt and releases only its matching ownership. An ambiguous router response or timeout retains
+the exact attempt, claim, and runtime account lease to prevent a duplicate or account switch.
+Ordinary requeue schedules recovery without deleting terminal rows or attempts, and managed goal
+tasks remain protected by their public requeue guard. `doctor` reports reconciliation requirements.
+Authority-required, permanent, unknown-launch, and no-progress recovery holds cannot trigger a
+silent retry. Further work requires a fresh, explicit follow-up task under reviewed policy and
+authority; the retained hold is not converted through the existing edit path.
+
+Structured outcome files live beneath the configured private state directory and are accepted
+only as current-user-owned, non-symlink, mode-0600 bounded JSON objects. New `done` outcomes require
+reason code `done_when_verified`, `completion.verified: true`, a mechanism of `command`, `artifact`,
+`operator_receipt`, or `goal_acceptance`, and nonempty bounded evidence. Repository and PR fields
+cannot grant completion or external authority. Same-thread completion uses the exact stable package
+CLI command embedded in the original prompt, creates no claim or router launch, and compare-and-swap
+refuses changed contracts, ambiguous ownership, and active or queued successors. It may append the
+verified attempt without a preexisting recovery projection; when one exists, only the exact match
+is consumed.
+
+`requeue --now`, `dispatch --now`, and `scout --now` are trusted operator inputs. Worker-facing
+`record` and `recover-complete` take their receipt and admission clocks from the service, so worker
+timestamps remain historical evidence and cannot shorten recovery backoff or bypass admission.
 
 ## Viewer defaults
 

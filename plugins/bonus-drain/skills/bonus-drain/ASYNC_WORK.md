@@ -22,6 +22,16 @@ The graph can branch and join. A child becomes ready only when **every prerequis
 Failed and skipped prerequisites leave it waiting; they do not launch a child or mark it failed.
 A waiting child creates no run, consumes no claim, and does not call the router.
 
+Failed and skipped attempts remain attached to the original task ID. When such a one-off blocks
+active dependent work, the automatic scout may schedule at most two recovery attempts: the first
+after 5 minutes and the second after 30 minutes. A legacy or unstructured failure is verified
+before it can be retried as successful. Recovery stops early when the normalized reason repeats.
+Unknown launch ownership, missing authority, unavailable repository identity, and ambiguous or
+divergent dependency state remain held; none is interpreted as success.
+Authority-required, permanent, unknown-launch, and no-progress recovery holds never retry
+silently. Continuing that work requires a fresh, explicit follow-up task under reviewed policy
+and authority; requeue or edit does not reinterpret the retained hold.
+
 Prerequisites must be existing one-off tasks. Children may be one-off or recurring; a recurring
 child uses those completed one-off prerequisites for each recurrence. Recurring prerequisites
 are deliberately rejected until an explicit rule exists for which occurrence satisfies a child.
@@ -32,6 +42,34 @@ tick; completion does not launch a cascade.
 Use task dependencies for workflow ordering. The task's textual precondition still describes
 external checks performed by the runner. If a runner discovers its precondition is false, it
 records skipped under the existing lifecycle contract.
+
+Each claimed launch receives a new immutable attempt ID. The dispatched prompt contains the exact
+terminal command and protected outcome-evidence path bound to that attempt. A new `done` event
+requires reason code `done_when_verified`, `completion.verified: true`, a supported completion
+mechanism (`command`, `artifact`, `operator_receipt`, or `goal_acceptance`), and nonempty evidence
+that verifies done-when; a branch or PR alone does not qualify. Failed and skipped outcomes use
+one of `retryable`, `verification_needed`, `authority_required`, `permanent`, or `unknown_launch`
+with nonempty detail and a stable non-secret signature. Terminal
+replay is idempotent only for the same attempt, and an old attempt cannot release a newer claim.
+Failed, skipped, ambiguous, and proved-not-launched aborted attempts remain in history.
+
+If the user continues the same failed/skipped worker thread with “try harder” and the work then
+meets done-when, the worker keeps the original task ID, writes the required verified evidence, and
+runs the exact stable package CLI `recover-complete` command already embedded in its prompt before
+replying. That command is separate from the configurable terminal-record adapter, which may not
+support recovery. It appends a verification attempt without a new claim or router launch and works
+even when no recovery projection has been scheduled; when one exists, it consumes only the exact
+matching projection. It refuses changed contracts, ambiguous ownership, or an already queued or
+active successor; the worker then keeps its evidence for that successor instead of recording over
+it.
+
+Repository-producing completion includes the exact remote, target ref, prior target base, branch,
+and head. A child starts from the current exact target only when ancestry and content prove the
+parent is present; squash merges use content equivalence because parent-head ancestry alone cannot
+prove them. Otherwise an explicitly unmerged parent supplies its verified head. Missing or
+conflicting identity holds dispatch. For multiple parents, one compatible descendant may contain
+all heads; divergent heads require an explicitly authorized integration task. The queue does not
+merge branches or add push, PR, deployment, or other external authority.
 
 ## Thread handoff and editing
 
@@ -52,11 +90,18 @@ references become links in the viewer; other references are displayed as text.
 Editing allows title, priority, size, cwd, goal, context, constraints, precondition, done_when,
 source_ref, work_group, and depends_on. Active claims and already-run one-off
 contracts cannot be edited. For ordinary tasks outside managed goals, a failed/skipped
-task must first be explicitly requeued; that operation removes its matching run history.
-Goal-owned jobs retain all attempts and reject requeue: create a fresh follow-up with
-the failure evidence instead. Coordinator and acceptance execution contracts are frozen;
-only their priority, size and active controls remain editable. See [GOALS.md](GOALS.md)
-for replacing an obsolete, unlaunched verifier without changing its proof subject.
+task must first be explicitly requeued; that schedules an operator recovery and preserves every
+prior attempt. Its contract can then be edited only before that exact recovery is claimed.
+Goal-owned jobs retain all attempts and continue to reject public requeue. The goal runtime may
+internally admit recovery for implementation or integration work without bypassing its authority,
+deadline, concurrency, operation, or frozen-candidate checks. Coordinator and acceptance execution
+contracts stay frozen and use the documented fresh follow-up flows; only their priority, size and
+active controls remain editable. See [GOALS.md](GOALS.md) for replacing an obsolete, unlaunched
+verifier without changing its proof subject.
+
+The `--now` clocks on `requeue`, `dispatch`, and `scout` are trusted operator controls. Worker-facing
+`record` and `recover-complete` use server receipt and admission time instead. A worker-supplied
+historical run timestamp does not choose the recovery backoff clock.
 Use a work group only when it forms a useful cross-task cluster, and keep its name to 15
 characters or fewer so the queue filter stays compact. Use title case; the soak-observation
 group is `Soak Obs`.
@@ -64,8 +109,9 @@ group is `Soak Obs`.
 The viewer shows readiness, work group, source reference, and prerequisite progress, with
 filters for each workflow facet. Rotation and provider usage remain visible above the queue.
 Task contracts are edited through planning threads and the CLI; the viewer has no job editor. Actual new
-launches record explicit or automatic provenance; terminal events inherit it. Old rows remain
-origin unknown. The scheduled value is reserved for future queue-backed timer integration.
+launches record explicit or automatic provenance plus their attempt identity; terminal events and
+structured outcome evidence inherit it. Old rows remain origin unknown. The scheduled value is
+reserved for future queue-backed timer integration.
 
 ## Calendar scheduling
 

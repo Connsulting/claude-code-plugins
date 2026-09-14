@@ -14,6 +14,15 @@ from dataclasses import replace
 from tests import test_bonus_drain_kick as kick_tests
 
 
+def verified_outcome():
+    return {
+        'reason': {'code': 'done_when_verified', 'detail': 'fixture proof',
+                   'signature': 'done_when_verified:async-work-fixture'},
+        'completion': {'verified': True, 'mechanism': 'command',
+                       'evidence': ['fixture://async-work']},
+    }
+
+
 class AsyncWorkTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -25,7 +34,19 @@ class AsyncWorkTests(unittest.TestCase):
         return self.queue.add_task(dict(id=task_id, title=task_id, cwd='/tmp', goal='proof', **values))
 
     def finish(self, task_id, status='done'):
-        return self.queue.record(task_id, 'account/manual/2000000000', status=status, provider_id='alpha')
+        key = 'account/manual/2000000000'
+        claim = self.queue.claim_for(task_id, key)
+        attempt_id = claim.attempt_id if claim else None
+        if status == 'done' and attempt_id is None:
+            attempt = self.queue.claim(task_id, key, 'alpha', 'account')
+            self.assertIsNotNone(attempt)
+            attempt_id = attempt.id
+        kwargs = {'attempt_id': attempt_id} if attempt_id is not None else {}
+        if status == 'done':
+            kwargs['outcome'] = verified_outcome()
+        return self.queue.record(
+            task_id, key, status=status, provider_id='alpha', **kwargs,
+        )
 
     def test_every_ready_task_is_eligible_for_automatic_capacity(self):
         self.assertEqual(self.queue.count_eligible(0, automatic=True), 1)
@@ -98,7 +119,12 @@ class AsyncWorkTests(unittest.TestCase):
             self.add('long-group', work_group='Curie v0.8.7 hardening')
 
     def test_run_trigger_propagates_to_terminal_and_legacy_stays_unknown(self):
-        self.queue.record('a', 'account/manual/2000000000', status='dispatched', provider_id='alpha', trigger='manual')
+        attempt = self.queue.claim('a', 'account/manual/2000000000', 'alpha', 'account')
+        self.assertIsNotNone(attempt)
+        self.queue.record(
+            'a', 'account/manual/2000000000', attempt_id=attempt.id,
+            status='dispatched', provider_id='alpha', trigger='manual',
+        )
         self.assertEqual(self.finish('a').trigger, 'manual')
         self.add('old')
         self.assertIsNone(self.finish('old').trigger)

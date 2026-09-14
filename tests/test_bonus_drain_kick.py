@@ -177,9 +177,10 @@ class KickContractTests(unittest.TestCase):
         self.assertEqual(activation_events, [("activate", "alpha-account")])
         self.assertEqual(len(seen_argv), 1)
         argv = seen_argv[0]
-        self.assertEqual(argv[0], str(self.root / "bin" / "agent-router"))
+        self.assertEqual(argv[:2], [str(self.root / "bin" / "agent-router"), "run"])
+        self.assertEqual(argv[argv.index("--provider") + 1], "alpha-engine")
         self.assertNotIn("--dry-run", argv)
-        flattened = "\0".join(argv).lower()
+        flattened = "\0".join([Path(argv[0]).name, *argv[1:-1]]).lower()
         for forbidden in ("run-now.sh", "/bash", "claude", "codex", "grok", "account-switch"):
             self.assertNotIn(forbidden, flattened)
 
@@ -253,7 +254,18 @@ class KickContractTests(unittest.TestCase):
         self.queue.record(
             "portable",
             "manual/launch-scope",
+            attempt_id=result.attempt_id,
             status="done",
+            outcome={
+                "reason": {
+                    "code": "done_when_verified", "detail": "fixture proof",
+                    "signature": "done_when_verified:launch-scope",
+                },
+                "completion": {
+                    "verified": True, "mechanism": "command",
+                    "evidence": ["fixture://launch-scope"],
+                },
+            },
             provider_id="alpha",
             account_id="alpha-account",
         )

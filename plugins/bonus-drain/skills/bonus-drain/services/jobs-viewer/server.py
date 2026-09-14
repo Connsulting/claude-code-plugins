@@ -644,7 +644,9 @@ def _remaining_snapshot(cycle: int) -> list[dict] | None:
         readiness = payload.get("readiness", {})
         visible_ids = list(task_ids)
         for task_id, status in readiness.items():
-            if task_id not in visible_ids and status.get("state") in {"ready", "waiting", "cooldown"}:
+            if task_id not in visible_ids and status.get("state") in {
+                "ready", "waiting", "cooldown", "recovering", "backoff", "held", "exhausted",
+            }:
                 visible_ids.append(task_id)
         for task_id in visible_ids:
             task = tasks_by_id.get(task_id)
@@ -659,7 +661,17 @@ def _remaining_snapshot(cycle: int) -> list[dict] | None:
                     task["compatible_providers"] = [str(provider) for provider in raw_compatible]
             task["readiness"] = readiness.get(task_id, {"state": "ready", "ready": True, "reason": "Ready to run manually", "dependencies": []})
             remaining.append(task)
-        remaining.sort(key=lambda task: (task["priority"], task["kind"] == "recurring", task.get("created_at", ""), task["id"]))
+        def recovery_unlocks(task: dict) -> int:
+            recovery = task.get("readiness", {}).get("recovery")
+            if not isinstance(recovery, dict):
+                return 0
+            value = recovery.get("blocked_descendants", 0)
+            return value if isinstance(value, int) else 0
+
+        remaining.sort(key=lambda task: (
+            task["priority"], -recovery_unlocks(task),
+            task["kind"] == "recurring", task.get("created_at", ""), task["id"],
+        ))
         return remaining
     except Exception:
         return None
@@ -700,15 +712,14 @@ def _last_runs() -> dict[str, dict]:
 
 def get_recent_runs(limit: int = 80) -> list[dict]:
     try:
-        with _db() as cx:
-            rows = cx.execute(
-                """SELECT r.ts, r.task, COALESCE(t.title, r.task) AS title, r.kind,
-                          r.status, r.engine, r.cycle, r.summary, r.branch, r.trigger
-                   FROM runs r LEFT JOIN tasks t ON t.id = r.task
-                   ORDER BY r.ts DESC LIMIT ?""",
-                (limit,),
-            ).fetchall()
-            return [dict(r) for r in rows]
+        queue = QueueDB(DB_PATH)
+        titles = {task.id: task.title for task in queue.tasks()}
+        result = []
+        for event in queue.runs(limit=limit):
+            value = event.to_dict()
+            value["title"] = titles.get(event.task, event.task)
+            result.append(value)
+        return result
     except Exception:
         return []
 
@@ -837,21 +848,30 @@ def run_task_now(task_id: str, engine: str) -> tuple[bool, str]:
 
 
 def requeue_task(task_id: str) -> tuple[bool, str]:
-    """Restore the most recent skipped or failed run to the dispatchable queue."""
+    """Schedule the retained failed/skipped source for operator recovery."""
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", task_id):
         return False, "invalid task id"
     try:
         cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
-        changed = QueueDB(
+        decision = QueueDB(
             cfg.database, recurrence_timezone=cfg.recurrence_timezone,
         ).requeue(task_id)
     except QueueError as exc:
         return False, str(exc)[:500] or "could not requeue this job"
     except (graph_config.ConfigError, OSError, ValueError):
         return False, "could not requeue this job"
-    if not changed:
+    if not decision:
         return False, "this job could not be requeued"
-    return True, "requeued"
+    state = getattr(decision, "state", "scheduled")
+    if state not in {"scheduled", "backoff"}:
+        detail = getattr(decision, "detail", None)
+        reason = getattr(decision, "reason_code", None)
+        return False, str(detail or reason or f"recovery {state}")[:500]
+    if state == "backoff":
+        not_before = getattr(decision, "not_before", None)
+        suffix = f" until {not_before}" if not_before else ""
+        return True, f"recovery in backoff{suffix}"
+    return True, "recovery scheduled"
 
 
 # ===========================================================================
@@ -1279,7 +1299,48 @@ def _work_meta(t: dict) -> str:
     dependencies = status.get("dependencies", [])
     edges = "".join(f'<li><span class="dep-dot {"done" if d["satisfied"] else "waiting"}"></span>{esc(d["title"])} <code>{esc(d["id"])}</code> <span class="dimtxt">{esc(d["status"])}</span></li>' for d in dependencies)
     dependency_html = f'<details class="dependencies"><summary>{sum(d["satisfied"] for d in dependencies)}/{len(dependencies)} prerequisites complete</summary><ul>{edges}</ul></details>' if dependencies else ""
-    return f'<div class="work-meta"><span class="work-state {esc(state)}">{esc(state)}</span>{group}{source_html}</div><div class="readiness-reason">{esc(status.get("reason", "Ready to run"))}</div>{dependency_html}'
+    recovery_bits: list[str] = []
+    attempt = status.get("attempt")
+    if isinstance(attempt, dict):
+        ordinal = attempt.get("ordinal")
+        mode = attempt.get("mode")
+        if ordinal is not None:
+            recovery_bits.append(f"attempt {esc(ordinal)}")
+        if mode:
+            recovery_bits.append(esc(mode))
+    recovery = status.get("recovery")
+    if isinstance(recovery, dict):
+        mode = recovery.get("mode")
+        if mode and mode not in recovery_bits:
+            recovery_bits.append(esc(mode))
+        not_before = recovery.get("not_before")
+        if not_before:
+            recovery_bits.append(f"next check {esc(not_before)}")
+        descendants = recovery.get("blocked_descendants")
+        if isinstance(descendants, int):
+            recovery_bits.append(
+                f"{descendants} blocked descendant{'s' if descendants != 1 else ''}"
+            )
+        reason_code = recovery.get("reason_code")
+        if reason_code:
+            recovery_bits.append(esc(reason_code))
+        detail = recovery.get("detail")
+        if detail and detail != status.get("reason"):
+            recovery_bits.append(esc(detail))
+    dependency_base = status.get("dependency_base")
+    if isinstance(dependency_base, dict):
+        base_oid = dependency_base.get("base_oid")
+        branch_ref = dependency_base.get("branch_ref")
+        if base_oid:
+            recovery_bits.append(
+                f"base {esc(str(base_oid)[:12])}"
+                + (f" from {esc(branch_ref)}" if branch_ref else "")
+            )
+    recovery_html = (
+        '<div class="recovery-meta">' + " · ".join(recovery_bits) + "</div>"
+        if recovery_bits else ""
+    )
+    return f'<div class="work-meta"><span class="work-state {esc(state)}">{esc(state)}</span>{group}{source_html}</div><div class="readiness-reason">{esc(status.get("reason", "Ready to run"))}</div>{recovery_html}{dependency_html}'
 
 
 def _run_buttons(t: dict) -> str:
@@ -2290,8 +2351,17 @@ def render_bonus_body() -> str:
                 engine_display = '<span class="lengine dimtxt">—</span>'
             retry = ""
             if r["status"] in {"failed", "skipped"}:
+                projection = r.get("requeue")
+                allowed = not isinstance(projection, dict) or bool(projection.get("allowed"))
+                reason = (
+                    projection.get("reason")
+                    if isinstance(projection, dict)
+                    else "Schedule an operator recovery"
+                )
+                reason = str(reason or "This run cannot be safely requeued")
                 retry = f'''<button class="task-requeue ionly" data-task-id="{esc(r["task"])}"
-                              aria-label="Requeue {esc(r["title"])}" title="Requeue this job"
+                              aria-label="Requeue {esc(r["title"])}" title="{esc(reason)}"
+                              {"" if allowed else "disabled"}
                               >{busy_button(ico("cycle"))}</button>'''
             lrows.append(f"""
           <div class="lg">

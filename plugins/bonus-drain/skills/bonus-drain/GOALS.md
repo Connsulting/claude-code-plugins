@@ -104,7 +104,18 @@ decision or stale revision is rejected. Read state after an uncertain CLI result
 Coordinator and acceptance job execution contracts are frozen and fingerprinted.
 Ordinary queue edits cannot replace their goals, constraints, routing or candidate
 context. Priority, size and active controls remain available without changing the
-proof subject. Goal-owned failure history cannot be erased through `requeue`.
+proof subject. Goal-owned failure history cannot be erased through `requeue`, and public
+requeue continues to reject every managed task.
+
+The goal runtime may internally admit bounded recovery for failed/skipped managed implementation
+or integration members, including members with no queue descendants. The managed role and
+GoalStore admission replace the ordinary active-dependent requirement. Admission keeps the
+original task ID and every attempt, and rechecks goal authority, pause, deadline, concurrency, contract,
+operation, dependency-base, and frozen-candidate guards. At most two automatic attempts are made,
+after 5-minute and 30-minute backoffs; a repeated normalized reason stops early. Unknown launch
+ownership, missing authority, and unavailable or divergent repository state remain held.
+Coordinator and acceptance jobs do not use this recovery path: a coordinator resumes through a
+fresh turn, and acceptance always uses a fresh verifier bound to the exact candidate.
 
 After `advance`, the coordinator records its own queue job `done` using the exact
 terminal command in its dispatch prompt, then ends. A `wait` decision completes
@@ -169,6 +180,14 @@ replacement with the correct immutable candidate through `goal advance`. A skipp
 verifier cannot supply a passing observation. The goal never silently rewrites a
 dependency or treats obsolete verification as successful.
 
+If a user continues the same failed implementation or integration thread and it later proves
+done-when, the worker uses the exact stable package CLI `recover-complete` command embedded in its
+original prompt, not the configurable terminal-record adapter. GoalStore must admit the completion
+against the unchanged contract and exact failed attempt. The command retains the task ID, appends
+verified evidence without a new router launch or claim, and works without a scheduled recovery
+projection; it atomically consumes one when present. It refuses an active or queued successor. It
+refuses coordinator and acceptance completion; use the fresh-turn and fresh-verifier flows above.
+
 ## External operations and recovery
 
 Before a coordinator merge or stack assembly, persist intent with
@@ -184,6 +203,15 @@ immutable and keyed per goal. On lost responses or coordinator failure, inspect
 operations in `goal show` and reconcile the actual effect before retrying. Stack
 goals reject recorded merge operations. The CLI records evidence; it does not itself
 perform Git or GitHub operations. An unresolved operation blocks goal completion.
+
+Repository handoff also binds the exact canonical remote, target ref, prior target base, branch,
+and parent head. A PR or receipt does not by itself prove completion or integration. A normal
+merge must be present in the current exact target by result ancestry and parent-delta content;
+a squash merge requires the same content equivalence because the parent head may not be an
+ancestor. Until then, an explicitly unmerged parent supplies its verified head. One compatible
+descendant may contain all parent heads; divergent heads require an explicitly authorized
+integration member and, where applicable, its immutable operation receipt. The runtime does not
+merge branches or expand the stored authority.
 
 Explicit planning-thread controls use the current revision:
 

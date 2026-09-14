@@ -304,3 +304,26 @@ of runtime removal.
 Every ready task is eligible for Bonus capacity; `run-now` accelerates an individual task.
 Tasks can carry source references, 15-character work groups, and one-off prerequisites.
 See [ASYNC_WORK.md](ASYNC_WORK.md) for the contract and commands.
+
+Every claimed launch receives a unique attempt ID. The prompt's exact record command binds the
+terminal event to that attempt and reads structured outcome evidence from its protected state
+path. `done` requires reason code `done_when_verified`, `completion.verified: true`, one of
+`command`, `artifact`, `operator_receipt`, or `goal_acceptance`, and nonempty evidence that proves
+done-when; branch or PR existence is insufficient.
+Attempts remain visible after failure, skip, ambiguity, or a proved-not-launched abort, so a late
+worker cannot close or release a newer attempt.
+
+Automatic recovery applies only to failed or skipped one-off prerequisites with active dependent
+work. It allows at most two recovery attempts, after 5-minute and 30-minute backoffs, and stops
+early when the normalized failure reason repeats. Unknown launch state, missing authority, and
+unavailable or divergent repository identity stay held. Ordinary requeue schedules an operator
+recovery without deleting history. Goal-managed public requeue remains rejected; the goal runtime
+may admit implementation or integration recovery under its existing guards, while coordinator and
+frozen acceptance failures require fresh follow-up jobs.
+
+A repository-producing success records the exact remote, target, prior target base, branch, and
+head. A child uses the current target only when ancestry plus content evidence proves a normal
+merge, or content equivalence proves a squash. Otherwise it uses the verified unmerged parent head.
+Missing or conflicting identity holds dispatch, and divergent parent heads require an explicitly
+authorized integration job. No recovery or handoff grants merge, push, deployment, or other
+external authority.

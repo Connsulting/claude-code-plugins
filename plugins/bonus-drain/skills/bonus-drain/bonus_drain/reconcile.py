@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .adapters import AdapterError, execute_adapter
@@ -14,6 +15,7 @@ from .dispatcher import DispatchError, _activation
 def reconcile_inflight(
     config: RuntimeConfig, queue: QueueDB, *, dry_run: bool = False,
     activation_call: Callable[[str, str], Any] | None = None,
+    now_epoch: int | None = None,
 ) -> tuple[dict[str, Any], ...]:
     """Reuse router status and the CLI's terminal-record path; never retry a task.
 
@@ -25,9 +27,14 @@ def reconcile_inflight(
     for run in queue.inflight():
         report = {
             "task_id": run.task, "eligibility_key": run.eligibility_key,
-            "router_job_id": run.router_job_id, "action": "held",
+            "router_job_id": run.router_job_id, "attempt_id": run.attempt_id,
+            "action": "held",
         }
         reports.append(report)
+        claim = queue.claim_for(run.task, run.eligibility_key)
+        if claim is not None and claim.state == "ambiguous":
+            report["reason"] = "launch ownership is ambiguous; operator reconciliation required"
+            continue
         if not run.router_job_id or not run.provider_id or not run.eligibility_key:
             report["reason"] = "missing execution identity; operator reconciliation required"
             continue
@@ -80,10 +87,25 @@ def reconcile_inflight(
                 continue
             account = config.account(run.account_id) if run.account_id else None
             event = queue.record(
-                run.task, run.eligibility_key, status="failed", kind=run.kind,
+                run.task, run.eligibility_key, attempt_id=run.attempt_id,
+                status="failed", kind=run.kind,
                 cycle=run.cycle, provider_id=run.provider_id, account_id=run.account_id,
                 router_job_id=run.router_job_id,
                 summary=f"scout reconciliation: {report['reason']}; task completion unverified",
+                outcome={
+                    "reason": {
+                        "code": "unknown_launch",
+                        "detail": report["reason"],
+                        "signature": "unknown_launch:missing_terminal_record",
+                    },
+                } if run.attempt_id is not None else None,
+                timestamp=(
+                    datetime.fromtimestamp(now_epoch, timezone.utc).replace(
+                        microsecond=0,
+                    ).isoformat().replace("+00:00", "Z")
+                    if now_epoch is not None else None
+                ),
+                now_epoch=now_epoch,
                 release_activation=lambda: _activation(config, account, "release", activation_call),
             )
             report.update(action="failed", terminal_rowid=event.rowid_pk)

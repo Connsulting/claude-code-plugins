@@ -303,6 +303,27 @@ Every ready task is eligible for Bonus capacity; `run-now` accelerates an indivi
 Tasks can carry source references, 15-character work groups, and one-off prerequisites.
 See [ASYNC_WORK.md](skills/bonus-drain/ASYNC_WORK.md) for the contract and commands.
 
+Each launch has an immutable attempt identity. The dispatched prompt provides the exact
+terminal command and private outcome-evidence path for that attempt. A `done` result must
+use reason code `done_when_verified` and demonstrate the stored done-when condition through
+`command`, `artifact`, `operator_receipt`, or `goal_acceptance` evidence. A PR or branch by
+itself is supporting evidence, not completion. Failed, skipped, ambiguous, and aborted attempts
+stay in history.
+
+When a failed or skipped one-off blocks active dependent work, the scout may make at most two
+automatic recovery attempts after 5-minute and 30-minute backoffs. Repeating the same failure
+reason stops recovery early. Missing authority, unknown launch ownership, and unavailable or
+divergent repository state remain held. An ordinary operator requeue preserves prior attempts.
+Public requeue remains unavailable for goal-managed work; admitted implementation and integration
+recovery stays under the goal contract, while coordinators and frozen acceptance use fresh
+follow-up jobs.
+
+Repository handoff records the exact remote, target, base, branch, and head. A merged parent must
+be present in the current exact target by ancestry and content proof; squash merges use the same
+content proof. An unmerged parent supplies its verified head as the child base. Divergent parent
+heads require an explicitly authorized integration job. Bonus Drain does not merge or expand the
+task's external authority.
+
 The bundled [Long Horizon skill](skills/long-horizon/SKILL.md) coordinates whole goals
 through those jobs, stacked or authorized merged PRs, combined acceptance, and further
 fix rounds. Durable joins leave the coordinator idle between short queue jobs. See

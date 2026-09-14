@@ -30,18 +30,24 @@ source private helper functions or invent a second DB path.
 5. `auto` classifies in a router dry run only. Validate the result, claim the task, and launch
    once with a concrete provider/account. Never persist `auto` or a null provider.
 6. Classifier uncertainty is pre-claim and retry-safe because `agent-router --dry-run` is
-   non-launching. Claim `(task_id, eligibility_key)` before concrete activation/routing.
-   Known-not-launched failure releases it; a post-launch ambiguity holds the claim and any
-   activation lease fail-closed for reconciliation. Never claim activation releases
-   immediately after ambiguity.
+   non-launching. Claiming creates a unique immutable attempt alongside
+   `(task_id, eligibility_key)` before concrete activation/routing. Known-not-launched failure
+   records that attempt as aborted and releases it; a post-launch ambiguity records the exact
+   attempt as ambiguous and holds the claim and any activation lease fail-closed for
+   reconciliation. Never claim activation releases immediately after ambiguity.
    A configured launch-scoped activation releases only after a concrete job identity and its
    dispatched record exist; run-scoped activation remains held through the terminal event.
 7. Use the resolved executable record command embedded in the dispatched prompt. It must
-   point to the stable CLI and the JSON graph's database. `BONUS_DB` is deprecated queue-only
-   compatibility and cannot retarget the configured graph.
+   point to the stable CLI and the JSON graph's database, bind the exact attempt, and use its
+   protected structured outcome-evidence path. Do not reconstruct uncertain CLI flags.
+   `BONUS_DB` is deprecated queue-only compatibility and cannot retarget the configured graph.
 8. No publish, merge, credential change, production mutation, contract/schema/ADR change, or
    other externally consequential action is implied by being bonus work. The task contract
    must grant it explicitly.
+9. Only explicit done-when verification satisfies a dependency. A PR, branch, router status,
+   failed attempt, or skipped attempt is not completion evidence.
+10. Recovery keeps the original task ID and prior attempts. It cannot weaken authority,
+    dependency, activation, calendar, GoalStore, or frozen-candidate gates.
 
 ## Before any mode
 
@@ -146,9 +152,11 @@ It uses this same queue and dispatcher. A goal is durable waiting state; its sho
 coordinator jobs finish between joins, so an idle coordinator holds no dispatch claim.
 
 Read `ASYNC_WORK.md` for dependencies, editing, run provenance, and the review UI. A dependency
-is satisfied only by a successful (`done`) one-off prerequisite; failed, skipped, running, and
-missing prerequisites keep the child waiting. Self-dependencies, cycles, missing IDs, and
-recurring prerequisites are rejected. Both automatic and explicit launches enforce dependencies.
+is satisfied only by a verified successful (`done`) one-off prerequisite; failed, skipped,
+running, and missing prerequisites keep the child waiting. A blocked active child may make its
+failed/skipped parent eligible for the bounded recovery policy described below. Self-dependencies,
+cycles, missing IDs, and recurring prerequisites are rejected. Both automatic and explicit
+launches enforce dependencies.
 
 Use `bonus-drain readiness TASK_ID --json` to explain readiness and
 `bonus-drain edit TASK_ID --changes '{"depends_on":["PARENT_ID"]}' --json`
@@ -180,7 +188,8 @@ Do not loop to empty the queue. systemd owns later ticks. A zero-dispatch result
 closed reasons is successful operation.
 
 Before the in-flight gate, scout checks router status and records `failed` for a positively
-terminal worker that omitted its terminal event, using the existing claim/lease lifecycle.
+terminal worker that omitted its terminal event, using that exact attempt and an unverified
+structured reason under the existing claim/lease lifecycle.
 Running or unknown jobs remain held; missing status and elapsed time do not prove exit.
 Inspect the `reconciliation` list in scout JSON. `--dry-run` only proposes queue repairs.
 Ambiguous claims still require operator reconciliation and are never cleared automatically.
@@ -202,24 +211,78 @@ bonus-drain dispatch TASK_ID [PROVIDER_ID_OR_auto] [--account ACCOUNT_ID] --json
 ## Terminal contract
 
 Every dispatched task must record exactly one terminal event through the command embedded in
-its prompt. The prompt must include task ID, kind, eligibility key, concrete provider and
-account, DB/config identity, precondition, constraints, and done-when.
+its prompt. The prompt includes the stable task ID, immutable attempt ID, kind, eligibility key,
+concrete provider and account, DB/config identity, precondition, constraints, done-when, and a
+protected path for structured outcome evidence. Use that command exactly.
 
 A background task must not exit blocked or waiting for input while its claim and activation
 lease remain live. If continuing safely would require new input or authority, it records
 `failed` with that blocker before exiting.
 
-Replaying the same terminal status for one task and eligibility key is idempotent. A conflicting
-terminal status or pre-existing duplicate terminal history is a reconciliation error, never a
-second terminal event.
+Replaying the same terminal status and evidence for the same attempt is idempotent. A missing or
+different attempt ID cannot release its claim, and a conflicting replay is a reconciliation
+error. Prior attempts stay immutable.
 
-- `done`: done-when is demonstrated.
-- `skipped`: the precondition is false or the work is already complete.
-- `failed`: work was attempted and did not satisfy done-when.
+- `done`: done-when is explicitly verified with supported evidence. PR or branch existence alone
+  is insufficient. Its outcome uses reason code `done_when_verified`, `completion.verified: true`,
+  one of `command`, `artifact`, `operator_receipt`, or `goal_acceptance`, and nonempty evidence.
+- `skipped`: the precondition is false or the work is already complete; include the structured
+  reason.
+- `failed`: work was attempted and did not satisfy done-when; record a structured reason that
+  distinguishes retryable, verification-needed, authority, permanent, and unknown-launch cases.
+
+Follow the exact `OUTCOME_SCHEMA` printed in the prompt. A repository-producing verified success
+has this shape; omit `repository` when the task does not produce one:
+
+```json
+{
+  "reason": {"code": "done_when_verified", "detail": "what passed", "signature": "stable-non-secret-signature"},
+  "completion": {"verified": true, "mechanism": "command", "evidence": ["bounded verification reference"]},
+  "repository": {
+    "remote": "exact canonical remote URL",
+    "target_ref": "refs/heads/main",
+    "target_base_oid": "full starting commit OID",
+    "branch_ref": "refs/heads/task/example",
+    "head_oid": "full result commit OID",
+    "integration_state": "merged|unmerged",
+    "merge_receipt": {"kind": "merge|squash", "result_oid": "full verified target result OID"}
+  }
+}
+```
+
+`merge_receipt` is optional. For `failed` or `skipped`, omit `completion` and use a reason code of
+`retryable`, `verification_needed`, `authority_required`, `permanent`, or `unknown_launch`, with
+nonempty detail and a stable non-secret signature. Accepted completion mechanisms are `command`,
+`artifact`, `operator_receipt`, and `goal_acceptance`.
 
 Do not call an ambiguous router response failed: its claim remains held until `doctor` and an
-operator reconcile whether a job exists. Requeue is an explicit operator action and removes
-the matching terminal history and claim atomically; it is not an automatic retry.
+operator reconcile whether a job exists.
+
+Automatic recovery applies only when active work depends on a failed or skipped one-off. It keeps
+the task ID and all attempts, allows at most two automatic recovery attempts after 5-minute and
+30-minute backoffs, and stops early when the normalized reason repeats. Legacy or unspecified
+failure is verification-first. Missing authority, unknown launch ownership, unavailable Git
+identity, and divergent parent heads remain held.
+
+Ordinary public `requeue` schedules an operator recovery without deleting history. Public requeue
+for goal-managed tasks remains rejected. GoalStore may internally admit implementation or
+integration recovery under its existing gates; a failed coordinator or frozen acceptance job
+uses its documented fresh follow-up path.
+
+If the user later says “try harder” in the same thread after this attempt recorded failed or
+skipped, continue under the original task ID and contract. When the continued work now proves
+done-when, write the required evidence and run the exact stable package CLI `recover-complete`
+command already embedded in the prompt before replying. This command is separate from the
+configurable record adapter, which may not support recovery. It appends a verification attempt
+without a new claim or router launch and does not require a previously scheduled recovery
+projection; if an exact projection exists, it consumes it atomically. If it refuses because a
+successor owns the task, keep the evidence for that successor and do not overwrite its state.
+
+For repository dependencies, use the resolved handoff in the prompt. A merged parent requires the
+exact target plus ancestry and content proof; a squash merge uses content equivalence. An unmerged
+parent uses its verified head. Unavailable identity holds dispatch, and divergent multiple-parent
+heads require an explicitly authorized integration task. Never merge or expand external authority
+to make a dependency ready.
 
 ## Operations
 

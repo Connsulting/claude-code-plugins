@@ -1,5 +1,6 @@
 """Goal coordination on the real SQLite queue; provider execution is a separate proof."""
 import json
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -15,6 +16,15 @@ from tests import test_bonus_drain_kick as kick_tests
 
 NOW = 2_000_000_000
 CANDIDATE = {'commits': {'example': 'a' * 40}, 'runtime': {}}
+
+
+def verified_outcome(task_id):
+    return {
+        'reason': {'code': 'done_when_verified', 'detail': 'fixture proof',
+                   'signature': f'done_when_verified:{task_id}'},
+        'completion': {'verified': True, 'mechanism': 'command',
+                       'evidence': [f'fixture://long-horizon/{task_id}']},
+    }
 
 
 class GoalTests(unittest.TestCase):
@@ -38,14 +48,33 @@ class GoalTests(unittest.TestCase):
         return self.store.create(contract, now=NOW)
 
     def finish(self, task_id, status='done'):
-        self.queue.record(task_id, 'account/manual/2000000000', status=status, provider_id='alpha')
+        key = 'account/manual/2000000000'
+        claim = self.queue.claim_for(task_id, key)
+        attempt_id = claim.attempt_id if claim else None
+        if status == 'done' and attempt_id is None:
+            attempt = self.queue.claim(task_id, key, 'alpha', 'account')
+            self.assertIsNotNone(attempt)
+            attempt_id = attempt.id
+        kwargs = {'attempt_id': attempt_id} if attempt_id is not None else {}
+        if status == 'done':
+            kwargs['outcome'] = verified_outcome(task_id)
+        elif attempt_id is not None:
+            kwargs['outcome'] = {
+                'reason': {'code': 'retryable', 'detail': 'fixture failure',
+                           'signature': f'retryable:{task_id}'},
+            }
+        self.queue.record(task_id, key, status=status, provider_id='alpha', **kwargs)
 
     def start_turn(self):
         self.store.tick(now=NOW)
         goal = self.store.show('release')
         task = goal['coordinator_task']
-        self.assertTrue(self.queue.claim(task, 'account/manual/2000000000', 'alpha', 'account'))
-        self.queue.record(task, 'account/manual/2000000000', status='dispatched', provider_id='alpha')
+        attempt = self.queue.claim(task, 'account/manual/2000000000', 'alpha', 'account')
+        self.assertIsNotNone(attempt)
+        self.queue.record(
+            task, 'account/manual/2000000000', attempt_id=attempt.id,
+            status='dispatched', provider_id='alpha',
+        )
         return task, goal['revision']
 
     def job(self, task_id, **changes):
@@ -133,7 +162,15 @@ class GoalTests(unittest.TestCase):
         self.create()
         turn, revision = self.start_turn()
         self.advance(turn, revision, tasks=[self.job('a')], wait_for=['a'])
-        self.finish('a')
+        # This contract predates attempt provenance: the completed child is an
+        # authentic migrated row, so recording it must not claim around the
+        # still-live coordinator's admission guard.
+        with sqlite3.connect(self.queue.path) as connection:
+            connection.execute(
+                "INSERT INTO runs(task,kind,cycle,eligibility_key,status,ts,summary) "
+                "VALUES('a','oneoff',?,NULL,'done',?,'historical completion')",
+                (NOW, '2033-05-18T03:33:20Z'),
+            )
         self.store.tick(now=NOW)
         self.assertEqual(self.store.show('release')['coordinator_task'], turn)
         with self.assertRaises(db.QueueError):
@@ -165,7 +202,7 @@ class GoalTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda task: self.queue.claim(
                 task, 'account/manual/2000000000', 'alpha', 'account'), ['a', 'b']))
-        self.assertEqual(sum(results), 1)
+        self.assertEqual(sum(result is not None for result in results), 1)
 
     def test_explicit_membership_does_not_rewrite_existing_contract(self):
         self.queue.add_task(dict(id='existing', title='Existing', cwd=self.tmp.name,
@@ -478,7 +515,11 @@ class GoalScoutTests(unittest.TestCase):
 
         def finish(task):
             event = queue.runs(task_id=task)[0]
-            queue.record(task, event.eligibility_key, status='done', provider_id=event.provider_id)
+            queue.record(
+                task, event.eligibility_key, attempt_id=event.attempt_id,
+                status='done', provider_id=event.provider_id,
+                outcome=verified_outcome(task),
+            )
 
         with mock.patch.object(scout, 'read_all', return_value=snapshots), \
                 mock.patch.object(dispatcher, 'record_factory_run', return_value=True):

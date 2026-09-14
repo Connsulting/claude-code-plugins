@@ -47,6 +47,11 @@ def _candidate(value: Any) -> dict[str, Any]:
 def _status(connection: sqlite3.Connection, task_id: str) -> str:
     if connection.execute('SELECT 1 FROM dispatch_claims WHERE task_id=?', (task_id,)).fetchone():
         return 'running'
+    recovery = connection.execute(
+        "SELECT state FROM task_recovery WHERE task_id=?", (task_id,),
+    ).fetchone()
+    if recovery and recovery[0] in {'scheduled', 'backoff'}:
+        return 'recovering'
     row = connection.execute(
         'SELECT status FROM runs WHERE task=? ORDER BY rowid_pk DESC LIMIT 1', (task_id,),
     ).fetchone()
@@ -103,8 +108,11 @@ def _matches_contract(connection: sqlite3.Connection, task_id: str, expected: st
     return row is not None and expected is not None and _contract_hash(QueueDB._task_from_row(row)) == expected
 
 
-def task_admitted(connection: sqlite3.Connection, task_id: str) -> bool:
+def task_admitted(
+    connection: sqlite3.Connection, task_id: str, *, now_epoch: float | None = None,
+) -> bool:
     """Called inside the shared atomic claim, so manual and Bonus launches obey the bound."""
+    now = time.time() if now_epoch is None else float(now_epoch)
     coordinator = connection.execute(
         'SELECT g.*,t.contract_hash FROM goals g JOIN goal_turns t ON t.goal_id=g.id WHERE t.task_id=?',
         (task_id,),
@@ -113,7 +121,7 @@ def task_admitted(connection: sqlite3.Connection, task_id: str) -> bool:
         contract = json.loads(coordinator['contract_json'])
         return (_matches_contract(connection, task_id, coordinator['contract_hash'])
                 and coordinator['state'] == 'queued' and coordinator['coordinator_task'] == task_id
-                and time.time() < contract['deadline'])
+                and now < contract['deadline'])
     member = connection.execute(
         'SELECT g.*,m.contract_hash FROM goals g JOIN goal_members m ON m.goal_id=g.id '
         'WHERE m.task_id=? AND m.managed=1', (task_id,),
@@ -123,14 +131,62 @@ def task_admitted(connection: sqlite3.Connection, task_id: str) -> bool:
     if member['contract_hash'] and not _matches_contract(connection, task_id, member['contract_hash']):
         return False
     contract = json.loads(member['contract_json'])
-    if member['state'] in {'paused', 'finishing', 'complete'} or time.time() >= contract['deadline']:
+    if member['state'] in {'paused', 'finishing', 'complete'} or now >= contract['deadline']:
         return False
     owner = member['coordinator_task']
     if owner and _status(connection, owner) not in TERMINAL_STATUSES:
         return False
-    active = sum(_status(connection, row[0]) in {'running', 'dispatched'} for row in
-                 connection.execute('SELECT task_id FROM goal_members WHERE goal_id=?', (member['id'],)))
+    active = sum(
+        row[0] != task_id and _status(connection, row[0]) in {'running', 'dispatched', 'recovering'}
+        for row in connection.execute('SELECT task_id FROM goal_members WHERE goal_id=?', (member['id'],))
+    )
     return active < contract['max_inflight']
+
+
+def recovery_admission(
+    connection: sqlite3.Connection, task_id: str, *, now_epoch: float | None = None,
+) -> tuple[bool, str]:
+    """Authorize retained same-ID recovery without weakening the public history guard."""
+
+    now = time.time() if now_epoch is None else float(now_epoch)
+    if connection.execute(
+        'SELECT 1 FROM goal_turns WHERE task_id=?', (task_id,),
+    ).fetchone():
+        return False, 'fresh_goal_followup_required'
+    member = connection.execute(
+        'SELECT g.*,m.role,m.contract_hash FROM goals g JOIN goal_members m ON m.goal_id=g.id '
+        'WHERE m.task_id=? AND m.managed=1', (task_id,),
+    ).fetchone()
+    if not member:
+        return True, 'admitted'
+    if member['role'] not in {'implementation', 'integration'}:
+        return False, 'fresh_goal_followup_required'
+    if member['contract_hash'] and not _matches_contract(connection, task_id, member['contract_hash']):
+        return False, 'goal_contract_mismatch'
+    if member['state'] == 'paused':
+        return False, 'goal_paused'
+    if member['state'] in {'finishing', 'complete'}:
+        return False, 'goal_not_recoverable'
+    contract = json.loads(member['contract_json'])
+    if now >= contract['deadline']:
+        return False, 'goal_deadline_expired'
+    owner = member['coordinator_task']
+    if owner and _status(connection, owner) not in TERMINAL_STATUSES:
+        return False, 'goal_coordinator_active'
+    if connection.execute(
+        'SELECT 1 FROM goal_operations WHERE goal_id=? AND receipt_json IS NULL',
+        (member['id'],),
+    ).fetchone():
+        return False, 'goal_operation_unresolved'
+    active = sum(
+        row[0] != task_id and _status(connection, row[0]) in {'running', 'dispatched', 'recovering'}
+        for row in connection.execute(
+            'SELECT task_id FROM goal_members WHERE goal_id=?', (member['id'],),
+        )
+    )
+    if active >= contract['max_inflight']:
+        return False, 'goal_concurrency_held'
+    return True, 'admitted'
 
 
 def coordinator_contract(queue: QueueDB, task: Task) -> dict[str, Any] | None:

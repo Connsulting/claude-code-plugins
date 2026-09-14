@@ -33,6 +33,7 @@ class ScoutReport:
     router_preflight: tuple[dict[str, Any], ...] = ()
     reconciliation: tuple[dict[str, Any], ...] = ()
     goal_updates: tuple[dict[str, Any], ...] = ()
+    recoveries: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -46,6 +47,7 @@ class ScoutReport:
             "router_preflight": list(self.router_preflight),
             "reconciliation": list(self.reconciliation),
             "goal_updates": list(self.goal_updates),
+            "recoveries": list(self.recoveries),
         }
 
 
@@ -121,19 +123,43 @@ def _inflight_index(
 
     by_provider: dict[str, int] = {}
     by_account: dict[tuple[str, str], int] = {}
+    seen_attempts: set[str] = set()
+    seen_legacy: set[tuple[str, str]] = set()
     for run in queue.inflight_details(now_epoch=now_epoch):
         provider_id = run.get("provider_id")
         account_id = run.get("account_id")
         if not isinstance(provider_id, str) or not provider_id:
             continue
         by_provider[provider_id] = by_provider.get(provider_id, 0) + 1
+        attempt_id = run.get("attempt_id")
+        if isinstance(attempt_id, str) and attempt_id:
+            seen_attempts.add(attempt_id)
+        elif isinstance(run.get("eligibility_key"), str):
+            seen_legacy.add((str(run.get("task")), str(run["eligibility_key"])))
         if isinstance(account_id, str) and account_id:
             key = (provider_id, account_id)
+            by_account[key] = by_account.get(key, 0) + 1
+    # A claim can be held before a dispatched row exists when launch identity is
+    # ambiguous. It still consumes only its provider/account capacity.
+    for claim in queue.claims():
+        if claim.attempt_id is not None and claim.attempt_id in seen_attempts:
+            continue
+        if claim.attempt_id is None and (claim.task_id, claim.eligibility_key) in seen_legacy:
+            continue
+        by_provider[claim.provider_id] = by_provider.get(claim.provider_id, 0) + 1
+        if claim.account_id:
+            key = (claim.provider_id, claim.account_id)
             by_account[key] = by_account.get(key, 0) + 1
     return by_provider, by_account
 
 
-def _apply_inflight_caps(plan: PlanResult, queue: QueueDB, *, now_epoch: int) -> PlanResult:
+def _apply_inflight_caps(
+    plan: PlanResult,
+    queue: QueueDB,
+    *,
+    now_epoch: int,
+    provider_holds: tuple[str, ...] = (),
+) -> PlanResult:
     """Subtract already-running jobs from this tick, per provider.
 
     A running job tightens that provider's cap; it does not block other providers.
@@ -142,12 +168,23 @@ def _apply_inflight_caps(plan: PlanResult, queue: QueueDB, *, now_epoch: int) ->
     """
 
     by_provider, by_account = _inflight_index(queue, now_epoch)
-    if not by_provider:
+    held_providers = set(provider_holds) | {
+        claim.provider_id for claim in queue.claims(state="ambiguous")
+    }
+    if not by_provider and not held_providers:
         return plan
     closed = dict(plan.closed)
     gates_by_key = {(gate.provider_id, gate.account_id): gate for gate in plan.gates}
     kept = []
     for batch in plan.batches:
+        key = (batch.provider_id, batch.account_id)
+        if batch.provider_id in held_providers:
+            reason = "provider lifecycle requires reconciliation"
+            closed[key] = reason
+            gates_by_key[key] = replace(
+                gates_by_key[key], open=False, reason=reason, batch_size=0,
+            )
+            continue
         sibling = next(
             (
                 account_id
@@ -156,7 +193,6 @@ def _apply_inflight_caps(plan: PlanResult, queue: QueueDB, *, now_epoch: int) ->
             ),
             None,
         )
-        key = (batch.provider_id, batch.account_id)
         if sibling is not None:
             reason = f"provider inflight on {sibling}"
             closed[key] = reason
@@ -231,6 +267,7 @@ def plan_tick(
     cache_root: str | Path | None = None,
     *,
     now_epoch: int | None = None,
+    provider_holds: tuple[str, ...] | None = None,
 ) -> TickPlan:
     """Build one adjusted tick plan from cache and initialized SQLite reads only."""
 
@@ -247,7 +284,11 @@ def plan_tick(
             capabilities=provider.capabilities, automatic=True, now_epoch=now,
         )
     plan = build_plan(config, snapshots, eligible_count=availability, now_epoch=now)
-    plan = _apply_inflight_caps(plan, queue, now_epoch=now)
+    if provider_holds is None:
+        provider_holds = db.doctor(queue).provider_holds
+    plan = _apply_inflight_caps(
+        plan, queue, now_epoch=now, provider_holds=provider_holds,
+    )
     plan = _apply_global_cap(plan, queue, config.max_jobs, now_epoch=now)
     allocations: dict[tuple[str, str], tuple[Any, ...]] = {}
 
@@ -375,45 +416,51 @@ def run_once(
     errors: list[dict[str, str]] = []
 
     lifecycle_report = db.doctor(queue)
+    lifecycle_blockers: tuple[dict[str, Any], ...] = ()
+    lifecycle_errors: tuple[dict[str, str], ...] = ()
     if not lifecycle_report.ok:
-        tick = plan_tick(config, queue, cache_root, now_epoch=now)
         message = "; ".join(lifecycle_report.diagnostics)
-        blocker = {
+        lifecycle_blockers = ({
             "kind": "reconciliation_required",
             "tasks": list(lifecycle_report.reconciliation_required),
             "message": message,
-        }
-        error = {
+        },)
+        lifecycle_errors = ({
             "task_id": "*", "kind": "reconciliation_required",
             "message": message or "queue lifecycle requires reconciliation",
-        }
-        return ScoutReport(
-            now, dry_run, tick.plan, (), (), (error,), (blocker,),
-            _router_preflight(config, tick.plan),
-        )
+        },)
 
     reconciliation = reconcile_inflight(
         config, queue, dry_run=dry_run, activation_call=activation_call,
+        now_epoch=now,
     )
     goal_updates = tuple(goals.GoalStore(queue).tick(now=now, dry_run=dry_run))
-    tick = plan_tick(config, queue, cache_root, now_epoch=now)
+    recoveries = tuple(
+        decision.to_dict()
+        for decision in queue.reconcile_recoveries(now_epoch=now, dry_run=dry_run)
+    )
+    tick = plan_tick(
+        config, queue, cache_root, now_epoch=now,
+        provider_holds=lifecycle_report.provider_holds,
+    )
     plan = tick.plan
     router_preflight = _router_preflight(config, plan)
 
     unavailable = [item for item in router_preflight if not item["available"]]
     if unavailable:
-        blockers = tuple({
+        blockers = lifecycle_blockers + tuple({
             "kind": "router_unavailable",
             "adapter_id": item["adapter_id"],
             "executable": item["executable"],
             "message": "resolved agent-router executable is missing or not executable",
         } for item in unavailable)
-        router_errors = tuple({
+        router_errors = lifecycle_errors + tuple({
             "task_id": "*", "kind": "router_unavailable",
             "message": f"router preflight failed: {item['executable']}",
         } for item in unavailable)
         return ScoutReport(
-            now, dry_run, plan, (), (), router_errors, blockers, router_preflight, reconciliation, goal_updates,
+            now, dry_run, plan, (), (), router_errors, blockers, router_preflight,
+            reconciliation, goal_updates, recoveries,
         )
 
     for batch in plan.batches:  # already nearest-reset-first
@@ -434,6 +481,7 @@ def run_once(
                     eligibility_key=batch.eligibility_key,
                     requested_provider=batch.provider_id,
                     trigger="bonus",
+                    now_epoch=now,
                     router_call=router_call, activation_call=activation_call,
                 ))
             except AmbiguousDispatch as exc:
@@ -445,6 +493,7 @@ def run_once(
                 errors.append({"task_id": task.id, "kind": "failed", "message": str(exc)})
 
     return ScoutReport(
-        now, dry_run, plan, tuple(dispatched), tuple(previews), tuple(errors),
-        (), router_preflight, reconciliation, goal_updates,
+        now, dry_run, plan, tuple(dispatched), tuple(previews),
+        lifecycle_errors + tuple(errors), lifecycle_blockers, router_preflight,
+        reconciliation, goal_updates, recoveries,
     )

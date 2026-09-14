@@ -20,6 +20,19 @@ from tests.test_bonus_drain_review_repairs import (
 from tests.test_bonus_drain_scout_inflight import _open_snapshots, _two_provider_config
 
 
+def verified_outcome():
+    return {
+        "reason": {
+            "code": "done_when_verified", "detail": "fixture proof",
+            "signature": "done_when_verified:reconcile-fixture",
+        },
+        "completion": {
+            "verified": True, "mechanism": "command",
+            "evidence": ["fixture://reconciliation"],
+        },
+    }
+
+
 class ScoutReconciliationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -28,12 +41,16 @@ class ScoutReconciliationTests(unittest.TestCase):
         self.queue = db.QueueDB(self.root / "queue.db")
         self.config = runtime(self.queue.path)
         self.queue.add_task(task("abandoned"))
-        self.queue.claim("abandoned", ELIGIBILITY_KEY, "alpha", "alpha-account")
+        self.attempt = self.queue.claim(
+            "abandoned", ELIGIBILITY_KEY, "alpha", "alpha-account",
+        )
+        self.assertIsNotNone(self.attempt)
         self.queue.acquire_activation(
             "abandoned", ELIGIBILITY_KEY, "alpha", "alpha-account", lambda: None,
         )
         self.queue.record(
-            "abandoned", ELIGIBILITY_KEY, status="dispatched", cycle=RESET,
+            "abandoned", ELIGIBILITY_KEY, attempt_id=self.attempt.id,
+            status="dispatched", cycle=RESET,
             provider_id="alpha", account_id="alpha-account", router_job_id="job-1",
         )
 
@@ -113,7 +130,9 @@ class ScoutReconciliationTests(unittest.TestCase):
     def test_worker_terminal_during_probe_wins(self):
         def probe(*args, **kwargs):
             self.queue.record(
-                "abandoned", ELIGIBILITY_KEY, status="done", release_activation=lambda: None,
+                "abandoned", ELIGIBILITY_KEY, attempt_id=self.attempt.id,
+                status="done", outcome=verified_outcome(),
+                release_activation=lambda: None,
             )
             return self.response()
 
@@ -126,7 +145,15 @@ class ScoutReconciliationTests(unittest.TestCase):
         original = self.queue.record
 
         def racing_record(*args, **kwargs):
-            original("abandoned", ELIGIBILITY_KEY, status="skipped", release_activation=lambda: None)
+            original(
+                "abandoned", ELIGIBILITY_KEY, attempt_id=self.attempt.id,
+                status="skipped",
+                outcome={"reason": {
+                    "code": "verification_needed", "detail": "fixture race",
+                    "signature": "verification_needed:fixture-race",
+                }},
+                release_activation=lambda: None,
+            )
             return original(*args, **kwargs)
 
         with mock.patch.object(self.queue, "record", side_effect=racing_record):

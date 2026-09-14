@@ -37,13 +37,16 @@ CREATE TABLE IF NOT EXISTS runs (
   eligibility_key TEXT,
   status          TEXT NOT NULL CHECK (status IN ('dispatched','done','skipped','failed')),
   ts              TEXT NOT NULL,
+  received_at     TEXT,
   branch          TEXT,
   summary         TEXT,
   engine          TEXT,
   provider_id     TEXT,
   account_id      TEXT,
   router_job_id   TEXT,
-  trigger         TEXT
+  trigger         TEXT,
+  attempt_id      TEXT,
+  outcome_json    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS dispatch_claims (
@@ -54,6 +57,7 @@ CREATE TABLE IF NOT EXISTS dispatch_claims (
   state           TEXT NOT NULL CHECK (state IN ('claimed','ambiguous')),
   claimed_at      TEXT NOT NULL,
   detail          TEXT,
+  attempt_id      TEXT,
   PRIMARY KEY (task_id, eligibility_key),
   FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
 );
@@ -65,6 +69,7 @@ CREATE TABLE IF NOT EXISTS activation_leases (
   account_id      TEXT NOT NULL,
   state           TEXT NOT NULL CHECK (state IN ('activating','active','releasing')),
   acquired_at     TEXT NOT NULL,
+  attempt_id      TEXT,
   PRIMARY KEY (task_id, eligibility_key),
   FOREIGN KEY (task_id, eligibility_key)
     REFERENCES dispatch_claims(task_id, eligibility_key) ON DELETE CASCADE
@@ -80,6 +85,51 @@ CREATE INDEX IF NOT EXISTS idx_runs_cycle ON runs(cycle);
 CREATE INDEX IF NOT EXISTS idx_claims_task ON dispatch_claims(task_id);
 CREATE INDEX IF NOT EXISTS idx_activation_provider_account
   ON activation_leases(provider_id, account_id);
+
+-- Attempts are immutable execution identities. Historical run/claim rows intentionally
+-- retain NULL attempt IDs; additive initialization never invents an identity for them.
+CREATE TABLE IF NOT EXISTS task_attempts (
+  id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  ordinal INTEGER NOT NULL,
+  eligibility_key TEXT,
+  mode TEXT NOT NULL CHECK (mode IN ('normal','retry','verification')),
+  origin TEXT NOT NULL CHECK (origin IN ('normal','automatic','operator','continuation')),
+  state TEXT NOT NULL CHECK (state IN ('claimed','dispatched','done','skipped','failed','ambiguous','aborted')),
+  recovery_of TEXT REFERENCES task_attempts(id),
+  recovery_of_legacy_run_rowid INTEGER REFERENCES runs(rowid_pk),
+  contract_hash TEXT NOT NULL,
+  reason_code TEXT,
+  reason_signature TEXT,
+  outcome_json TEXT,
+  created_at TEXT NOT NULL,
+  terminal_at TEXT,
+  UNIQUE(task_id, ordinal),
+  CHECK ((mode='normal' AND recovery_of IS NULL AND recovery_of_legacy_run_rowid IS NULL)
+      OR (mode!='normal' AND ((recovery_of IS NULL) != (recovery_of_legacy_run_rowid IS NULL))))
+);
+
+-- This is only the current scheduling projection. The immutable attempt rows remain the
+-- source of retry counts and history.
+CREATE TABLE IF NOT EXISTS task_recovery (
+  task_id TEXT PRIMARY KEY REFERENCES tasks(id),
+  after_attempt_id TEXT REFERENCES task_attempts(id),
+  after_legacy_run_rowid INTEGER REFERENCES runs(rowid_pk),
+  mode TEXT NOT NULL CHECK (mode IN ('retry','verification')),
+  origin TEXT NOT NULL CHECK (origin IN ('automatic','operator')),
+  state TEXT NOT NULL CHECK (state IN ('scheduled','backoff','consumed','held','exhausted')),
+  consumed_by_attempt_id TEXT REFERENCES task_attempts(id),
+  contract_hash TEXT NOT NULL,
+  not_before TEXT,
+  reason_code TEXT NOT NULL,
+  reason_signature TEXT,
+  detail TEXT,
+  updated_at TEXT NOT NULL,
+  CHECK ((after_attempt_id IS NULL) != (after_legacy_run_rowid IS NULL)),
+  CHECK ((state='consumed') = (consumed_by_attempt_id IS NOT NULL))
+);
+
+CREATE INDEX IF NOT EXISTS idx_attempts_task_ordinal ON task_attempts(task_id, ordinal);
 
 CREATE TABLE IF NOT EXISTS usage_history (
   ts           TEXT    NOT NULL,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -80,6 +81,19 @@ def snapshots() -> dict[tuple[str, str], usage.UsageSnapshot]:
     }
 
 
+def verified_outcome():
+    return {
+        "reason": {
+            "code": "done_when_verified", "detail": "fixture proof",
+            "signature": "done_when_verified:review-repair-fixture",
+        },
+        "completion": {
+            "verified": True, "mechanism": "command",
+            "evidence": ["fixture://review-repair"],
+        },
+    }
+
+
 class BonusDrainReviewRepairTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -91,12 +105,18 @@ class BonusDrainReviewRepairTests(unittest.TestCase):
 
     def test_terminal_record_is_idempotent_and_rejects_a_conflicting_outcome(self) -> None:
         self.queue.add_task(task("terminal-once"))
+        attempt = self.queue.claim(
+            "terminal-once", ELIGIBILITY_KEY, "alpha", "alpha-account", now_epoch=NOW,
+        )
+        self.assertIsNotNone(attempt)
 
         first = self.queue.record(
-            "terminal-once", ELIGIBILITY_KEY, status="done", summary="proof",
+            "terminal-once", ELIGIBILITY_KEY, attempt_id=attempt.id,
+            status="done", outcome=verified_outcome(), summary="proof",
         )
         replay = self.queue.record(
-            "terminal-once", ELIGIBILITY_KEY, status="done", summary="proof",
+            "terminal-once", ELIGIBILITY_KEY, attempt_id=attempt.id,
+            status="done", outcome=verified_outcome(), summary="proof",
         )
 
         self.assertEqual(replay.rowid_pk, first.rowid_pk)
@@ -106,14 +126,26 @@ class BonusDrainReviewRepairTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(db.QueueError, "already recorded as done"):
             self.queue.record(
-                "terminal-once", ELIGIBILITY_KEY, status="skipped", summary="changed mind",
+                "terminal-once", ELIGIBILITY_KEY, attempt_id=attempt.id,
+                status="skipped",
+                outcome={"reason": {
+                    "code": "verification_needed", "detail": "changed mind",
+                    "signature": "verification_needed:changed-mind",
+                }},
+                summary="changed mind",
             )
 
     def test_keyed_terminal_replay_recognizes_legacy_cycle_history(self) -> None:
         self.queue.add_task(task("legacy-terminal"))
-        first = self.queue.record(
-            "legacy-terminal", None, cycle=RESET, status="done", summary="legacy proof",
-        )
+        with sqlite3.connect(self.queue.path) as connection:
+            cursor = connection.execute(
+                "INSERT INTO runs(task,kind,cycle,eligibility_key,status,ts,summary) "
+                "VALUES('legacy-terminal','oneoff',?,NULL,'done',?,'legacy proof')",
+                (RESET, iso(NOW)),
+            )
+            legacy_rowid = cursor.lastrowid
+        first = self.queue.runs(task_id="legacy-terminal")[0]
+        self.assertEqual(first.rowid_pk, legacy_rowid)
 
         replay = self.queue.record(
             "legacy-terminal", ELIGIBILITY_KEY, status="done", summary="legacy proof",
@@ -172,12 +204,29 @@ class BonusDrainReviewRepairTests(unittest.TestCase):
 
     def test_legacy_terminal_cycle_closes_the_matching_keyed_dispatch(self) -> None:
         self.queue.add_task(task("legacy-finish"))
-        self.queue.record(
-            "legacy-finish", ELIGIBILITY_KEY, status="dispatched", timestamp=iso(NOW - 125),
-        )
-        self.queue.record(
-            "legacy-finish", None, cycle=RESET, status="done", timestamp=iso(NOW - 100),
-        )
+        other_key = f"alpha-account/other-weekly/{RESET}"
+        with sqlite3.connect(self.queue.path) as connection:
+            connection.execute(
+                "INSERT INTO runs(task,kind,cycle,eligibility_key,status,ts) "
+                "VALUES('legacy-finish','oneoff',?,?, 'dispatched',?)",
+                (RESET, ELIGIBILITY_KEY, iso(NOW - 125)),
+            )
+            connection.execute(
+                "INSERT INTO runs(task,kind,cycle,eligibility_key,status,ts) "
+                "VALUES('legacy-finish','oneoff',?,?,'done',?)",
+                (RESET, other_key, iso(NOW - 110)),
+            )
+
+        inflight = self.queue.inflight_details(now_epoch=NOW)
+        self.assertEqual(len(inflight), 1)
+        self.assertEqual(inflight[0]["eligibility_key"], ELIGIBILITY_KEY)
+
+        with sqlite3.connect(self.queue.path) as connection:
+            connection.execute(
+                "INSERT INTO runs(task,kind,cycle,eligibility_key,status,ts) "
+                "VALUES('legacy-finish','oneoff',?,NULL,'done',?)",
+                (RESET, iso(NOW - 100)),
+            )
 
         self.assertEqual(self.queue.inflight_details(now_epoch=NOW), [])
 
@@ -204,6 +253,17 @@ class BonusDrainReviewRepairTests(unittest.TestCase):
             )
 
         self.assertEqual(report.errors, ())
+        router = Path("/bin/true")
+        router_stat = router.stat()
+        self.assertEqual(report.router_preflight, ({
+            "adapter_id": "router",
+            "executable": str(router),
+            "available": True,
+            "identity": (
+                f"{router_stat.st_dev}:{router_stat.st_ino}:{router_stat.st_size}:"
+                f"{router_stat.st_mtime_ns}"
+            ),
+        },))
         self.assertEqual(dispatch_mock.call_count, 1)
         self.assertEqual(dispatch_mock.call_args.kwargs["task_id"], "would-run")
         self.assertEqual(dispatch_mock.call_args.kwargs["requested_provider"], "beta")

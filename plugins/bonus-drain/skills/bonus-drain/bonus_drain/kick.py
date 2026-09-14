@@ -104,4 +104,5 @@ def kick_task(
         requested_provider=requested_provider,
         router_call=router_call,
         activation_call=activation_call,
+        now_epoch=now,
     )

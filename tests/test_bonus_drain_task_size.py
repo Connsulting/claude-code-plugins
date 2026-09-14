@@ -354,6 +354,10 @@ class TaskSizeContractTests(unittest.TestCase):
             "spent", f"alpha-account/alpha-weekly/{cycle}",
             attempt_id=spent_attempt.id, status="done", cycle=cycle,
             outcome={
+                "reason": {
+                    "code": "done_when_verified", "detail": "fixture proof",
+                    "signature": "done_when_verified:task-size-spent",
+                },
                 "completion": {
                     "verified": True,
                     "mechanism": "command",

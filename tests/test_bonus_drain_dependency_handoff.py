@@ -13,14 +13,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 CLI = SKILL_ROOT / "bin" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
 
-from bonus_drain import config as config_module, db, dispatcher  # noqa: E402
-
+from bonus_drain import config as config_module
+from bonus_drain import db, dispatcher, handoff
 
 NOW = 2_000_000_000
 KEY = "alpha-account/alpha-weekly/2000001000"
@@ -196,6 +195,7 @@ class RepositoryHandoffCase(unittest.TestCase):
             provider_id="alpha",
             account_id="alpha-account",
             timestamp=iso(NOW),
+            now_epoch=NOW,
             summary=f"verified {task_id}",
         )
 
@@ -348,6 +348,96 @@ class RepositoryHandoffCase(unittest.TestCase):
             },
         )
 
+    def test_verified_merge_and_squash_resolve_target_after_source_branch_deletion(self) -> None:
+        remote, work, base = self.repository("deleted-integrated-branches")
+        merged_head = self.branch(
+            work, "task/merged-deleted", base, "merged.txt", "merged\n",
+        )
+        self.git(work, "switch", "main")
+        self.git(work, "merge", "--no-ff", "task/merged-deleted", "-m", "merge deleted branch")
+        self.git(work, "push", "origin", "main")
+        merged_target = self.git(work, "rev-parse", "HEAD")
+        self.git(work, "push", "origin", "--delete", "task/merged-deleted")
+        self.complete_parent(
+            "merged-deleted", work,
+            self.handoff(
+                remote, base, "task/merged-deleted", merged_head,
+                integration_state="merged",
+                receipt={"kind": "merge", "result_oid": merged_target},
+            ),
+        )
+        self.queue.add_task(task(
+            "merged-deleted-child", work, depends_on=["merged-deleted"],
+        ))
+        self.assertEqual(
+            self.queue.dependency_base("merged-deleted-child"),
+            {
+                "base_oid": merged_target,
+                "branch_ref": "refs/heads/main",
+                "target_ref": "refs/heads/main",
+                "parent_ids": ["merged-deleted"],
+            },
+        )
+
+        squash_head = self.branch(
+            work, "task/squash-deleted", merged_target, "squash-deleted.txt", "squash\n",
+        )
+        self.git(work, "switch", "main")
+        self.git(work, "checkout", "task/squash-deleted", "--", "squash-deleted.txt")
+        self.git(work, "add", "squash-deleted.txt")
+        self.git(work, "commit", "-m", "squash deleted branch")
+        self.git(work, "push", "origin", "main")
+        squash_target = self.git(work, "rev-parse", "HEAD")
+        self.git(work, "push", "origin", "--delete", "task/squash-deleted")
+        self.complete_parent(
+            "squash-deleted", work,
+            self.handoff(
+                remote, merged_target, "task/squash-deleted", squash_head,
+                integration_state="merged",
+                receipt={"kind": "squash", "result_oid": squash_target},
+            ),
+        )
+        self.queue.add_task(task(
+            "squash-deleted-child", work, depends_on=["squash-deleted"],
+        ))
+        self.assertEqual(
+            self.queue.dependency_base("squash-deleted-child"),
+            {
+                "base_oid": squash_target,
+                "branch_ref": "refs/heads/main",
+                "target_ref": "refs/heads/main",
+                "parent_ids": ["squash-deleted"],
+            },
+        )
+
+    def test_rename_receipt_rejects_target_that_retains_the_deleted_source(self) -> None:
+        remote, work, base = self.repository("rename-equivalence")
+        self.git(work, "config", "diff.renames", "true")
+        self.git(work, "switch", "-C", "task/rename", base)
+        self.git(work, "mv", "base.txt", "renamed.txt")
+        self.git(work, "commit", "-m", "rename source")
+        self.git(work, "push", "-f", "origin", "HEAD:refs/heads/task/rename")
+        head = self.git(work, "rev-parse", "HEAD")
+
+        self.git(work, "switch", "main")
+        (work / "renamed.txt").write_text("base\n", encoding="utf-8")
+        self.git(work, "add", "renamed.txt")
+        self.git(work, "commit", "-m", "copy without deleting source")
+        self.git(work, "push", "origin", "main")
+        target = self.git(work, "rev-parse", "HEAD")
+        self.complete_parent(
+            "false-rename-receipt", work,
+            self.handoff(
+                remote, base, "task/rename", head, integration_state="merged",
+                receipt={"kind": "squash", "result_oid": target},
+            ),
+        )
+
+        self.assert_rejected(
+            "false-rename-child", work, "false-rename-receipt",
+            "dependency_integration_ambiguous",
+        )
+
     def test_false_receipt_and_remote_ref_object_or_branch_identity_mismatch_hold(self) -> None:
         remote, work, base = self.repository("rejections")
         head = self.branch(work, "task/parent", base, "parent.txt", "parent delta\n")
@@ -430,6 +520,49 @@ class RepositoryHandoffCase(unittest.TestCase):
                 router_call=router,
             )
         router.assert_not_called()
+
+    def test_multi_parent_target_move_between_resolutions_requires_integration(self) -> None:
+        remote, work, base = self.repository("moving-target")
+        first = self.branch(work, "task/first", base, "first.txt", "first\n")
+        descendant = self.branch(
+            work, "task/descendant", first, "descendant.txt", "descendant\n",
+        )
+        self.git(work, "switch", "main")
+        (work / "target.txt").write_text("target moved\n", encoding="utf-8")
+        self.git(work, "add", "target.txt")
+        self.git(work, "commit", "-m", "move target")
+        self.git(work, "push", "origin", "main")
+        moved_target = self.git(work, "rev-parse", "HEAD")
+
+        self.complete_parent(
+            "first-moving-target", work,
+            self.handoff(remote, base, "task/first", first),
+        )
+        self.complete_parent(
+            "descendant-moving-target", work,
+            self.handoff(remote, base, "task/descendant", descendant),
+        )
+        self.queue.add_task(task(
+            "moving-target-child", work,
+            depends_on=["first-moving-target", "descendant-moving-target"],
+        ))
+
+        real_remote_ref_oid = handoff._remote_ref_oid
+        observed_targets = iter((base, moved_target))
+
+        def resolve_with_target_move(cwd: Path, remote_name: str, ref: str) -> str:
+            if ref == "refs/heads/main":
+                return next(observed_targets)
+            return real_remote_ref_oid(cwd, remote_name, ref)
+
+        with mock.patch.object(
+            handoff, "_remote_ref_oid", side_effect=resolve_with_target_move,
+        ):
+            readiness = self.queue.readiness("moving-target-child", now_epoch=NOW)
+
+        self.assertFalse(readiness["ready"])
+        self.assertEqual(readiness["hold_reason"], "integration_required")
+        self.assertIn("do not share one exact target", readiness["reason"])
 
 
 class FullLocalDependencyJourney(RepositoryHandoffCase):
@@ -582,6 +715,7 @@ class FullLocalDependencyJourney(RepositoryHandoffCase):
             provider_id="alpha",
             account_id="alpha-account",
             timestamp=iso(NOW),
+            now_epoch=NOW,
             summary="A verified",
         )
 
@@ -608,6 +742,7 @@ class FullLocalDependencyJourney(RepositoryHandoffCase):
             provider_id="alpha",
             account_id="alpha-account",
             timestamp=iso(NOW),
+            now_epoch=NOW,
             summary="tests failed",
         )
 
@@ -642,6 +777,7 @@ class FullLocalDependencyJourney(RepositoryHandoffCase):
             provider_id="alpha",
             account_id="alpha-account",
             timestamp=iso(NOW + 301),
+            now_epoch=NOW + 301,
             summary="B recovered and verified",
         )
 

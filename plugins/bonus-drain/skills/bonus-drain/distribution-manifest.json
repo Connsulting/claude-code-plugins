@@ -21,6 +21,7 @@
     "bonus_drain/db.py",
     "bonus_drain/dispatcher.py",
     "bonus_drain/goals.py",
+    "bonus_drain/handoff.py",
     "bonus_drain/kick.py",
     "bonus_drain/lifecycle.py",
     "bonus_drain/planner.py",
