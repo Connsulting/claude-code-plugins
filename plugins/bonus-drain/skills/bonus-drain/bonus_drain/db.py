@@ -646,14 +646,14 @@ class QueueDB:
         return set(task.required_capabilities).issubset(capability_set)
 
     def _weekly_window(self, now_epoch: float) -> tuple[float, float, float]:
-        """Return Monday start, Sunday start, and next Monday in recurrence time."""
+        """Return Saturday week start and the Sunday-only automatic window."""
 
         local_now = datetime.fromtimestamp(now_epoch, self.recurrence_timezone)
-        monday = local_now.date() - timedelta(days=local_now.weekday())
-        week_start = datetime.combine(monday, datetime.min.time(), self.recurrence_timezone)
-        sunday_start = week_start + timedelta(days=6)
-        week_end = week_start + timedelta(days=7)
-        return week_start.timestamp(), sunday_start.timestamp(), week_end.timestamp()
+        saturday = local_now.date() - timedelta(days=(local_now.weekday() - 5) % 7)
+        week_start = datetime.combine(saturday, datetime.min.time(), self.recurrence_timezone)
+        sunday_start = week_start + timedelta(days=1)
+        sunday_end = sunday_start + timedelta(days=1)
+        return week_start.timestamp(), sunday_start.timestamp(), sunday_end.timestamp()
 
     def _eligible_in_connection(
         self,
@@ -689,8 +689,8 @@ class QueueDB:
             (task.id,),
         ).fetchone()
         if cadence == "weekly":
-            week_start, sunday_start, week_end = self._weekly_window(now)
-            if automatic and not sunday_start <= now < week_end:
+            week_start, sunday_start, sunday_end = self._weekly_window(now)
+            if automatic and not sunday_start <= now < sunday_end:
                 return False
             if row is None:
                 return True

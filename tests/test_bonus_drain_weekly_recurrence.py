@@ -59,20 +59,33 @@ class WeeklyRecurrenceTests(unittest.TestCase):
         self.assertTrue(self.eligible("2026-09-14T03:59:59Z", automatic=True))
         self.assertFalse(self.eligible("2026-09-14T04:00:00Z", automatic=True))
 
-    def test_manual_run_outside_sunday_consumes_the_monday_starting_week(self) -> None:
-        self.assertTrue(self.eligible("2026-09-08T16:00:00Z", automatic=False))
+    def test_manual_run_outside_sunday_consumes_the_saturday_starting_week(self) -> None:
+        self.assertTrue(self.eligible("2026-09-12T16:00:00Z", automatic=False))
         self.queue.record(
             "weekly-job",
             "alpha/manual/2026-W37",
             status="done",
-            timestamp=timestamp("2026-09-08T16:00:00Z"),
+            timestamp=timestamp("2026-09-12T16:00:00Z"),
         )
 
         self.assertFalse(self.eligible("2026-09-13T16:00:00Z", automatic=True))
         self.assertFalse(self.eligible("2026-09-13T16:00:00Z", automatic=False))
-        self.assertTrue(self.eligible("2026-09-14T16:00:00Z", automatic=False))
+        self.assertFalse(self.eligible("2026-09-14T16:00:00Z", automatic=False))
         self.assertFalse(self.eligible("2026-09-14T16:00:00Z", automatic=True))
+        self.assertFalse(self.eligible("2026-09-19T03:59:59Z", automatic=False))
+        self.assertTrue(self.eligible("2026-09-19T04:00:00Z", automatic=False))
+        self.assertFalse(self.eligible("2026-09-19T04:00:00Z", automatic=True))
         self.assertTrue(self.eligible("2026-09-20T16:00:00Z", automatic=True))
+
+    def test_sunday_run_stays_spent_on_monday_and_friday(self) -> None:
+        self.queue.record(
+            "weekly-job", "alpha/manual/2026-W37", status="done",
+            timestamp=timestamp("2026-09-13T16:00:00Z"),
+        )
+        for value in ("2026-09-14T16:00:00Z", "2026-09-18T16:00:00Z"):
+            with self.subTest(value=value):
+                self.assertFalse(self.eligible(value, automatic=False))
+                self.assertFalse(self.eligible(value, automatic=True))
 
     def test_missed_sunday_does_not_carry_into_monday(self) -> None:
         self.assertTrue(self.eligible("2026-09-13T16:00:00Z", automatic=True))

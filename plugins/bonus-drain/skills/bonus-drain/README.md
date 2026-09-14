@@ -98,7 +98,7 @@ BONUS_DRAIN_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/bonus-drain/config.json" \
 The configuration graph is versioned and uses IDs for all relationships:
 
 - `recurrence_timezone` is the IANA timezone used for weekly boundaries. The default and
-  example use `America/New_York`: weeks start Monday at midnight, and Sunday is the automatic
+  example use `America/New_York`: weeks start Saturday at midnight, and Sunday is the automatic
   dispatch window.
 - `adapters[]` declares argv arrays for `agent-router`, usage, optional separate reset,
   and optional activation adapters.

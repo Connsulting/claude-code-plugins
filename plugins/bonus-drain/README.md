@@ -145,7 +145,7 @@ Scout reserves actual compatible task IDs in nearest-reset order, preventing a p
 from consuming two provider slots while preserving exclusive work for a capable provider.
 Within one priority, eligible tasks are oldest-waiting-first. Weekly tasks are automatically
 eligible only on Sunday in the configured recurrence timezone, and at most once in the week
-that began Monday at midnight. A manual run outside Sunday consumes the same weekly slot. If
+that began Saturday at midnight. A manual run outside Sunday consumes the same weekly slot. If
 Sunday passes without a run, the task waits for the next Sunday instead of catching up Monday.
 Monthly tasks start waiting when their 28-day cooldown ends. Before any claim, scout reports
 queue reconciliation blockers, global in-flight runs with their ages, and the resolved executable
