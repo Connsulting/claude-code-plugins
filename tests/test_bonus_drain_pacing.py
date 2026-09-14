@@ -154,7 +154,7 @@ def _two_account_config() -> SimpleNamespace:
 
 
 class SameProviderAccountSelectionTests(unittest.TestCase):
-    def test_higher_surplus_account_wins_the_provider_tick(self) -> None:
+    def test_closed_sibling_keeps_its_own_capacity_reason(self) -> None:
         from bonus_drain.usage import UsageSnapshot
 
         config = _two_account_config()
@@ -176,9 +176,12 @@ class SameProviderAccountSelectionTests(unittest.TestCase):
         )
         self.assertEqual([batch.account_id for batch in plan.batches], ["claude-business"])
         self.assertEqual(plan.batches[0].batch_size, 4)
-        self.assertEqual(plan.closed[("claude", "claude-personal")], "queued behind claude-business")
+        self.assertEqual(
+            plan.closed[("claude", "claude-personal")],
+            "at reserve target for limit claude-personal-weekly",
+        )
 
-    def test_both_above_floor_keeps_the_larger_surplus(self) -> None:
+    def test_capacity_plan_keeps_both_drainable_siblings_open(self) -> None:
         from bonus_drain.usage import UsageSnapshot
 
         config = _two_account_config()
@@ -198,11 +201,15 @@ class SameProviderAccountSelectionTests(unittest.TestCase):
             eligible_count={("claude", "claude-personal"): 6, ("claude", "claude-business"): 6},
             now_epoch=NOW,
         )
-        self.assertEqual([batch.account_id for batch in plan.batches], ["claude-business"])
-        self.assertEqual(plan.batches[0].batch_size, 6)
-        self.assertEqual(plan.closed[("claude", "claude-personal")], "queued behind claude-business")
+        self.assertEqual(
+            [batch.account_id for batch in plan.batches],
+            ["claude-personal", "claude-business"],
+        )
+        self.assertEqual([batch.batch_size for batch in plan.batches], [5, 6])
+        self.assertNotIn(("claude", "claude-personal"), plan.closed)
+        self.assertNotIn(("claude", "claude-business"), plan.closed)
 
-    def test_last_day_pins_the_sooner_reset_even_with_less_surplus(self) -> None:
+    def test_capacity_plan_keeps_urgent_and_nonurgent_siblings_open(self) -> None:
         from bonus_drain.usage import UsageSnapshot
 
         config = _two_account_config()
@@ -221,11 +228,14 @@ class SameProviderAccountSelectionTests(unittest.TestCase):
             eligible_count={("claude", "claude-personal"): 6, ("claude", "claude-business"): 6},
             now_epoch=NOW,
         )
-        self.assertEqual([batch.account_id for batch in plan.batches], ["claude-business"])
-        self.assertTrue(plan.batches[0].urgent)
-        self.assertEqual(plan.closed[("claude", "claude-personal")], "queued behind claude-business")
+        self.assertEqual(
+            [batch.account_id for batch in plan.batches],
+            ["claude-business", "claude-personal"],
+        )
+        self.assertNotIn(("claude", "claude-personal"), plan.closed)
+        self.assertNotIn(("claude", "claude-business"), plan.closed)
 
-    def test_last_day_at_floor_still_blocks_the_sibling(self) -> None:
+    def test_urgent_sibling_at_floor_does_not_block_a_drainable_sibling(self) -> None:
         from bonus_drain.usage import UsageSnapshot
 
         config = _two_account_config()
@@ -245,11 +255,13 @@ class SameProviderAccountSelectionTests(unittest.TestCase):
             eligible_count={("claude", "claude-personal"): 6, ("claude", "claude-business"): 6},
             now_epoch=NOW,
         )
-        self.assertEqual(plan.batches, ())
-        self.assertEqual(plan.closed[("claude", "claude-personal")], "queued behind claude-business")
-        self.assertTrue(next(g for g in plan.gates if g.account_id == "claude-business").urgent)
+        self.assertEqual([batch.account_id for batch in plan.batches], ["claude-personal"])
+        self.assertEqual(
+            plan.closed[("claude", "claude-business")],
+            "at reserve target for limit claude-business-weekly",
+        )
 
-    def test_new_week_surplus_loses_to_sibling_still_in_last_day(self) -> None:
+    def test_capacity_plan_does_not_preselect_an_urgent_sibling(self) -> None:
         from bonus_drain.usage import UsageSnapshot
 
         config = _two_account_config()
@@ -268,9 +280,44 @@ class SameProviderAccountSelectionTests(unittest.TestCase):
             eligible_count={("claude", "claude-personal"): 6, ("claude", "claude-business"): 6},
             now_epoch=NOW,
         )
-        self.assertEqual([batch.account_id for batch in plan.batches], ["claude-personal"])
-        self.assertTrue(plan.batches[0].urgent)
-        self.assertEqual(plan.closed[("claude", "claude-business")], "queued behind claude-personal")
+        self.assertEqual(
+            [batch.account_id for batch in plan.batches],
+            ["claude-personal", "claude-business"],
+        )
+        self.assertNotIn(("claude", "claude-personal"), plan.closed)
+        self.assertNotIn(("claude", "claude-business"), plan.closed)
+
+    def test_neither_sibling_above_floor_yields_no_provider_batch(self) -> None:
+        from bonus_drain.usage import UsageSnapshot
+
+        config = _two_account_config()
+        snapshots = {
+            ("claude", "claude-personal"): UsageSnapshot(
+                "claude", "claude-personal", NOW,
+                {"claude-personal-weekly": {"used_percent": 75, "resets_at": NOW + 40 * HOUR}},
+            ),
+            ("claude", "claude-business"): UsageSnapshot(
+                "claude", "claude-business", NOW,
+                {"claude-business-weekly": {"used_percent": 79, "resets_at": NOW + 40 * HOUR}},
+            ),
+        }
+
+        plan = build_plan(
+            config, snapshots,
+            eligible_count={("claude", "claude-personal"): 6, ("claude", "claude-business"): 6},
+            now_epoch=NOW,
+        )
+
+        self.assertEqual(plan.batches, ())
+        self.assertEqual(
+            plan.closed,
+            {
+                ("claude", "claude-personal"):
+                    "at reserve target for limit claude-personal-weekly",
+                ("claude", "claude-business"):
+                    "at reserve target for limit claude-business-weekly",
+            },
+        )
 
 
 class RecurringCycleEligibilityTests(unittest.TestCase):

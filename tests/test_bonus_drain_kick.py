@@ -23,7 +23,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
 
-from bonus_drain import adapters, cli, config as config_module, db, dispatcher  # noqa: E402
+from bonus_drain import adapters, cli, config as config_module, db, dispatcher, usage  # noqa: E402
 
 
 NOW = 2_000_000_000
@@ -110,6 +110,37 @@ class KickContractTests(unittest.TestCase):
         if "--dry-run" in argv:
             return {"provider_id": "alpha"}
         return {"dispatch": {"job_id": "job-1", "launched": True}}
+
+    def _active_multi_config(
+        self,
+        active: Path,
+        *,
+        personal_label: str = "Personal",
+        business_label: str = "Business",
+        personal_id: str = "alpha-personal",
+        business_id: str = "alpha-business",
+    ) -> config_module.RuntimeConfig:
+        personal_activation = config_module.AdapterConfig(
+            "personal-switch", "activation",
+            ("switch", "--label", personal_label, "--active-path", str(active)),
+        )
+        business_activation = config_module.AdapterConfig(
+            "business-switch", "activation",
+            ("switch", "--label", business_label, "--active-path", str(active)),
+        )
+        personal = replace(
+            self.config.accounts[0], id=personal_id,
+            activation_adapter_id="personal-switch",
+        )
+        business = replace(
+            self.config.accounts[0], id=business_id,
+            activation_adapter_id="business-switch",
+        )
+        return replace(
+            self.config,
+            adapters=(*self.config.adapters, personal_activation, business_activation),
+            accounts=(personal, business, self.config.accounts[1]),
+        )
 
     def test_cli_and_viewer_name_the_same_manual_kick_service(self) -> None:
         from bonus_drain import kick
@@ -430,20 +461,9 @@ class KickContractTests(unittest.TestCase):
     def test_manual_kick_reuses_the_provider_account_with_active_leases(self) -> None:
         from bonus_drain import kick
 
-        activation = config_module.AdapterConfig(
-            "switch", "activation", (str(self.root / "bin" / "account-switch"),),
-        )
-        personal = replace(
-            self.config.accounts[0], id="alpha-personal", activation_adapter_id="switch",
-        )
-        business = replace(
-            self.config.accounts[0], id="alpha-business", activation_adapter_id="switch",
-        )
-        cfg = replace(
-            self.config,
-            adapters=(*self.config.adapters, activation),
-            accounts=(personal, business, self.config.accounts[1]),
-        )
+        active = self.root / "active"
+        active.write_text("Business\n", encoding="utf-8")
+        cfg = self._active_multi_config(active)
         self.queue.add_task(_task("already-running"))
         held_key = f"alpha-business/alpha-weekly/{NOW + 604800}"
         self.assertTrue(self.queue.claim(
@@ -509,6 +529,206 @@ class KickContractTests(unittest.TestCase):
                 cfg, self.queue, task_id="portable", requested_provider="alpha",
                 now_epoch=NOW, router_call=self._router,
             )
+
+    def test_missing_unknown_and_duplicate_active_markers_never_fall_back(self) -> None:
+        from bonus_drain import kick
+
+        active = self.root / "active"
+        cases = (
+            ("missing", None, "Personal", "Business"),
+            ("unknown", "Retired", "Personal", "Business"),
+            ("duplicate", "Business", "Business", "Business"),
+        )
+        for name, marker, personal_label, business_label in cases:
+            with self.subTest(name=name):
+                if marker is None:
+                    active.unlink(missing_ok=True)
+                else:
+                    active.write_text(f"{marker}\n", encoding="utf-8")
+                cfg = self._active_multi_config(
+                    active,
+                    personal_label=personal_label,
+                    business_label=business_label,
+                )
+                router_calls: list[object] = []
+                activation_calls: list[object] = []
+                with self.assertRaises(dispatcher.InvalidRoute):
+                    kick.kick_task(
+                        cfg,
+                        self.queue,
+                        task_id="portable",
+                        requested_provider="alpha",
+                        now_epoch=NOW,
+                        router_call=lambda *args, **kwargs: router_calls.append((args, kwargs)),
+                        activation_call=lambda *args: activation_calls.append(args),
+                    )
+                self.assertEqual(router_calls, [])
+                self.assertEqual(activation_calls, [])
+                self.assertEqual(self.queue.claims(), [])
+
+    def test_marker_and_unique_lease_disagreement_blocks_before_dispatch(self) -> None:
+        from bonus_drain import kick
+
+        active = self.root / "active"
+        active.write_text("Personal\n", encoding="utf-8")
+        cfg = self._active_multi_config(active)
+        self.queue.add_task(_task("business-owner"))
+        key = f"alpha-business/alpha-weekly/{NOW + 604800}"
+        self.assertTrue(self.queue.claim(
+            "business-owner", key, "alpha", "alpha-business",
+            provider_capabilities=("legacy-exclusive", "cpu"),
+        ))
+        self.assertTrue(self.queue.acquire_activation(
+            "business-owner", key, "alpha", "alpha-business", lambda: None,
+        ))
+        router_calls: list[object] = []
+        activation_calls: list[object] = []
+
+        with self.assertRaisesRegex(dispatcher.InvalidRoute, "disagree"):
+            kick.kick_task(
+                cfg,
+                self.queue,
+                task_id="portable",
+                requested_provider="alpha",
+                now_epoch=NOW,
+                router_call=lambda *args, **kwargs: router_calls.append((args, kwargs)),
+                activation_call=lambda *args: activation_calls.append(args),
+            )
+
+        self.assertEqual(router_calls, [])
+        self.assertEqual(activation_calls, [])
+        self.assertEqual([claim.task_id for claim in self.queue.claims()], ["business-owner"])
+
+    def test_multiple_same_account_leases_block_manual_selection(self) -> None:
+        from bonus_drain import kick
+
+        active = self.root / "active"
+        active.write_text("Business\n", encoding="utf-8")
+        cfg = self._active_multi_config(active)
+        for task_id in ("owner-one", "owner-two"):
+            self.queue.add_task(_task(task_id))
+            key = f"alpha-business/alpha-weekly/{NOW + 604800}/{task_id}"
+            self.assertTrue(self.queue.claim(
+                task_id, key, "alpha", "alpha-business",
+                provider_capabilities=("legacy-exclusive", "cpu"),
+            ))
+            self.queue.acquire_activation(
+                task_id, key, "alpha", "alpha-business", lambda: None,
+            )
+
+        with self.assertRaisesRegex(dispatcher.InvalidRoute, "multiple|conflicting"):
+            kick.kick_task(
+                cfg,
+                self.queue,
+                task_id="portable",
+                requested_provider="alpha",
+                now_epoch=NOW,
+                router_call=lambda *_args, **_kwargs: self.fail("router was called"),
+            )
+
+    def test_unknown_lease_account_blocks_manual_selection(self) -> None:
+        from bonus_drain import kick
+
+        active = self.root / "active"
+        active.write_text("Business\n", encoding="utf-8")
+        cfg = self._active_multi_config(active)
+        self.queue.add_task(_task("retired-owner"))
+        key = f"alpha-retired/alpha-weekly/{NOW + 604800}"
+        self.assertTrue(self.queue.claim(
+            "retired-owner", key, "alpha", "alpha-retired",
+            provider_capabilities=("legacy-exclusive", "cpu"),
+        ))
+        self.assertTrue(self.queue.acquire_activation(
+            "retired-owner", key, "alpha", "alpha-retired", lambda: None,
+        ))
+
+        with self.assertRaisesRegex(dispatcher.InvalidRoute, "unknown|configured"):
+            kick.kick_task(
+                cfg,
+                self.queue,
+                task_id="portable",
+                requested_provider="alpha",
+                now_epoch=NOW,
+                router_call=lambda *_args, **_kwargs: self.fail("router was called"),
+            )
+
+    def test_accounts_select_uses_active_winner_before_scalar_allocation(self) -> None:
+        active = self.root / "active"
+        active.write_text("Business\n", encoding="utf-8")
+        cfg = self._active_multi_config(active)
+        snapshots = {
+            ("alpha", "alpha-personal"): usage.UsageSnapshot(
+                "alpha", "alpha-personal", NOW,
+                {"alpha-weekly": {"used_percent": 70, "resets_at": NOW + 20_000}},
+            ),
+            ("alpha", "alpha-business"): usage.UsageSnapshot(
+                "alpha", "alpha-business", NOW,
+                {"alpha-weekly": {"used_percent": 70, "resets_at": NOW + 30_000}},
+            ),
+            ("beta", "beta-account"): usage.UsageSnapshot(
+                "beta", "beta-account", NOW,
+                {"beta-weekly": {"used_percent": 95, "resets_at": NOW + 20_000}},
+            ),
+        }
+        with (
+            mock.patch.object(cli, "_load_config", return_value=cfg),
+            mock.patch.object(cli, "_queue", return_value=(cfg, self.queue)) as opened,
+            mock.patch.object(usage, "read_all", return_value=snapshots),
+            mock.patch("builtins.print") as printed,
+        ):
+            result = cli.main([
+                "accounts", "select", "--config", str(cfg.source_path),
+                "--database", str(cfg.database), "--now", str(NOW),
+            ])
+
+        self.assertEqual(result, 0)
+        opened.assert_called_once()
+        self.assertEqual(opened.call_args.kwargs, {"graph_required": True})
+        printed.assert_called_once_with(f"alpha-business {NOW + 30_000}")
+
+    def test_accounts_select_equal_resets_keeps_active_later_account_id(self) -> None:
+        active = self.root / "active"
+        active.write_text("Business\n", encoding="utf-8")
+        cfg = self._active_multi_config(
+            active, personal_id="alpha-a", business_id="alpha-z",
+        )
+        reset = NOW + 30_000
+        snapshots = {
+            ("alpha", "alpha-a"): usage.UsageSnapshot(
+                "alpha", "alpha-a", NOW,
+                {"alpha-weekly": {"used_percent": 70, "resets_at": reset}},
+            ),
+            ("alpha", "alpha-z"): usage.UsageSnapshot(
+                "alpha", "alpha-z", NOW,
+                {"alpha-weekly": {"used_percent": 70, "resets_at": reset}},
+            ),
+            ("beta", "beta-account"): usage.UsageSnapshot(
+                "beta", "beta-account", NOW,
+                {"beta-weekly": {"used_percent": 95, "resets_at": reset}},
+            ),
+        }
+        with (
+            mock.patch.object(cli, "_load_config", return_value=cfg),
+            mock.patch.object(cli, "_queue", return_value=(cfg, self.queue)),
+            mock.patch.object(usage, "read_all", return_value=snapshots),
+            mock.patch("builtins.print") as printed,
+        ):
+            result = cli.main([
+                "accounts", "select", "--config", str(cfg.source_path),
+                "--database", str(cfg.database), "--now", str(NOW),
+            ])
+
+        self.assertEqual(result, 0)
+        printed.assert_called_once_with(f"alpha-z {reset}")
+
+    def test_nonselect_accounts_action_does_not_open_queue(self) -> None:
+        with (
+            mock.patch.object(cli, "_load_config", return_value=self.config),
+            mock.patch.object(cli, "_queue") as opened,
+            mock.patch("builtins.print"),
+        ):
+            self.assertEqual(cli.main(["accounts", "labels"]), 0)
+        opened.assert_not_called()
 
     def test_runtime_injected_non_router_classifier_and_launcher_are_rejected_before_execution(self) -> None:
         bad = config_module.AdapterConfig("bad", "usage", ("/bin/false",))

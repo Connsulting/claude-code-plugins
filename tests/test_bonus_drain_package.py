@@ -79,6 +79,31 @@ class BonusDrainPackageContractTests(unittest.TestCase):
         self.assertIsInstance(value, dict, f"{path} must contain a JSON object")
         return value
 
+    def activation_command(self, pin: Path, *extra: str) -> list[str]:
+        return [
+            str(SKILL_ROOT / "bin" / "bonus-drain-account-activation"),
+            "--action", "activate",
+            "--account", "account-business",
+            "--expected-account", "account-business",
+            "--label", "Business",
+            "--pin-file", str(pin),
+            *extra,
+        ]
+
+    def make_rotator(self, root: Path) -> Path:
+        rotator = root / "rotator"
+        rotator.write_text(
+            "#!/bin/sh\n"
+            "trace=$1\n"
+            "printf 'called\\n' >> \"$trace\"\n"
+            "if [ \"$#\" -eq 3 ]; then\n"
+            "  printf '%s\\n' \"$3\" > \"$2\"\n"
+            "fi\n",
+            encoding="utf-8",
+        )
+        rotator.chmod(0o700)
+        return rotator
+
     def installed_config(self, home: Path, config_path: Path) -> None:
         state = home / ".local" / "state" / "bonus-drain"
         state.mkdir(parents=True)
@@ -713,6 +738,148 @@ class BonusDrainPackageContractTests(unittest.TestCase):
         self.assertIn("{provider_id}", flattened)
         self.assertIn("{account_id}", flattened)
         self.assertIn("{action}", flattened)
+
+    def test_activation_skips_rotator_when_requested_label_is_already_active(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pin = root / "PIN"
+            active = root / "active"
+            trace = root / "trace"
+            active.write_text("Business\n", encoding="utf-8")
+            rotator = self.make_rotator(root)
+
+            completed = subprocess.run(
+                self.activation_command(
+                    pin,
+                    "--rotate", str(rotator),
+                    "--rotate-arg", str(trace),
+                    "--active-path", str(active),
+                ),
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertFalse(trace.exists())
+            self.assertEqual(pin.read_text(encoding="utf-8"), "Business\n")
+
+    def test_activation_without_active_path_still_invokes_rotator(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pin = root / "PIN"
+            trace = root / "trace"
+            rotator = self.make_rotator(root)
+
+            completed = subprocess.run(
+                self.activation_command(
+                    pin,
+                    "--rotate", str(rotator),
+                    "--rotate-arg", str(trace),
+                ),
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(trace.read_text(encoding="utf-8").splitlines(), ["called"])
+            self.assertEqual(pin.read_text(encoding="utf-8"), "Business\n")
+
+    def test_missing_configured_active_marker_rotates_then_requires_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pin = root / "PIN"
+            active = root / "active"
+            trace = root / "trace"
+            rotator = self.make_rotator(root)
+
+            completed = subprocess.run(
+                self.activation_command(
+                    pin,
+                    "--rotate", str(rotator),
+                    "--rotate-arg", str(trace),
+                    "--active-path", str(active),
+                ),
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+            )
+
+            self.assertEqual(completed.returncode, 1)
+            self.assertEqual(trace.read_text(encoding="utf-8").splitlines(), ["called"])
+            self.assertIn("active account path", completed.stderr)
+            self.assertFalse(pin.exists())
+
+    def test_inactive_target_invokes_rotator_once_and_verifies_new_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pin = root / "PIN"
+            active = root / "active"
+            trace = root / "trace"
+            active.write_text("Personal\n", encoding="utf-8")
+            rotator = self.make_rotator(root)
+
+            completed = subprocess.run(
+                self.activation_command(
+                    pin,
+                    "--rotate", str(rotator),
+                    "--rotate-arg", str(trace),
+                    "--rotate-arg", str(active),
+                    "--rotate-arg", "Business",
+                    "--active-path", str(active),
+                ),
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(trace.read_text(encoding="utf-8").splitlines(), ["called"])
+            self.assertEqual(active.read_text(encoding="utf-8"), "Business\n")
+            self.assertEqual(pin.read_text(encoding="utf-8"), "Business\n")
+
+    def test_failed_inactive_rotation_restores_prior_pin(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pin = root / "PIN"
+            active = root / "active"
+            trace = root / "trace"
+            pin.write_text("Personal\n", encoding="utf-8")
+            active.write_text("Personal\n", encoding="utf-8")
+            rotator = self.make_rotator(root)
+
+            completed = subprocess.run(
+                self.activation_command(
+                    pin,
+                    "--rotate", str(rotator),
+                    "--rotate-arg", str(trace),
+                    "--active-path", str(active),
+                ),
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+            )
+
+            self.assertEqual(completed.returncode, 1)
+            self.assertEqual(trace.read_text(encoding="utf-8").splitlines(), ["called"])
+            self.assertIn("requested account did not become active", completed.stderr)
+            self.assertEqual(pin.read_text(encoding="utf-8"), "Personal\n")
 
     def test_package_test_command_is_idempotent_without_bytecode_environment_flags(self) -> None:
         if os.environ.get("BONUS_DRAIN_PACKAGE_IDEMPOTENCE_CHILD") == "1":
