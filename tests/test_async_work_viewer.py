@@ -71,6 +71,117 @@ class AsyncViewerTests(unittest.TestCase):
         self.assertEqual(buttons.count(' disabled'), 4)
         self.assertIn('Waiting for parent', buttons)
 
+    def test_recovering_backoff_held_and_exhausted_tasks_stay_visible_with_recovery_context(self):
+        states = {
+            'recovering': {
+                'state': 'recovering', 'ready': False, 'reason': 'Recovery attempt is running',
+                'attempt': {'ordinal': 2, 'mode': 'retry'},
+                'recovery': {'state': 'consumed', 'blocked_descendants': 4},
+            },
+            'backoff': {
+                'state': 'backoff', 'ready': False, 'reason': 'Retryable tests failed',
+                'attempt': {'ordinal': 1, 'mode': 'normal'},
+                'recovery': {
+                    'state': 'backoff', 'mode': 'retry',
+                    'not_before': '2033-05-18T03:38:20Z', 'blocked_descendants': 3,
+                },
+            },
+            'held': {
+                'state': 'held', 'ready': False, 'reason': 'Repository identity is unavailable',
+                'attempt': {'ordinal': 2, 'mode': 'verification'},
+                'recovery': {
+                    'state': 'held', 'reason_code': 'dependency_ref_unavailable',
+                    'blocked_descendants': 2,
+                },
+            },
+            'exhausted': {
+                'state': 'exhausted', 'ready': False, 'reason': 'Automatic recovery limit reached',
+                'attempt': {'ordinal': 3, 'mode': 'retry'},
+                'recovery': {'state': 'exhausted', 'blocked_descendants': 1},
+            },
+        }
+        tasks = [{
+            'id': task_id, 'title': task_id.title(), 'priority': 2, 'kind': 'oneoff',
+            'cwd': '/tmp', 'goal': 'Retain this recovery in the queue',
+        } for task_id in states]
+        payload = {
+            'tasks': tasks,
+            'eligible_task_ids': [],
+            'eligible_provider_ids': {},
+            'compatible_provider_ids': {task_id: ['alpha'] for task_id in states},
+            'readiness': states,
+        }
+        with mock.patch.object(
+            self.viewer.subprocess, 'run', return_value=mock.Mock(stdout=json.dumps(payload)),
+        ):
+            remaining = self.viewer._remaining_snapshot(0)
+
+        self.assertEqual({item['id'] for item in remaining}, set(states))
+        self.assertTrue(all(item['compatible_providers'] == ['alpha'] for item in remaining))
+        rendered = {item['id']: self.viewer._work_meta(item) for item in remaining}
+        self.assertIn('attempt 2', rendered['recovering'].lower())
+        self.assertIn('retry', rendered['recovering'].lower())
+        self.assertIn('2033-05-18T03:38:20Z', rendered['backoff'])
+        self.assertIn('3 blocked descendants', rendered['backoff'])
+        self.assertIn('dependency_ref_unavailable', rendered['held'])
+        self.assertIn('Automatic recovery limit reached', rendered['exhausted'])
+
+    def test_run_log_disables_requeue_when_the_projected_action_is_unsafe(self):
+        runs = [
+            {
+                'ts': '2026-09-14T12:00:00Z', 'task': 'ordinary', 'title': 'Ordinary',
+                'kind': 'oneoff', 'status': 'failed', 'engine': 'codex', 'cycle': 1,
+                'summary': 'retryable', 'branch': None,
+                'requeue': {'allowed': True, 'reason': 'Operator retry is available'},
+            },
+            {
+                'ts': '2026-09-14T11:00:00Z', 'task': 'authority', 'title': 'Authority',
+                'kind': 'oneoff', 'status': 'failed', 'engine': 'claude', 'cycle': 1,
+                'summary': 'authority required', 'branch': None,
+                'requeue': {'allowed': False, 'reason': 'Authority is required'},
+            },
+            {
+                'ts': '2026-09-14T10:00:00Z', 'task': 'ambiguous', 'title': 'Ambiguous',
+                'kind': 'oneoff', 'status': 'failed', 'engine': 'claude', 'cycle': 1,
+                'summary': 'launch unknown', 'branch': None,
+                'requeue': {'allowed': False, 'reason': 'Launch ownership is ambiguous'},
+            },
+            {
+                'ts': '2026-09-14T09:00:00Z', 'task': 'goal-member', 'title': 'Goal member',
+                'kind': 'oneoff', 'status': 'skipped', 'engine': 'claude', 'cycle': 1,
+                'summary': 'fresh verifier required', 'branch': None,
+                'requeue': {'allowed': False, 'reason': 'Fresh goal follow-up required'},
+            },
+        ]
+        with (
+            mock.patch.object(self.viewer, 'get_usage', return_value=None),
+            mock.patch.object(self.viewer, 'get_codex_usage', return_value=None),
+            mock.patch.object(self.viewer, 'get_grok_usage', return_value=None),
+            mock.patch.object(self.viewer, 'current_cycle', return_value=1),
+            mock.patch.object(self.viewer, 'get_remaining', return_value=[]),
+            mock.patch.object(self.viewer, 'get_recent_runs', return_value=runs),
+            mock.patch.object(self.viewer, 'get_disabled', return_value=[]),
+            mock.patch.object(self.viewer, 'get_inflight', return_value=[]),
+            mock.patch.object(self.viewer, 'get_gates', return_value={'coordinator': 'none'}),
+            mock.patch.object(self.viewer, '_claude_cards', return_value=[]),
+            mock.patch.object(self.viewer, '_codex_cards', return_value=[]),
+            mock.patch.object(self.viewer, '_grok_cards', return_value=[]),
+            mock.patch.object(self.viewer, '_verdict', return_value=('idle', 'idle', 'idle', '')),
+            mock.patch.object(self.viewer, 'get_dispatch_times', return_value=[]),
+        ):
+            body = self.viewer.render_bonus_body()
+
+        ordinary = body[body.index('data-task-id="ordinary"'):]
+        self.assertNotIn('disabled', ordinary.split('</button>', 1)[0])
+        for task_id, reason in (
+            ('authority', 'Authority is required'),
+            ('ambiguous', 'Launch ownership is ambiguous'),
+            ('goal-member', 'Fresh goal follow-up required'),
+        ):
+            button = body[body.index(f'data-task-id="{task_id}"'):].split('</button>', 1)[0]
+            self.assertIn('disabled', button)
+            self.assertIn(reason, button)
+
     def test_explicit_empty_compatibility_does_not_enable_fallback_providers(self):
         self.viewer.PREVIEW = False
         buttons = self.viewer._run_buttons({'id': 'x', 'eligible_providers': [], 'readiness': {'ready': True}})

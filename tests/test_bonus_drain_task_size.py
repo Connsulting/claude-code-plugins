@@ -345,7 +345,22 @@ class TaskSizeContractTests(unittest.TestCase):
         })
         self.queue.add_task(_task_values("inactive") | {"active": False})
         self.queue.add_task(_task_values("claimed"))
-        self.queue.record("spent", status="done", cycle=cycle)
+        spent_attempt = self.queue.claim(
+            "spent", f"alpha-account/alpha-weekly/{cycle}", "alpha", "alpha-account",
+            provider_capabilities=("cpu",), now_epoch=cycle,
+        )
+        self.assertIsNotNone(spent_attempt)
+        self.queue.record(
+            "spent", f"alpha-account/alpha-weekly/{cycle}",
+            attempt_id=spent_attempt.id, status="done", cycle=cycle,
+            outcome={
+                "completion": {
+                    "verified": True,
+                    "mechanism": "command",
+                    "evidence": ["fixture://task-size-spent"],
+                },
+            },
+        )
         self.queue.record("weekly-current", status="done", cycle=cycle)
         self.queue.record(
             "weekly-prior", status="done", cycle=cycle - 604_800,

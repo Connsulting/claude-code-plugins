@@ -17,6 +17,7 @@ from bonus_drain.dispatcher import DispatchError
 from tests.test_bonus_drain_review_repairs import (
     ELIGIBILITY_KEY, NOW, RESET, runtime, snapshots, task,
 )
+from tests.test_bonus_drain_scout_inflight import _open_snapshots, _two_provider_config
 
 
 class ScoutReconciliationTests(unittest.TestCase):
@@ -41,12 +42,15 @@ class ScoutReconciliationTests(unittest.TestCase):
             "provider": "alpha", "job_id": "job-1", "state": state, **extra,
         }]}
 
-    def run_scout(self, response, *, dry_run=False, release=None):
+    def run_scout(self, response, *, dry_run=False, release=None, config=None, usage_snapshots=None):
         with mock.patch.object(reconcile, "execute_adapter", return_value=response):
-            with mock.patch.object(scout, "read_all", return_value=snapshots()):
+            with mock.patch.object(
+                scout, "read_all",
+                return_value=snapshots() if usage_snapshots is None else usage_snapshots,
+            ):
                 with mock.patch.object(scout, "dispatch") as dispatch:
                     report = scout.run_once(
-                        self.config, self.queue, now_epoch=NOW, dry_run=dry_run,
+                        config or self.config, self.queue, now_epoch=NOW, dry_run=dry_run,
                         activation_call=release,
                     )
         return report, dispatch
@@ -70,6 +74,8 @@ class ScoutReconciliationTests(unittest.TestCase):
         self.assertEqual(len(self.queue.runs()), 2)
 
     def test_live_unknown_absent_wrong_provider_and_duplicate_jobs_stay_blocked(self):
+        self.queue.add_task(task("healthy-beta") | {"allowed_providers": ["beta"]})
+        two_provider = _two_provider_config(self.queue, self.root / "cache")
         responses = [
             self.response("running"), self.response("unknown", persisted="completed"),
             {"rows": []}, {"rows": [dict(self.response()["rows"][0], provider="other")]},
@@ -77,10 +83,14 @@ class ScoutReconciliationTests(unittest.TestCase):
         ]
         for response in responses:
             with self.subTest(response=response):
-                report, dispatch = self.run_scout(response)
-                self.assertEqual(report.blockers[0]["kind"], "inflight")
+                report, dispatch = self.run_scout(
+                    response, config=two_provider, usage_snapshots=_open_snapshots(),
+                )
                 self.assertEqual(report.reconciliation[0]["action"], "held")
-                dispatch.assert_not_called()
+                self.assertEqual(dispatch.call_count, 1)
+                self.assertEqual(dispatch.call_args.kwargs["task_id"], "healthy-beta")
+                self.assertEqual(dispatch.call_args.kwargs["requested_provider"], "beta")
+                self.assertIn(("alpha", "alpha-account"), report.plan.closed)
                 self.assertEqual(len(self.queue.claims()), 1)
                 self.assertEqual(len(self.queue.activation_leases()), 1)
                 self.assertEqual(len(self.queue.runs()), 1)

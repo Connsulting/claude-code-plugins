@@ -15,6 +15,7 @@ SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
 
 from bonus_drain import config as config_module, db, scout, usage  # noqa: E402
+from tests.test_bonus_drain_scout_inflight import _open_snapshots, _two_provider_config
 
 
 NOW = 2_000_000_000
@@ -180,27 +181,36 @@ class BonusDrainReviewRepairTests(unittest.TestCase):
 
         self.assertEqual(self.queue.inflight_details(now_epoch=NOW), [])
 
-    def test_scout_reports_the_global_inflight_blocker_with_task_ages(self) -> None:
-        self.queue.add_task(task("running"))
-        self.queue.add_task(task("would-run"))
+    def test_scout_caps_the_inflight_provider_and_dispatches_healthy_provider_work(self) -> None:
+        self.queue.add_task(task("running") | {"allowed_providers": ["alpha"]})
+        self.queue.add_task(task("would-run") | {"allowed_providers": ["beta"]})
+        attempt = self.queue.claim(
+            "running", ELIGIBILITY_KEY, "alpha", "alpha-account", now_epoch=NOW,
+        )
+        self.assertIsNotNone(attempt)
         self.queue.record(
-            "running", ELIGIBILITY_KEY, status="dispatched", timestamp=iso(NOW - 125),
+            "running", ELIGIBILITY_KEY, attempt_id=attempt.id,
+            status="dispatched", timestamp=iso(NOW - 125),
+            provider_id="alpha", account_id="alpha-account", router_job_id="job-running",
         )
 
         with (
-            mock.patch.object(scout, "read_all", return_value=snapshots()),
+            mock.patch.object(scout, "read_all", return_value=_open_snapshots()),
             mock.patch.object(scout, "dispatch") as dispatch_mock,
         ):
-            report = scout.run_once(runtime(self.queue.path), self.queue, now_epoch=NOW)
+            report = scout.run_once(
+                _two_provider_config(self.queue, self.root / "cache"),
+                self.queue, now_epoch=NOW,
+            )
 
-        self.assertEqual(report.dispatched, ())
         self.assertEqual(report.errors, ())
-        self.assertEqual(report.blockers[0]["kind"], "inflight")
-        self.assertEqual(report.blockers[0]["runs"][0]["task"], "running")
-        self.assertEqual(report.blockers[0]["runs"][0]["age_seconds"], 125)
-        self.assertTrue(report.router_preflight[0]["available"])
-        self.assertIsNotNone(report.router_preflight[0]["identity"])
-        dispatch_mock.assert_not_called()
+        self.assertEqual(dispatch_mock.call_count, 1)
+        self.assertEqual(dispatch_mock.call_args.kwargs["task_id"], "would-run")
+        self.assertEqual(dispatch_mock.call_args.kwargs["requested_provider"], "beta")
+        self.assertIn(("alpha", "alpha-account"), report.plan.closed)
+        self.assertEqual(self.queue.claim_for("running").attempt_id, attempt.id)
+        self.assertEqual(self.queue.inflight_details(now_epoch=NOW)[0]["age_seconds"], 125)
+        self.assertEqual(len(self.queue.runs(task_id="running")), 1)
 
     def test_scout_preflights_router_before_claiming_any_task(self) -> None:
         self.queue.add_task(task("would-run"))
