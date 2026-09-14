@@ -819,7 +819,12 @@ def run_task_now(task_id: str, engine: str) -> tuple[bool, str]:
         return False, "invalid engine"
     try:
         cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
-        result = kick_task(cfg, QueueDB(cfg.database), task_id, engine)
+        result = kick_task(
+            cfg,
+            QueueDB(cfg.database, recurrence_timezone=cfg.recurrence_timezone),
+            task_id,
+            engine,
+        )
     except graph_dispatcher.AlreadyClaimed:
         return False, "this job is already claimed or no longer eligible"
     except graph_dispatcher.AmbiguousDispatch:
@@ -837,7 +842,9 @@ def requeue_task(task_id: str) -> tuple[bool, str]:
         return False, "invalid task id"
     try:
         cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
-        changed = QueueDB(cfg.database).requeue(task_id)
+        changed = QueueDB(
+            cfg.database, recurrence_timezone=cfg.recurrence_timezone,
+        ).requeue(task_id)
     except QueueError as exc:
         return False, str(exc)[:500] or "could not requeue this job"
     except (graph_config.ConfigError, OSError, ValueError):

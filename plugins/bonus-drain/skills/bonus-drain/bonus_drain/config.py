@@ -15,6 +15,7 @@ from ipaddress import ip_address
 from pathlib import Path
 from typing import Any, Iterable, Mapping, MutableMapping, Sequence
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 class ConfigError(ValueError):
@@ -178,6 +179,7 @@ class RuntimeConfig:
     limits: tuple[LimitConfig, ...]
     viewer: Mapping[str, Any]
     pr_exceptions: tuple[Mapping[str, Any], ...]
+    recurrence_timezone: str = "America/New_York"
     usage_max_age_seconds: int = 3_600
     cache_dir: Path = Path(".")
     max_jobs: int | None = None
@@ -352,7 +354,7 @@ def validate_config(
     data = _require_mapping(raw, "config")
     _reject_unknown(data, {
         "schema_version", "database", "cache_dir", "record_command",
-        "usage_max_age_seconds", "max_jobs", "secret_refs", "adapters", "providers", "plans",
+        "usage_max_age_seconds", "max_jobs", "recurrence_timezone", "secret_refs", "adapters", "providers", "plans",
         "accounts", "limits", "viewer", "pr_exceptions",
     }, "config")
     _reject_inline_secrets(data)
@@ -361,6 +363,14 @@ def validate_config(
     schema_version = _integer(data.get("schema_version", 1), "schema_version", minimum=1)
     if schema_version != 1:
         raise ConfigError(f"unsupported schema_version: {schema_version}")
+    recurrence_timezone = _string(
+        data.get("recurrence_timezone", "America/New_York"),
+        "recurrence_timezone",
+    )
+    try:
+        ZoneInfo(recurrence_timezone)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ConfigError(f"unknown recurrence_timezone: {recurrence_timezone}") from exc
 
     secret_rows = [_require_mapping(row, f"secret_refs[{i}]") for i, row in enumerate(_require_list(data.get("secret_refs", []), "secret_refs"))]
     adapter_rows = [_require_mapping(row, f"adapters[{i}]") for i, row in enumerate(_require_list(data.get("adapters", []), "adapters"))]
@@ -708,6 +718,7 @@ def validate_config(
         limits=tuple(limits),
         viewer=viewer,
         pr_exceptions=tuple(pr_exceptions),
+        recurrence_timezone=recurrence_timezone,
         usage_max_age_seconds=_integer(data.get("usage_max_age_seconds", 3_600), "usage_max_age_seconds", minimum=1),
         cache_dir=cache_dir,
         max_jobs=(

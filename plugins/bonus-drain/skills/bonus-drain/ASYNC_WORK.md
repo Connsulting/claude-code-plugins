@@ -69,10 +69,12 @@ origin unknown. The scheduled value is reserved for future queue-backed timer in
 
 ## Calendar scheduling
 
-`bg-schedule` still owns exact times and calendar recurrence. General queue handoffs should
-use this skill; timed jobs remain on the Schedules tab. This branch does not install or change
-that external skill. Unifying timers by having them start a queued task ID is a follow-up;
-the queue's existing weekly/monthly cooldowns are not exact calendar schedules.
+`bg-schedule` still owns exact clock times and general calendar recurrence. General queue
+handoffs should use this skill; timed jobs remain on the Schedules tab. Weekly Bonus Drain work
+has a bounded calendar window: the automatic scout may launch it only on Sunday in the configured
+recurrence timezone, at most once in the week that began Monday at midnight. Missed Sundays do
+not catch up on Monday. Manual acceleration may launch a weekly task on another day, but that run
+consumes the same weekly slot. Monthly work retains its 28-day elapsed cooldown.
 
 ## Isolated review preview
 

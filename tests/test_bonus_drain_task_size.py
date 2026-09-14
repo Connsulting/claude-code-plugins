@@ -438,17 +438,15 @@ class TaskSizeContractTests(unittest.TestCase):
         )
         self.assertEqual(self.queue.task("untouched").size, "small")
 
-    def test_recurring_cooldowns_use_the_last_run_time_not_the_dispatch_cycle(self) -> None:
-        self.queue.add_task(_task_values("weekly") | {"kind": "recurring", "cadence": "weekly"})
+    def test_monthly_cooldown_uses_the_last_run_time_not_the_dispatch_cycle(self) -> None:
         self.queue.add_task(_task_values("monthly") | {"kind": "recurring", "cadence": "monthly"})
         now = NOW
 
         def timestamp(seconds_ago: int) -> str:
             return datetime.fromtimestamp(now - seconds_ago, timezone.utc).isoformat()
 
-        # The first weekly run came from a manual cycle. A later provider-reset cycle
-        # must not make it eligible again before the four-day cooldown has elapsed.
-        self.queue.record("weekly", status="done", cycle=123, timestamp=timestamp(3 * 24 * 60 * 60))
+        # A later provider-reset cycle must not make the task eligible before its
+        # elapsed monthly cooldown has ended.
         self.queue.record("monthly", status="skipped", cycle=456, timestamp=timestamp(27 * 24 * 60 * 60))
         with mock.patch.object(db.time, "time", return_value=now):
             self.assertEqual(
@@ -456,7 +454,6 @@ class TaskSizeContractTests(unittest.TestCase):
                 [],
             )
 
-        self.queue.record("weekly", status="done", cycle=789, timestamp=timestamp(4 * 24 * 60 * 60))
         self.queue.record("monthly", status="done", cycle=987, timestamp=timestamp(28 * 24 * 60 * 60))
         with mock.patch.object(db.time, "time", return_value=now):
             self.assertEqual(
@@ -465,7 +462,7 @@ class TaskSizeContractTests(unittest.TestCase):
                         now + 1_209_600, provider_id="alpha", capabilities=("cpu",),
                     )
                 },
-                {"weekly", "monthly"},
+                {"monthly"},
             )
 
     def test_task_json_surfaces_carry_size_and_null_and_render_json_accepts_both(self) -> None:

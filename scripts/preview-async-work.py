@@ -71,7 +71,7 @@ def main():
     config_path.write_text(json.dumps(data, indent=2) + '\n')
     config = load_config(config_path)
     assert config.database == database and config.cache_dir == destination / 'cache'
-    queue = QueueDB(database)
+    queue = QueueDB(database, recurrence_timezone=config.recurrence_timezone)
     queue.initialize()
     if args.examples:
         examples = (

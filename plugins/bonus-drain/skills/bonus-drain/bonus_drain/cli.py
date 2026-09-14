@@ -94,7 +94,7 @@ def _load_config(args: argparse.Namespace, *, graph_required: bool) -> config_mo
 
 def _queue(args: argparse.Namespace, *, graph_required: bool = False) -> tuple[config_module.RuntimeConfig, db.QueueDB]:
     cfg = _load_config(args, graph_required=graph_required)
-    queue = db.QueueDB(cfg.database)
+    queue = db.QueueDB(cfg.database, recurrence_timezone=cfg.recurrence_timezone)
     return cfg, queue
 
 

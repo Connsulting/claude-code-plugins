@@ -9,9 +9,10 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Mapping
+from zoneinfo import ZoneInfo
 
 
 class QueueError(RuntimeError):
@@ -26,7 +27,6 @@ TASK_SIZES = ("tiny", "small", "medium", "large", "huge")
 CANONICAL_FABLE_MODEL = "claude-fable-5-1"
 _FABLE_MODEL_ALIASES = frozenset({"fable", "claude-fable-5"})
 RECURRING_COOLDOWNS_SECONDS = {
-    "weekly": 4 * 24 * 60 * 60,
     "monthly": 28 * 24 * 60 * 60,
 }
 
@@ -256,9 +256,16 @@ class DoctorReport:
 class QueueDB:
     """Short-lived-connection SQLite access layer with atomic claim transitions."""
 
-    def __init__(self, path: str | os.PathLike[str] | Path, *, timeout_seconds: float = 5.0):
+    def __init__(
+        self,
+        path: str | os.PathLike[str] | Path,
+        *,
+        timeout_seconds: float = 5.0,
+        recurrence_timezone: str = "America/New_York",
+    ):
         self.path = Path(path).expanduser().resolve(strict=False)
         self.timeout_seconds = timeout_seconds
+        self.recurrence_timezone = ZoneInfo(recurrence_timezone)
 
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -638,8 +645,25 @@ class QueueDB:
                 return False
         return set(task.required_capabilities).issubset(capability_set)
 
-    @staticmethod
-    def _eligible_in_connection(connection: sqlite3.Connection, task: Task, cycle: int) -> bool:
+    def _weekly_window(self, now_epoch: float) -> tuple[float, float, float]:
+        """Return Monday start, Sunday start, and next Monday in recurrence time."""
+
+        local_now = datetime.fromtimestamp(now_epoch, self.recurrence_timezone)
+        monday = local_now.date() - timedelta(days=local_now.weekday())
+        week_start = datetime.combine(monday, datetime.min.time(), self.recurrence_timezone)
+        sunday_start = week_start + timedelta(days=6)
+        week_end = week_start + timedelta(days=7)
+        return week_start.timestamp(), sunday_start.timestamp(), week_end.timestamp()
+
+    def _eligible_in_connection(
+        self,
+        connection: sqlite3.Connection,
+        task: Task,
+        cycle: int,
+        *,
+        now_epoch: float | None = None,
+        automatic: bool = False,
+    ) -> bool:
         if not task.active:
             return False
         from .goals import task_admitted
@@ -654,15 +678,28 @@ class QueueDB:
         if cycle > 0 and connection.execute(
             "SELECT 1 FROM runs WHERE task=? AND cycle=? LIMIT 1", (task.id, int(cycle)),
         ).fetchone():
-            # One dispatch per weekly/monthly reset. Cooldown still applies across resets.
+            # Keep provider-reset dedup in addition to calendar/cooldown recurrence.
             return False
-        cooldown = RECURRING_COOLDOWNS_SECONDS.get(task.cadence or "")
-        if cooldown is None:
+        cadence = task.cadence or ""
+        if cadence not in {"weekly", *RECURRING_COOLDOWNS_SECONDS}:
             raise QueueError(f"unsupported recurring cadence: {task.cadence}")
+        now = time.time() if now_epoch is None else float(now_epoch)
         row = connection.execute(
             "SELECT ts FROM runs WHERE task=? ORDER BY rowid_pk DESC LIMIT 1",
             (task.id,),
         ).fetchone()
+        if cadence == "weekly":
+            week_start, sunday_start, week_end = self._weekly_window(now)
+            if automatic and not sunday_start <= now < week_end:
+                return False
+            if row is None:
+                return True
+            try:
+                last_run_epoch = _timestamp_epoch(str(row["ts"]))
+            except ValueError:
+                return False
+            # A future timestamp is also fail-closed. Requeue is the explicit retry path.
+            return last_run_epoch < week_start
         if row is None:
             return True
         try:
@@ -670,11 +707,15 @@ class QueueDB:
         except ValueError:
             # A malformed run timestamp must not make a recurring job eligible early.
             return False
-        return time.time() - last_run_epoch >= cooldown
+        return now - last_run_epoch >= RECURRING_COOLDOWNS_SECONDS[cadence]
 
-    @staticmethod
     def _eligible_since_in_connection(
-        connection: sqlite3.Connection, task: Task,
+        self,
+        connection: sqlite3.Connection,
+        task: Task,
+        *,
+        now_epoch: float | None = None,
+        automatic: bool = False,
     ) -> float:
         """Return when an already-eligible task began waiting."""
 
@@ -684,6 +725,10 @@ class QueueDB:
             created_at = float("inf")
         if task.kind == "oneoff":
             return created_at
+        if task.cadence == "weekly":
+            now = time.time() if now_epoch is None else float(now_epoch)
+            week_start, sunday_start, _week_end = self._weekly_window(now)
+            return max(created_at, sunday_start if automatic else week_start)
         row = connection.execute(
             "SELECT ts FROM runs WHERE task=? ORDER BY rowid_pk DESC LIMIT 1",
             (task.id,),
@@ -700,6 +745,7 @@ class QueueDB:
         self, cycle: int, *, provider_id: str | None = None, capabilities: Iterable[str] = (),
         portable_only: bool = False, exclusive_only: bool = False, task_id: str | None = None,
         claude_priority: bool = False, limit: int | None = None, automatic: bool = False,
+        now_epoch: int | float | None = None,
     ) -> list[Task]:
         self.initialize()
         with self._connect() as connection:
@@ -716,8 +762,12 @@ class QueueDB:
                     continue
                 if not self._provider_compatible(task, provider_id, capabilities):
                     continue
-                if self._eligible_in_connection(connection, task, int(cycle)):
-                    candidates.append((task, self._eligible_since_in_connection(connection, task)))
+                if self._eligible_in_connection(
+                    connection, task, int(cycle), now_epoch=now_epoch, automatic=automatic,
+                ):
+                    candidates.append((task, self._eligible_since_in_connection(
+                        connection, task, now_epoch=now_epoch, automatic=automatic,
+                    )))
         if claude_priority:
             candidates.sort(key=lambda item: (
                 not task_requires_legacy_exclusive(item[0]), item[0].priority,
@@ -752,7 +802,9 @@ class QueueDB:
                     return False
                 if not self._provider_compatible(task, provider_id, provider_capabilities):
                     return False
-                if not self._eligible_in_connection(connection, task, cycle):
+                if not self._eligible_in_connection(
+                    connection, task, cycle, automatic=automatic,
+                ):
                     return False
                 connection.execute(
                     """INSERT INTO dispatch_claims(

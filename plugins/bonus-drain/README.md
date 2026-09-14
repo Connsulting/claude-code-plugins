@@ -143,10 +143,14 @@ and the claim and applicable activation lease stay fail-closed until reconciliat
 
 Scout reserves actual compatible task IDs in nearest-reset order, preventing a portable task
 from consuming two provider slots while preserving exclusive work for a capable provider.
-Within one priority, eligible tasks are oldest-waiting-first; a recurring task starts waiting
-when its cooldown ends. Before any claim, scout reports queue reconciliation blockers, global
-in-flight runs with their ages, and the resolved executable identity for every router needed by
-the tick. A lifecycle or router failure stops the tick once instead of failing each selected task.
+Within one priority, eligible tasks are oldest-waiting-first. Weekly tasks are automatically
+eligible only on Sunday in the configured recurrence timezone, and at most once in the week
+that began Monday at midnight. A manual run outside Sunday consumes the same weekly slot. If
+Sunday passes without a run, the task waits for the next Sunday instead of catching up Monday.
+Monthly tasks start waiting when their 28-day cooldown ends. Before any claim, scout reports
+queue reconciliation blockers, global in-flight runs with their ages, and the resolved executable
+identity for every router needed by the tick. A lifecycle or router failure stops the tick once
+instead of failing each selected task.
 Before applying the in-flight gate, each normal scout tick checks the configured router's
 status report. An exact provider/job match freshly reported as `completed` or `failed`,
 without a queue terminal event, is recorded as `failed` through the same lifecycle path as

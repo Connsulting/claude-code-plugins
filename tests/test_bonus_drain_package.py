@@ -217,6 +217,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             source_dir=SKILL_ROOT,
             source_path=SKILL_ROOT / "config.example.json",
         )
+        self.assertEqual(validated.recurrence_timezone, "America/New_York")
         self.assertEqual(
             {account.id: account.activation_scope for account in validated.accounts},
             {
@@ -226,6 +227,18 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                 "grok-personal": "run",
             },
         )
+
+        invalid_timezone = json.loads(json.dumps(example))
+        invalid_timezone["recurrence_timezone"] = "Eastern-ish"
+        with self.assertRaisesRegex(
+            config_module.ConfigError,
+            "unknown recurrence_timezone: Eastern-ish",
+        ):
+            config_module.validate_config(
+                invalid_timezone,
+                source_dir=SKILL_ROOT,
+                source_path=SKILL_ROOT / "config.example.json",
+            )
 
         mixed = json.loads(json.dumps(example))
         next(

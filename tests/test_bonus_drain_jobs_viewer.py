@@ -308,7 +308,9 @@ class JobsViewerContractTests(unittest.TestCase):
 
     def test_force_delegates_once_to_shared_router_kick_service(self) -> None:
         result = mock.Mock(provider_id="claude", job_id="job-1")
-        cfg = mock.Mock(database=Path("/tmp/queue.db"))
+        cfg = mock.Mock(
+            database=Path("/tmp/queue.db"), recurrence_timezone="America/New_York",
+        )
         with (
             mock.patch.object(self.viewer.graph_config, "load_config", return_value=cfg),
             mock.patch.object(self.viewer, "QueueDB") as queue_type,
@@ -320,7 +322,9 @@ class JobsViewerContractTests(unittest.TestCase):
         kick.assert_called_once_with(cfg, queue_type.return_value, "portable-a", "claude")
 
     def test_requeue_restores_only_a_retryable_terminal_job(self) -> None:
-        cfg = mock.Mock(database=Path("/tmp/queue.db"))
+        cfg = mock.Mock(
+            database=Path("/tmp/queue.db"), recurrence_timezone="America/New_York",
+        )
         queue = mock.Mock()
         queue.requeue.return_value = True
         with (
@@ -330,7 +334,9 @@ class JobsViewerContractTests(unittest.TestCase):
         ):
             ok, message = self.viewer.requeue_task("portable-a")
         self.assertTrue(ok, message)
-        queue_type.assert_called_once_with(cfg.database)
+        queue_type.assert_called_once_with(
+            cfg.database, recurrence_timezone="America/New_York",
+        )
         queue.requeue.assert_called_once_with("portable-a")
 
         queue.requeue.side_effect = self.viewer.QueueError("portable-a last ran done; refusing to retry completed work")

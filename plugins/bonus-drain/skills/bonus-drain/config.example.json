@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "recurrence_timezone": "America/New_York",
   "record_command": ["/ABSOLUTE/PATH/TO/.local/bin/bonus-drain", "record"],
   "usage_max_age_seconds": 3600,
   "secret_refs": [],

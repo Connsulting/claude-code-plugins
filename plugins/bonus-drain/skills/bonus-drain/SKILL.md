@@ -131,10 +131,12 @@ Verify each returned task object, then re-run the current pick and confirm every
 task has a non-null size. `set-size` does not discover the current cycle; it validates the
 operator-supplied frozen cycle at its transaction boundary and does not close a later
 post-recheck dispatch race. Never query or update spent, inactive, run-log-only, or otherwise
-absent rows for this backfill. Recurrence is based on elapsed time from the most recent recorded
-run, never a provider-reset or manual-dispatch cycle: weekly jobs cool down for at least four
-days and monthly jobs for at least 28 days. A recurring task absent during that cooldown stays
-null until it is separately eligible for an authorized upcoming-only estimate.
+absent rows for this backfill. Weekly recurrence uses Monday-starting calendar weeks in the
+configured timezone. The automatic scout may launch a weekly task only on Sunday and at most
+once in that week; a missed Sunday is not carried into Monday. Manual acceleration outside
+Sunday consumes the same weekly slot. Monthly recurrence retains its 28-day elapsed cooldown.
+A recurring task that is not currently eligible stays null until it becomes eligible for an
+authorized upcoming-only estimate.
 
 ## Mode: edit and inspect
 

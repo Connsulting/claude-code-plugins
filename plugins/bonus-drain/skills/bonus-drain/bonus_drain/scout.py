@@ -244,7 +244,7 @@ def plan_tick(
         availability[(account.provider_id, account.id)] = reader.count_eligible(
             anchor,
             provider_id=provider.id,
-            capabilities=provider.capabilities, automatic=True,
+            capabilities=provider.capabilities, automatic=True, now_epoch=now,
         )
     plan = build_plan(config, snapshots, eligible_count=availability, now_epoch=now)
     plan = _apply_inflight_caps(plan, queue, now_epoch=now)
@@ -265,7 +265,7 @@ def plan_tick(
         candidates = list(reader.eligible_tasks(
             batch.resets_at,
             provider_id=provider.id,
-            capabilities=provider.capabilities, automatic=True,
+            capabilities=provider.capabilities, automatic=True, now_epoch=now,
         ))
         batch_slots: list[int] = []
         for _index in range(batch.batch_size):
@@ -366,7 +366,9 @@ def run_once(
     """
 
     now = int(time.time() if now_epoch is None else now_epoch)
-    queue = queue or QueueDB(config.database)
+    queue = queue or QueueDB(
+        config.database, recurrence_timezone=config.recurrence_timezone,
+    )
     queue.initialize()
     dispatched: list[DispatchResult] = []
     previews: list[dict[str, Any]] = []
