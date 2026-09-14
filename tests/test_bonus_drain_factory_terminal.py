@@ -55,9 +55,9 @@ class HelperTests(unittest.TestCase):
         row = {"factory_version": "v1", "repo": "r", "tier": "quick", "status": "dispatched",
                "completed_at": None, "outcome": None, "pr_url": None}
         for ledger, expected in (("skipped", "skipped"), ("failed", "failed"), ("done", "complete")):
-            payload = factory_terminal.terminal_payload(
+            payload = factory_terminal.fill_only_null(row, factory_terminal.candidate_fills(
                 row, ledger, EVENT_TS, "x.", "/tmp", lambda ref, cwd: None,
-            )
+            ))
             assert payload is not None
             self.assertEqual(payload["status"], expected)
 
@@ -182,6 +182,42 @@ class TerminalUpsertTests(unittest.TestCase):
         self.assertEqual(row["completed_at"], EVENT_TS)
         self.assertEqual(row["outcome"], "Gave up.")
         self.assertEqual(row["repo"], "driver-repo")
+
+    def test_placeholder_session_survives_the_status_transition(self) -> None:
+        attempt = "abababababababababababababababab"
+        run_id = dispatcher.new_factory_run_id("sessioned", attempt)
+        self._write_run(run_id, {
+            "factory_version": "v1", "repo": "repo", "tier": "quick", "status": "dispatched",
+            "drain_task_id": "sessioned", "session_id": "known-session",
+        })
+        self.assertTrue(factory_terminal.record_factory_terminal(
+            "sessioned", attempt, "done", EVENT_TS, "Done.", str(self.root),
+            pr_resolver=lambda ref, cwd: None,
+        ))
+        row = self._row(run_id)
+        self.assertEqual(row["status"], "complete")
+        self.assertEqual(row["session_id"], "known-session")
+
+    def test_driver_write_during_the_pr_lookup_is_kept(self) -> None:
+        attempt = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+        run_id = self._placeholder("racing", attempt)
+
+        def resolver(reference: str, cwd: str) -> str:
+            self._write_run(run_id, {
+                "factory_version": "v1", "repo": "repo", "tier": "quick", "status": "blocked",
+                "outcome": "driver outcome",
+            })
+            return PR_2524
+
+        self.assertTrue(factory_terminal.record_factory_terminal(
+            "racing", attempt, "done", EVENT_TS, "Opened #2524.", str(self.root),
+            pr_resolver=resolver,
+        ))
+        row = self._row(run_id)
+        self.assertEqual(row["status"], "blocked")
+        self.assertEqual(row["outcome"], "driver outcome")
+        self.assertEqual(row["completed_at"], EVENT_TS)
+        self.assertEqual(row["pr_url"], PR_2524)
 
     def test_summary_without_a_pr_leaves_pr_url_null(self) -> None:
         attempt = "99998888777766665555444433332222"

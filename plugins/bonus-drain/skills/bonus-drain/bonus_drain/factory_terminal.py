@@ -97,38 +97,47 @@ def read_factory_run(script: Path, run_id: str) -> Mapping[str, Any] | None:
     return dict(row) if row is not None else None
 
 
-def terminal_payload(
+def candidate_fills(
     existing: Mapping[str, Any],
     status: str,
     event_ts: str,
     summary: str | None,
     cwd: str,
     pr_resolver: Callable[[str, str], str | None] = resolve_pr_url,
-) -> dict[str, Any] | None:
-    """The fill-only-NULL upsert for one row, or None when there is nothing to fill."""
+) -> dict[str, Any]:
+    """Terminal values for the row; gh is only asked when the row still lacks a PR URL."""
     fills: dict[str, Any] = {}
-    if existing.get("status") == PLACEHOLDER_STATUS:
-        fills["status"] = LEDGER_TO_RUN_STATUS[status]
-    if existing.get("completed_at") is None:
-        fills["completed_at"] = event_ts
-    if existing.get("outcome") is None:
-        fills["outcome"] = first_sentence(summary) or f"bonus-drain {status}"
     if existing.get("pr_url") is None:
         reference = pr_reference(summary)
         url = pr_resolver(reference, cwd) if reference is not None else None
         if url is not None:
             fills["pr_url"] = url
-    if not fills:
+    fills["completed_at"] = event_ts
+    fills["outcome"] = first_sentence(summary) or f"bonus-drain {status}"
+    fills["status"] = LEDGER_TO_RUN_STATUS[status]
+    return fills
+
+
+def fill_only_null(existing: Mapping[str, Any], fills: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Narrow candidate fills to the row as it stands now, or None when nothing is left."""
+    kept = {
+        key: value for key, value in fills.items()
+        if (existing.get(key) == PLACEHOLDER_STATUS if key == "status" else existing.get(key) is None)
+    }
+    if not kept:
         return None
     # record run requires the identity fields and always rewrites status, so the row's
-    # own values ride along unchanged.
+    # own values ride along unchanged. Its placeholder branch clears session_id, so an
+    # existing one is carried back in.
     payload = {
         "factory_version": existing["factory_version"],
         "repo": existing["repo"],
         "tier": existing["tier"],
         "status": existing["status"],
     }
-    payload.update(fills)
+    if existing.get("session_id"):
+        payload["session_id"] = existing["session_id"]
+    payload.update(kept)
     return payload
 
 
@@ -153,7 +162,14 @@ def record_factory_terminal(
         existing = read_factory_run(script, run_id)
         if existing is None or existing.get("drain_task_id") != task_id:
             return False
-        payload = terminal_payload(existing, status, event_ts, summary, cwd, pr_resolver)
+        candidates = candidate_fills(existing, status, event_ts, summary, cwd, pr_resolver)
+        if fill_only_null(existing, candidates) is None:
+            return False
+        # The writer's upsert overwrites status and prefers incoming values, so re-read
+        # after the gh lookup to keep a driver write that landed meanwhile. A write inside
+        # the remaining read-to-commit gap can still be overwritten.
+        current = read_factory_run(script, run_id)
+        payload = fill_only_null(current, candidates) if current is not None else None
         if payload is None:
             return False
         env = {key: value for key, value in os.environ.items() if key not in FACTORY_SESSION_ENV_KEYS}
