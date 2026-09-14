@@ -365,6 +365,184 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         requeue.assert_called_once_with("portable-a")
 
+    def test_inflight_rows_offer_done_and_failed_cutoffs(self) -> None:
+        inflight = [{
+            "ts": "2026-08-26T12:00:00Z", "task": "runaway-job",
+            "title": "Runaway job", "engine": "grok", "cwd": "/tmp/runaway",
+        }]
+        self.viewer.MUTATIONS_ENABLED = True
+        body = self._bonus_body([], inflight=inflight)
+        row_start = body.index('<span class="fltitle">Runaway job</span>')
+        row = body[row_start:body.find("</div>", body.find("flact", row_start)) + 6]
+        self.assertIn('class="task-finish ionly" data-task-id="runaway-job" data-status="done"', body)
+        self.assertIn('class="task-finish ionly" data-task-id="runaway-job" data-status="failed"', body)
+        self.assertIn('aria-label="Mark Runaway job done"', body)
+        self.assertIn('aria-label="Mark Runaway job failed"', body)
+        self.assertIn(self.viewer.ico("check"), row)
+        self.assertIn(self.viewer.ico("ban"), row)
+        self.assertIn("/api/bonus/task/finish", self.viewer.SCRIPT)
+        self.assertNotIn("unavailable", row)
+
+    def test_inflight_cutoffs_are_disabled_when_the_viewer_is_read_only(self) -> None:
+        inflight = [{
+            "ts": "2026-08-26T12:00:00Z", "task": "runaway-job",
+            "title": "Runaway job", "engine": "grok", "cwd": "/tmp/runaway",
+        }]
+        self.viewer.MUTATIONS_ENABLED = False
+        body = self._bonus_body([], inflight=inflight)
+        self.assertIn('class="task-finish ionly unavailable"', body)
+        self.assertIn('disabled title="Viewer is read-only"', body)
+        self.assertIn('data-status="done"', body)
+        self.assertIn('data-status="failed"', body)
+
+    def test_clicking_inflight_failed_disables_the_row_in_a_browser(self) -> None:
+        chrome = shutil.which("google-chrome") or shutil.which("google-chrome-stable")
+        if chrome is None:
+            self.skipTest("Chrome is unavailable")
+        inflight = [{
+            "ts": "2026-08-26T12:00:00Z", "task": "runaway-job",
+            "title": "Runaway job", "engine": "grok", "cwd": "/tmp/runaway",
+        }]
+        self.viewer.MUTATIONS_ENABLED = True
+        with (
+            mock.patch.object(
+                self.viewer, "render_bonus_body",
+                return_value=self._bonus_body([], inflight=inflight),
+            ),
+            mock.patch.object(self.viewer, "render_schedule_body", return_value="scheduled body"),
+        ):
+            page = self.viewer.render_page().decode()
+        page = page.replace(
+            "<head>",
+            "<head><script>window.fetch=function(){return new Promise(function(){})}</script>",
+            1,
+        )
+        with tempfile.TemporaryDirectory() as work:
+            target = Path(work) / "page.html"
+            target.write_text(
+                page + '<script>document.querySelector('
+                '\'.task-finish[data-status="failed"]\').click();</script>'
+            )
+            completed = subprocess.run(
+                [
+                    chrome, "--headless=new", "--no-sandbox", "--disable-gpu",
+                    "--disable-dev-shm-usage", "--no-proxy-server",
+                    f"--user-data-dir={work}/profile", "--dump-dom", target.as_uri(),
+                ],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=60, check=False,
+            )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        dom = completed.stdout
+        act_at = dom.index('class="flact"')
+        act = dom[act_at:dom.find("</span>", act_at) + 7]
+        self.assertIn('data-status="failed"', act)
+        self.assertIn("busy", act)
+        self.assertEqual(act.count("disabled"), 2)
+
+    def test_finish_records_a_terminal_event_for_the_inflight_run(self) -> None:
+        run = mock.Mock(
+            task="runaway-job", eligibility_key="claude-personal/manual/123",
+            kind="oneoff", cycle=123, account_id="claude-personal",
+            provider_id="claude", router_job_id="job-9",
+        )
+        queue = mock.Mock()
+        queue.inflight.return_value = [run]
+        account = mock.Mock(activation_adapter_id="switch")
+        cfg = mock.Mock(
+            database=Path("/tmp/queue.db"), recurrence_timezone="America/New_York",
+        )
+        cfg.account.return_value = account
+        with (
+            mock.patch.object(self.viewer.graph_config, "load_config", return_value=cfg),
+            mock.patch.object(self.viewer, "QueueDB", return_value=queue),
+            mock.patch.dict(os.environ, {"BONUS_DRAIN_CONFIG": "/tmp/config.json"}),
+        ):
+            ok, message = self.viewer.finish_inflight_task("runaway-job", "failed")
+        self.assertTrue(ok, message)
+        queue.record.assert_called_once()
+        args, kwargs = queue.record.call_args
+        self.assertEqual(args[:2], ("runaway-job", "claude-personal/manual/123"))
+        self.assertEqual(kwargs["status"], "failed")
+        self.assertEqual(kwargs["kind"], "oneoff")
+        self.assertEqual(kwargs["cycle"], 123)
+        self.assertEqual(kwargs["provider_id"], "claude")
+        self.assertEqual(kwargs["account_id"], "claude-personal")
+        self.assertEqual(kwargs["router_job_id"], "job-9")
+        self.assertIn("failed", kwargs["summary"])
+        self.assertTrue(callable(kwargs["release_activation"]))
+
+    def test_finish_rejects_jobs_that_are_not_in_flight(self) -> None:
+        queue = mock.Mock()
+        queue.inflight.return_value = []
+        cfg = mock.Mock(
+            database=Path("/tmp/queue.db"), recurrence_timezone="America/New_York",
+        )
+        with (
+            mock.patch.object(self.viewer.graph_config, "load_config", return_value=cfg),
+            mock.patch.object(self.viewer, "QueueDB", return_value=queue),
+        ):
+            ok, message = self.viewer.finish_inflight_task("idle-job", "done")
+        self.assertFalse(ok)
+        self.assertIn("not in flight", message)
+        queue.record.assert_not_called()
+
+    def test_finish_drops_a_real_inflight_run_from_the_queue(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        db_path = Path(temporary.name) / "queue.db"
+        queue = self.viewer.QueueDB(db_path)
+        queue.initialize()
+        queue.add_task({
+            "id": "runaway-job", "title": "Runaway", "kind": "oneoff",
+            "priority": 2, "cwd": "/tmp", "goal": "run", "active": True,
+        })
+        key = "alpha-account/manual/2000000000"
+        queue.record(
+            "runaway-job", key, status="dispatched", provider_id="claude",
+            account_id="claude-personal", router_job_id="job-9",
+            kind="oneoff", cycle=2000000000,
+        )
+        self.assertEqual(len(queue.inflight()), 1)
+        cfg = mock.Mock(database=db_path, recurrence_timezone="America/New_York")
+        cfg.account.side_effect = self.viewer.graph_config.ConfigError("unknown account")
+        with (
+            mock.patch.object(self.viewer.graph_config, "load_config", return_value=cfg),
+            mock.patch.dict(os.environ, {"BONUS_DRAIN_CONFIG": "/tmp/config.json"}),
+        ):
+            ok, message = self.viewer.finish_inflight_task("runaway-job", "failed")
+        self.assertTrue(ok, message)
+        self.assertEqual(queue.inflight(), [])
+        last = queue.runs(task_id="runaway-job")[0]
+        self.assertEqual(last.status, "failed")
+        self.assertEqual(last.eligibility_key, key)
+
+    def test_finish_endpoint_uses_the_existing_mutation_boundary(self) -> None:
+        self.viewer.ALLOWED_HOSTS = (self.HOST,)
+        self.viewer.ALLOWED_ORIGINS = (self.ORIGIN,)
+        self.viewer.MUTATIONS_ENABLED = True
+        server = self._server()
+        payload = json.dumps({"id": "runaway-job", "status": "failed"}).encode()
+        headers = {
+            "Host": self.HOST, "Origin": self.ORIGIN,
+            "Content-Type": "application/json", "Content-Length": str(len(payload)),
+        }
+        with mock.patch.object(
+            self.viewer, "finish_inflight_task", return_value=(True, "failed"),
+        ) as finish:
+            status, _headers, body = self._request(
+                server, "POST", "/api/bonus/task/finish", headers=headers, body=payload,
+            )
+            self.assertEqual(status, 200, body)
+            finish.assert_called_once_with("runaway-job", "failed")
+            rejected = json.dumps({"id": "runaway-job", "status": "skipped"}).encode()
+            status, _headers, _body = self._request(
+                server, "POST", "/api/bonus/task/finish",
+                headers={**headers, "Content-Length": str(len(rejected))}, body=rejected,
+            )
+            self.assertEqual(status, 400)
+            self.assertEqual(finish.call_count, 1)
+
     def test_run_log_offers_requeue_only_for_failed_and_skipped_jobs(self) -> None:
         history = [
             {"ts": "2026-08-26T12:00:00Z", "task": "failed-job", "title": "Failed job", "kind": "oneoff", "status": "failed", "engine": "codex", "cycle": 123, "summary": "error", "branch": None},
@@ -584,7 +762,7 @@ class JobsViewerContractTests(unittest.TestCase):
         },
     ]
 
-    def _bonus_body(self, remaining, runs=None, gates=None):
+    def _bonus_body(self, remaining, runs=None, gates=None, inflight=None):
         with (
             mock.patch.object(self.viewer, "get_usage", return_value=None),
             mock.patch.object(self.viewer, "get_codex_usage", return_value=None),
@@ -593,7 +771,7 @@ class JobsViewerContractTests(unittest.TestCase):
             mock.patch.object(self.viewer, "get_remaining", return_value=remaining),
             mock.patch.object(self.viewer, "get_recent_runs", return_value=runs or []),
             mock.patch.object(self.viewer, "get_disabled", return_value=[]),
-            mock.patch.object(self.viewer, "get_inflight", return_value=[]),
+            mock.patch.object(self.viewer, "get_inflight", return_value=inflight or []),
             mock.patch.object(
                 self.viewer, "get_gates",
                 return_value=gates if gates is not None else {"coordinator": "none"},

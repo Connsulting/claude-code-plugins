@@ -63,7 +63,10 @@ group is `Soak Obs`.
 
 The viewer shows readiness, work group, source reference, and prerequisite progress, with
 filters for each workflow facet. Rotation and provider usage remain visible above the queue.
-Task contracts are edited through planning threads and the CLI; the viewer has no job editor. Actual new
+In-flight rows have Mark done and Mark failed buttons that record a terminal event and free
+the dispatch slot. Use failed to cut off a runaway; done unblocks dependents as if the work
+succeeded. Neither button stops the provider worker. Task contracts are edited through planning
+threads and the CLI; the viewer has no job editor. Actual new
 launches record explicit or automatic provenance; terminal events inherit it. Old rows remain
 origin unknown. The scheduled value is reserved for future queue-backed timer integration.
 
@@ -94,6 +97,6 @@ Front its loopback listener with a separately owned Tailscale Serve HTTPS port.
 The preview has a copy of tasks, run history, and cached capacity. Copied running rows are
 historical snapshot evidence, not proof that this preview owns those jobs. Four clearly labeled
 example tasks demonstrate a dependency chain without inferring dependencies for real work.
-All execution is disabled. Requeues affect the copy. Task editing remains a CLI operation. Do not enable a scout or
+All execution is disabled. Requeues and in-flight done/failed marks affect the copy. Task editing remains a CLI operation. Do not enable a scout or
 refresher against it. Stop the preview process and remove only its Tailscale Serve port when
 review finishes; keep the copied state until its owner chooses to discard it.
