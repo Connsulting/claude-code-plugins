@@ -929,6 +929,22 @@ class QueueDB:
             )
             return cursor.rowcount > 0
 
+    def abandon_unproven_activation(self, task_id: str, eligibility_key: str) -> bool:
+        """Drop an unproven ``activating`` lease after a known failed switch.
+
+        Only ``activating`` is removable. ``active`` and ``releasing`` stay fail-closed
+        for operator reconciliation because the external pin may already have moved.
+        """
+
+        self.initialize()
+        with self._transaction() as connection:
+            cursor = connection.execute(
+                """DELETE FROM activation_leases
+                     WHERE task_id=? AND eligibility_key=? AND state='activating'""",
+                (task_id, eligibility_key),
+            )
+            return cursor.rowcount == 1
+
     def mark_ambiguous(self, task_id: str, eligibility_key: str, *, detail: str) -> None:
         self.initialize()
         with self._transaction() as connection:

@@ -342,6 +342,79 @@ class KickContractTests(unittest.TestCase):
         self.assertEqual([lease.state for lease in leases], ["releasing"])
         self.assertFalse(db.doctor(self.queue).ok)
 
+    def _launch_scoped_config(self) -> config_module.RuntimeConfig:
+        activation = config_module.AdapterConfig(
+            "switch", "activation", (str(self.root / "bin" / "account-switch"),),
+        )
+        alpha = replace(
+            self.config.accounts[0],
+            activation_adapter_id="switch",
+            activation_scope="launch",
+        )
+        return replace(
+            self.config,
+            adapters=(*self.config.adapters, activation),
+            accounts=(alpha, self.config.accounts[1]),
+        )
+
+    def test_proven_unswitched_activation_releases_instead_of_sticking(self) -> None:
+        cfg = self._launch_scoped_config()
+
+        def boom(_cfg: object, _account: object, action: str, _callback: object) -> None:
+            if action == "activate":
+                raise dispatcher.DispatchError(
+                    "account activation activate failed: adapter switch exited 1: "
+                    "bonus-drain-account-activation: requested account did not become active"
+                )
+
+        with (
+            mock.patch.object(dispatcher, "_activation", side_effect=boom),
+            self.assertRaises(dispatcher.ActivationUnavailable),
+        ):
+            dispatcher.dispatch(
+                cfg,
+                self.queue,
+                task_id="portable",
+                eligibility_key="manual/unswitched",
+                requested_provider="alpha",
+                router_call=self._router,
+            )
+
+        self.assertIsNone(self.queue.claim_for("portable", "manual/unswitched"))
+        self.assertEqual(self.queue.activation_leases(provider_id="alpha"), [])
+        self.assertEqual(self.queue.runs(task_id="portable"), [])
+        self.assertTrue(db.doctor(self.queue).ok)
+
+    def test_unknown_activation_failure_stays_fail_closed(self) -> None:
+        cfg = self._launch_scoped_config()
+
+        def boom(_cfg: object, _account: object, action: str, _callback: object) -> None:
+            if action == "activate":
+                raise dispatcher.DispatchError("rotate subprocess timeout")
+
+        with (
+            mock.patch.object(dispatcher, "_activation", side_effect=boom),
+            self.assertRaises(dispatcher.AmbiguousDispatch),
+        ):
+            dispatcher.dispatch(
+                cfg,
+                self.queue,
+                task_id="portable",
+                eligibility_key="manual/timeout",
+                requested_provider="alpha",
+                router_call=self._router,
+            )
+
+        claim = self.queue.claim_for("portable", "manual/timeout")
+        self.assertIsNotNone(claim)
+        self.assertEqual(claim.state, "ambiguous")
+        self.assertEqual(
+            [lease.state for lease in self.queue.activation_leases(provider_id="alpha")],
+            ["activating"],
+        )
+        self.assertEqual(self.queue.runs(task_id="portable"), [])
+        self.assertFalse(db.doctor(self.queue).ok)
+
     def test_manual_kick_reuses_the_provider_account_with_active_leases(self) -> None:
         from bonus_drain import kick
 

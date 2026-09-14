@@ -56,6 +56,9 @@ class ActivationUnavailable(DispatchError):
     """Another durable account lease currently owns this provider."""
 
 
+_PROVEN_UNSWITCHED_ACTIVATION = "requested account did not become active"
+
+
 _MCP_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _MCP_FILE_LIMIT = 1_048_576
 _MCP_SERVER_LIMIT = 64
@@ -1010,6 +1013,12 @@ def dispatch(
                     lease.task_id == task.id and lease.eligibility_key == eligibility_key
                     for lease in queue.activation_leases(provider_id=provider.id)
                 )
+                if incomplete and _PROVEN_UNSWITCHED_ACTIVATION in str(exc):
+                    # The adapter verified the active account never moved and rolled
+                    # the pin back. That is known-not-launched, not post-launch
+                    # ambiguity; dropping the unproven lease unblocks the provider.
+                    if queue.abandon_unproven_activation(task.id, eligibility_key):
+                        raise ActivationUnavailable(str(exc)) from exc
                 if incomplete:
                     queue.mark_ambiguous(
                         task.id, eligibility_key,
