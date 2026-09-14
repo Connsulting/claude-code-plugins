@@ -610,40 +610,65 @@ def _db() -> sqlite3.Connection:
     return cx
 
 
-def _pick(cycle: int, codex_only: bool) -> list[dict]:
-    args = ["bash", str(BONUSDB_SH), "pick", "9999", str(cycle)]
-    if codex_only:
-        args.append("--codex")
-    try:
-        out = subprocess.run(args, capture_output=True, text=True, timeout=15).stdout.strip()
-        return json.loads(out) if out else []
-    except Exception:
-        return []
-
-
-def _remaining_snapshot(cycle: int) -> list[dict] | None:
+def _remaining_snapshot(cycle: int) -> list[dict]:
     """Read graph-backed remaining work plus the providers the scout can use."""
     try:
-        out = subprocess.run(
+        result = subprocess.run(
             ["bash", str(BONUSDB_SH), "queue", "--json", str(cycle)],
             capture_output=True, text=True, timeout=15,
-        ).stdout.strip()
-        payload = json.loads(out) if out else {}
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("bonus queue command timed out") from None
+    except OSError:
+        raise RuntimeError("bonus queue command failed") from None
+    if result.returncode != 0:
+        raise RuntimeError("bonus queue command failed")
+    try:
+        payload = json.loads(result.stdout.strip())
+    except (json.JSONDecodeError, TypeError):
+        raise RuntimeError("bonus queue returned malformed JSON") from None
+    try:
         if not isinstance(payload, dict):
-            return None
+            raise TypeError
         values = payload.get("eligible_provider_ids")
         compatible_values = payload.get("compatible_provider_ids")
         task_ids = payload.get("eligible_task_ids")
         tasks = payload.get("tasks")
-        if not isinstance(values, dict) or not isinstance(task_ids, list) or not isinstance(tasks, list):
-            return None
+        readiness = payload.get("readiness")
+        if not all((
+            isinstance(values, dict), isinstance(task_ids, list),
+            isinstance(tasks, list), isinstance(readiness, dict),
+        )):
+            raise TypeError
         if compatible_values is not None and not isinstance(compatible_values, dict):
             compatible_values = None
-        tasks_by_id = {task.get("id"): task for task in tasks if isinstance(task, dict)}
+        if any(
+            not isinstance(task, dict) or not isinstance(task.get("id"), str)
+            for task in tasks
+        ):
+            raise TypeError
+        tasks_by_id = {task["id"]: task for task in tasks}
+        allowed_readiness_states = {
+            "ready", "paused", "held", "running", "done", "waiting",
+            "exhausted", "recovering", "claimed", "dispatched", "skipped",
+            "failed", "ambiguous", "cooldown", "backoff",
+        }
+        for task_id in tasks_by_id:
+            status = readiness.get(task_id)
+            if (
+                not isinstance(status, dict)
+                or status.get("state") not in allowed_readiness_states
+                or not isinstance(status.get("ready"), bool)
+                or status["ready"] != (status["state"] == "ready")
+                or not isinstance(status.get("reason"), str)
+                or not status["reason"].strip()
+            ):
+                raise TypeError
         remaining = []
-        readiness = payload.get("readiness", {})
         visible_ids = list(task_ids)
         for task_id, status in readiness.items():
+            if not isinstance(status, dict):
+                raise TypeError
             if task_id not in visible_ids and status.get("state") in {
                 "ready", "waiting", "cooldown", "recovering", "backoff", "held", "exhausted",
             }:
@@ -651,15 +676,16 @@ def _remaining_snapshot(cycle: int) -> list[dict] | None:
         for task_id in visible_ids:
             task = tasks_by_id.get(task_id)
             providers = values.get(task_id, [])
-            if task is None or not isinstance(providers, list):
-                continue
+            status = readiness.get(task_id)
+            if task is None or not isinstance(providers, list) or not isinstance(status, dict):
+                raise TypeError
             task = dict(task)
             task["eligible_providers"] = [str(provider) for provider in providers]
             if isinstance(compatible_values, dict):
                 raw_compatible = compatible_values.get(task_id, [])
                 if isinstance(raw_compatible, list):
                     task["compatible_providers"] = [str(provider) for provider in raw_compatible]
-            task["readiness"] = readiness.get(task_id, {"state": "ready", "ready": True, "reason": "Ready to run manually", "dependencies": []})
+            task["readiness"] = status
             remaining.append(task)
         def recovery_unlocks(task: dict) -> int:
             recovery = task.get("readiness", {}).get("recovery")
@@ -673,19 +699,13 @@ def _remaining_snapshot(cycle: int) -> list[dict] | None:
             task["kind"] == "recurring", task.get("created_at", ""), task["id"],
         ))
         return remaining
-    except Exception:
-        return None
+    except (AttributeError, KeyError, TypeError, ValueError):
+        raise RuntimeError("bonus queue returned malformed payload") from None
 
 
 def get_remaining(cycle: int) -> list[dict]:
     """Remaining work in drain order, annotated with scout-authoritative providers."""
     picks = _remaining_snapshot(cycle)
-    if picks is None:
-        # Compatibility for an older installed CLI during a package upgrade. This branch keeps
-        # the historical display only until the paired graph-backed CLI is installed.
-        picks = _pick(cycle, codex_only=False)
-        for p in picks:
-            p["eligible_providers"] = _legacy_providers(p)
     last = _last_runs()
     for p in picks:
         lr = last.get(p["id"])
@@ -3518,9 +3538,16 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/bonus":
             usage = get_usage()
             cycle = current_cycle(usage)
-            payload = {"usage": usage, "cycle": cycle,
-                       "remaining": get_remaining(cycle), "disabled": get_disabled(),
-                       "recent": get_recent_runs()}
+            try:
+                remaining = get_remaining(cycle)
+            except RuntimeError as exc:
+                self._send(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    json.dumps({"error": str(exc)}).encode(), "application/json",
+                )
+                return
+            payload = {"usage": usage, "cycle": cycle, "remaining": remaining,
+                       "disabled": get_disabled(), "recent": get_recent_runs()}
             self._send(HTTPStatus.OK, json.dumps(payload).encode(), "application/json")
         elif self.path == "/api/schedule":
             data = [enrich(t) for t in list_timers()]

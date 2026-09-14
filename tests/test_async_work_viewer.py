@@ -59,7 +59,10 @@ class AsyncViewerTests(unittest.TestCase):
                    'eligible_task_ids': [], 'eligible_provider_ids': {},
                    'compatible_provider_ids': {'child': ['claude']},
                    'readiness': {'child': {'state': 'waiting', 'ready': False, 'reason': 'Waiting for parent'}}}
-        with mock.patch.object(self.viewer.subprocess, 'run', return_value=mock.Mock(stdout=json.dumps(payload))):
+        with mock.patch.object(
+            self.viewer.subprocess, 'run',
+            return_value=mock.Mock(returncode=0, stdout=json.dumps(payload), stderr=''),
+        ):
             tasks = self.viewer._remaining_snapshot(0)
         self.assertEqual(len(tasks), 1)
         self.assertEqual(tasks[0]['readiness']['state'], 'waiting')
@@ -70,6 +73,143 @@ class AsyncViewerTests(unittest.TestCase):
         buttons = self.viewer._run_buttons(tasks[0])
         self.assertEqual(buttons.count(' disabled'), 4)
         self.assertIn('Waiting for parent', buttons)
+
+    def test_graph_queue_timeout_is_explicit_and_never_uses_legacy_pick(self):
+        legacy = mock.Mock(
+            returncode=0,
+            stdout=json.dumps([{'id': 'fabricated_ready', 'priority': 0, 'kind': 'oneoff'}]),
+            stderr='',
+        )
+        timeout = self.viewer.subprocess.TimeoutExpired(cmd=['bonusdb', 'queue'], timeout=15)
+        with mock.patch.object(
+            self.viewer.subprocess, 'run', side_effect=[timeout, legacy],
+        ) as run:
+            with self.assertRaisesRegex(RuntimeError, 'queue'):
+                self.viewer.get_remaining(0)
+
+        self.assertEqual(run.call_count, 1)
+
+    def test_graph_queue_nonzero_exit_is_explicit_and_sanitizes_stderr(self):
+        result = mock.Mock(
+            returncode=7,
+            stdout=json.dumps({
+                'tasks': [], 'eligible_task_ids': [], 'eligible_provider_ids': {},
+            }),
+            stderr='credential=do_not_expose',
+        )
+        with mock.patch.object(self.viewer.subprocess, 'run', return_value=result) as run:
+            with self.assertRaises(RuntimeError) as raised:
+                self.viewer.get_remaining(0)
+
+        self.assertEqual(run.call_count, 1)
+        self.assertNotIn('do_not_expose', str(raised.exception))
+
+    def test_malformed_graph_queue_shape_is_explicit_and_never_fabricates_ready_work(self):
+        malformed = mock.Mock(returncode=0, stdout=json.dumps([]), stderr='')
+        legacy = mock.Mock(
+            returncode=0,
+            stdout=json.dumps([{'id': 'fabricated_ready', 'priority': 0, 'kind': 'oneoff'}]),
+            stderr='',
+        )
+        with mock.patch.object(
+            self.viewer.subprocess, 'run', side_effect=[malformed, legacy],
+        ) as run:
+            with self.assertRaisesRegex(RuntimeError, 'queue'):
+                self.viewer.get_remaining(0)
+
+        self.assertEqual(run.call_count, 1)
+
+    def test_missing_or_empty_task_readiness_is_rejected(self):
+        for readiness in ({}, {'task': {}}):
+            with self.subTest(readiness=readiness):
+                payload = {
+                    'tasks': [{'id': 'task', 'priority': 2, 'kind': 'oneoff'}],
+                    'eligible_task_ids': [], 'eligible_provider_ids': {},
+                    'readiness': readiness,
+                }
+                result = mock.Mock(returncode=0, stdout=json.dumps(payload), stderr='')
+                with mock.patch.object(self.viewer.subprocess, 'run', return_value=result):
+                    with self.assertRaisesRegex(RuntimeError, 'queue'):
+                        self.viewer._remaining_snapshot(0)
+
+    def test_malformed_task_readiness_contract_is_rejected(self):
+        malformed_statuses = (
+            {'state': 'unknown', 'ready': False, 'reason': 'Unknown state'},
+            {'state': 'ready', 'ready': False, 'reason': 'Contradictory ready'},
+            {'state': 'waiting', 'ready': True, 'reason': 'Contradictory waiting'},
+            {'state': 'waiting', 'ready': False},
+            {'state': 'waiting', 'ready': False, 'reason': ''},
+        )
+        for status in malformed_statuses:
+            with self.subTest(status=status):
+                payload = {
+                    'tasks': [{'id': 'task', 'priority': 2, 'kind': 'oneoff'}],
+                    'eligible_task_ids': [], 'eligible_provider_ids': {},
+                    'readiness': {'task': status},
+                }
+                result = mock.Mock(returncode=0, stdout=json.dumps(payload), stderr='')
+                with mock.patch.object(self.viewer.subprocess, 'run', return_value=result):
+                    with self.assertRaisesRegex(RuntimeError, 'queue'):
+                        self.viewer._remaining_snapshot(0)
+
+    def test_queue_failure_surfaces_on_page_and_api(self):
+        error = RuntimeError('bonus queue command failed')
+        with (
+            mock.patch.object(self.viewer, 'render_bonus_body', side_effect=error),
+            mock.patch.object(self.viewer, 'render_schedule_body', return_value='scheduled body'),
+        ):
+            page = self.viewer.render_page().decode()
+        self.assertIn('error: bonus queue command failed', page)
+        self.assertIn('scheduled body', page)
+
+        with (
+            mock.patch.object(self.viewer, 'get_usage', return_value=None),
+            mock.patch.object(self.viewer, 'current_cycle', return_value=0),
+            mock.patch.object(self.viewer, 'get_remaining', side_effect=error),
+        ):
+            status, _, body = viewer_tests.JobsViewerContractTests._request(
+                self.server, 'GET', '/api/bonus',
+                headers={'Host': 'viewer.example.test'},
+            )
+        self.assertEqual(status, 503)
+        self.assertEqual(json.loads(body), {'error': 'bonus queue command failed'})
+
+    def test_authoritative_ready_waiting_and_cooldown_render_with_readiness_filter(self):
+        task_ids = ('ready', 'waiting', 'cooldown')
+        tasks = [
+            {
+                'id': task_id, 'title': task_id.title(), 'priority': 2,
+                'kind': 'oneoff', 'size': 'small', 'cwd': '/tmp',
+                'goal': f'Keep {task_id} visible', 'created_at': str(index),
+            }
+            for index, task_id in enumerate(task_ids)
+        ]
+        payload = {
+            'tasks': tasks,
+            'eligible_task_ids': ['ready'],
+            'eligible_provider_ids': {'ready': ['claude']},
+            'compatible_provider_ids': {task_id: ['claude'] for task_id in task_ids},
+            'readiness': {
+                task_id: {
+                    'state': task_id, 'ready': task_id == 'ready',
+                    'reason': f'{task_id} reason', 'dependencies': [],
+                }
+                for task_id in task_ids
+            },
+        }
+        result = mock.Mock(returncode=0, stdout=json.dumps(payload), stderr='')
+        with mock.patch.object(self.viewer.subprocess, 'run', return_value=result):
+            remaining = self.viewer._remaining_snapshot(0)
+
+        self.assertEqual([task['id'] for task in remaining], list(task_ids))
+        filters = self.viewer._queue_filters(remaining)
+        self.assertIn('aria-label="filter by readiness"', filters)
+        for state in task_ids:
+            self.assertIn(f'data-value="{state}"', filters)
+            self.assertEqual(
+                next(task for task in remaining if task['id'] == state)['readiness']['state'],
+                state,
+            )
 
     def test_recovering_backoff_held_and_exhausted_tasks_stay_visible_with_recovery_context(self):
         states = {
@@ -112,7 +252,8 @@ class AsyncViewerTests(unittest.TestCase):
             'readiness': states,
         }
         with mock.patch.object(
-            self.viewer.subprocess, 'run', return_value=mock.Mock(stdout=json.dumps(payload)),
+            self.viewer.subprocess, 'run',
+            return_value=mock.Mock(returncode=0, stdout=json.dumps(payload), stderr=''),
         ):
             remaining = self.viewer._remaining_snapshot(0)
 

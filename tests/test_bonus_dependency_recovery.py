@@ -461,6 +461,52 @@ class AttemptAndLegacyContracts(RecoveryCase):
 
 
 class AutomaticRecoveryContracts(RecoveryCase):
+    def test_readiness_skips_descendant_graph_when_task_has_no_recovery(self) -> None:
+        self.add("ordinary")
+
+        with mock.patch.object(
+            self.queue, "_blocked_descendant_counts",
+            side_effect=AssertionError("descendant graph should not be rebuilt"),
+        ):
+            status = self.queue.readiness("ordinary", now_epoch=NOW)
+
+        self.assertEqual(status["state"], "ready")
+        self.assertIsNone(status["recovery"])
+
+    def test_readiness_keeps_exact_descendant_count_when_recovery_exists(self) -> None:
+        self.add("parent")
+        self.add("child", depends_on=["parent"])
+        self.add("grandchild", depends_on=["child"])
+        self.fail_task("parent", signature="retryable:counted")
+        self.queue.reconcile_recoveries(now_epoch=NOW, dry_run=False)
+
+        with mock.patch.object(
+            self.queue, "_blocked_descendant_counts",
+            wraps=self.queue._blocked_descendant_counts,
+        ) as counts:
+            status = self.queue.readiness("parent", now_epoch=NOW)
+
+        counts.assert_called_once()
+        self.assertEqual(status["recovery"]["blocked_descendants"], 2)
+
+    def test_cli_queue_reuses_snapshot_readiness_once_per_task(self) -> None:
+        self.add("ready")
+        self.add("waiting", depends_on=["ready"])
+        cfg = runtime(self.queue.path)
+
+        with (
+            mock.patch.object(cli, "_queue", return_value=(cfg, self.queue)),
+            mock.patch.object(
+                self.queue, "readiness", wraps=self.queue.readiness,
+            ) as readiness,
+            captured_json() as payloads,
+        ):
+            code = cli.main(["queue", "0", "--json", "--now", str(NOW)])
+
+        self.assertEqual(code, 0)
+        self.assertEqual(readiness.call_count, 2)
+        self.assertEqual(set(payloads[0]["readiness"]), {"ready", "waiting"})
+
     def test_failed_parent_with_only_a_historically_done_child_gets_no_automatic_recovery(self) -> None:
         self.add("historical-parent")
         self.add("historical-child", depends_on=["historical-parent"])

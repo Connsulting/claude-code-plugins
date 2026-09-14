@@ -1051,7 +1051,10 @@ class QueueDB:
             done = self._verified_done_row(connection, task_id)
             latest = self._latest_effective_attempt(connection, task_id)
             legacy = self._latest_legacy_run(connection, task_id)
-            counts = self._blocked_descendant_counts(connection)
+            counts = (
+                self._blocked_descendant_counts(connection)
+                if recovery is not None else {}
+            )
             consumed_live = False
             if recovery is not None and recovery["state"] == "consumed":
                 consumer = connection.execute(

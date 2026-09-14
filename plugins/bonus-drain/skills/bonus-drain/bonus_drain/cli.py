@@ -369,10 +369,6 @@ def _command(args: argparse.Namespace) -> int:
                 ]
                 for task in tasks_by_id.values()
             }
-            snapshot["readiness"] = {
-                task.id: queue.readiness(task.id, now_epoch=now)
-                for task in tasks_by_id.values()
-            }
             _json(snapshot)
         else:
             _human_queue_status(queue, cycle)
