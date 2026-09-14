@@ -14,7 +14,7 @@ from typing import Any, Mapping, Sequence
 
 from . import __version__
 from . import config as config_module
-from . import db, dispatcher, planner, scout, usage
+from . import db, dispatcher, factory_terminal, planner, scout, usage
 from .kick import kick_task
 
 
@@ -291,6 +291,11 @@ def _command(args: argparse.Namespace) -> int:
         )
         if outcome_path is not None and args.status == "done":
             dispatcher.remove_outcome_file(outcome_path)
+        task = queue.task(args.task)
+        if task is not None:
+            factory_terminal.record_factory_terminal(
+                task.id, event.attempt_id, event.status, event.ts, event.summary, task.cwd,
+            )
         _json({"run": event.to_dict()}) if args.json else print(f"recorded: {args.task} {args.status}")
         return 0
     if command == "recover-complete":

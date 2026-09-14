@@ -20,6 +20,7 @@
     "bonus_drain/cutover.py",
     "bonus_drain/db.py",
     "bonus_drain/dispatcher.py",
+    "bonus_drain/factory_terminal.py",
     "bonus_drain/goals.py",
     "bonus_drain/handoff.py",
     "bonus_drain/kick.py",

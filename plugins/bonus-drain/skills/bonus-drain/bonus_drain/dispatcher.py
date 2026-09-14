@@ -152,8 +152,9 @@ FACTORY_SESSION_ENV_KEYS = (
 )
 
 
-def new_factory_run_id(task: Task) -> str:
-    return f"drain-{task.id}-{uuid.uuid4().hex[:12]}"
+def new_factory_run_id(task_id: str, attempt_id: str) -> str:
+    """Derive the runs row id from the attempt so the terminal record can find it again."""
+    return f"drain-{task_id}-{attempt_id.replace('-', '')[:12]}"
 
 
 def factory_telemetry_script() -> Path | None:
@@ -1410,7 +1411,7 @@ def dispatch(
             raise KnownDispatchFailure(
                 "dependency base changed after claim; refusing the router launch"
             )
-        factory_run_id = new_factory_run_id(task) if task.use_implement else None
+        factory_run_id = new_factory_run_id(task.id, attempt.id) if task.use_implement else None
         prompt = render_prompt(
             config,
             task,
