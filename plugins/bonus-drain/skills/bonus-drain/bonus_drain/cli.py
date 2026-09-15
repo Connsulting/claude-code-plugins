@@ -15,7 +15,7 @@ from typing import Any, Mapping, Sequence
 from . import __version__
 from . import config as config_module
 from . import db, dispatcher, factory_terminal, planner, scout, usage
-from .kick import kick_task
+from .kick import kick_task, resolve_active_accounts
 
 
 class CLIError(RuntimeError):
@@ -576,8 +576,12 @@ def _command(args: argparse.Namespace) -> int:
         print(dispatcher.render_prompt(cfg, task, key, args.provider, args.account))
         return 0
     if command == "accounts":
+        if args.accounts_command == "select":
+            cfg, queue = _queue(args, graph_required=True)
+            queue.initialize()
+            return _accounts_command(cfg, args, queue)
         cfg = _load_config(args, graph_required=True)
-        return _accounts_command(cfg, args)
+        return _accounts_command(cfg, args, None)
     if command == "doctor":
         from . import lifecycle
 
@@ -657,7 +661,11 @@ def _command(args: argparse.Namespace) -> int:
     raise CLIError(f"unknown subcommand: {command}")
 
 
-def _accounts_command(cfg: config_module.RuntimeConfig, args: argparse.Namespace) -> int:
+def _accounts_command(
+    cfg: config_module.RuntimeConfig,
+    args: argparse.Namespace,
+    queue: db.QueueDB | None,
+) -> int:
     action = args.accounts_command
     accounts = list(cfg.accounts)
     if action == "labels":
@@ -683,8 +691,19 @@ def _accounts_command(cfg: config_module.RuntimeConfig, args: argparse.Namespace
         print(usage.legacy_window_line(cfg, record))
         return 0 if record.fresh else 1
     if action == "select":
-        records = usage.read_all(cfg, now_epoch=_now(args))
-        result = planner.build_plan(cfg, records, eligible_count=1, now_epoch=_now(args))
+        if queue is None:
+            raise CLIError("accounts select requires the authoritative queue")
+        now = _now(args)
+        active_account_ids, identity_failures = resolve_active_accounts(cfg, queue)
+        records = usage.read_all(cfg, now_epoch=now)
+        result = planner.build_plan(cfg, records, eligible_count=1, now_epoch=now)
+        result = planner.close_providers(result, identity_failures)
+        result = planner.finalize_plan(
+            cfg,
+            result,
+            active_account_ids=active_account_ids,
+            eligible_count=1,
+        )
         if result.batches:
             batch = result.batches[0]
             print(f"{batch.account_id} {batch.resets_at}")
@@ -798,7 +817,7 @@ def build_parser() -> argparse.ArgumentParser:
     render = sub.add_parser("render-prompt"); _add_common(render); render.add_argument("task"); render.add_argument("--provider", required=True); render.add_argument("--account"); render.add_argument("--eligibility-key", required=True)
     render_json = sub.add_parser("render-prompt-json"); _add_common(render_json); render_json.add_argument("--task-json", required=True); render_json.add_argument("--cycle", type=int, required=True); render_json.add_argument("--provider", required=True); render_json.add_argument("--account")
 
-    accounts = sub.add_parser("accounts"); _add_common(accounts, database=False); accounts.add_argument("accounts_command", choices=("labels", "count", "multi", "cycle", "canonical-cycle", "usage", "select")); accounts.add_argument("account", nargs="?"); accounts.add_argument("epoch", type=int, nargs="?"); accounts.add_argument("--now", type=int)
+    accounts = sub.add_parser("accounts"); _add_common(accounts); accounts.add_argument("accounts_command", choices=("labels", "count", "multi", "cycle", "canonical-cycle", "usage", "select")); accounts.add_argument("account", nargs="?"); accounts.add_argument("epoch", type=int, nargs="?"); accounts.add_argument("--now", type=int)
     doctor = sub.add_parser("doctor"); _add_common(doctor); _add_json(doctor)
 
     install = sub.add_parser("install"); install.add_argument("--source", type=Path, required=True); install.add_argument("--home", type=Path); install.add_argument("--version", dest="install_version"); _add_json(install)

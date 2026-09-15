@@ -767,6 +767,140 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             self.assertFalse(trace.exists())
             self.assertEqual(pin.read_text(encoding="utf-8"), "Business\n")
 
+    def test_activation_rejects_repeated_identity_options(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pin = root / "PIN"
+            active = root / "active"
+            active.write_text("Business\n", encoding="utf-8")
+            cases = (
+                ("--account", "account-business"),
+                ("--expected-account", "account-business"),
+                ("--label", "Business"),
+                ("--pin-file", str(pin)),
+                ("--active-path", str(active)),
+            )
+            for option, value in cases:
+                with self.subTest(option=option):
+                    pin.unlink(missing_ok=True)
+                    command = self.activation_command(
+                        pin, "--active-path", str(active), option, value,
+                    )
+                    completed = subprocess.run(
+                        command,
+                        check=False,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        timeout=5,
+                    )
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertFalse(pin.exists())
+
+    def test_activation_rejects_abbreviated_identity_options(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pin = root / "PIN"
+            active = root / "active"
+            active.write_text("Business\n", encoding="utf-8")
+            completed = subprocess.run(
+                self.activation_command(
+                    pin,
+                    "--active-path", str(active),
+                    "--expected-acc", "account-business",
+                ),
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertFalse(pin.exists())
+
+    def test_config_rejects_abbreviated_activation_identity_options(self) -> None:
+        sys.path.insert(0, str(SKILL_ROOT))
+        try:
+            from bonus_drain import config as config_module
+        finally:
+            sys.path.pop(0)
+        example = self.load_json(SKILL_ROOT / "config.example.json")
+        adapter = next(
+            item for item in example["adapters"]
+            if item["id"] == "claude-personal-activation"
+        )
+        adapter["argv"].extend(("--expected-acc", "claude-personal"))
+
+        with self.assertRaisesRegex(config_module.ConfigError, "identity|option"):
+            config_module.validate_config(
+                example,
+                source_dir=SKILL_ROOT,
+                source_path=SKILL_ROOT / "config.example.json",
+            )
+
+    def test_config_rejects_duplicate_labels_within_multi_account_provider(self) -> None:
+        sys.path.insert(0, str(SKILL_ROOT))
+        try:
+            from bonus_drain import config as config_module
+        finally:
+            sys.path.pop(0)
+        example = self.load_json(SKILL_ROOT / "config.example.json")
+        labels: dict[str, str] = {}
+        for adapter in example["adapters"]:
+            if adapter["id"] not in {
+                "claude-personal-activation", "claude-business-activation",
+            }:
+                continue
+            argv = adapter["argv"]
+            label_index = argv.index("--label") + 1
+            labels[adapter["id"]] = argv[label_index]
+            if adapter["id"] == "claude-business-activation":
+                argv[label_index] = labels["claude-personal-activation"]
+
+        with self.assertRaisesRegex(config_module.ConfigError, "label"):
+            config_module.validate_config(
+                example,
+                source_dir=SKILL_ROOT,
+                source_path=SKILL_ROOT / "config.example.json",
+            )
+
+    def test_activation_rollback_failure_is_not_reported_as_proven_unswitched(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pin = root / "PIN"
+            active = root / "active"
+            active.write_text("Personal\n", encoding="utf-8")
+            rotator = root / "break-rollback"
+            rotator.write_text(
+                "#!/bin/sh\n"
+                "rm -f \"$1\"\n"
+                "mkdir \"$1\"\n",
+                encoding="utf-8",
+            )
+            rotator.chmod(0o700)
+
+            completed = subprocess.run(
+                self.activation_command(
+                    pin,
+                    "--rotate", str(rotator),
+                    "--rotate-arg", str(pin),
+                    "--active-path", str(active),
+                ),
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=5,
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertTrue(pin.is_dir())
+            self.assertNotIn("requested account did not become active", completed.stderr)
+
     def test_activation_without_active_path_still_invokes_rotator(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

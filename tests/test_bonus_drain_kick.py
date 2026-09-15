@@ -400,8 +400,135 @@ class KickContractTests(unittest.TestCase):
             accounts=(alpha, self.config.accounts[1]),
         )
 
+    def test_abort_unlaunched_attempt_cannot_delete_an_activating_lease(self) -> None:
+        key = "manual/activating-lease-invariant"
+        attempt = self.queue.claim(
+            "portable",
+            key,
+            "alpha",
+            "alpha-account",
+            provider_capabilities=("legacy-exclusive", "cpu"),
+            now_epoch=NOW,
+        )
+        self.assertIsNotNone(attempt)
+        assert attempt is not None
+
+        def fail_activation() -> None:
+            raise RuntimeError("activation outcome is unknown")
+
+        with self.assertRaisesRegex(RuntimeError, "activation outcome is unknown"):
+            self.queue.acquire_activation(
+                "portable",
+                key,
+                "alpha",
+                "alpha-account",
+                fail_activation,
+                attempt_id=attempt.id,
+            )
+
+        with self.assertRaises(db.QueueError):
+            self.queue.abort_unlaunched_attempt(
+                "portable",
+                key,
+                attempt.id,
+                "activation failed",
+            )
+
+        claim = self.queue.claim_for("portable", key)
+        self.assertIsNotNone(claim)
+        self.assertEqual(claim.state, "claimed")
+        self.assertEqual(
+            [(lease.account_id, lease.state) for lease in self.queue.activation_leases()],
+            [("alpha-account", "activating")],
+        )
+        self.assertEqual(
+            [item.state for item in self.queue.attempts(task_id="portable")],
+            ["claimed"],
+        )
+
+    def test_secondary_activation_cleanup_error_retains_ambiguous_ownership(self) -> None:
+        cfg = self._launch_scoped_config()
+        active = self.root / "active"
+        active.write_text("Personal\n", encoding="utf-8")
+        activation = replace(
+            cfg.adapter("switch"),
+            argv=(
+                str(self.root / "bin" / "account-switch"),
+                "--label", "Personal",
+                "--active-path", str(active),
+            ),
+        )
+        cfg = replace(
+            cfg,
+            adapters=tuple(
+                activation if adapter.id == activation.id else adapter
+                for adapter in cfg.adapters
+            ),
+        )
+        router_calls: list[object] = []
+
+        def fail_activation(
+            _cfg: object, _account: object, action: str, _callback: object,
+        ) -> None:
+            if action == "activate":
+                raise dispatcher.DispatchError(
+                    "account activation activate failed: adapter switch exited 1: "
+                    "bonus-drain-account-activation: requested account did not become active"
+                )
+
+        with (
+            mock.patch.object(dispatcher, "_activation", side_effect=fail_activation),
+            mock.patch.object(
+                self.queue,
+                "abandon_unproven_activation",
+                side_effect=db.QueueError("secondary activation cleanup failed"),
+            ),
+            self.assertRaisesRegex(
+                dispatcher.AmbiguousDispatch,
+                "cleanup requires reconciliation",
+            ),
+        ):
+            dispatcher.dispatch(
+                cfg,
+                self.queue,
+                task_id="portable",
+                eligibility_key="manual/secondary-activation-cleanup",
+                requested_provider="alpha",
+                router_call=lambda *args, **kwargs: router_calls.append((args, kwargs)),
+            )
+
+        self.assertEqual(router_calls, [])
+        claim = self.queue.claim_for("portable", "manual/secondary-activation-cleanup")
+        self.assertIsNotNone(claim)
+        self.assertEqual(claim.state, "ambiguous")
+        self.assertEqual(
+            [(lease.account_id, lease.state) for lease in self.queue.activation_leases()],
+            [("alpha-account", "activating")],
+        )
+        self.assertEqual(
+            [item.state for item in self.queue.attempts(task_id="portable")],
+            ["ambiguous"],
+        )
+
     def test_proven_unswitched_activation_releases_instead_of_sticking(self) -> None:
         cfg = self._launch_scoped_config()
+        active = self.root / "active"
+        active.write_text("Personal\n", encoding="utf-8")
+        activation = replace(
+            cfg.adapter("switch"),
+            argv=(
+                str(self.root / "bin" / "account-switch"),
+                "--label", "Personal",
+                "--active-path", str(active),
+            ),
+        )
+        cfg = replace(
+            cfg,
+            adapters=tuple(
+                activation if adapter.id == activation.id else adapter
+                for adapter in cfg.adapters
+            ),
+        )
 
         def boom(_cfg: object, _account: object, action: str, _callback: object) -> None:
             if action == "activate":
@@ -427,6 +554,51 @@ class KickContractTests(unittest.TestCase):
         self.assertEqual(self.queue.activation_leases(provider_id="alpha"), [])
         self.assertEqual(self.queue.runs(task_id="portable"), [])
         self.assertTrue(db.doctor(self.queue).ok)
+
+    def test_single_account_activation_can_establish_a_missing_marker(self) -> None:
+        cfg = self._launch_scoped_config()
+        active = self.root / "missing-active"
+        activation = replace(
+            cfg.adapter("switch"),
+            argv=(
+                str(self.root / "bin" / "account-switch"),
+                "--label", "Personal",
+                "--active-path", str(active),
+            ),
+        )
+        cfg = replace(
+            cfg,
+            adapters=tuple(
+                activation if adapter.id == activation.id else adapter
+                for adapter in cfg.adapters
+            ),
+        )
+        activation_actions: list[str] = []
+
+        def establish_marker(
+            _cfg: object, _account: object, action: str, _callback: object,
+        ) -> None:
+            activation_actions.append(action)
+            if action == "activate":
+                active.write_text("Personal\n", encoding="utf-8")
+
+        with mock.patch.object(dispatcher, "_activation", side_effect=establish_marker):
+            result = dispatcher.dispatch(
+                cfg,
+                self.queue,
+                task_id="portable",
+                eligibility_key="alpha-account/manual/first-activation",
+                requested_provider="alpha",
+                router_call=self._router,
+            )
+
+        self.assertEqual(result.account_id, "alpha-account")
+        self.assertEqual(activation_actions, ["activate", "release"])
+        self.assertEqual(active.read_text(encoding="utf-8"), "Personal\n")
+        self.assertEqual(
+            [run.status for run in self.queue.runs(task_id="portable")],
+            ["dispatched"],
+        )
 
     def test_unknown_activation_failure_stays_fail_closed(self) -> None:
         cfg = self._launch_scoped_config()
@@ -599,7 +771,7 @@ class KickContractTests(unittest.TestCase):
         self.assertEqual(activation_calls, [])
         self.assertEqual([claim.task_id for claim in self.queue.claims()], ["business-owner"])
 
-    def test_multiple_same_account_leases_block_manual_selection(self) -> None:
+    def test_multiple_same_account_leases_allow_manual_selection(self) -> None:
         from bonus_drain import kick
 
         active = self.root / "active"
@@ -616,6 +788,39 @@ class KickContractTests(unittest.TestCase):
                 task_id, key, "alpha", "alpha-business", lambda: None,
             )
 
+        result = kick.kick_task(
+            cfg,
+            self.queue,
+            task_id="portable",
+            requested_provider="alpha",
+            now_epoch=NOW,
+            router_call=self._router,
+        )
+
+        self.assertEqual(result.account_id, "alpha-business")
+
+    def test_distinct_account_leases_block_manual_selection(self) -> None:
+        from bonus_drain import kick
+
+        active = self.root / "active"
+        active.write_text("Business\n", encoding="utf-8")
+        cfg = self._active_multi_config(active)
+        for task_id in ("owner-one", "owner-two"):
+            self.queue.add_task(_task(task_id))
+            key = f"alpha-business/alpha-weekly/{NOW + 604800}/{task_id}"
+            self.assertTrue(self.queue.claim(
+                task_id, key, "alpha", "alpha-business",
+                provider_capabilities=("legacy-exclusive", "cpu"),
+            ))
+            self.queue.acquire_activation(
+                task_id, key, "alpha", "alpha-business", lambda: None,
+            )
+        with self.queue._connect() as connection:
+            connection.execute(
+                "UPDATE activation_leases SET account_id=? WHERE task_id=?",
+                ("alpha-personal", "owner-one"),
+            )
+
         with self.assertRaisesRegex(dispatcher.InvalidRoute, "multiple|conflicting"):
             kick.kick_task(
                 cfg,
@@ -625,6 +830,235 @@ class KickContractTests(unittest.TestCase):
                 now_epoch=NOW,
                 router_call=lambda *_args, **_kwargs: self.fail("router was called"),
             )
+
+    def test_multi_account_marker_paths_fail_closed_without_blocking(self) -> None:
+        from bonus_drain import kick
+
+        relative_target = self.root / "relative-active"
+        relative_target.write_text("Business\n", encoding="utf-8")
+        symlink_target = self.root / "symlink-target"
+        symlink_target.write_text("Business\n", encoding="utf-8")
+        symlink_marker = self.root / "symlink-active"
+        symlink_marker.symlink_to(symlink_target)
+        directory_marker = self.root / "directory-active"
+        directory_marker.mkdir()
+        oversized_marker = self.root / "oversized-active"
+        oversized_marker.write_bytes(b"Business" + b"x" * 5000)
+
+        cases = (
+            ("relative", Path(os.path.relpath(relative_target, Path.cwd()))),
+            ("symlink", symlink_marker),
+            ("directory", directory_marker),
+            ("oversized", oversized_marker),
+        )
+        for name, marker in cases:
+            with self.subTest(name=name):
+                cfg = self._active_multi_config(marker)
+                with self.assertRaises(dispatcher.InvalidRoute):
+                    kick.resolve_active_account_id(cfg, self.queue, "alpha")
+
+        fifo_marker = self.root / "fifo-active"
+        os.mkfifo(fifo_marker)
+        cfg = self._active_multi_config(fifo_marker)
+        outcome: list[object] = []
+
+        def resolve_fifo() -> None:
+            try:
+                outcome.append(kick.resolve_active_account_id(cfg, self.queue, "alpha"))
+            except Exception as exc:  # noqa: BLE001
+                outcome.append(exc)
+
+        thread = threading.Thread(target=resolve_fifo, daemon=True)
+        thread.start()
+        thread.join(0.25)
+        completed_without_blocking = not thread.is_alive()
+        if thread.is_alive():
+            descriptor = os.open(fifo_marker, os.O_WRONLY | os.O_NONBLOCK)
+            try:
+                os.write(descriptor, b"Business\n")
+            finally:
+                os.close(descriptor)
+            thread.join(1)
+        self.assertTrue(completed_without_blocking, "nonregular active marker read blocked")
+        self.assertEqual(len(outcome), 1)
+        self.assertIsInstance(outcome[0], dispatcher.InvalidRoute)
+
+    def test_changed_marker_makes_activation_refusal_ambiguous(self) -> None:
+        from bonus_drain import kick
+
+        active = self.root / "active"
+        active.write_text("Personal\n", encoding="utf-8")
+        cfg = self._active_multi_config(active)
+
+        def refused_after_switch(
+            _cfg: object, account: object, action: str, _callback: object,
+        ) -> None:
+            self.assertEqual((action, account.id), ("activate", "alpha-business"))
+            active.write_text("Business\n", encoding="utf-8")
+            raise dispatcher.DispatchError(
+                "account activation activate failed: adapter business-switch exited 1: "
+                "bonus-drain-account-activation: requested account did not become active"
+            )
+
+        with (
+            mock.patch.object(dispatcher, "_activation", side_effect=refused_after_switch),
+            self.assertRaises(dispatcher.AmbiguousDispatch),
+        ):
+            kick.kick_task(
+                cfg,
+                self.queue,
+                task_id="portable",
+                requested_provider="alpha",
+                account_id="alpha-business",
+                now_epoch=NOW,
+                router_call=self._router,
+            )
+
+        claim = self.queue.claims()[0]
+        self.assertEqual(claim.state, "ambiguous")
+        self.assertEqual(
+            [lease.state for lease in self.queue.activation_leases(provider_id="alpha")],
+            ["activating"],
+        )
+
+    def test_auto_and_custom_eligibility_keys_resolve_the_active_account(self) -> None:
+        from bonus_drain import kick
+
+        active = self.root / "active"
+        active.write_text("Business\n", encoding="utf-8")
+        cfg = self._active_multi_config(active)
+        for task_id, requested_provider, key in (
+            ("portable", "auto", "manual/auto-key"),
+            ("custom-key", "alpha", "manual/custom-key"),
+        ):
+            if task_id != "portable":
+                self.queue.add_task(_task(task_id))
+            with self.subTest(requested_provider=requested_provider):
+                result = kick.kick_task(
+                    cfg,
+                    self.queue,
+                    task_id=task_id,
+                    requested_provider=requested_provider,
+                    eligibility_key=key,
+                    now_epoch=NOW,
+                    router_call=self._router,
+                    activation_call=lambda _action, _account: None,
+                )
+                self.assertEqual(result.account_id, "alpha-business")
+
+    def test_custom_eligibility_key_rejects_lease_and_marker_disagreement(self) -> None:
+        from bonus_drain import kick
+
+        active = self.root / "active"
+        active.write_text("Personal\n", encoding="utf-8")
+        cfg = self._active_multi_config(active)
+        self.queue.add_task(_task("business-owner"))
+        owner_key = f"alpha-business/alpha-weekly/{NOW + 604800}"
+        self.assertTrue(self.queue.claim(
+            "business-owner", owner_key, "alpha", "alpha-business",
+            provider_capabilities=("legacy-exclusive", "cpu"),
+        ))
+        self.assertTrue(self.queue.acquire_activation(
+            "business-owner", owner_key, "alpha", "alpha-business", lambda: None,
+        ))
+        router_calls: list[list[str]] = []
+
+        def router(argv: list[str], **_kwargs: object) -> dict[str, object]:
+            router_calls.append(argv)
+            return {"dispatch": {"job_id": "wrong-account-job", "launched": True}}
+
+        with self.assertRaisesRegex(dispatcher.InvalidRoute, "disagree"):
+            kick.kick_task(
+                cfg,
+                self.queue,
+                task_id="portable",
+                requested_provider="alpha",
+                eligibility_key="manual/custom-key",
+                now_epoch=NOW,
+                router_call=router,
+            )
+
+        self.assertEqual(router_calls, [])
+        self.assertIsNone(self.queue.claim_for("portable", "manual/custom-key"))
+        self.assertEqual(self.queue.runs(task_id="portable"), [])
+
+    def test_joining_same_account_lease_requires_matching_marker(self) -> None:
+        from bonus_drain import kick
+
+        active = self.root / "active"
+        active.write_text("Personal\n", encoding="utf-8")
+        cfg = self._active_multi_config(active)
+        self.queue.add_task(_task("business-owner"))
+        owner_key = f"alpha-business/alpha-weekly/{NOW + 604800}"
+        self.assertTrue(self.queue.claim(
+            "business-owner", owner_key, "alpha", "alpha-business",
+            provider_capabilities=("legacy-exclusive", "cpu"),
+        ))
+        self.assertTrue(self.queue.acquire_activation(
+            "business-owner", owner_key, "alpha", "alpha-business", lambda: None,
+        ))
+        router_calls: list[list[str]] = []
+
+        def router(argv: list[str], **_kwargs: object) -> dict[str, object]:
+            router_calls.append(argv)
+            return {"dispatch": {"job_id": "wrong-account-job", "launched": True}}
+
+        with self.assertRaisesRegex(dispatcher.InvalidRoute, "disagree"):
+            kick.kick_task(
+                cfg,
+                self.queue,
+                task_id="portable",
+                requested_provider="alpha",
+                eligibility_key=f"alpha-business/manual/{NOW + 604800}",
+                account_id="alpha-business",
+                now_epoch=NOW,
+                router_call=router,
+            )
+
+        self.assertEqual(router_calls, [])
+        self.assertEqual(self.queue.runs(task_id="portable"), [])
+
+    def test_missing_marker_with_explicit_account_fails_without_override_advice(self) -> None:
+        from bonus_drain import kick
+
+        active = self.root / "missing-active"
+        cfg = self._active_multi_config(active)
+        router_calls: list[list[str]] = []
+
+        with self.assertRaises(dispatcher.InvalidRoute) as raised:
+            kick.kick_task(
+                cfg,
+                self.queue,
+                task_id="portable",
+                requested_provider="alpha",
+                account_id="alpha-business",
+                now_epoch=NOW,
+                router_call=lambda argv, **_kwargs: router_calls.append(argv),
+            )
+
+        self.assertNotIn("requires --account", str(raised.exception))
+        self.assertEqual(router_calls, [])
+        self.assertEqual(self.queue.claims(), [])
+
+    def test_explicit_account_cannot_disagree_with_eligibility_key(self) -> None:
+        from bonus_drain import kick
+
+        active = self.root / "active"
+        active.write_text("Business\n", encoding="utf-8")
+        cfg = self._active_multi_config(active)
+        with self.assertRaises(dispatcher.InvalidRoute):
+            kick.kick_task(
+                cfg,
+                self.queue,
+                task_id="portable",
+                requested_provider="alpha",
+                eligibility_key=f"alpha-personal/manual/{NOW + 604800}",
+                account_id="alpha-business",
+                now_epoch=NOW,
+                router_call=self._router,
+                activation_call=lambda _action, _account: None,
+            )
+        self.assertEqual(self.queue.claims(), [])
 
     def test_unknown_lease_account_blocks_manual_selection(self) -> None:
         from bonus_drain import kick
@@ -659,11 +1093,11 @@ class KickContractTests(unittest.TestCase):
         snapshots = {
             ("alpha", "alpha-personal"): usage.UsageSnapshot(
                 "alpha", "alpha-personal", NOW,
-                {"alpha-weekly": {"used_percent": 70, "resets_at": NOW + 20_000}},
+                {"alpha-weekly": {"used_percent": 70, "resets_at": NOW + 10_000}},
             ),
             ("alpha", "alpha-business"): usage.UsageSnapshot(
                 "alpha", "alpha-business", NOW,
-                {"alpha-weekly": {"used_percent": 70, "resets_at": NOW + 30_000}},
+                {"alpha-weekly": {"used_percent": 70, "resets_at": NOW + 20_000}},
             ),
             ("beta", "beta-account"): usage.UsageSnapshot(
                 "beta", "beta-account", NOW,
@@ -684,7 +1118,7 @@ class KickContractTests(unittest.TestCase):
         self.assertEqual(result, 0)
         opened.assert_called_once()
         self.assertEqual(opened.call_args.kwargs, {"graph_required": True})
-        printed.assert_called_once_with(f"alpha-business {NOW + 30_000}")
+        printed.assert_called_once_with(f"alpha-business {NOW + 20_000}")
 
     def test_accounts_select_equal_resets_keeps_active_later_account_id(self) -> None:
         active = self.root / "active"
@@ -692,7 +1126,7 @@ class KickContractTests(unittest.TestCase):
         cfg = self._active_multi_config(
             active, personal_id="alpha-a", business_id="alpha-z",
         )
-        reset = NOW + 30_000
+        reset = NOW + 20_000
         snapshots = {
             ("alpha", "alpha-a"): usage.UsageSnapshot(
                 "alpha", "alpha-a", NOW,

@@ -1180,7 +1180,18 @@ def _account_for(
     for account in accounts:
         if account.id == account_hint:
             return account
+    if len(accounts) > 1:
+        return None
     leased = set(leased_account_ids)
+    configured_ids = {account.id for account in accounts}
+    if leased and not leased <= configured_ids:
+        raise InvalidRoute(
+            f"provider {provider.id} activation lease names an unknown configured account"
+        )
+    if len(leased) > 1:
+        raise InvalidRoute(
+            f"provider {provider.id} has multiple conflicting activation leases"
+        )
     for account in accounts:
         if account.id in leased:
             return account
@@ -1276,6 +1287,15 @@ def dispatch(
             for lease in queue.activation_leases(provider_id=provider.id)
         ),
     )
+    provider_accounts = config.accounts_for_provider(provider.id)
+    if len(provider_accounts) > 1:
+        from .kick import resolve_active_account_id
+
+        active_account_id = resolve_active_account_id(config, queue, provider.id)
+        if account is None:
+            account = config.account(active_account_id)
+    elif account is None and provider_accounts:
+        account = provider_accounts[0]
     account_id = account.id if account else None
     attempt = queue.claim(
         task.id, eligibility_key, provider.id, account_id,
@@ -1345,6 +1365,18 @@ def dispatch(
         outcome_path = materialize_outcome_file(config, attempt.id)
         if lease_managed:
             assert account is not None
+            from .kick import active_marker_for_account
+
+            try:
+                marker_before_activation = active_marker_for_account(config, account.id)
+            except InvalidRoute as exc:
+                if (
+                    len(provider_accounts) == 1
+                    and isinstance(exc.__cause__, FileNotFoundError)
+                ):
+                    marker_before_activation = None
+                else:
+                    raise
             try:
                 queue.acquire_activation(
                     task.id,
@@ -1360,13 +1392,39 @@ def dispatch(
                     for lease in queue.activation_leases(provider_id=provider.id)
                 )
                 assert account.activation_adapter_id is not None
-                if incomplete and _trusted_unswitched_activation(
-                    exc, account.activation_adapter_id,
+                marker_unchanged = False
+                try:
+                    marker_after_activation = active_marker_for_account(config, account.id)
+                    marker_unchanged = (
+                        marker_before_activation is not None
+                        and marker_after_activation == marker_before_activation
+                    )
+                except InvalidRoute:
+                    pass
+                if (
+                    incomplete
+                    and marker_unchanged
+                    and _trusted_unswitched_activation(exc, account.activation_adapter_id)
                 ):
                     # The adapter verified the active account never moved and rolled
                     # the pin back. That is known-not-launched, not post-launch
                     # ambiguity; dropping the unproven lease unblocks the provider.
-                    if queue.abandon_unproven_activation(task.id, eligibility_key):
+                    try:
+                        abandoned = queue.abandon_unproven_activation(
+                            task.id, eligibility_key,
+                        )
+                    except Exception as cleanup_exc:
+                        queue.mark_attempt_ambiguous(
+                            task.id,
+                            eligibility_key,
+                            attempt.id,
+                            "known-not-launched activation cleanup requires reconciliation: "
+                            f"{str(cleanup_exc)[:500]}",
+                        )
+                        raise AmbiguousDispatch(
+                            "account activation cleanup requires reconciliation"
+                        ) from cleanup_exc
+                    if abandoned:
                         raise ActivationUnavailable(
                             str(exc), known_not_switched=True,
                         ) from exc

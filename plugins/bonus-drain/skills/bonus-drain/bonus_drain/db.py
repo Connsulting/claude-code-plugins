@@ -1797,6 +1797,10 @@ class QueueDB:
                 "SELECT * FROM activation_leases WHERE task_id=? AND eligibility_key=? AND attempt_id=?",
                 (task_id, eligibility_key, attempt_id),
             ).fetchone()
+            if lease is not None and lease["state"] == "activating":
+                raise QueueError(
+                    "unproven activation requires reconciliation before abort"
+                )
             if lease is not None and lease["state"] in {"active", "releasing"}:
                 holders = int(connection.execute(
                     """SELECT COUNT(*) FROM activation_leases

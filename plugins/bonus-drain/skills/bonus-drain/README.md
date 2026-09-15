@@ -17,12 +17,18 @@ also consume a later provider slot, while exclusive work remains available to a 
 with the required capability. Legacy-exclusive tasks drain before portable tasks regardless
 of provider batch order; normal queue priority remains authoritative within each class.
 
+Scout evaluates every account through the complete drainability gates before choosing a
+provider winner. When both accounts can drain, it chooses the active account. When only the
+active account can drain, it uses that account. When only an inactive account can drain, it
+attempts verified activation before launch. Scout launches nothing when the active identity
+or the switch cannot be proven.
+
 Manual dispatch without an explicit account reuses an account already leased by the selected
-provider; if no lease exists, it selects the single account whose configured active-account
+provider; if no lease exists, it selects the single account whose configured active account
 marker matches. This permits compatible concurrent launches without switching credentials
-beneath running jobs. If a multi-account provider has neither an active marker nor a lease,
-manual dispatch fails closed and requires `--account ACCOUNT_ID`. An explicit account hint
-remains authoritative and fails closed on a conflict.
+beneath running jobs. If a provider with multiple accounts has neither an active marker nor a
+lease, manual dispatch fails closed. An explicit account hint does not bypass missing active
+identity proof and fails closed on a conflict.
 
 Account activation defaults to `activation_scope: "run"`, which holds the selected credential
 through the terminal event. Providers that safely reread switched credentials between calls may
@@ -38,10 +44,11 @@ the remaining-headroom floor (`max_percent_per_window` points per
 to one job, then subtracts already-running jobs on that provider. `batch_size` is
 the per-provider cap (3 in the example). Optional top-level `max_jobs` is a
 cross-provider ceiling including in-flight work; omit it for no global cap. Bonus Drain is
-the last `urgency_seconds` (24 hours): the same floor, but a multi-account provider
-pins to the wallet that expires first so leftover is not stranded. Far from expiry,
-same-provider accounts equalize on surplus. Recurring tasks still cool down, and
-each weekly reset key may run only once.
+the last `urgency_seconds` (24 hours) and uses the same floor. For a provider with multiple
+accounts, Scout applies the complete gates to each account and prefers the proven active
+account among those that can drain. It attempts verified activation only when the inactive
+account is the sole drainable choice. Recurring tasks still cool down, and each weekly reset
+key may run only once.
 
 ## Requirements
 

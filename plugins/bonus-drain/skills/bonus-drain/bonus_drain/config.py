@@ -439,6 +439,23 @@ def validate_config(
             )
         )
     adapter_by_id = {adapter.id: adapter for adapter in adapters}
+    activation_identity_options = (
+        "--action", "--account", "--expected-account", "--label",
+        "--pin-file", "--active-path",
+    )
+    for adapter in adapters:
+        if adapter.kind != "activation":
+            continue
+        for token in adapter.argv:
+            option = token.split("=", 1)[0]
+            if (
+                option.startswith("--")
+                and option not in activation_identity_options
+                and any(identity.startswith(option) for identity in activation_identity_options)
+            ):
+                raise ConfigError(
+                    f"activation adapter {adapter.id} has abbreviated identity option {option}"
+                )
 
     providers: list[ProviderConfig] = []
     for index, row in enumerate(provider_rows):
@@ -529,11 +546,23 @@ def validate_config(
         accounts_by_provider.setdefault(account.provider_id, []).append(account)
 
     def adapter_option(adapter: AdapterConfig, option: str) -> str | None:
-        try:
-            index = adapter.argv.index(option)
-        except ValueError:
+        if any(token.startswith(f"{option}=") for token in adapter.argv):
+            raise ConfigError(
+                f"activation adapter {adapter.id} must use a separate value for {option}"
+            )
+        indexes = [index for index, token in enumerate(adapter.argv) if token == option]
+        if len(indexes) > 1:
+            raise ConfigError(
+                f"activation adapter {adapter.id} repeats identity option {option}"
+            )
+        if not indexes:
             return None
-        return adapter.argv[index + 1] if index + 1 < len(adapter.argv) else None
+        index = indexes[0]
+        if index + 1 >= len(adapter.argv) or adapter.argv[index + 1].startswith("--"):
+            raise ConfigError(
+                f"activation adapter {adapter.id} is missing a value for {option}"
+            )
+        return adapter.argv[index + 1]
 
     for provider_id, provider_accounts in accounts_by_provider.items():
         provider = next(item for item in providers if item.id == provider_id)
@@ -543,24 +572,43 @@ def validate_config(
             continue
         activation_domains: set[tuple[str | None, str | None, str | None]] = set()
         activation_scopes: set[str] = set()
+        activation_labels: set[str] = set()
         for account in provider_accounts:
             if not account.activation_adapter_id:
                 raise ConfigError(
                     f"multi-account provider {provider_id} requires activation for every account"
                 )
             adapter = adapter_by_id[account.activation_adapter_id]
+            identity_options = (
+                "--action", "--account", "--expected-account", "--label",
+                "--pin-file", "--active-path",
+            )
+            identity = {
+                option: adapter_option(adapter, option)
+                for option in identity_options
+            }
             verified = (
                 Path(adapter.argv[0]).name == "bonus-drain-account-activation"
-                and adapter_option(adapter, "--action") == "{action}"
-                and adapter_option(adapter, "--account") == "{account_id}"
-                and adapter_option(adapter, "--expected-account") == account.id
-                and adapter_option(adapter, "--pin-file") is not None
-                and adapter_option(adapter, "--active-path") is not None
+                and identity["--action"] == "{action}"
+                and identity["--account"] == "{account_id}"
+                and identity["--expected-account"] == account.id
+                and identity["--label"] is not None
+                and identity["--pin-file"] is not None
+                and identity["--active-path"] is not None
+                and Path(identity["--pin-file"]).is_absolute()
+                and Path(identity["--active-path"]).is_absolute()
             )
             if not verified:
                 raise ConfigError(
                     f"multi-account provider {provider_id} account {account.id} requires a verified activation adapter with active-account proof"
                 )
+            label = identity["--label"]
+            assert label is not None
+            if label in activation_labels:
+                raise ConfigError(
+                    f"multi-account provider {provider_id} activation label is duplicated"
+                )
+            activation_labels.add(label)
             activation_domains.add((
                 adapter_option(adapter, "--pin-file"),
                 adapter_option(adapter, "--active-path"),

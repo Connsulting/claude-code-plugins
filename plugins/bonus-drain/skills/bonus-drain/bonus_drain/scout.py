@@ -12,11 +12,19 @@ from . import db, goals
 from .config import RuntimeConfig
 from .db import QueueDB, hour_round, task_requires_legacy_exclusive
 from .dispatcher import (
+    ActivationUnavailable,
     AmbiguousDispatch,
     DispatchResult,
     dispatch,
 )
-from .planner import PlanResult, build_plan
+from .kick import resolve_active_accounts
+from .planner import (
+    PlanResult,
+    build_plan,
+    close_providers,
+    finalize_plan,
+    preferred_provider_batches,
+)
 from .reconcile import reconcile_inflight
 from .usage import read_all
 
@@ -220,7 +228,12 @@ def _apply_inflight_caps(
 
 
 def _apply_global_cap(
-    plan: PlanResult, queue: QueueDB, max_jobs: int | None, *, now_epoch: int,
+    plan: PlanResult,
+    queue: QueueDB,
+    config: RuntimeConfig,
+    active_account_ids: Mapping[str, str],
+    *,
+    now_epoch: int,
 ) -> PlanResult:
     """Cap new launches so in-flight plus this tick stay at most ``max_jobs``.
 
@@ -228,33 +241,45 @@ def _apply_global_cap(
     ceiling. Urgent (last-day) batches take remaining slots first, then nearest reset.
     """
 
-    if max_jobs is None:
+    if config.max_jobs is None:
         return plan
     by_provider, _by_account = _inflight_index(queue, now_epoch)
-    remaining = max(0, max_jobs - sum(by_provider.values()))
+    remaining = max(0, config.max_jobs - sum(by_provider.values()))
     closed = dict(plan.closed)
     gates_by_key = {(gate.provider_id, gate.account_id): gate for gate in plan.gates}
+    preferred = preferred_provider_batches(config, plan, active_account_ids)
     ranked = sorted(
-        plan.batches,
+        preferred,
         key=lambda batch: (
             not batch.urgent, batch.resets_at, batch.provider_id, batch.account_id,
         ),
     )
+    batches_by_provider: dict[str, list[Any]] = {}
+    for batch in plan.batches:
+        batches_by_provider.setdefault(batch.provider_id, []).append(batch)
     kept: list[Any] = []
-    for batch in ranked:
-        key = (batch.provider_id, batch.account_id)
+    for preferred_batch in ranked:
+        provider_batches = batches_by_provider[preferred_batch.provider_id]
         if remaining <= 0:
             reason = "global job cap reached"
-            closed[key] = reason
-            gates_by_key[key] = replace(
-                gates_by_key[key], open=False, reason=reason, batch_size=0,
-            )
+            for batch in provider_batches:
+                key = (batch.provider_id, batch.account_id)
+                closed[key] = reason
+                gates_by_key[key] = replace(
+                    gates_by_key[key], open=False, reason=reason, batch_size=0,
+                )
             continue
-        cap = min(batch.batch_size, remaining)
-        if cap != batch.batch_size:
-            batch = replace(batch, batch_size=cap)
-            gates_by_key[key] = replace(gates_by_key[key], batch_size=cap)
-        kept.append(batch)
+        cap = min(preferred_batch.batch_size, remaining)
+        preferred_key = (
+            preferred_batch.provider_id, preferred_batch.account_id,
+        )
+        for batch in provider_batches:
+            if batch.account_id == preferred_batch.account_id and cap != batch.batch_size:
+                batch = replace(batch, batch_size=cap)
+                gates_by_key[preferred_key] = replace(
+                    gates_by_key[preferred_key], batch_size=cap,
+                )
+            kept.append(batch)
         remaining -= cap
     kept.sort(key=lambda batch: (batch.resets_at, batch.provider_id, batch.account_id))
     gates = tuple(gates_by_key[(gate.provider_id, gate.account_id)] for gate in plan.gates)
@@ -284,12 +309,22 @@ def plan_tick(
             capabilities=provider.capabilities, automatic=True, now_epoch=now,
         )
     plan = build_plan(config, snapshots, eligible_count=availability, now_epoch=now)
+    active_account_ids, identity_failures = resolve_active_accounts(config, reader)
+    plan = close_providers(plan, identity_failures)
     if provider_holds is None:
         provider_holds = db.doctor(queue).provider_holds
     plan = _apply_inflight_caps(
         plan, queue, now_epoch=now, provider_holds=provider_holds,
     )
-    plan = _apply_global_cap(plan, queue, config.max_jobs, now_epoch=now)
+    plan = _apply_global_cap(
+        plan, queue, config, active_account_ids, now_epoch=now,
+    )
+    plan = finalize_plan(
+        config,
+        plan,
+        active_account_ids=active_account_ids,
+        eligible_count=availability,
+    )
     allocations: dict[tuple[str, str], tuple[Any, ...]] = {}
 
     # Build a capacity-expanded bipartite graph and find an augmenting-path matching. Processing
@@ -332,7 +367,10 @@ def plan_tick(
         seen_tasks.add(task_id)
         # Prefer emptier provider batches so portable work cannot fill Claude's
         # six slots and leave a Codex surplus with nothing to run.
-        ordered = sorted(task_slots.get(task_id, ()), key=lambda slot: (batch_fill(slot), slot))
+        ordered = sorted(
+            task_slots.get(task_id, ()),
+            key=lambda slot: (slot in slot_task, batch_fill(slot), slot),
+        )
         for slot in ordered:
             if slot in seen_slots:
                 continue
@@ -484,6 +522,9 @@ def run_once(
                     now_epoch=now,
                     router_call=router_call, activation_call=activation_call,
                 ))
+            except ActivationUnavailable as exc:
+                errors.append({"task_id": task.id, "kind": "failed", "message": str(exc)})
+                break
             except AmbiguousDispatch as exc:
                 errors.append({"task_id": task.id, "kind": "ambiguous", "message": str(exc)})
                 # The claim and durable activation lease remain fail-closed because the job may

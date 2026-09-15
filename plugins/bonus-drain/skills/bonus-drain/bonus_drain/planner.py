@@ -165,77 +165,138 @@ def _is_urgent(reset: int | None, now_epoch: int, urgency_seconds: int) -> bool:
     return 0 < remaining <= urgency_seconds
 
 
-def _one_batch_per_provider(
+def preferred_provider_batches(
     config: RuntimeConfig,
-    now_epoch: int,
-    provisional: list[PlanBatch],
-    closed: dict[tuple[str, str], str],
-    gates_by_key: dict[tuple[str, str], GateDecision],
-) -> list[PlanBatch]:
-    """One account per provider: last-day pin, else highest surplus.
+    plan: PlanResult,
+    active_account_ids: Mapping[str, str],
+) -> tuple[PlanBatch, ...]:
+    """Choose each provider's preferred open account without closing siblings."""
 
-    Accounts in the last ``urgency_seconds`` own the provider even at the floor,
-    so the sibling cannot steal the final day. Otherwise equalize by surplus.
-    """
+    batches_by_provider: dict[str, list[PlanBatch]] = {}
+    for batch in plan.batches:
+        batches_by_provider.setdefault(batch.provider_id, []).append(batch)
 
-    open_by_account = {(batch.provider_id, batch.account_id): batch for batch in provisional}
-    kept: list[PlanBatch] = []
-    for provider_id in {account.provider_id for account in config.accounts}:
-        accounts = [account for account in config.accounts if account.provider_id == provider_id]
-        urgent: list[tuple[int, AccountConfig]] = []
-        for account in accounts:
-            gate = gates_by_key.get((provider_id, account.id))
-            if gate is None:
-                continue
-            reset = gate.resets_at
-            if _is_urgent(reset, now_epoch, _account_urgency_seconds(config, account)):
-                urgent.append((int(reset), account))
+    preferred: list[PlanBatch] = []
+    for provider in config.providers:
+        open_batches = batches_by_provider.get(provider.id, [])
+        if not open_batches:
+            continue
+        active_account_id = active_account_ids.get(provider.id)
+        active = next(
+            (batch for batch in open_batches if batch.account_id == active_account_id),
+            None,
+        )
+        if active is not None:
+            preferred.append(active)
+            continue
+        urgent = [batch for batch in open_batches if batch.urgent]
         if urgent:
-            winner = min(urgent, key=lambda item: (item[0], item[1].id))[1]
-        else:
-            open_batches = [
-                open_by_account[key]
-                for account in accounts
-                if (key := (provider_id, account.id)) in open_by_account
-            ]
-            if not open_batches:
-                continue
-            winner_batch = max(
-                open_batches,
-                key=lambda batch: (batch.surplus, -batch.resets_at, batch.account_id),
-            )
-            winner = next(account for account in accounts if account.id == winner_batch.account_id)
-        winner_key = (provider_id, winner.id)
-        winner_batch = open_by_account.get(winner_key)
-        winner_gate = gates_by_key[winner_key]
-        urgent_winner = _is_urgent(
-            winner_gate.resets_at, now_epoch, _account_urgency_seconds(config, winner),
-        )
-        gates_by_key[winner_key] = GateDecision(
-            winner_gate.provider_id, winner_gate.account_id, winner_gate.plan_id,
-            winner_gate.open, winner_gate.reason, winner_gate.batch_size,
-            winner_gate.resets_at, winner_gate.eligibility_key, winner_gate.limit_ids,
-            urgent_winner,
-        )
-        if winner_batch is not None:
-            kept.append(PlanBatch(
-                winner_batch.provider_id, winner_batch.account_id, winner_batch.plan_id,
-                winner_batch.batch_size, winner_batch.resets_at, winner_batch.eligibility_key,
-                winner_batch.limit_ids, winner_batch.surplus, winner_batch.surplus_jobs,
-                urgent_winner,
+            preferred.append(min(
+                urgent,
+                key=lambda batch: (batch.resets_at, batch.account_id),
             ))
-        for account in accounts:
-            if account.id == winner.id:
+            continue
+        preferred.append(max(
+            open_batches,
+            key=lambda batch: (batch.surplus, -batch.resets_at, batch.account_id),
+        ))
+    return tuple(preferred)
+
+
+def close_providers(
+    plan: PlanResult,
+    failures: Mapping[str, str],
+) -> PlanResult:
+    """Close every account candidate for providers with unresolved identity."""
+
+    if not failures:
+        return plan
+    closed = dict(plan.closed)
+    gates = []
+    for gate in plan.gates:
+        reason = failures.get(gate.provider_id)
+        if reason is None:
+            gates.append(gate)
+            continue
+        key = (gate.provider_id, gate.account_id)
+        closed[key] = reason
+        gates.append(GateDecision(
+            gate.provider_id, gate.account_id, gate.plan_id, False, reason, 0,
+            gate.resets_at, gate.eligibility_key, gate.limit_ids, False,
+        ))
+    batches = tuple(
+        batch for batch in plan.batches if batch.provider_id not in failures
+    )
+    return PlanResult(batches, closed, tuple(gates), plan.generated_at)
+
+
+def finalize_plan(
+    config: RuntimeConfig,
+    plan: PlanResult,
+    *,
+    active_account_ids: Mapping[str, str],
+    eligible_count: int | Mapping[Any, int],
+) -> PlanResult:
+    """Select one account per provider, then allocate any shared scalar queue."""
+
+    winners = preferred_provider_batches(config, plan, active_account_ids)
+    winner_by_provider = {batch.provider_id: batch for batch in winners}
+    closed = dict(plan.closed)
+    gates_by_key = {
+        (gate.provider_id, gate.account_id): gate for gate in plan.gates
+    }
+    selected: list[PlanBatch] = []
+    for batch in plan.batches:
+        winner = winner_by_provider.get(batch.provider_id)
+        if winner is None:
+            continue
+        if batch.account_id == winner.account_id:
+            selected.append(batch)
+            continue
+        key = (batch.provider_id, batch.account_id)
+        reason = f"queued behind {winner.account_id}"
+        closed[key] = reason
+        gate = gates_by_key[key]
+        gates_by_key[key] = GateDecision(
+            gate.provider_id, gate.account_id, gate.plan_id, False, reason, 0,
+            gate.resets_at, gate.eligibility_key, gate.limit_ids, False,
+        )
+
+    selected.sort(key=lambda batch: (batch.resets_at, batch.provider_id, batch.account_id))
+    if not isinstance(eligible_count, Mapping):
+        remaining = max(0, int(eligible_count))
+        allocated: list[PlanBatch] = []
+        for batch in selected:
+            size = min(batch.batch_size, remaining)
+            key = (batch.provider_id, batch.account_id)
+            if size <= 0:
+                reason = "no eligible tasks remain after nearer resets"
+                closed[key] = reason
+                gate = gates_by_key[key]
+                gates_by_key[key] = GateDecision(
+                    gate.provider_id, gate.account_id, gate.plan_id, False, reason, 0,
+                    gate.resets_at, gate.eligibility_key, gate.limit_ids, gate.urgent,
+                )
                 continue
-            key = (provider_id, account.id)
-            gate = gates_by_key[key]
-            reason = f"queued behind {winner.id}"
-            closed[key] = reason
-            gates_by_key[key] = GateDecision(
-                gate.provider_id, gate.account_id, gate.plan_id, False, reason, 0,
-                gate.resets_at, gate.eligibility_key, gate.limit_ids, False,
-            )
-    return kept
+            if size != batch.batch_size:
+                batch = PlanBatch(
+                    batch.provider_id, batch.account_id, batch.plan_id, size,
+                    batch.resets_at, batch.eligibility_key, batch.limit_ids,
+                    batch.surplus, batch.surplus_jobs, batch.urgent,
+                )
+                gate = gates_by_key[key]
+                gates_by_key[key] = GateDecision(
+                    gate.provider_id, gate.account_id, gate.plan_id, True, None, size,
+                    gate.resets_at, gate.eligibility_key, gate.limit_ids, gate.urgent,
+                )
+            allocated.append(batch)
+            remaining -= size
+        selected = allocated
+
+    gates = tuple(
+        gates_by_key[(account.provider_id, account.id)] for account in config.accounts
+    )
+    return PlanResult(tuple(selected), closed, gates, plan.generated_at)
 
 
 def build_plan(
@@ -314,49 +375,29 @@ def build_plan(
         surplus_jobs = min(batch_sizes)
         size = min(available, surplus_jobs)
         eligibility_key = f"{account.id}/{nearest_limit}/{nearest_reset}"
+        urgent = _is_urgent(
+            nearest_reset, now, _account_urgency_seconds(config, account),
+        )
         batch = PlanBatch(
             account.provider_id, account.id, account.plan_id, size, nearest_reset,
             eligibility_key, tuple(limit.id for limit in limits),
             min(surpluses) if surpluses else 0.0,
             surplus_jobs,
+            urgent,
         )
         provisional.append(batch)
         gates_by_key[key] = GateDecision(
             account.provider_id, account.id, account.plan_id, True, None, size,
-            nearest_reset, eligibility_key, tuple(limit.id for limit in limits),
+            nearest_reset, eligibility_key, tuple(limit.id for limit in limits), urgent,
         )
 
-    provisional = _one_batch_per_provider(config, now, provisional, closed, gates_by_key)
-    provisional.sort(key=lambda batch: (batch.resets_at, batch.provider_id, batch.account_id))
-
-    # A scalar count describes one shared portable queue.  Allocate it in the same
-    # nearest-reset order that dispatch will use so the plan never promises duplicate slots.
-    if not isinstance(eligible_count, Mapping):
-        remaining = max(0, int(eligible_count))
-        allocated: list[PlanBatch] = []
-        for batch in provisional:
-            size = min(batch.batch_size, remaining)
-            if size <= 0:
-                key = (batch.provider_id, batch.account_id)
-                closed[key] = "no eligible tasks remain after nearer resets"
-                gates_by_key[key] = GateDecision(
-                    batch.provider_id, batch.account_id, batch.plan_id, False, closed[key], 0,
-                    batch.resets_at, batch.eligibility_key, batch.limit_ids,
-                )
-                continue
-            allocated.append(PlanBatch(
-                batch.provider_id, batch.account_id, batch.plan_id, size, batch.resets_at,
-                batch.eligibility_key, batch.limit_ids, batch.surplus, batch.surplus_jobs,
-                batch.urgent,
-            ))
-            if size != batch.batch_size:
-                key = (batch.provider_id, batch.account_id)
-                gates_by_key[key] = GateDecision(
-                    batch.provider_id, batch.account_id, batch.plan_id, True, None, size,
-                    batch.resets_at, batch.eligibility_key, batch.limit_ids,
-                )
-            remaining -= size
-        provisional = allocated
+    account_order = {
+        (account.provider_id, account.id): index
+        for index, account in enumerate(config.accounts)
+    }
+    provisional.sort(
+        key=lambda batch: (batch.resets_at, account_order[(batch.provider_id, batch.account_id)]),
+    )
 
     gates = tuple(gates_by_key[(account.provider_id, account.id)] for account in config.accounts)
     return PlanResult(tuple(provisional), closed, gates, now)

@@ -23,6 +23,10 @@ _SAFE_ENV = {
     "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME",
 }
 _LABEL_FILE_LIMIT = 4096
+_IDENTITY_OPTIONS = (
+    "--action", "--account", "--expected-account", "--label", "--pin-file",
+    "--active-path",
+)
 
 
 def _validate_path(path: Path, label: str) -> Path:
@@ -62,6 +66,8 @@ def _ensure_parent(path: Path) -> None:
 
 def _open_regular(path: Path, *, write: bool = False) -> int:
     flags = (os.O_RDWR if write else os.O_RDONLY) | getattr(os, "O_CLOEXEC", 0)
+    if not write:
+        flags |= os.O_NONBLOCK
     flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
@@ -76,7 +82,10 @@ def _open_regular(path: Path, *, write: bool = False) -> int:
 
 def _read_bytes(path: Path, label: str) -> bytes:
     _validate_path(path, label)
-    descriptor = _open_regular(path)
+    try:
+        descriptor = _open_regular(path)
+    except AdapterError as exc:
+        raise AdapterError(f"{label}: {exc}") from exc
     try:
         value = os.read(descriptor, _LABEL_FILE_LIMIT + 1)
     finally:
@@ -152,7 +161,7 @@ def _run_rotator(executable: Path, arguments: list[str], timeout: float) -> None
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--action", required=True, choices=("activate", "release"))
     parser.add_argument("--account", required=True)
     parser.add_argument("--expected-account", required=True)
@@ -165,8 +174,18 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _reject_ambiguous_identity_options(arguments: list[str]) -> None:
+    for option in _IDENTITY_OPTIONS:
+        if any(token.startswith(f"{option}=") for token in arguments):
+            raise AdapterError(f"{option} must use a separate value")
+        if arguments.count(option) > 1:
+            raise AdapterError(f"{option} must be specified at most once")
+
+
 def main() -> int:
-    args = _parser().parse_args()
+    arguments = sys.argv[1:]
+    _reject_ambiguous_identity_options(arguments)
+    args = _parser().parse_args(arguments)
     if args.account != args.expected_account:
         raise AdapterError("account identity mismatch")
     if not args.label or args.label.strip() != args.label or any(
@@ -206,23 +225,39 @@ def main() -> int:
             return 0
 
         previous = _read_bytes(pin, "pin path") if pin.exists() else None
+        active_before = None
+        if args.active_path is not None and args.active_path.exists():
+            active_before = _read_label(args.active_path, "active account path")
+        already_active = active_before == args.label
         _atomic_write(pin, (args.label + "\n").encode("utf-8"))
         try:
-            if args.rotate is not None:
+            if args.rotate is not None and not already_active:
                 _run_rotator(args.rotate, args.rotate_arg, args.timeout)
-            if args.active_path is not None and _read_label(
-                args.active_path, "active account path",
-            ) != args.label:
-                raise AdapterError("requested account did not become active")
-        except Exception:
+            if args.active_path is not None:
+                active_after = _read_label(args.active_path, "active account path")
+                if active_after != args.label:
+                    if active_before is not None and active_after == active_before:
+                        raise AdapterError("requested account did not become active")
+                    raise AdapterError(
+                        "active account changed without proving the requested account"
+                    )
+        except Exception as activation_error:
+            rollback_error = None
             if previous is None:
                 try:
                     if pin.exists() and not pin.is_symlink():
                         pin.unlink()
-                except OSError:
-                    pass
+                except OSError as exc:
+                    rollback_error = exc
             else:
-                _atomic_write(pin, previous)
+                try:
+                    _atomic_write(pin, previous)
+                except Exception as exc:
+                    rollback_error = exc
+            if rollback_error is not None:
+                raise AdapterError(
+                    "activation failed and pin rollback could not be completed"
+                ) from activation_error
             raise
         return 0
     finally:
