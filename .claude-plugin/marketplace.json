@@ -14,7 +14,7 @@
     },
     {
       "name": "work-log",
-      "description": "Auto-log substantive Claude Code sessions to Notion Work Log via Notion MCP",
+      "description": "Auto-log substantive Claude, Grok, and Codex sessions to Notion Work Log via Notion MCP",
       "source": "./plugins/work-log",
       "category": "productivity"
     },

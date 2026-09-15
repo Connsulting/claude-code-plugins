@@ -1,16 +1,16 @@
 #!/bin/bash
 
-# Auto-log substantive Claude Code sessions to Notion Work Log
-# Triggered by SessionEnd hook
+# Auto-log substantive sessions to Notion Work Log.
+# Claude: SessionEnd plugin hook. Grok/Codex: thin wrappers that detach this script.
 
-# Bail if plugin root not set
-if [ -z "$CLAUDE_PLUGIN_ROOT" ]; then
-  exit 0
+if [ -z "${CLAUDE_PLUGIN_ROOT:-}" ]; then
+  CLAUDE_PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
+export CLAUDE_PLUGIN_ROOT
 
 # Setup logging
 LOG_DIR="$HOME/.claude/plugins/work-log"
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR/locks"
 LOG_FILE="$LOG_DIR/activity.log"
 
 log_activity() {
@@ -18,19 +18,46 @@ log_activity() {
 }
 
 # Skip all hooks for subprocess calls (prevents recursion)
-if [ -n "$CLAUDE_SUBPROCESS" ]; then
+if [ -n "${CLAUDE_SUBPROCESS:-}" ]; then
   exit 0
 fi
 
-# Read hook input from stdin (single jq call)
+export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:$PATH"
+
+# Read hook input from stdin (single jq call). Accept Claude snake_case and Grok camelCase.
 INPUT=$(cat)
-eval "$(echo "$INPUT" | jq -r '@sh "SESSION_ID=\(.session_id) TRANSCRIPT=\(.transcript_path) CWD=\(.cwd)"')"
+eval "$(printf '%s' "$INPUT" | jq -r '@sh "SESSION_ID=\(.session_id // .sessionId // "") TRANSCRIPT=\(.transcript_path // .transcriptPath // "") CWD=\(.cwd // .workspaceRoot // "") SUBAGENT=\(.subagent_type // .subagentType // "")"')"
+
+if [ -n "$SUBAGENT" ]; then
+  exit 0
+fi
+
+ENGINE="${WORK_LOG_ENGINE:-}"
+if [ -z "$ENGINE" ]; then
+  if [ -n "${GROK_HOOK_EVENT:-}${GROK_SESSION_ID:-}" ]; then
+    ENGINE=grok
+  elif [ -n "${CODEX_THREAD_ID:-}" ]; then
+    ENGINE=codex
+  else
+    ENGINE=claude
+  fi
+fi
 
 # Expand ~ in transcript path
 TRANSCRIPT="${TRANSCRIPT/#\~/$HOME}"
 
+# Grok SessionEnd may omit transcriptPath; chat_history.jsonl is the conversation.
+if [ ! -s "$TRANSCRIPT" ] && [ "$ENGINE" = grok ] && [ -n "$SESSION_ID" ] && [ -n "$CWD" ]; then
+  ENC_CWD=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$CWD")
+  CANDIDATE="$HOME/.grok/sessions/${ENC_CWD}/${SESSION_ID}/chat_history.jsonl"
+  if [ -s "$CANDIDATE" ]; then
+    TRANSCRIPT="$CANDIDATE"
+  fi
+fi
+
 # Quick size check before any config reads
 LINES=$(head -n 50 "$TRANSCRIPT" 2>/dev/null | wc -l)
+LINES=${LINES// /}
 
 # Merge user config (survives reinstalls) over bundled defaults
 BUNDLED_CONFIG="${CLAUDE_PLUGIN_ROOT}/.claude-plugin/config.json"
@@ -45,8 +72,25 @@ else
 fi
 eval "$(jq -r '@sh "DATABASE_ID=\(.notion.databaseId) MCP_SERVER=\(.notion.mcpServerName // "claude_ai_Notion") SOURCE_PREFIX=\(.sourcePrefix // "cc") MIN_LINES=\(.minTranscriptLines // 40) TIMEZONE=\(.timezone // "UTC") DEFAULT_PROJECT=\(.defaultProject // "personal") PROJECT_PATTERN=\(.projectPattern // ".*/git/([^/]+).*")"' "$CONFIG_FILE")"
 
-if [ "$LINES" -lt "$MIN_LINES" ]; then
-  log_activity "SKIP: transcript too short ($LINES lines, minimum $MIN_LINES)"
+if [ -n "${WORK_LOG_SOURCE_PREFIX:-}" ]; then
+  SOURCE_PREFIX="$WORK_LOG_SOURCE_PREFIX"
+else
+  case "$ENGINE" in
+    grok) SOURCE_PREFIX=gx ;;
+    codex) SOURCE_PREFIX=cx ;;
+  esac
+fi
+
+if [ "${LINES:-0}" -lt "$MIN_LINES" ]; then
+  log_activity "[$ENGINE] SKIP: transcript too short ($LINES lines, minimum $MIN_LINES)"
+  exit 0
+fi
+
+# One writer per session so Claude/Grok/Codex wrappers cannot double-fire.
+LOCK_FILE="$LOG_DIR/locks/${SESSION_ID}.lock"
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  log_activity "[$ENGINE] SKIP: already logging session=$SESSION_ID"
   exit 0
 fi
 
@@ -58,7 +102,7 @@ TRANSCRIPT_CONTENT=$(python3 "${CLAUDE_PLUGIN_ROOT}/hooks/extract-transcript-mes
 [ -s "$ERR_FILE" ] && log_activity "[work-log] parse error: $(cat "$ERR_FILE")"
 rm -f "$ERR_FILE"
 if [ -z "$TRANSCRIPT_CONTENT" ]; then
-  log_activity "SKIP: empty transcript content"
+  log_activity "[$ENGINE] SKIP: empty transcript content"
   exit 0
 fi
 
@@ -76,7 +120,7 @@ fi
 # Default if not in a git/ path
 : "${PROJECT:=$DEFAULT_PROJECT}"
 
-# Look up session name from sessions-index.json (customTitle from /rename, or summary)
+# Look up session name from Claude sessions-index.json, else Grok summary.json
 ENCODED_CWD=$(echo "$CWD" | sed 's|/|-|g')
 SESSIONS_INDEX="$HOME/.claude/projects/${ENCODED_CWD}/sessions-index.json"
 SESSION_NAME=""
@@ -85,6 +129,13 @@ if [ -f "$SESSIONS_INDEX" ]; then
     .entries[] | select(.sessionId == $id) |
     .customTitle // .summary // empty
   ' "$SESSIONS_INDEX" 2>/dev/null | head -1)
+fi
+if [ -z "$SESSION_NAME" ] && [ "$ENGINE" = grok ] && [ -n "$SESSION_ID" ] && [ -n "$CWD" ]; then
+  ENC_CWD=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$CWD")
+  GROK_SUMMARY="$HOME/.grok/sessions/${ENC_CWD}/${SESSION_ID}/summary.json"
+  if [ -f "$GROK_SUMMARY" ]; then
+    SESSION_NAME=$(jq -r '.generated_title // .session_summary // empty' "$GROK_SUMMARY" 2>/dev/null | head -1)
+  fi
 fi
 
 # Compute session tag and timestamp
@@ -96,11 +147,20 @@ TIMESTAMP=$(TZ="$TIMEZONE" date +'%I:%M %p')
 OUTPUT_FILE=$(mktemp)
 trap "rm -f $OUTPUT_FILE $TEMP_CONFIG" EXIT
 
-log_activity "WORK_LOG_START: session=$SESSION_ID project=$PROJECT tag=$SESSION_TAG"
+CLAUDE_BIN="${CLAUDE_BIN:-$(command -v claude 2>/dev/null || true)}"
+if [ -z "$CLAUDE_BIN" ] && [ -x "$HOME/.local/bin/claude" ]; then
+  CLAUDE_BIN="$HOME/.local/bin/claude"
+fi
+if [ -z "$CLAUDE_BIN" ]; then
+  log_activity "[$ENGINE] WORK_LOG_END: session=$SESSION_ID exit=127 claude: command not found"
+  exit 0
+fi
+
+log_activity "[$ENGINE] WORK_LOG_START: session=$SESSION_ID project=$PROJECT tag=$SESSION_TAG"
 
 # Use heredoc to pass prompt via stdin (avoids temp files and arg size limits)
 NOTION_TOOLS="mcp__${MCP_SERVER}__notion-search,mcp__${MCP_SERVER}__notion-fetch,mcp__${MCP_SERVER}__notion-create-pages,mcp__${MCP_SERVER}__notion-update-page,mcp__${MCP_SERVER}__notion-create-comment,mcp__${MCP_SERVER}__notion-get-comments"
-CLAUDE_SUBPROCESS=1 ENABLE_CLAUDEAI_MCP_SERVERS=true claude -p --no-session-persistence \
+CLAUDE_SUBPROCESS=1 ENABLE_CLAUDEAI_MCP_SERVERS=true "$CLAUDE_BIN" -p --no-session-persistence \
   --model sonnet \
   --permission-mode bypassPermissions \
   --allowedTools "Read,ToolSearch,${NOTION_TOOLS}" \
@@ -188,9 +248,9 @@ if [ -f "$OUTPUT_FILE" ]; then
   # Check if subprocess decided to skip
   if grep -qm1 "^SKIP" "$OUTPUT_FILE" 2>/dev/null; then
     REASON=$(grep -m1 "^SKIP" "$OUTPUT_FILE")
-    log_activity "WORK_LOG_SKIP: $REASON"
+    log_activity "[$ENGINE] WORK_LOG_SKIP: $REASON"
   else
-    log_activity "WORK_LOG_END: session=$SESSION_ID exit=$EXIT_CODE"
+    log_activity "[$ENGINE] WORK_LOG_END: session=$SESSION_ID exit=$EXIT_CODE"
   fi
   # Log first few lines of output
   head -5 "$OUTPUT_FILE" >> "$LOG_FILE" 2>/dev/null

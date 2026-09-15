@@ -1,6 +1,6 @@
 {
   "name": "work-log",
-  "version": "0.1.1",
-  "description": "Auto-log substantive Claude Code sessions to Notion Work Log",
+  "version": "0.1.2",
+  "description": "Auto-log substantive Claude, Grok, and Codex sessions to Notion Work Log",
   "keywords": ["work-log", "notion", "session-tracking"]
 }
