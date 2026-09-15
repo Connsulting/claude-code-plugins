@@ -462,6 +462,22 @@ details.section > summary h2 {
   border-color: var(--accent);
   color: var(--fg);
 }
+.heading-with-comment {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 18px 0 6px;
+}
+.heading-with-comment > h3 {
+  flex: 1;
+  margin: 0;
+  min-width: 0;
+}
+.heading-with-comment > .section-comment-button {
+  position: static;
+  top: auto;
+  flex-shrink: 0;
+}
 .section-body { padding: 4px 0 0 20px; }
 
 .anchor-link {

@@ -689,6 +689,14 @@ def augment_heading(
     )
 
 
+def _section_comment_button(slug: str, target: str) -> str:
+    return (
+        f'<button type="button" class="section-comment-button" '
+        f'data-anchor="{html.escape(slug)}" '
+        f'aria-label="Add comment to {target}">Comment</button>'
+    )
+
+
 def wrap_sections(body_html: str, comments: dict) -> str:
     """Walk body HTML, wrap each H2-bounded range in <details>, augment every heading."""
     out: list[str] = []
@@ -719,22 +727,26 @@ def wrap_sections(body_html: str, comments: dict) -> str:
             f'<div class="comments-inline" data-anchor="{slug}">{non_reactions}</div>'
             if non_reactions else ""
         )
+        level_n = int(level)
 
-        if int(level) == SECTION_BOUNDARY_LEVEL:
+        if level_n == SECTION_BOUNDARY_LEVEL:
             close_section()
             out.append('<details class="section" open>\n')
             out.append("<summary>")
             out.append(augmented)
             out.append("</summary>\n")
-            out.append(
-                f'<button type="button" class="section-comment-button" '
-                f'data-anchor="{html.escape(slug)}" '
-                f'aria-label="Add comment to this section">Comment</button>'
-            )
+            out.append(_section_comment_button(slug, "this section"))
             out.append('<div class="section-body">\n')
             if inline:
                 out.append(inline)
             open_section = True
+        elif level_n == 3:
+            out.append('<div class="heading-with-comment">')
+            out.append(augmented)
+            out.append(_section_comment_button(slug, "this heading"))
+            out.append("</div>\n")
+            if inline:
+                out.append(inline)
         else:
             out.append(augmented)
             if inline:

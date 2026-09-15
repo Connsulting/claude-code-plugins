@@ -147,6 +147,64 @@ class AtxHeadingRenderTest(unittest.TestCase):
         self.assertIn("#1234 fenced", body)
 
 
+class HeadingCommentButtonTest(unittest.TestCase):
+    def test_h2_and_h3_get_comment_buttons_h4_does_not(self) -> None:
+        page = render.render_html(
+            "# Title\n\n## Section\n\n### Subheading\n\n#### Deeper\n\nText\n",
+            "Plan",
+            {},
+        )
+
+        self.assertRegex(
+            page,
+            r'<button type="button" class="section-comment-button" '
+            r'data-anchor="section" '
+            r'aria-label="Add comment to this section">Comment</button>',
+        )
+        self.assertRegex(
+            page,
+            re.compile(
+                r'<div class="heading-with-comment">'
+                r'<h3[^>]*id="subheading"[^>]*>.*?</h3>'
+                r'<button type="button" class="section-comment-button" '
+                r'data-anchor="subheading" '
+                r'aria-label="Add comment to this heading">Comment</button>'
+                r"</div>",
+                re.DOTALL,
+            ),
+        )
+        self.assertIn('<h4 id="deeper"', page)
+        h4_block = page[page.index('<h4 id="deeper"') : page.index("</h4>") + 5]
+        next_chunk = page.split("</h4>", 1)[1].split("<p", 1)[0]
+        self.assertNotIn("section-comment-button", h4_block)
+        self.assertNotIn("section-comment-button", next_chunk)
+        self.assertNotIn("heading-with-comment", h4_block)
+        self.assertNotIn("heading-with-comment", next_chunk)
+
+    def test_open_comment_on_h3_renders_after_the_heading_row(self) -> None:
+        page = render.render_html(
+            "## Section\n\n### Subheading\n\nBody\n",
+            "Plan",
+            {"comments": [{
+                "id": "c1",
+                "type": "text",
+                "anchor": "subheading",
+                "text": "Please expand this.",
+                "timestamp": "2026-09-15T00:00:00+00:00",
+                "resolved": False,
+            }]},
+        )
+
+        heading_row = (
+            '<div class="heading-with-comment">'
+        )
+        self.assertIn(heading_row, page)
+        heading_idx = page.index(heading_row)
+        comment_idx = page.index('class="comments-inline" data-anchor="subheading"')
+        self.assertGreater(comment_idx, heading_idx)
+        self.assertIn("Please expand this.", page)
+
+
 class ContentWidthTest(unittest.TestCase):
     def test_content_can_use_a_wide_desktop_viewport(self) -> None:
         style = STYLE_PATH.read_text()
