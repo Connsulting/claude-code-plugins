@@ -510,7 +510,7 @@ def render_prompt(
         contract.extend([
             (
                 "If a later user message in this same thread continues the work after this "
-                "attempt recorded failed or skipped, retain this task contract and attempt context. "
+                "attempt recorded failed, skipped, or awaiting_human, retain this task contract and attempt context. "
                 "When the continued work meets done-when, write verified evidence to the same "
                 "private outcome path and invoke the exact command below automatically before replying. "
                 "If it still fails, retain the original terminal evidence and bounded recovery state."

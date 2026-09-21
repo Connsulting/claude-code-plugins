@@ -320,7 +320,8 @@ done-when. A run that opened or updated a PR is done, even while the PR awaits r
 or pending CI, with `artifact` completion and the PR URL as evidence; PR presence alone still does
 not prove integration for a dependency handoff. `awaiting_human` parks a run whose remaining step
 needs Brian personally; it requires a reason detail naming that step, is never requeued or
-recovered automatically, and leaves dependents waiting.
+recovered automatically, and leaves dependents waiting until operator recovery (requeue or
+recover-complete) continues it.
 Attempts remain visible after failure, skip, ambiguity, or a proved-not-launched abort, so a late
 worker cannot close or release a newer attempt.
 

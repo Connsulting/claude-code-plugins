@@ -23,6 +23,9 @@ class QueueError(RuntimeError):
 
 VALID_STATUSES = frozenset({"dispatched", "done", "skipped", "failed", "awaiting_human"})
 TERMINAL_STATUSES = frozenset({"done", "skipped", "failed", "awaiting_human"})
+# Automatic recovery only continues failed/skipped work; an operator may also continue parked
+# awaiting_human work, because Brian doing the parked step is exactly the authority it waited on.
+OPERATOR_RECOVERY_SOURCES = frozenset({"failed", "skipped", "awaiting_human"})
 ATTEMPT_STATES = frozenset({
     "claimed", "dispatched", "done", "skipped", "failed", "awaiting_human", "ambiguous", "aborted",
 })
@@ -1201,10 +1204,10 @@ class QueueDB:
                 task.kind == "oneoff" and claim is None and done is None
                 and not goal_owned
                 and (
-                    (latest is not None and latest["state"] in {"failed", "skipped"})
+                    (latest is not None and latest["state"] in OPERATOR_RECOVERY_SOURCES)
                     or (
                         latest is None and legacy is not None
-                        and legacy["status"] in {"failed", "skipped"}
+                        and legacy["status"] in OPERATOR_RECOVERY_SOURCES
                     )
                 )
                 and (
@@ -1216,9 +1219,13 @@ class QueueDB:
                         and recovery["origin"] == "automatic"
                     )
                 )
-                and source_reason_code not in {
-                    "authority_required", "permanent", "unknown_launch",
-                }
+                and (
+                    (latest is not None and latest["state"] == "awaiting_human")
+                    or (latest is None and legacy is not None and legacy["status"] == "awaiting_human")
+                    or source_reason_code not in {
+                        "authority_required", "permanent", "unknown_launch",
+                    }
+                )
             )
             if not admitted:
                 requeue_allowed = False
@@ -2393,13 +2400,18 @@ class QueueDB:
             (latest is not None and row["attempt_id"] == latest["id"]) or
             (latest is None and legacy is not None and row["rowid_pk"] == legacy["rowid_pk"])
         )
-        if not is_source or row["status"] not in {"failed", "skipped"}:
-            return {"allowed": False, "reason": "Only the latest failed or skipped outcome can recover"}
+        if not is_source or row["status"] not in OPERATOR_RECOVERY_SOURCES:
+            return {
+                "allowed": False,
+                "reason": "Only the latest failed, skipped, or awaiting_human outcome can recover",
+            }
         reason_code = (
             latest["reason_code"]
             if latest is not None else self._source_reason(None, legacy)[0]
         )
-        if reason_code in {"authority_required", "permanent", "unknown_launch"}:
+        if row["status"] != "awaiting_human" and reason_code in {
+            "authority_required", "permanent", "unknown_launch",
+        }:
             return {"allowed": False, "reason": reason_code.replace("_", " ").capitalize()}
         recovery = connection.execute(
             """SELECT state,origin,reason_code,detail,consumed_by_attempt_id
@@ -2559,8 +2571,10 @@ class QueueDB:
             if latest is None or latest["id"] != expected_attempt_id:
                 successor = latest["id"] if latest is not None else "none"
                 raise QueueError(f"recovery source is stale; latest successor is {successor}")
-            if source["state"] not in {"failed", "skipped"}:
-                raise QueueError(f"recovery source is {source['state']}, not failed or skipped")
+            if source["state"] not in OPERATOR_RECOVERY_SOURCES:
+                raise QueueError(
+                    f"recovery source is {source['state']}, not failed, skipped, or awaiting_human"
+                )
             return source, None
         if QueueDB._latest_effective_attempt(connection, task_id) is not None:
             latest = QueueDB._latest_effective_attempt(connection, task_id)
@@ -2573,8 +2587,10 @@ class QueueDB:
         latest_legacy = QueueDB._latest_legacy_run(connection, task_id)
         if legacy is None or latest_legacy is None or legacy["rowid_pk"] != latest_legacy["rowid_pk"]:
             raise QueueError("legacy recovery source is stale")
-        if legacy["status"] not in {"failed", "skipped"}:
-            raise QueueError(f"legacy recovery source is {legacy['status']}, not failed or skipped")
+        if legacy["status"] not in OPERATOR_RECOVERY_SOURCES:
+            raise QueueError(
+                f"legacy recovery source is {legacy['status']}, not failed, skipped, or awaiting_human"
+            )
         return None, legacy
 
     @staticmethod
@@ -2665,7 +2681,10 @@ class QueueDB:
         if not admitted:
             state, decision_code, decision_detail = "held", admission_reason, admission_reason
             persist = admission_reason != "fresh_goal_followup_required"
-        elif reason_code in {"authority_required", "permanent", "unknown_launch"}:
+        elif reason_code in {"authority_required", "permanent", "unknown_launch"} and not (
+            source != "automatic"
+            and (attempt["state"] if attempt is not None else legacy["status"]) == "awaiting_human"
+        ):
             state = "held"
         elif attempt is not None and attempt["recovery_of"] is not None:
             previous = connection.execute(

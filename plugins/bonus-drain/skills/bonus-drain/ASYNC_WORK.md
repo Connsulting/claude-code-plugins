@@ -54,7 +54,8 @@ and `awaiting_human` outcomes use one of `retryable`, `verification_needed`, `au
 `permanent`, or `unknown_launch` with nonempty detail and a stable non-secret signature.
 `awaiting_human` means the worker finished everything it can and the remaining step needs Brian
 personally; its detail names exactly what Brian must do. It is never requeued or recovered
-automatically, and dependents keep waiting. Terminal
+automatically, and dependents keep waiting; only operator recovery (requeue or
+recover-complete) continues it. Terminal
 replay is idempotent only for the same attempt, and an old attempt cannot release a newer claim.
 Failed, skipped, ambiguous, and proved-not-launched aborted attempts remain in history.
 

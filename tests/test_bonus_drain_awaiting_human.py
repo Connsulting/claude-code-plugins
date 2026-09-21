@@ -17,7 +17,7 @@ sys.path.insert(0, str(SKILL_ROOT))
 from bonus_drain import cli, db, dispatcher, factory_terminal  # noqa: E402
 
 from tests.test_bonus_dependency_recovery import (  # noqa: E402
-    KEY, NOW, RecoveryCase, captured_json, iso, rows, runtime, task,
+    KEY, NOW, RecoveryCase, captured_json, iso, rows, runtime, task, verified,
 )
 from tests.test_bonus_drain_jobs_viewer import _load_server  # noqa: E402
 
@@ -124,7 +124,8 @@ class ReadinessTests(AwaitingHumanCase):
         self.assertFalse(status["ready"])
         self.assertIn("Awaiting Brian", status["reason"])
         self.assertIn(DETAIL, status["reason"])
-        self.assertFalse(status["requeue"]["allowed"])
+        # Parked work is never requeued automatically, but Brian may continue it himself.
+        self.assertTrue(status["requeue"]["allowed"])
 
     def test_no_automatic_recovery_and_dependent_keeps_waiting(self) -> None:
         self.add("parent")
@@ -142,6 +143,44 @@ class ReadinessTests(AwaitingHumanCase):
         parent_dep = [item for item in child["dependencies"] if item["id"] == "parent"]
         self.assertEqual(len(parent_dep), 1)
         self.assertFalse(parent_dep[0]["satisfied"])
+
+
+class OperatorRecoveryTests(AwaitingHumanCase):
+    def test_operator_requeue_continues_awaiting_human_despite_authority_code(self) -> None:
+        self.add("parked")
+        source = self.park("parked")
+
+        decision = self.queue.requeue("parked", attempt_id=source.id, now_epoch=NOW + 10)
+        self.assertIn(decision.state, {"scheduled", "backoff"})
+        recovery = self.queue.recovery_for("parked")
+        self.assertIsNotNone(recovery)
+        self.assertEqual(recovery.origin, "operator")
+        status = self.queue.readiness("parked", now_epoch=NOW + 10_000)
+        self.assertTrue(status["ready"], status)
+
+    def test_recover_complete_from_awaiting_human_satisfies_dependents(self) -> None:
+        self.add("parent")
+        self.add("child", depends_on=["parent"])
+        source = self.park("parent")
+
+        completed = self.queue.recover_complete(
+            "parent", expected_attempt_id=source.id,
+            outcome=verified(evidence="fixture://brian-approved"),
+            summary="Brian approved and the work was committed", now_epoch=NOW + 10,
+        )
+        self.assertEqual(completed.status, "done")
+        self.assertNotEqual(completed.attempt_id, source.id)
+        child = self.queue.readiness("child", now_epoch=NOW + 20)
+        self.assertTrue(all(item["satisfied"] for item in child["dependencies"]), child)
+
+    def test_automatic_recovery_still_skips_awaiting_human(self) -> None:
+        self.add("parent")
+        self.add("child", depends_on=["parent"])
+        self.park("parent")
+        for offset in (10, 5_000, 50_000):
+            decisions = self.queue.reconcile_recoveries(now_epoch=NOW + offset, dry_run=False)
+            self.assertEqual([d for d in decisions if d.task_id == "parent"], [])
+        self.assertIsNone(self.queue.recovery_for("parent"))
 
 
 class InflightTests(AwaitingHumanCase):
@@ -174,8 +213,9 @@ class InflightTests(AwaitingHumanCase):
         self.assertEqual([row["task"] for row in inflight], ["running"])
 
 
-class ViewerTests(unittest.TestCase):
+class ViewerTests(AwaitingHumanCase):
     def setUp(self) -> None:
+        super().setUp()
         self.viewer = _load_server()
 
     def test_status_color_is_distinct_from_failed(self) -> None:
@@ -183,22 +223,27 @@ class ViewerTests(unittest.TestCase):
         self.assertIn("awaiting_human", colors)
         self.assertNotEqual(colors["awaiting_human"], colors["failed"])
 
-    def test_remaining_snapshot_accepts_awaiting_human_readiness(self) -> None:
-        payload = {
-            "eligible_provider_ids": {"parked": []},
-            "eligible_task_ids": ["parked"],
-            "tasks": [{"id": "parked", "priority": 2, "kind": "oneoff", "created_at": iso(NOW)}],
-            "readiness": {"parked": {
-                "state": "awaiting_human", "ready": False, "reason": f"Awaiting Brian: {DETAIL}",
-            }},
-        }
+    def test_remaining_snapshot_shows_parked_work_from_production_eligibility(self) -> None:
+        self.add("parked")
+        self.park("parked")
+        cfg = runtime(self.queue.path)
+        with (
+            mock.patch.object(cli, "_queue", return_value=(cfg, self.queue)),
+            captured_json() as payloads,
+        ):
+            code = cli.main(["queue", "0", "--json", "--now", str(NOW + 10)])
+        self.assertEqual(code, 0)
+        payload = payloads[0]
+        self.assertNotIn("parked", payload["eligible_task_ids"])
         result = SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
         with mock.patch.object(self.viewer.subprocess, "run", return_value=result):
             try:
                 remaining = self.viewer._remaining_snapshot(0)
             except RuntimeError as exc:
                 self.fail(f"viewer rejected awaiting_human readiness: {exc}")
-        self.assertEqual([item["readiness"]["state"] for item in remaining], ["awaiting_human"])
+        parked = [item for item in remaining if item["id"] == "parked"]
+        self.assertEqual([item["readiness"]["state"] for item in parked], ["awaiting_human"])
+        self.assertEqual(parked[0]["readiness"]["reason"], f"Awaiting Brian: {DETAIL}")
 
 
 class MigrationTests(RecoveryCase):

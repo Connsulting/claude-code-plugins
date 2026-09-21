@@ -237,7 +237,7 @@ error. Prior attempts stay immutable.
   personally, such as hands-on testing only he can do or a decision or approval. Its structured
   reason must not use `done_when_verified`, its `reason.detail` must name exactly what Brian must
   do, and it must not claim verified completion. It is not requeued or recovered automatically,
-  and dependents keep waiting.
+  and dependents keep waiting; only operator recovery (requeue or recover-complete) continues it.
 
 Follow the exact `OUTCOME_SCHEMA` printed in the prompt. A repository-producing verified success
 has this shape; omit `repository` when the task does not produce one:
