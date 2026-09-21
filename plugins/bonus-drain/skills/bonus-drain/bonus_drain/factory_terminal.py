@@ -33,7 +33,8 @@ from .dispatcher import (
 
 PLACEHOLDER_STATUS = "dispatched"
 # The factory runs table has no status CHECK and already carries `skipped` rows.
-LEDGER_TO_RUN_STATUS = {"done": "complete", "failed": "failed", "skipped": "skipped"}
+LEDGER_TO_RUN_STATUS = {"done": "complete", "failed": "failed", "skipped": "skipped",
+                        "awaiting_human": "awaiting_human"}
 OUTCOME_MAX_CHARS = 500
 GH_TIMEOUT_SECONDS = 15.0
 PR_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")

@@ -316,7 +316,11 @@ Every claimed launch receives a unique attempt ID. The prompt's exact record com
 terminal event to that attempt and reads structured outcome evidence from its protected state
 path. `done` requires reason code `done_when_verified`, `completion.verified: true`, one of
 `command`, `artifact`, `operator_receipt`, or `goal_acceptance`, and nonempty evidence that proves
-done-when; branch or PR existence is insufficient.
+done-when. A run that opened or updated a PR is done, even while the PR awaits review, approval,
+or pending CI, with `artifact` completion and the PR URL as evidence; PR presence alone still does
+not prove integration for a dependency handoff. `awaiting_human` parks a run whose remaining step
+needs Brian personally; it requires a reason detail naming that step, is never requeued or
+recovered automatically, and leaves dependents waiting.
 Attempts remain visible after failure, skip, ambiguity, or a proved-not-launched abort, so a late
 worker cannot close or release a newer attempt.
 

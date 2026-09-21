@@ -47,9 +47,14 @@ Each claimed launch receives a new immutable attempt ID. The dispatched prompt c
 terminal command and protected outcome-evidence path bound to that attempt. A new `done` event
 requires reason code `done_when_verified`, `completion.verified: true`, a supported completion
 mechanism (`command`, `artifact`, `operator_receipt`, or `goal_acceptance`), and nonempty evidence
-that verifies done-when; a branch or PR alone does not qualify. Failed and skipped outcomes use
-one of `retryable`, `verification_needed`, `authority_required`, `permanent`, or `unknown_launch`
-with nonempty detail and a stable non-secret signature. Terminal
+that verifies done-when. A run that opened or updated a PR is done, even while that PR awaits
+review, approval, or pending CI: it records `completion.mechanism: artifact` with the PR URL as
+evidence. PR presence still does not prove integration for a dependency handoff. Failed, skipped,
+and `awaiting_human` outcomes use one of `retryable`, `verification_needed`, `authority_required`,
+`permanent`, or `unknown_launch` with nonempty detail and a stable non-secret signature.
+`awaiting_human` means the worker finished everything it can and the remaining step needs Brian
+personally; its detail names exactly what Brian must do. It is never requeued or recovered
+automatically, and dependents keep waiting. Terminal
 replay is idempotent only for the same attempt, and an old attempt cannot release a newer claim.
 Failed, skipped, ambiguous, and proved-not-launched aborted attempts remain in history.
 

@@ -651,7 +651,7 @@ def _remaining_snapshot(cycle: int) -> list[dict]:
         allowed_readiness_states = {
             "ready", "paused", "held", "running", "done", "waiting",
             "exhausted", "recovering", "claimed", "dispatched", "skipped",
-            "failed", "ambiguous", "cooldown", "backoff",
+            "failed", "awaiting_human", "ambiguous", "cooldown", "backoff",
         }
         for task_id in tasks_by_id:
             status = readiness.get(task_id)
@@ -758,7 +758,7 @@ def get_inflight() -> list[dict]:
                    FROM runs r LEFT JOIN tasks t ON t.id = r.task
                    WHERE r.status='dispatched'
                      AND NOT EXISTS (SELECT 1 FROM runs r2 WHERE r2.task=r.task
-                           AND r2.status IN ('done','skipped','failed')
+                           AND r2.status IN ('done','skipped','failed','awaiting_human')
                            AND r2.rowid_pk > r.rowid_pk)
                    ORDER BY r.ts DESC"""
             ).fetchall()
@@ -1275,7 +1275,7 @@ def _humanize(secs: float, past: bool) -> str:
 
 STATUS_COLORS = {
     "done": "var(--ok)", "dispatched": "var(--acc)", "failed": "var(--warn)",
-    "skipped": "var(--dim)",
+    "skipped": "var(--dim)", "awaiting_human": "var(--pace)",
 }
 SIZE_LEVEL = {"tiny": 1, "small": 2, "medium": 3, "large": 4, "huge": 5}
 PRI_TINT = {0: "var(--warn)", 1: "var(--acc)", 2: "var(--fg)", 3: "var(--dim)", 4: "var(--dim)"}
