@@ -216,20 +216,28 @@ concrete provider and account, DB/config identity, precondition, constraints, do
 protected path for structured outcome evidence. Use that command exactly.
 
 A background task must not exit blocked or waiting for input while its claim and activation
-lease remain live. If continuing safely would require new input or authority, it records
-`failed` with that blocker before exiting.
+lease remain live. A run that opened or updated a PR records `done`. When only a step Brian must
+take personally remains, it records `awaiting_human`. If the work itself cannot be completed, it
+records `failed` with that blocker before exiting.
 
 Replaying the same terminal status and evidence for the same attempt is idempotent. A missing or
 different attempt ID cannot release its claim, and a conflicting replay is a reconciliation
 error. Prior attempts stay immutable.
 
-- `done`: done-when is explicitly verified with supported evidence. PR or branch existence alone
-  is insufficient. Its outcome uses reason code `done_when_verified`, `completion.verified: true`,
+- `done`: done-when is explicitly verified with supported evidence. A run that opened or updated
+  a PR is done, even while that PR awaits review, approval, or pending CI; it records
+  `completion.mechanism: artifact` with the PR URL as evidence. PR presence still does not prove
+  integration for a dependency handoff. Its outcome uses reason code `done_when_verified`, `completion.verified: true`,
   one of `command`, `artifact`, `operator_receipt`, or `goal_acceptance`, and nonempty evidence.
 - `skipped`: the precondition is false or the work is already complete; include the structured
   reason.
 - `failed`: work was attempted and did not satisfy done-when; record a structured reason that
   distinguishes retryable, verification-needed, authority, permanent, and unknown-launch cases.
+- `awaiting_human`: the worker finished everything it can and the remaining step needs Brian
+  personally, such as hands-on testing only he can do or a decision or approval. Its structured
+  reason must not use `done_when_verified`, its `reason.detail` must name exactly what Brian must
+  do, and it must not claim verified completion. It is not requeued or recovered automatically,
+  and dependents keep waiting; only operator recovery (requeue or recover-complete) continues it.
 
 Follow the exact `OUTCOME_SCHEMA` printed in the prompt. A repository-producing verified success
 has this shape; omit `repository` when the task does not produce one:
@@ -250,7 +258,7 @@ has this shape; omit `repository` when the task does not produce one:
 }
 ```
 
-`merge_receipt` is optional. For `failed` or `skipped`, omit `completion` and use a reason code of
+`merge_receipt` is optional. For `failed`, `skipped`, or `awaiting_human`, omit `completion` and use a reason code of
 `retryable`, `verification_needed`, `authority_required`, `permanent`, or `unknown_launch`, with
 nonempty detail and a stable non-secret signature. Accepted completion mechanisms are `command`,
 `artifact`, `operator_receipt`, and `goal_acceptance`.

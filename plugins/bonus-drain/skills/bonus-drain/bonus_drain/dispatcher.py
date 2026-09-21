@@ -326,7 +326,7 @@ def _record_line(
             "--kind", task.kind,
             "--eligibility-key", eligibility_key,
             "--cycle", str(cycle_from_key(eligibility_key)),
-            "--status", "done|skipped|failed",
+            "--status", "done|skipped|failed|awaiting_human",
             "--provider-id", provider_id,
         ]
     )
@@ -504,7 +504,10 @@ def render_prompt(
     contract.extend(
         [
             "Never leave this background run blocked, waiting for input, or otherwise non-terminal.",
-            "If safe progress requires new input or authority, record failed with the blocker before exiting; do not request input or set a blocked status.",
+            "A run that opened or updated a pull request is done, even while that PR awaits review, approval, or pending CI; record done with completion.mechanism=artifact and the PR URL as evidence, never failed or awaiting_human for that reason alone.",
+            "Record awaiting_human only when you finished everything you can and the remaining step needs Brian personally: hands-on testing only he can do (for example a real human review comment or a live Slack check) or a decision or approval (for example approving a CI or automation diff before commit, or choosing between conflicting acceptance criteria). Its reason.detail must name exactly what Brian must do.",
+            "If the work itself cannot be completed, record failed with the blocker before exiting; do not request input or set a blocked status.",
+            "Failed, skipped, or awaiting_human results require the structured reason and must not claim verified completion.",
             f"The concrete provider for this accounted run is {provider_id}.",
             "When finished, record exactly one terminal event with this command (replace only the status and summary placeholders):",
             f"  {_record_line(config, task, eligibility_key, provider_id, account_id, attempt.id if attempt is not None else None, outcome_path)}",
@@ -528,8 +531,7 @@ def render_prompt(
                 "Every terminal result requires reason.code, non-empty reason.detail, and a stable, "
                 "non-secret reason.signature. Status done requires reason.code=done_when_verified, "
                 "completion.verified=true, one supported completion.mechanism, and at least one "
-                "non-empty completion.evidence reference. Failed or skipped results require the "
-                "structured reason and must not claim verified completion."
+                "non-empty completion.evidence reference."
             ),
             (
                 "If this task produces a branch or commit that a dependent task must use, include "
@@ -543,7 +545,7 @@ def render_prompt(
         contract.extend([
             (
                 "If a later user message in this same thread continues the work after this "
-                "attempt recorded failed or skipped, retain this task contract and attempt context. "
+                "attempt recorded failed, skipped, or awaiting_human, retain this task contract and attempt context. "
                 "When the continued work meets done-when, write verified evidence to the same "
                 "private outcome path and invoke the exact command below automatically before replying. "
                 "If it still fails, retain the original terminal evidence and bounded recovery state."

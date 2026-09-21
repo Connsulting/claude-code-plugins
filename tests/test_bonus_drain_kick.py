@@ -229,11 +229,11 @@ class KickContractTests(unittest.TestCase):
             prompt,
         )
         self.assertIn(
-            "record failed with the blocker before exiting",
+            "If the work itself cannot be completed, record failed with the blocker before exiting",
             prompt,
         )
         self.assertLess(
-            prompt.index("record failed with the blocker before exiting"),
+            prompt.index("If the work itself cannot be completed, record failed with the blocker before exiting"),
             prompt.index("When finished, record exactly one terminal event"),
         )
 

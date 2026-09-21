@@ -30,7 +30,8 @@ from .dispatcher import (
 OPEN_RUN_STATUSES = frozenset({"dispatched", "running"})
 RUN_FILL_FIELDS = ("status", "completed_at", "outcome", "pr_url", "pr_state", "merged_at")
 # The factory runs table has no status CHECK and already carries `skipped` rows.
-LEDGER_TO_RUN_STATUS = {"done": "complete", "failed": "failed", "skipped": "skipped"}
+LEDGER_TO_RUN_STATUS = {"done": "complete", "failed": "failed", "skipped": "skipped",
+                        "awaiting_human": "awaiting_human"}
 OUTCOME_MAX_CHARS = 500
 GH_TIMEOUT_SECONDS = 15.0
 PR_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")

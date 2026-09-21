@@ -356,7 +356,12 @@ class GoalStore:
                     if status not in TERMINAL_STATUSES:
                         continue
                     final_state = 'complete' if status == 'done' else 'paused'
-                    summary = row['summary'] if status == 'done' else 'Coordinator closeout failed; reconcile before resuming'
+                    summary = (
+                        row['summary'] if status == 'done'
+                        else 'Coordinator awaiting Brian; reconcile before resuming'
+                        if status == 'awaiting_human'
+                        else 'Coordinator closeout failed; reconcile before resuming'
+                    )
                     result.append({'goal_id': row['id'], 'action': final_state, 'reason': summary})
                     if not dry_run:
                         connection.execute('UPDATE goals SET state=?,summary=?,revision=revision+1 WHERE id=?',

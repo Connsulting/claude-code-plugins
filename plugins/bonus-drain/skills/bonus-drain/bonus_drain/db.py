@@ -21,10 +21,13 @@ class QueueError(RuntimeError):
     """Queue operation failed without changing its requested invariant."""
 
 
-VALID_STATUSES = frozenset({"dispatched", "done", "skipped", "failed"})
-TERMINAL_STATUSES = frozenset({"done", "skipped", "failed"})
+VALID_STATUSES = frozenset({"dispatched", "done", "skipped", "failed", "awaiting_human"})
+TERMINAL_STATUSES = frozenset({"done", "skipped", "failed", "awaiting_human"})
+# Automatic recovery only continues failed/skipped work; an operator may also continue parked
+# awaiting_human work, because Brian doing the parked step is exactly the authority it waited on.
+OPERATOR_RECOVERY_SOURCES = frozenset({"failed", "skipped", "awaiting_human"})
 ATTEMPT_STATES = frozenset({
-    "claimed", "dispatched", "done", "skipped", "failed", "ambiguous", "aborted",
+    "claimed", "dispatched", "done", "skipped", "failed", "awaiting_human", "ambiguous", "aborted",
 })
 RECOVERY_MODES = frozenset({"retry", "verification"})
 RECOVERY_STATES = frozenset({"scheduled", "backoff", "consumed", "held", "exhausted"})
@@ -84,7 +87,8 @@ def validate_outcome(
 ) -> dict[str, Any] | None:
     """Validate and canonicalize attempt outcome evidence.
 
-    A PR is repository evidence only. It cannot satisfy a completion contract.
+    A run that opened or updated a PR records done with an artifact completion naming the PR.
+    awaiting_human parks work for Brian and must never claim verified completion.
     Legacy callers can omit outcomes only when ``require_structured_reason`` is false.
     """
 
@@ -110,6 +114,12 @@ def validate_outcome(
             normalized = re.sub(r"[^a-z0-9]+", ":", str(detail).lower()).strip(":")[:500]
             signature = f"{code}:{normalized}"
         value["reason"] = {"code": code, "detail": detail, "signature": signature}
+    if status == "awaiting_human" and require_structured_reason:
+        if value["reason"]["code"] == "done_when_verified":
+            raise QueueError("awaiting_human cannot use the done_when_verified reason code")
+        completion = value.get("completion")
+        if isinstance(completion, Mapping) and completion.get("verified") is True:
+            raise QueueError("awaiting_human must not claim verified completion")
     if status == "done":
         if require_structured_reason and value.get("reason", {}).get("code") != "done_when_verified":
             raise QueueError("done requires a done_when_verified outcome")
@@ -475,6 +485,47 @@ class QueueDB:
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, ?)",
                 (utc_now(),),
             )
+            self._relax_status_checks(connection)
+
+    @staticmethod
+    def _relax_status_checks(connection: sqlite3.Connection) -> None:
+        """Admit awaiting_human into the CHECK constraints of databases created before it existed.
+
+        SQLite cannot ALTER a CHECK, so this follows the documented writable_schema procedure:
+        loosening a CHECK IN-list changes no on-disk format, only the stored table SQL.
+        """
+        changed = False
+        for table, column in (("runs", "status"), ("task_attempts", "state")):
+            row = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,),
+            ).fetchone()
+            if row is None or "'awaiting_human'" in row[0]:
+                continue
+            match = re.search(rf"CHECK \({column} IN \([^)]*'failed'[^)]*\)\)", row[0])
+            if match is None:
+                # Tables from before the status CHECK existed already admit awaiting_human.
+                continue
+            relaxed = match.group(0).replace("'failed'", "'failed','awaiting_human'", 1)
+            sql = row[0][:match.start()] + relaxed + row[0][match.end():]
+            version = connection.execute("PRAGMA schema_version").fetchone()[0]
+            connection.execute("PRAGMA writable_schema=ON")
+            try:
+                connection.execute(
+                    "UPDATE sqlite_master SET sql=? WHERE type='table' AND name=?", (sql, table),
+                )
+                connection.execute(f"PRAGMA schema_version={int(version) + 1}")
+            finally:
+                connection.execute("PRAGMA writable_schema=OFF")
+            changed = True
+        if not changed:
+            return
+        result = connection.execute("PRAGMA integrity_check").fetchone()[0]
+        if result != "ok":
+            raise QueueError(f"status CHECK migration failed integrity_check: {result}")
+        connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(2, ?)",
+            (utc_now(),),
+        )
 
     def record_usage(self, snapshots) -> int:
         """Append one row per (account, limit) reading so the weekly curve is recoverable.
@@ -600,7 +651,7 @@ class QueueDB:
               eligibility_key TEXT,
               mode TEXT NOT NULL CHECK (mode IN ('normal','retry','verification')),
               origin TEXT NOT NULL CHECK (origin IN ('normal','automatic','operator','continuation')),
-              state TEXT NOT NULL CHECK (state IN ('claimed','dispatched','done','skipped','failed','ambiguous','aborted')),
+              state TEXT NOT NULL CHECK (state IN ('claimed','dispatched','done','skipped','failed','awaiting_human','ambiguous','aborted')),
               recovery_of TEXT REFERENCES task_attempts(id),
               recovery_of_legacy_run_rowid INTEGER REFERENCES runs(rowid_pk),
               contract_hash TEXT NOT NULL,
@@ -1137,6 +1188,14 @@ class QueueDB:
                 elif state == "ready" and task.kind == "oneoff" and (latest is not None or legacy is not None):
                     source_state = latest["state"] if latest is not None else legacy["status"]
                     state, reason = source_state, f"Last run: {source_state}"
+                    if source_state == "awaiting_human":
+                        source_outcome = (
+                            json.loads(latest["outcome_json"])
+                            if latest is not None and latest["outcome_json"] else {}
+                        )
+                        detail = (source_outcome.get("reason") or {}).get("detail")
+                        if detail:
+                            reason = f"Awaiting Brian: {detail}"
                 elif state == "ready" and not self._eligible_in_connection(
                     connection, task, 0, now_epoch=now, automatic=False,
                 ):
@@ -1145,10 +1204,10 @@ class QueueDB:
                 task.kind == "oneoff" and claim is None and done is None
                 and not goal_owned
                 and (
-                    (latest is not None and latest["state"] in {"failed", "skipped"})
+                    (latest is not None and latest["state"] in OPERATOR_RECOVERY_SOURCES)
                     or (
                         latest is None and legacy is not None
-                        and legacy["status"] in {"failed", "skipped"}
+                        and legacy["status"] in OPERATOR_RECOVERY_SOURCES
                     )
                 )
                 and (
@@ -1160,9 +1219,13 @@ class QueueDB:
                         and recovery["origin"] == "automatic"
                     )
                 )
-                and source_reason_code not in {
-                    "authority_required", "permanent", "unknown_launch",
-                }
+                and (
+                    (latest is not None and latest["state"] == "awaiting_human")
+                    or (latest is None and legacy is not None and legacy["status"] == "awaiting_human")
+                    or source_reason_code not in {
+                        "authority_required", "permanent", "unknown_launch",
+                    }
+                )
             )
             if not admitted:
                 requeue_allowed = False
@@ -2041,7 +2104,7 @@ class QueueDB:
             with self._transaction() as connection:
                 prior = connection.execute(
                     """SELECT 1 FROM runs WHERE task=? AND attempt_id=?
-                         AND status IN ('done','skipped','failed') LIMIT 1""",
+                         AND status IN ('done','skipped','failed','awaiting_human') LIMIT 1""",
                     (task_id, attempt_id),
                 ).fetchone()
                 if prior is None:
@@ -2110,7 +2173,7 @@ class QueueDB:
                     raise QueueError(f"unknown attempt for {task_id}: {attempt_id}")
                 prior = connection.execute(
                     """SELECT * FROM runs WHERE task=? AND attempt_id=?
-                         AND status IN ('done','skipped','failed') ORDER BY rowid_pk DESC LIMIT 1""",
+                         AND status IN ('done','skipped','failed','awaiting_human') ORDER BY rowid_pk DESC LIMIT 1""",
                     (task_id, attempt_id),
                 ).fetchone()
                 if prior is not None:
@@ -2246,14 +2309,14 @@ class QueueDB:
                     prior_rows = connection.execute(
                         """SELECT * FROM runs WHERE task=? AND attempt_id IS NULL
                              AND eligibility_key IS NULL AND cycle=?
-                             AND status IN ('done','skipped','failed') ORDER BY rowid_pk""",
+                             AND status IN ('done','skipped','failed','awaiting_human') ORDER BY rowid_pk""",
                         (task_id, resolved_cycle),
                     ).fetchall()
                 else:
                     prior_rows = connection.execute(
                         """SELECT * FROM runs WHERE task=? AND attempt_id IS NULL
                              AND (eligibility_key=? OR (eligibility_key IS NULL AND cycle=?))
-                             AND status IN ('done','skipped','failed') ORDER BY rowid_pk""",
+                             AND status IN ('done','skipped','failed','awaiting_human') ORDER BY rowid_pk""",
                         (task_id, eligibility_key, resolved_cycle),
                     ).fetchall()
                 if len(prior_rows) > 1:
@@ -2337,13 +2400,18 @@ class QueueDB:
             (latest is not None and row["attempt_id"] == latest["id"]) or
             (latest is None and legacy is not None and row["rowid_pk"] == legacy["rowid_pk"])
         )
-        if not is_source or row["status"] not in {"failed", "skipped"}:
-            return {"allowed": False, "reason": "Only the latest failed or skipped outcome can recover"}
+        if not is_source or row["status"] not in OPERATOR_RECOVERY_SOURCES:
+            return {
+                "allowed": False,
+                "reason": "Only the latest failed, skipped, or awaiting_human outcome can recover",
+            }
         reason_code = (
             latest["reason_code"]
             if latest is not None else self._source_reason(None, legacy)[0]
         )
-        if reason_code in {"authority_required", "permanent", "unknown_launch"}:
+        if row["status"] != "awaiting_human" and reason_code in {
+            "authority_required", "permanent", "unknown_launch",
+        }:
             return {"allowed": False, "reason": reason_code.replace("_", " ").capitalize()}
         recovery = connection.execute(
             """SELECT state,origin,reason_code,detail,consumed_by_attempt_id
@@ -2503,8 +2571,10 @@ class QueueDB:
             if latest is None or latest["id"] != expected_attempt_id:
                 successor = latest["id"] if latest is not None else "none"
                 raise QueueError(f"recovery source is stale; latest successor is {successor}")
-            if source["state"] not in {"failed", "skipped"}:
-                raise QueueError(f"recovery source is {source['state']}, not failed or skipped")
+            if source["state"] not in OPERATOR_RECOVERY_SOURCES:
+                raise QueueError(
+                    f"recovery source is {source['state']}, not failed, skipped, or awaiting_human"
+                )
             return source, None
         if QueueDB._latest_effective_attempt(connection, task_id) is not None:
             latest = QueueDB._latest_effective_attempt(connection, task_id)
@@ -2517,8 +2587,10 @@ class QueueDB:
         latest_legacy = QueueDB._latest_legacy_run(connection, task_id)
         if legacy is None or latest_legacy is None or legacy["rowid_pk"] != latest_legacy["rowid_pk"]:
             raise QueueError("legacy recovery source is stale")
-        if legacy["status"] not in {"failed", "skipped"}:
-            raise QueueError(f"legacy recovery source is {legacy['status']}, not failed or skipped")
+        if legacy["status"] not in OPERATOR_RECOVERY_SOURCES:
+            raise QueueError(
+                f"legacy recovery source is {legacy['status']}, not failed, skipped, or awaiting_human"
+            )
         return None, legacy
 
     @staticmethod
@@ -2609,7 +2681,10 @@ class QueueDB:
         if not admitted:
             state, decision_code, decision_detail = "held", admission_reason, admission_reason
             persist = admission_reason != "fresh_goal_followup_required"
-        elif reason_code in {"authority_required", "permanent", "unknown_launch"}:
+        elif reason_code in {"authority_required", "permanent", "unknown_launch"} and not (
+            source != "automatic"
+            and (attempt["state"] if attempt is not None else legacy["status"]) == "awaiting_human"
+        ):
             state = "held"
         elif attempt is not None and attempt["recovery_of"] is not None:
             previous = connection.execute(

@@ -651,7 +651,7 @@ def _remaining_snapshot(cycle: int) -> list[dict]:
         allowed_readiness_states = {
             "ready", "paused", "held", "running", "done", "waiting",
             "exhausted", "recovering", "claimed", "dispatched", "skipped",
-            "failed", "ambiguous", "cooldown", "backoff",
+            "failed", "awaiting_human", "ambiguous", "cooldown", "backoff",
         }
         for task_id in tasks_by_id:
             status = readiness.get(task_id)
@@ -671,6 +671,7 @@ def _remaining_snapshot(cycle: int) -> list[dict]:
                 raise TypeError
             if task_id not in visible_ids and status.get("state") in {
                 "ready", "waiting", "cooldown", "recovering", "backoff", "held", "exhausted",
+                "awaiting_human",
             }:
                 visible_ids.append(task_id)
         for task_id in visible_ids:
@@ -747,7 +748,7 @@ def get_recent_runs(limit: int = 80) -> list[dict]:
 def get_inflight() -> list[dict]:
     """Dispatched-and-not-yet-terminal runs: the jobs actually burning tokens right now.
 
-    Same predicate as `bonusdb.sh inflight` (a dispatch with no later done/skipped/failed for
+    Same predicate as `bonusdb.sh inflight` (a dispatch with no later done/skipped/failed/awaiting_human for
     the same task), joined out to the title and cwd the run log does not carry. `branch` is in
     the schema but is written empty by every dispatcher today, so the row shows the working
     directory instead - it is the field that actually identifies where the job is working."""
@@ -758,7 +759,7 @@ def get_inflight() -> list[dict]:
                    FROM runs r LEFT JOIN tasks t ON t.id = r.task
                    WHERE r.status='dispatched'
                      AND NOT EXISTS (SELECT 1 FROM runs r2 WHERE r2.task=r.task
-                           AND r2.status IN ('done','skipped','failed')
+                           AND r2.status IN ('done','skipped','failed','awaiting_human')
                            AND r2.rowid_pk > r.rowid_pk)
                    ORDER BY r.ts DESC"""
             ).fetchall()
@@ -1275,7 +1276,7 @@ def _humanize(secs: float, past: bool) -> str:
 
 STATUS_COLORS = {
     "done": "var(--ok)", "dispatched": "var(--acc)", "failed": "var(--warn)",
-    "skipped": "var(--dim)",
+    "skipped": "var(--dim)", "awaiting_human": "var(--acc)",
 }
 SIZE_LEVEL = {"tiny": 1, "small": 2, "medium": 3, "large": 4, "huge": 5}
 PRI_TINT = {0: "var(--warn)", 1: "var(--acc)", 2: "var(--fg)", 3: "var(--dim)", 4: "var(--dim)"}
@@ -2478,7 +2479,7 @@ def render_bonus_body() -> str:
             else:
                 engine_display = '<span class="lengine dimtxt">—</span>'
             retry = ""
-            if r["status"] in {"failed", "skipped"}:
+            if r["status"] in {"failed", "skipped", "awaiting_human"}:
                 projection = r.get("requeue")
                 allowed = not isinstance(projection, dict) or bool(projection.get("allowed"))
                 reason = (
