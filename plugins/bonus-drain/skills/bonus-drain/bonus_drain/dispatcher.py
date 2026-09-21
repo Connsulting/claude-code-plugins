@@ -265,6 +265,41 @@ def record_factory_run(
         return False
 
 
+def replay_factory_terminal(
+    queue: QueueDB,
+    task: Task,
+    attempt_id: str,
+) -> bool:
+    """Replay a terminal event that committed before its placeholder was written."""
+    try:
+        terminal = next(
+            (
+                event for event in queue.runs(task_id=task.id)
+                if event.attempt_id == attempt_id
+                and event.status in {"done", "skipped", "failed"}
+            ),
+            None,
+        )
+        if terminal is None:
+            return False
+        from .factory_terminal import record_factory_terminal
+
+        return record_factory_terminal(
+            task.id,
+            terminal.attempt_id,
+            terminal.status,
+            terminal.ts,
+            terminal.summary,
+            task.cwd,
+        )
+    except Exception as exc:  # noqa: BLE001 - telemetry must never fail a dispatch
+        print(
+            f"bonus-drain: factory terminal replay for {task.id} failed: {str(exc)[:500]}",
+            file=sys.stderr,
+        )
+        return False
+
+
 def provider_compatible(task: Task, provider: ProviderConfig) -> bool:
     if task.allowed_providers and provider.id not in task.allowed_providers:
         return False
@@ -1514,7 +1549,7 @@ def dispatch(
         if factory_run_id is not None:
             # After the queue's own dispatched record so a telemetry problem can never
             # leave the claim in a state that looks unlaunched.
-            record_factory_run(
+            placeholder_written = record_factory_run(
                 task,
                 provider,
                 factory_run_id,
@@ -1522,6 +1557,8 @@ def dispatch(
                 telemetry_call,
                 attempt.id,
             )
+            if placeholder_written:
+                replay_factory_terminal(queue, task, attempt.id)
         if account is not None and account.activation_scope == "launch" and activated:
             try:
                 if lease_managed:
