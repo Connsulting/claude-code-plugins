@@ -311,11 +311,13 @@ without a new claim or router launch and does not require a previously scheduled
 projection; if an exact projection exists, it consumes it atomically. If it refuses because a
 successor owns the task, keep the evidence for that successor and do not overwrite its state.
 
-For repository dependencies, use the resolved handoff in the prompt. A merged parent requires the
-exact target plus ancestry and content proof; a squash merge uses content equivalence. An unmerged
-parent uses its verified head. Unavailable identity holds dispatch, and divergent multiple-parent
-heads require an explicitly authorized integration task. Never merge or expand external authority
-to make a dependency ready.
+For repository dependencies, use the resolved handoff in the prompt. A merge receipt proves the
+parent at its recorded result commit, which must remain on the current exact target. A normal
+merge requires parent head ancestry at that result; a squash requires parent delta equivalence
+there. A full revert holds the child. An unmerged branch may advance, but the child uses only its
+recorded verified head. A replaced head needs fresh verified evidence through `reverify-handoff`.
+Unavailable identity holds dispatch, and divergent multiple parent heads require an explicitly
+authorized integration task. Never merge or expand external authority to make a dependency ready.
 
 ## Operations
 

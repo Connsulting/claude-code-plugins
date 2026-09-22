@@ -479,7 +479,8 @@ def render_prompt(
             (
                 "Use this exact verified dependency head for the isolated worktree. "
                 "It overrides /implement's default target-base selection. Confirm the exact "
-                "remote, ref, and object identity; never fall back to another local base."
+                "remote and object identity; the branch ref may have advanced beyond the "
+                "verified base object. Never substitute its newer tip or another local base."
             ),
         ])
     if attempt is not None:

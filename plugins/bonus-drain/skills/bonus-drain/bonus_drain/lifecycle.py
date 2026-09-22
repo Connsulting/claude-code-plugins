@@ -291,6 +291,7 @@ def install(source: str | Path, home: str | Path | None = None, *, version: str 
     version_dir = lib / release
     current = lib / "current"
     source_files = _runtime_files(source_path)
+    source_hashes = {str(rel): _sha256(source_path / rel) for rel in source_files}
     wrapper_bytes = _wrapper_text(lib).encode("utf-8")
 
     unit_payloads: dict[Path, bytes] = {}
@@ -328,7 +329,12 @@ def install(source: str | Path, home: str | Path | None = None, *, version: str 
 
     lib.mkdir(parents=True, exist_ok=True)
     if version_dir.exists() or version_dir.is_symlink():
-        _verify_version_dir(version_dir)
+        installed_hashes = _verify_version_dir(version_dir)
+        if installed_hashes != source_hashes:
+            raise OwnershipError(
+                f"same version source payload differs from installed release: {release}; "
+                "choose a new install version"
+            )
     else:
         staging = Path(tempfile.mkdtemp(prefix=f".{release}.", dir=lib))
         try:
@@ -348,6 +354,7 @@ def install(source: str | Path, home: str | Path | None = None, *, version: str 
         finally:
             if staging.exists():
                 shutil.rmtree(staging)
+        installed_hashes = _verify_version_dir(version_dir)
 
     temporary_link = lib / f".current.{os.getpid()}"
     try:
@@ -366,6 +373,7 @@ def install(source: str | Path, home: str | Path | None = None, *, version: str 
         "version": release,
         "wrapper": {"path": str(wrapper), "sha256": _sha256(wrapper)},
         "units": {str(path): _sha256(path) for path in unit_payloads},
+        "source": {"path": str(source_path), "files": installed_hashes},
     }
     _write_atomic(
         lib / _INSTALL_NAME,
@@ -457,6 +465,34 @@ def doctor(
     }
     required_checks = {"installation", "dependency:python>=3.10", "dependency:sqlite3"}
     diagnostics = list(current_status.problems)
+    _home, lib, _wrapper, _unit_dir = _paths(Path(home) if home is not None else Path.home())
+    record_path = lib / _INSTALL_NAME
+    if record_path.is_file():
+        try:
+            source_record = _install_record(lib).get("source")
+        except OwnershipError as exc:
+            diagnostics.append(str(exc))
+            checks["source_integrity"] = False
+            required_checks.add("source_integrity")
+        else:
+            if isinstance(source_record, Mapping):
+                recorded_path = source_record.get("path")
+                recorded_files = source_record.get("files")
+                if isinstance(recorded_path, str) and Path(recorded_path).is_dir():
+                    source_path = Path(recorded_path)
+                    try:
+                        actual_files = {
+                            str(rel): _sha256(source_path / rel)
+                            for rel in _runtime_files(source_path)
+                        }
+                    except (LifecycleError, OSError) as exc:
+                        actual_files = None
+                        diagnostics.append(f"source drift: {exc}")
+                    intact = actual_files == recorded_files
+                    checks["source_integrity"] = intact
+                    required_checks.add("source_integrity")
+                    if not intact and actual_files is not None:
+                        diagnostics.append(f"source drift: installed payload differs from {source_path}")
     if not python_ok:
         diagnostics.append(
             f"Python 3.10 or newer is required; detected {sys.version_info.major}.{sys.version_info.minor}"

@@ -81,10 +81,11 @@ already queued or active successor; the worker then keeps its evidence for that 
 of recording over it. A refusal does not authorize a second dispatch.
 
 Repository-producing completion includes the exact remote, target ref, prior target base, branch,
-and head. A child starts from the current exact target only when ancestry and content prove the
-parent is present; squash merges use content equivalence because parent-head ancestry alone cannot
-prove them. Otherwise an explicitly unmerged parent supplies its verified head. Missing or
-conflicting identity holds dispatch. For multiple parents, one compatible descendant may contain
+and head. A receipt proves integration at its recorded result commit, which must remain on the
+current target. A normal merge needs parent head ancestry at that result; a squash needs parent
+delta equivalence there. A full revert holds the child. An unmerged branch may advance while the
+child keeps its recorded verified head. A replaced head needs fresh verified evidence through
+`reverify-handoff`. Missing or conflicting identity holds dispatch. For multiple parents, one compatible descendant may contain
 all heads; divergent heads require an explicitly authorized integration task. The queue does not
 merge branches or add push, PR, deployment, or other external authority.
 

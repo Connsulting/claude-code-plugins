@@ -314,6 +314,30 @@ def _command(args: argparse.Namespace) -> int:
             f"recorded recovered completion: {args.task}"
         )
         return 0
+    if command == "reverify-handoff":
+        cfg, queue = _terminal_queue(args)
+        if args.after_revision_id != "none" and not args.after_revision_id.isdecimal():
+            raise CLIError("--after-revision-id must be none or a positive integer")
+        outcome, outcome_path = _outcome(args, cfg)
+        assert outcome is not None and outcome_path is not None
+        revision = queue.reverify_handoff(
+            args.task,
+            from_done_rowid=args.from_done_rowid,
+            after_revision_id=(
+                None if args.after_revision_id == "none" else int(args.after_revision_id)
+            ),
+            outcome=outcome,
+            summary=args.summary,
+        )
+        dispatcher.remove_outcome_file(outcome_path)
+        _json({"revision": revision}) if args.json else print(
+            f"recorded handoff revision: {args.task} {revision['id']}"
+        )
+        return 0
+    if command == "handoff-revision":
+        _cfg, queue = _queue(args)
+        _json(queue.handoff_revision(args.task))
+        return 0
     if command == "continue-progress":
         _cfg, queue = _terminal_queue(args)
         result = queue.open_same_thread_continuation(
@@ -798,6 +822,16 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--from-legacy-run-rowid", type=int)
     recovered.add_argument("--outcome-file", required=True)
     recovered.add_argument("--summary", required=True)
+
+    reverified = sub.add_parser("reverify-handoff"); _add_common(reverified); _add_json(reverified)
+    reverified.add_argument("--task", required=True)
+    reverified.add_argument("--from-done-rowid", type=int, required=True)
+    reverified.add_argument("--after-revision-id", required=True)
+    reverified.add_argument("--outcome-file", required=True)
+    reverified.add_argument("--summary", required=True)
+
+    revision = sub.add_parser("handoff-revision"); _add_common(revision); _add_json(revision)
+    revision.add_argument("task")
 
     continued = sub.add_parser("continue-progress"); _add_common(continued); _add_json(continued)
     continued.add_argument("--task", required=True)

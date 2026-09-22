@@ -367,6 +367,57 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             report.diagnostics,
         )
 
+    def test_same_version_install_rejects_changed_source_without_changing_current(self) -> None:
+        sys.path.insert(0, str(SKILL_ROOT))
+        try:
+            from bonus_drain import lifecycle
+        finally:
+            sys.path.pop(0)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            shutil.copytree(SKILL_ROOT, source)
+            home = root / "home"
+            first = lifecycle.install(source, home, version="0.3.2+source-integrity")
+            previous_record = (first.current.parent / ".bonus-drain-install.json").read_bytes()
+            previous_payload = (first.version_dir / "bonus_drain" / "handoff.py").read_bytes()
+            (source / "bonus_drain" / "handoff.py").write_bytes(previous_payload + b"\n# changed\n")
+
+            with self.assertRaisesRegex(lifecycle.OwnershipError, "same version.*payload"):
+                lifecycle.install(source, home, version="0.3.2+source-integrity")
+
+            self.assertEqual(first.current.resolve(), first.version_dir)
+            self.assertEqual((first.version_dir / "bonus_drain" / "handoff.py").read_bytes(), previous_payload)
+            self.assertEqual((first.current.parent / ".bonus-drain-install.json").read_bytes(), previous_record)
+
+    def test_doctor_reports_recorded_source_drift_without_treating_missing_source_as_corruption(self) -> None:
+        sys.path.insert(0, str(SKILL_ROOT))
+        try:
+            from bonus_drain import lifecycle
+        finally:
+            sys.path.pop(0)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            shutil.copytree(SKILL_ROOT, source)
+            home = root / "home"
+            lifecycle.install(source, home, version="0.3.2+source-doctor")
+            self.assertTrue(lifecycle.doctor(home).checks["source_integrity"])
+
+            changed = source / "bonus_drain" / "handoff.py"
+            changed.write_bytes(changed.read_bytes() + b"\n# changed\n")
+            report = lifecycle.doctor(home)
+            self.assertFalse(report.ok)
+            self.assertFalse(report.checks["source_integrity"])
+            self.assertIn("source drift", "\n".join(report.diagnostics))
+
+            source.rename(root / "source-moved")
+            missing_report = lifecycle.doctor(home)
+            self.assertTrue(missing_report.ok)
+            self.assertNotIn("source_integrity", missing_report.checks)
+
     def test_interpreter_bytecode_for_owned_modules_does_not_invalidate_installation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary) / "home"

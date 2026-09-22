@@ -190,6 +190,11 @@ From the skill directory, install a version and the five self-owned unit templat
 ~/.local/bin/bonus-drain doctor --json
 ```
 
+Reinstalling changed source under an existing version is refused. Choose a new install version.
+Doctor compares the installed payload with its recorded source checkout while that checkout
+exists. If the source checkout is gone, this drift check is unavailable; installation ownership
+and payload checks still run.
+
 Installation does not enable or start anything. After placing the validated config and
 injecting its external secrets, initialize and perform one cache refresh manually:
 
@@ -334,8 +339,19 @@ may admit implementation or integration recovery under its existing guards, whil
 frozen acceptance failures require fresh follow-up jobs.
 
 A repository-producing success records the exact remote, target, prior target base, branch, and
-head. A child uses the current target only when ancestry plus content evidence proves a normal
-merge, or content equivalence proves a squash. Otherwise it uses the verified unmerged parent head.
+head. A merge receipt is checked at its recorded result commit on the current target. A normal
+merge needs parent head ancestry there; a squash needs parent delta equivalence there. A full
+revert holds the child. Otherwise it uses the recorded verified unmerged parent head, even if
+its branch advances. A replaced head needs fresh verified evidence through `reverify-handoff`.
 Missing or conflicting identity holds dispatch, and divergent parent heads require an explicitly
 authorized integration job. No recovery or handoff grants merge, push, deployment, or other
 external authority.
+
+For a completed parent whose branch was replaced, first prove the new head satisfies the
+parent's done condition. Then inspect `bonus-drain handoff-revision PARENT --json` for the exact
+`from_done_rowid` and `after_revision_id`. Supply a fresh structured done outcome with verified
+completion and repository evidence in a private outcome file. Run `bonus-drain reverify-handoff
+--task PARENT --from-done-rowid ROW --after-revision-id none --outcome-file FILE --summary TEXT`
+for the first revision, or use the reported numeric revision id for a later revision. The command
+validates the Git handoff, preserves the original terminal row, and rejects stale revision ids.
+It does not waive failing checks or authorize a child to run before the new parent proof exists.

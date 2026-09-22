@@ -19,7 +19,7 @@ CLI = SKILL_ROOT / "bin" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
 
 from bonus_drain import config as config_module
-from bonus_drain import db, dispatcher, handoff
+from bonus_drain import db, dispatcher, handoff, scout, usage
 
 NOW = 2_000_000_000
 KEY = "alpha-account/alpha-weekly/2000001000"
@@ -372,6 +372,215 @@ class RepositoryHandoffCase(unittest.TestCase):
                 "target_ref": "refs/heads/main",
                 "parent_ids": ["parent"],
             },
+        )
+
+    def test_merge_receipt_remains_valid_after_later_target_edit_of_parent_path(self) -> None:
+        remote, work, base = self.repository("receipt-later-edit")
+        head = self.branch(
+            work, "task/parent", base, "shared.txt", "parent value\n",
+        )
+        self.git(work, "switch", "main")
+        self.git(work, "merge", "--no-ff", "task/parent", "-m", "Merge parent")
+        receipt_result = self.git(work, "rev-parse", "HEAD")
+        (work / "shared.txt").write_text(
+            "parent value\nlater accepted edit\n", encoding="utf-8",
+        )
+        self.git(work, "add", "shared.txt")
+        self.git(work, "commit", "-m", "Edit shared path after parent merge")
+        self.git(work, "push", "origin", "main")
+        target = self.git(work, "rev-parse", "HEAD")
+        self.complete_parent(
+            "parent",
+            work,
+            self.handoff(
+                remote,
+                base,
+                "task/parent",
+                head,
+                integration_state="merged",
+                receipt={"kind": "merge", "result_oid": receipt_result},
+            ),
+        )
+
+        self.assertEqual(
+            self.dependency_base(self.launch("child", work, ["parent"])),
+            {
+                "base_oid": target,
+                "branch_ref": "refs/heads/main",
+                "target_ref": "refs/heads/main",
+                "parent_ids": ["parent"],
+            },
+        )
+
+    def test_complete_revert_after_merge_receipt_holds(self) -> None:
+        remote, work, base = self.repository("receipt-reverted")
+        head = self.branch(
+            work, "task/parent", base, "parent.txt", "parent delta\n",
+        )
+        self.git(work, "switch", "main")
+        self.git(work, "checkout", "task/parent", "--", "parent.txt")
+        self.git(work, "add", "parent.txt")
+        self.git(work, "commit", "-m", "Apply parent delta")
+        receipt_result = self.git(work, "rev-parse", "HEAD")
+        self.git(work, "revert", "--no-edit", receipt_result)
+        self.git(work, "push", "origin", "main")
+        self.complete_parent(
+            "parent",
+            work,
+            self.handoff(
+                remote,
+                base,
+                "task/parent",
+                head,
+                integration_state="merged",
+                receipt={"kind": "squash", "result_oid": receipt_result},
+            ),
+        )
+
+        self.assert_rejected(
+            "child", work, "parent", "dependency_integration_ambiguous",
+        )
+
+    def test_advanced_unmerged_branch_keeps_recorded_head_base(self) -> None:
+        remote, work, base = self.repository("advanced-unmerged")
+        recorded_head = self.branch(
+            work, "task/parent", base, "parent.txt", "parent delta\n",
+        )
+        self.complete_parent(
+            "parent",
+            work,
+            self.handoff(remote, base, "task/parent", recorded_head),
+        )
+        (work / "followup.txt").write_text("unverified followup\n", encoding="utf-8")
+        self.git(work, "add", "followup.txt")
+        self.git(work, "commit", "-m", "Advance parent branch")
+        self.git(work, "push", "origin", "task/parent")
+
+        self.assertEqual(
+            self.dependency_base(self.launch("child", work, ["parent"])),
+            {
+                "base_oid": recorded_head,
+                "branch_ref": "refs/heads/task/parent",
+                "target_ref": "refs/heads/main",
+                "parent_ids": ["parent"],
+            },
+        )
+
+    def test_rebased_unmerged_branch_holds_with_actionable_verification_reason(self) -> None:
+        remote, work, base = self.repository("rebased-unmerged")
+        recorded_head = self.branch(
+            work, "task/parent", base, "parent.txt", "parent delta\n",
+        )
+        self.complete_parent(
+            "parent",
+            work,
+            self.handoff(remote, base, "task/parent", recorded_head),
+        )
+        self.git(work, "switch", "main")
+        (work / "target.txt").write_text("new target work\n", encoding="utf-8")
+        self.git(work, "add", "target.txt")
+        self.git(work, "commit", "-m", "Advance target")
+        self.git(work, "push", "origin", "main")
+        self.git(work, "switch", "task/parent")
+        self.git(work, "rebase", "main")
+        self.git(work, "push", "--force", "origin", "task/parent")
+
+        self.queue.add_task(task("child", work, depends_on=["parent"]))
+        readiness = self.queue.readiness("child", now_epoch=NOW)
+
+        self.assertFalse(readiness["ready"])
+        self.assertEqual(
+            readiness["hold_reason"], "dependency_integration_ambiguous",
+        )
+        self.assertIn("refs/heads/task/parent", readiness["reason"])
+        self.assertRegex(
+            readiness["reason"].lower(), r"\b(?:verify|verification)\b",
+        )
+        router = mock.Mock()
+        with self.assertRaises(dispatcher.DispatchError):
+            dispatcher.dispatch(
+                runtime(self.queue.path),
+                self.queue,
+                task_id="child",
+                eligibility_key="manual/child",
+                requested_provider="alpha",
+                router_call=router,
+            )
+        router.assert_not_called()
+
+    def test_changed_unmerged_branch_delta_holds_with_actionable_verification_reason(self) -> None:
+        remote, work, base = self.repository("changed-unmerged")
+        recorded_head = self.branch(
+            work, "task/parent", base, "parent.txt", "original delta\n",
+        )
+        self.complete_parent(
+            "parent",
+            work,
+            self.handoff(remote, base, "task/parent", recorded_head),
+        )
+        self.git(work, "switch", "-C", "task/parent", base)
+        (work / "parent.txt").write_text("changed delta\n", encoding="utf-8")
+        self.git(work, "add", "parent.txt")
+        self.git(work, "commit", "-m", "Replace parent delta")
+        self.git(work, "push", "--force", "origin", "task/parent")
+
+        self.queue.add_task(task("child", work, depends_on=["parent"]))
+        readiness = self.queue.readiness("child", now_epoch=NOW)
+
+        self.assertFalse(readiness["ready"])
+        self.assertEqual(
+            readiness["hold_reason"], "dependency_integration_ambiguous",
+        )
+        self.assertIn("refs/heads/task/parent", readiness["reason"])
+        self.assertRegex(
+            readiness["reason"].lower(), r"\b(?:verify|verification)\b",
+        )
+        router = mock.Mock()
+        with self.assertRaises(dispatcher.DispatchError):
+            dispatcher.dispatch(
+                runtime(self.queue.path),
+                self.queue,
+                task_id="child",
+                eligibility_key="manual/child",
+                requested_provider="alpha",
+                router_call=router,
+            )
+        router.assert_not_called()
+
+    def test_scout_skips_held_dependency_and_allocates_ready_work(self) -> None:
+        remote, work, base = self.repository("scout-held-parent")
+        recorded_head = self.branch(
+            work, "task/parent", base, "parent.txt", "verified delta\n",
+        )
+        self.complete_parent(
+            "parent", work, self.handoff(remote, base, "task/parent", recorded_head),
+        )
+        self.git(work, "switch", "-C", "task/parent", base)
+        (work / "parent.txt").write_text("replacement delta\n", encoding="utf-8")
+        self.git(work, "add", "parent.txt")
+        self.git(work, "commit", "-m", "Replace verified parent")
+        self.git(work, "push", "--force", "origin", "task/parent")
+        self.queue.add_task(task("held-child", work, depends_on=["parent"], priority=1))
+        self.queue.add_task(task("ready-child", work, priority=3))
+        snapshots = {
+            ("alpha", "alpha-account"): usage.UsageSnapshot(
+                "alpha", "alpha-account", NOW,
+                {"alpha-weekly": {"used_percent": 70, "resets_at": NOW + 1_000}},
+            ),
+        }
+
+        with mock.patch.object(scout, "read_all", return_value=snapshots):
+            tick = scout.plan_tick(
+                runtime(self.queue.path), self.queue, now_epoch=NOW, provider_holds=(),
+            )
+
+        self.assertEqual(
+            [item.id for tasks in tick.allocations.values() for item in tasks],
+            ["ready-child"],
+        )
+        self.assertEqual(tick.dependency_holds[0]["task_id"], "held-child")
+        self.assertEqual(
+            tick.dependency_holds[0]["hold_reason"], "dependency_integration_ambiguous",
         )
 
     def test_unmerged_handoff_selects_target_after_merge_and_branch_deletion(self) -> None:
@@ -868,6 +1077,159 @@ class FullLocalDependencyJourney(RepositoryHandoffCase):
             ],
             [a_head, a_head, b_head],
         )
+
+
+class HandoffReverificationCase(RepositoryHandoffCase):
+    def test_squash_receipt_survives_later_target_edit(self) -> None:
+        remote, work, initial = self.repository("squash-later")
+        head = self.branch(work, "task/parent", initial, "shared.txt", "parent\n")
+        self.git(work, "switch", "main")
+        self.git(work, "checkout", "task/parent", "--", "shared.txt")
+        self.git(work, "add", "shared.txt")
+        self.git(work, "commit", "-m", "Squash parent delta")
+        receipt_result = self.git(work, "rev-parse", "HEAD")
+        (work / "shared.txt").write_text("parent\nlater edit\n", encoding="utf-8")
+        self.git(work, "add", "shared.txt")
+        self.git(work, "commit", "-m", "Later edit")
+        self.git(work, "push", "origin", "main")
+        target = self.git(work, "rev-parse", "HEAD")
+        self.complete_parent(
+            "parent", work,
+            self.handoff(
+                remote, initial, "task/parent", head,
+                integration_state="merged",
+                receipt={"kind": "squash", "result_oid": receipt_result},
+            ),
+        )
+        self.assertEqual(
+            self.dependency_base(self.launch("child", work, ["parent"]))["base_oid"],
+            target,
+        )
+
+    def test_reverify_rebased_parent_preserves_original_and_unblocks_child(self) -> None:
+        remote, work, initial = self.repository("reverify")
+        old_head = self.branch(work, "task/parent", initial, "parent.txt", "old\n")
+        self.complete_parent(
+            "parent", work, self.handoff(remote, initial, "task/parent", old_head),
+        )
+        self.queue.add_task(task("child", work, depends_on=["parent"]))
+        source = self.queue.runs(task_id="parent")[-1]
+        self.assertEqual(
+            self.queue.handoff_revision("parent"),
+            {
+                "task_id": "parent", "from_done_rowid": source.rowid_pk,
+                "after_revision_id": None, "summary": None,
+            },
+        )
+
+        self.git(work, "switch", "-C", "task/parent", initial)
+        (work / "parent.txt").write_text("revised\n", encoding="utf-8")
+        self.git(work, "add", "parent.txt")
+        self.git(work, "commit", "-m", "revised parent")
+        new_head = self.git(work, "rev-parse", "HEAD")
+        self.git(work, "push", "-f", "origin", "HEAD:refs/heads/task/parent")
+        self.assertFalse(self.queue.readiness("child", now_epoch=NOW)["ready"])
+
+        original = source.outcome
+        revised = verified_outcome(
+            self.handoff(remote, initial, "task/parent", new_head),
+            f"git:{new_head}",
+        )
+        revision = self.queue.reverify_handoff(
+            "parent", from_done_rowid=source.rowid_pk,
+            after_revision_id=None, outcome=revised, summary="fresh parent proof",
+            now_epoch=NOW + 1,
+        )
+        self.assertEqual(revision["source_run_rowid"], source.rowid_pk)
+        self.assertEqual(
+            self.queue.handoff_revision("parent")["after_revision_id"], revision["id"],
+        )
+        self.assertEqual(self.queue.runs(task_id="parent")[-1].outcome, original)
+        self.assertEqual(
+            self.dependency_base(self.launch("grandchild", work, ["parent"]))["base_oid"],
+            new_head,
+        )
+
+    def test_reverify_requires_verified_repository_and_exact_revision_cas(self) -> None:
+        remote, work, initial = self.repository("reverify-cas")
+        head = self.branch(work, "task/parent", initial, "parent.txt", "proof\n")
+        self.complete_parent("parent", work, self.handoff(remote, initial, "task/parent", head))
+        source = self.queue.runs(task_id="parent")[-1]
+        valid = verified_outcome(
+            self.handoff(remote, initial, "task/parent", head), f"git:{head}",
+        )
+        with self.assertRaises(db.QueueError):
+            self.queue.reverify_handoff(
+                "parent", from_done_rowid=source.rowid_pk,
+                after_revision_id=None, outcome={"repository": valid["repository"]},
+                summary="missing proof",
+            )
+        with self.assertRaises(db.QueueError):
+            self.queue.reverify_handoff(
+                "parent", from_done_rowid=source.rowid_pk,
+                after_revision_id=None, outcome=verified_outcome({}, "unproven"),
+                summary="missing repository fields",
+            )
+        first = self.queue.reverify_handoff(
+            "parent", from_done_rowid=source.rowid_pk,
+            after_revision_id=None, outcome=valid, summary="first proof",
+        )
+        with self.assertRaises(db.QueueError):
+            self.queue.reverify_handoff(
+                "parent", from_done_rowid=source.rowid_pk,
+                after_revision_id=None, outcome=valid, summary="stale proof",
+            )
+        second = self.queue.reverify_handoff(
+            "parent", from_done_rowid=source.rowid_pk,
+            after_revision_id=first["id"], outcome=valid, summary="second proof",
+        )
+        self.assertGreater(second["id"], first["id"])
+
+    def test_reverify_cannot_redirect_parent_repository_identity(self) -> None:
+        remote, work, initial = self.repository("reverify-identity")
+        head = self.branch(work, "task/parent", initial, "parent.txt", "proof\n")
+        self.complete_parent("parent", work, self.handoff(remote, initial, "task/parent", head))
+        source = self.queue.runs(task_id="parent")[-1]
+        for field, replacement in (
+            ("remote", str(remote.parent / "other.git")),
+            ("target_ref", "refs/heads/task/parent"),
+            ("branch_ref", "refs/heads/main"),
+        ):
+            changed = self.handoff(remote, initial, "task/parent", head)
+            changed[field] = replacement
+            with self.subTest(field=field), self.assertRaisesRegex(
+                db.QueueError, "repository identity",
+            ):
+                self.queue.reverify_handoff(
+                    "parent", from_done_rowid=source.rowid_pk,
+                    after_revision_id=None,
+                    outcome=verified_outcome(changed, f"git:{head}"),
+                    summary="redirected proof",
+                )
+
+    def test_revision_cannot_override_a_newer_verified_done_row(self) -> None:
+        remote, work, initial = self.repository("reverify-new-done")
+        head = self.branch(work, "task/parent", initial, "parent.txt", "proof\n")
+        self.complete_parent("parent", work, self.handoff(remote, initial, "task/parent", head))
+        source = self.queue.runs(task_id="parent")[-1]
+        self.queue.reverify_handoff(
+            "parent", from_done_rowid=source.rowid_pk,
+            after_revision_id=None, outcome=verified_outcome(
+                self.handoff(remote, initial, "task/parent", head), f"git:{head}",
+            ), summary="fresh proof",
+        )
+        self.queue.add_task(task("child", work, depends_on=["parent"]))
+        with sqlite3.connect(self.queue.path) as connection:
+            connection.execute(
+                """INSERT INTO runs(task,kind,cycle,status,ts,attempt_id,outcome_json)
+                   SELECT task,kind,cycle,status,ts,attempt_id,outcome_json
+                     FROM runs WHERE rowid_pk=?""",
+                (source.rowid_pk,),
+            )
+        with self.assertRaisesRegex(db.QueueError, "older done row"):
+            self.queue.dependency_base("child")
+        with self.assertRaisesRegex(db.QueueError, "older done row"):
+            self.queue.handoff_revision("parent")
 
 
 if __name__ == "__main__":
