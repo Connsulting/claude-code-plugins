@@ -228,7 +228,10 @@ def _resolve_parent(cwd: Path, parent_id: str, repository: Mapping[str, Any]) ->
                 "merge receipt does not prove the parent delta on current target history",
             )
         selected_oid, selected_ref = target_oid, target_ref
-    elif equivalent:
+    elif equivalent or _is_ancestor(cwd, head_oid, target_oid):
+        # A later commit may touch a generated file such as the ADR index.
+        # Ancestry proves the recorded head is already on the target, so the
+        # child starts there instead of the stale unmerged branch tip.
         selected_oid, selected_ref = target_oid, target_ref
     elif integration_state == "unmerged":
         selected_oid, selected_ref = head_oid, branch_ref

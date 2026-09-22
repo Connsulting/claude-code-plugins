@@ -348,6 +348,32 @@ class RepositoryHandoffCase(unittest.TestCase):
             },
         )
 
+    def test_recorded_ancestor_selects_target_after_generated_index_changes(self) -> None:
+        remote, work, base = self.repository("generated-index")
+        head = self.branch(
+            work, "task/parent", base, "adr-index.md", "ADR 1\n",
+        )
+        self.complete_parent(
+            "parent", work, self.handoff(remote, base, "task/parent", head),
+        )
+        self.git(work, "switch", "main")
+        self.git(work, "merge", "--ff-only", "task/parent")
+        (work / "adr-index.md").write_text("ADR 1\nADR 2\n", encoding="utf-8")
+        self.git(work, "add", "adr-index.md")
+        self.git(work, "commit", "-m", "Regenerate ADR index")
+        self.git(work, "push", "origin", "main")
+        target = self.git(work, "rev-parse", "HEAD")
+
+        self.assertEqual(
+            self.dependency_base(self.launch("child", work, ["parent"])),
+            {
+                "base_oid": target,
+                "branch_ref": "refs/heads/main",
+                "target_ref": "refs/heads/main",
+                "parent_ids": ["parent"],
+            },
+        )
+
     def test_verified_merge_and_squash_resolve_target_after_source_branch_deletion(self) -> None:
         remote, work, base = self.repository("deleted-integrated-branches")
         merged_head = self.branch(
