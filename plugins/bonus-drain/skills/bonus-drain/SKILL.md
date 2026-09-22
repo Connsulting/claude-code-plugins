@@ -229,8 +229,14 @@ error. Prior attempts stay immutable.
   `completion.mechanism: artifact` with the PR URL as evidence. PR presence still does not prove
   integration for a dependency handoff. Its outcome uses reason code `done_when_verified`, `completion.verified: true`,
   one of `command`, `artifact`, `operator_receipt`, or `goal_acceptance`, and nonempty evidence.
-- `skipped`: the precondition is false or the work is already complete; include the structured
-  reason.
+- `skipped`: the work is already complete, or a genuine precondition is false. That means
+  missing authority, a prerequisite the worker cannot create, an unavailable provider or
+  required service, a frozen contract, another owner already editing the same paths, or a
+  validation gate that setup cannot remove. A dirty or wrong-branch shared checkout,
+  untracked worktree directories, occupied default ports, a shared baseline lock, or a
+  missing local dependency is setup: create an isolated worktree from the named remote
+  base, bind private ports, and install dependencies without cleaning another owner's
+  checkout. Include the structured reason.
 - `failed`: work was attempted and did not satisfy done-when; record a structured reason that
   distinguishes retryable, verification-needed, authority, permanent, and unknown-launch cases.
 - `awaiting_human`: the worker finished everything it can and the remaining step needs Brian
@@ -278,7 +284,13 @@ integration recovery under its existing gates; a failed coordinator or frozen ac
 uses its documented fresh follow-up path.
 
 If the user later says “try harder” in the same thread after this attempt recorded failed or
-skipped, continue under the original task ID and contract. When the continued work now proves
+skipped, continue under the original task ID and contract. Before more work, run the exact
+`continue-progress` command embedded in the prompt. It marks that same router job in progress
+and does not launch another worker. When the continued work finishes, record the terminal
+result with the prompt's record command, replacing only the attempt id with the `attempt_id`
+`continue-progress` printed. Do not call `recover-complete` after `continue-progress` succeeds.
+If `continue-progress` refuses, stop without changing the original attempt and do not launch a
+replacement. If `continue-progress` was not opened and the continued work already proves
 done-when, write the required evidence and run the exact stable package CLI `recover-complete`
 command already embedded in the prompt before replying. This command is separate from the
 configurable record adapter, which may not support recovery. It appends a verification attempt

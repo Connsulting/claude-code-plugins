@@ -77,6 +77,12 @@ def reconcile_inflight(
                     else "worker state is unknown; operator reconciliation required"
                 )
                 continue
+            if queue.continuation_lacks_separate_liveness(run):
+                report["reason"] = (
+                    "shared router job is already terminal; "
+                    "continuation liveness is not proven"
+                )
+                continue
             report["reason"] = f"router observed {state} execution without a terminal record"
             if dry_run:
                 report["action"] = "would_fail"

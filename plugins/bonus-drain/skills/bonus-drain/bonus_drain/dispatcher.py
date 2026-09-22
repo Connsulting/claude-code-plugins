@@ -369,6 +369,25 @@ def _outcome_contract_line() -> str:
     return "OUTCOME_SCHEMA=" + json.dumps(schema, sort_keys=True, separators=(",", ":"))
 
 
+def _continue_progress_line(
+    config: RuntimeConfig,
+    task: Task,
+    attempt_id: str,
+) -> str:
+    executable = str(Path(__file__).resolve().parents[1] / "bin" / "bonus-drain")
+    command = [
+        executable,
+        "continue-progress",
+        "--database", str(config.database),
+        "--task", task.id,
+        "--from-attempt", attempt_id,
+        "--json",
+    ]
+    if config.source_path is not None:
+        command[2:2] = ["--config", str(config.source_path)]
+    return shlex.join(command)
+
+
 def _recover_complete_line(
     config: RuntimeConfig,
     task: Task,
@@ -410,6 +429,24 @@ def _pr_policy(config: RuntimeConfig, task: Task) -> str:
         if bool(exception.get("allow_push", False)):
             return "This configured repository permits pushing the committed branch; do not open or merge a pull request."
     return "Produce a branch and committed artifact only; do not push, publish, merge, or delete unrelated files."
+
+
+# Checkout cleanliness, default ports, and local dependencies are setup the worker
+# performs. They are not skip gates. Genuine authority, prerequisite, provider,
+# contract, ownership, and validation failures still skip immediately.
+PRECONDITION_EXECUTION_RULE = (
+    "Run the precondition first. "
+    "A dirty or wrong-branch shared checkout, untracked worktree directories, "
+    "occupied default ports, a shared baseline lock, or a missing local dependency "
+    "is setup you are authorized to perform, not an unmet precondition. "
+    "Create your own clean worktree from the named remote base, bind private ports, "
+    "and install dependencies. Do not clean, reset, or reuse another owner's checkout. "
+    "Record skipped immediately only when the work is already complete, or when a "
+    "genuine precondition is false: missing authority, a missing prerequisite you "
+    "cannot create, an unavailable provider or required service, a frozen contract, "
+    "another owner already editing the same paths, or a validation gate that rejects "
+    "the change for a reason setup cannot remove."
+)
 
 
 def render_prompt(
@@ -491,14 +528,14 @@ def render_prompt(
             "--- ASYNC TASK EXECUTION CONTRACT ---",
             "Execute this authorized asynchronous task within its stated contract.",
             _pr_policy(config, task),
-            "Run the precondition first. If it is unmet, record skipped immediately.",
+            PRECONDITION_EXECUTION_RULE,
             "On bounded ambiguity, choose the reasonable default, note it, and continue without asking for input.",
         ]
     else:
         contract = [
             "--- RECURRING ASYNC JOB EXECUTION CONTRACT ---",
             "Run this vetted recurring operation with its configured mandate unchanged.",
-            "Run the precondition first. If it is unmet, record skipped immediately.",
+            PRECONDITION_EXECUTION_RULE,
             "On bounded ambiguity, choose the reasonable default, note it, and continue without asking for input.",
         ]
     contract.extend(
@@ -545,10 +582,22 @@ def render_prompt(
         contract.extend([
             (
                 "If a later user message in this same thread continues the work after this "
-                "attempt recorded failed, skipped, or awaiting_human, retain this task contract and attempt context. "
-                "When the continued work meets done-when, write verified evidence to the same "
-                "private outcome path and invoke the exact command below automatically before replying. "
-                "If it still fails, retain the original terminal evidence and bounded recovery state."
+                "attempt recorded failed, skipped, or awaiting_human, keep this task and do not "
+                "launch another worker. Before more work, run the exact continue-progress command "
+                "below. It marks this same router job in progress and does not start a dispatch. "
+                "If it refuses, stop without changing the original attempt and do not launch a replacement."
+            ),
+            f"  {_continue_progress_line(config, task, attempt.id)}",
+            (
+                "When that continued work finishes, record its terminal result with the record "
+                "command in this prompt, replacing only the attempt id with the attempt_id "
+                "continue-progress printed. Do not call recover-complete after continue-progress succeeds."
+            ),
+            (
+                "If continue-progress was not opened and the continued work already meets done-when, "
+                "write verified evidence to the same private outcome path and invoke the exact "
+                "recover-complete command below before replying. If the work still fails, retain "
+                "the original terminal evidence and bounded recovery state."
             ),
             (
                 "Terminal processing may remove the staging file. Before recover-complete, "

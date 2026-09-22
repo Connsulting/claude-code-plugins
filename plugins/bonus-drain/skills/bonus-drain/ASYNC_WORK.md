@@ -40,8 +40,13 @@ claiming, including for Run now. A newly ready child waits for a subsequent norm
 tick; completion does not launch a cascade.
 
 Use task dependencies for workflow ordering. The task's textual precondition still describes
-external checks performed by the runner. If a runner discovers its precondition is false, it
-records skipped under the existing lifecycle contract.
+external checks performed by the runner. Record skipped when that check is a genuine external
+failure: missing authority, a prerequisite the runner cannot create, an unavailable provider
+or required service, a frozen contract, another owner of the same paths, or a validation gate
+setup cannot remove. A dirty or wrong-branch shared checkout, untracked worktree directories,
+occupied default ports, a shared baseline lock, or a missing local dependency is not that
+failure. The runner creates its own clean worktree from the named remote base, binds private
+ports, and installs dependencies, and it leaves every other checkout alone.
 
 Each claimed launch receives a new immutable attempt ID. The dispatched prompt contains the exact
 terminal command and protected outcome-evidence path bound to that attempt. A new `done` event
@@ -59,15 +64,19 @@ recover-complete) continues it. Terminal
 replay is idempotent only for the same attempt, and an old attempt cannot release a newer claim.
 Failed, skipped, ambiguous, and proved-not-launched aborted attempts remain in history.
 
-If the user continues the same failed/skipped worker thread with “try harder” and the work then
-meets done-when, the worker keeps the original task ID, writes the required verified evidence, and
+If the user continues the same failed/skipped worker thread with “try harder”, the worker keeps
+the original task ID and runs the prompt's `continue-progress` command before more work. That
+marks the same router job in progress and does not launch another worker. When the continued
+work finishes, the worker records the terminal result on the attempt `continue-progress` returns.
+It does not call `recover-complete` after that command succeeds. If `continue-progress` was not
+opened and the work then meets done-when, the worker writes the required verified evidence and
 runs the exact stable package CLI `recover-complete` command already embedded in its prompt before
 replying. That command is separate from the configurable terminal-record adapter, which may not
 support recovery. It appends a verification attempt without a new claim or router launch and works
 even when no recovery projection has been scheduled; when one exists, it consumes only the exact
-matching projection. It refuses changed contracts, ambiguous ownership, or an already queued or
-active successor; the worker then keeps its evidence for that successor instead of recording over
-it.
+matching projection. It refuses changed contracts, ambiguous ownership, a held recovery, or an
+already queued or active successor; the worker then keeps its evidence for that successor instead
+of recording over it. A refusal does not authorize a second dispatch.
 
 Repository-producing completion includes the exact remote, target ref, prior target base, branch,
 and head. A child starts from the current exact target only when ancestry and content prove the
