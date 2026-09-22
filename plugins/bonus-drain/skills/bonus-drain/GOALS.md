@@ -210,9 +210,10 @@ perform Git or GitHub operations. An unresolved operation blocks goal completion
 
 Repository handoff also binds the exact canonical remote, target ref, prior target base, branch,
 and parent head. A PR or receipt does not by itself prove completion or integration. A normal
-merge must be present in the current exact target by result ancestry and parent-delta content;
-a squash merge requires the same content equivalence because the parent head may not be an
-ancestor. Until then, an explicitly unmerged parent supplies its verified head. One compatible
+merge requires the parent head to be an ancestor of the recorded result, which must remain on the
+current exact target. A squash requires parent delta equivalence at the recorded result. A full
+revert holds the child. An explicitly unmerged parent supplies only its recorded verified head,
+even if the branch advances. A replaced head needs fresh verified evidence. One compatible
 descendant may contain all parent heads; divergent heads require an explicitly authorized
 integration member and, where applicable, its immutable operation receipt. The runtime does not
 merge branches or expand the stored authority.

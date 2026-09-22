@@ -214,10 +214,29 @@ def _resolve_parent(cwd: Path, parent_id: str, repository: Mapping[str, Any]) ->
             raise _fail("dependency_integration_ambiguous", "merge receipt kind is unsupported")
         result_oid = _safe_oid(receipt.get("result_oid"), "merge_receipt.result_oid")
         _require_commit(cwd, result_oid)
-        if not _is_ancestor(cwd, result_oid, target_oid) or not equivalent:
+        if not _is_ancestor(cwd, result_oid, target_oid):
             raise _fail(
                 "dependency_integration_ambiguous",
-                "merge receipt does not prove the parent delta on current target history",
+                "merge receipt result is not on current target history",
+            )
+        kind = receipt["kind"]
+        if kind == "merge":
+            integrated = _is_ancestor(cwd, head_oid, result_oid)
+        else:
+            integrated = _delta_equivalent(cwd, target_base_oid, head_oid, result_oid)
+        if not integrated:
+            raise _fail(
+                "dependency_integration_ambiguous",
+                "merge receipt result does not contain the verified parent delta",
+            )
+        changed_paths = _changed_paths(cwd, target_base_oid, head_oid)
+        if changed_paths and all(
+            _tree_entry(cwd, target_base_oid, path) == _tree_entry(cwd, target_oid, path)
+            for path in changed_paths
+        ):
+            raise _fail(
+                "dependency_integration_ambiguous",
+                "the verified parent delta was fully reverted on current target history",
             )
         selected_oid, selected_ref = target_oid, target_ref
     elif equivalent or _is_ancestor(cwd, head_oid, target_oid):
@@ -230,10 +249,12 @@ def _resolve_parent(cwd: Path, parent_id: str, repository: Mapping[str, Any]) ->
         # parent's branch is routinely deleted, so it is checked only here.
         branch_oid = _remote_ref_oid(cwd, remote_name, branch_ref)
         _require_commit(cwd, branch_oid)
-        if branch_oid != head_oid:
+        if not _is_ancestor(cwd, head_oid, branch_oid):
             raise _fail(
                 "dependency_integration_ambiguous",
-                "the completed parent head does not match its exact branch ref",
+                f"parent {parent_id} recorded head {head_oid}, but {branch_ref} points to "
+                f"{branch_oid} without that commit; verify a new completion or integrate "
+                "the recorded head",
             )
         selected_oid, selected_ref = head_oid, branch_ref
     else:

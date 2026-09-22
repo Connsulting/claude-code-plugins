@@ -129,6 +129,18 @@ CREATE TABLE IF NOT EXISTS task_recovery (
   CHECK ((state='consumed') = (consumed_by_attempt_id IS NOT NULL))
 );
 
+CREATE TABLE IF NOT EXISTS handoff_revisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT NOT NULL REFERENCES tasks(id),
+  source_run_rowid INTEGER NOT NULL REFERENCES runs(rowid_pk),
+  prior_revision_id INTEGER REFERENCES handoff_revisions(id),
+  outcome_json TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_handoff_revisions_task
+  ON handoff_revisions(task_id, id);
+
 CREATE INDEX IF NOT EXISTS idx_attempts_task_ordinal ON task_attempts(task_id, ordinal);
 
 CREATE TABLE IF NOT EXISTS usage_history (

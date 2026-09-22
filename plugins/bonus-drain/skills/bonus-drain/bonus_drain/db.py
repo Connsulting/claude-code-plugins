@@ -417,7 +417,7 @@ class RecoveryDecision:
 class _DependencySnapshot:
     task_id: str
     contract_hash: str
-    evidence: tuple[tuple[str, int, str | None, str | None], ...]
+    evidence: tuple[tuple[str, int, str | None, str | None, int | None, str | None], ...]
     base: dict[str, Any] | None
 
 
@@ -681,6 +681,17 @@ class QueueDB:
               CHECK ((after_attempt_id IS NULL) != (after_legacy_run_rowid IS NULL)),
               CHECK ((state='consumed') = (consumed_by_attempt_id IS NOT NULL))
             );
+            CREATE TABLE IF NOT EXISTS handoff_revisions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_id TEXT NOT NULL REFERENCES tasks(id),
+              source_run_rowid INTEGER NOT NULL REFERENCES runs(rowid_pk),
+              prior_revision_id INTEGER REFERENCES handoff_revisions(id),
+              outcome_json TEXT NOT NULL,
+              summary TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_handoff_revisions_task
+              ON handoff_revisions(task_id, id);
             CREATE INDEX IF NOT EXISTS idx_attempts_task_ordinal
               ON task_attempts(task_id, ordinal);
             CREATE INDEX IF NOT EXISTS idx_runs_task_attempt ON runs(task, attempt_id);
@@ -868,6 +879,26 @@ class QueueDB:
         ).fetchone()
 
     @staticmethod
+    def _handoff_revision_row(
+        connection: sqlite3.Connection, task_id: str,
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            "SELECT * FROM handoff_revisions WHERE task_id=? ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+
+    @staticmethod
+    def _current_handoff_revision(
+        connection: sqlite3.Connection, task_id: str, done_rowid: int,
+    ) -> sqlite3.Row | None:
+        revision = QueueDB._handoff_revision_row(connection, task_id)
+        if revision is not None and revision["source_run_rowid"] != done_rowid:
+            raise QueueError(
+                "dependency_integration_ambiguous: handoff revision belongs to an older done row"
+            )
+        return revision
+
+    @staticmethod
     def _latest_effective_attempt(
         connection: sqlite3.Connection, task_id: str,
     ) -> sqlite3.Row | None:
@@ -947,7 +978,12 @@ class QueueDB:
             done = QueueDB._verified_done_row(connection, dependency)
             if done is None or not done["outcome_json"]:
                 continue
-            outcome = json.loads(done["outcome_json"])
+            revision = QueueDB._current_handoff_revision(
+                connection, dependency, int(done["rowid_pk"]),
+            )
+            outcome = json.loads(
+                revision["outcome_json"] if revision is not None else done["outcome_json"]
+            )
             if isinstance(outcome, dict) and isinstance(outcome.get("repository"), dict):
                 result.append((dependency, outcome))
         return result
@@ -955,8 +991,8 @@ class QueueDB:
     @staticmethod
     def _dependency_evidence(
         connection: sqlite3.Connection, task: Task,
-    ) -> tuple[tuple[str, int, str | None, str | None], ...]:
-        evidence: list[tuple[str, int, str | None, str | None]] = []
+    ) -> tuple[tuple[str, int, str | None, str | None, int | None, str | None], ...]:
+        evidence: list[tuple[str, int, str | None, str | None, int | None, str | None]] = []
         for dependency in task.depends_on:
             parent = connection.execute(
                 "SELECT kind FROM tasks WHERE id=?", (dependency,),
@@ -966,11 +1002,16 @@ class QueueDB:
                 raise QueueError(
                     "dependencies_unsatisfied: prerequisite completion is not verified"
                 )
+            revision = QueueDB._current_handoff_revision(
+                connection, dependency, int(done["rowid_pk"]),
+            )
             evidence.append((
                 dependency,
                 int(done["rowid_pk"]),
                 done["attempt_id"],
                 done["outcome_json"],
+                int(revision["id"]) if revision is not None else None,
+                revision["outcome_json"] if revision is not None else None,
             ))
         return tuple(evidence)
 
@@ -2941,6 +2982,110 @@ class QueueDB:
         if replay["outcome_json"] == canonical and run["summary"] == summary:
             return self._run_from_row(run)
         raise QueueError("source was already completed with conflicting evidence")
+
+    def reverify_handoff(
+        self,
+        task_id: str,
+        *,
+        from_done_rowid: int,
+        after_revision_id: int | None,
+        outcome: Mapping[str, Any],
+        summary: str,
+        now_epoch: float | None = None,
+    ) -> dict[str, Any]:
+        """Append fresh operator proof for one completed parent's Git handoff.
+
+        The original terminal run and attempt remain immutable. The caller must
+        identify both that run and the revision it observed before writing.
+        """
+
+        _require_task_id(task_id)
+        if not isinstance(from_done_rowid, int) or from_done_rowid <= 0:
+            raise QueueError("an exact positive done row id is required")
+        if after_revision_id is not None and (
+            not isinstance(after_revision_id, int) or after_revision_id <= 0
+        ):
+            raise QueueError("the prior revision id must be positive or none")
+        bounded_summary = _bounded_text(summary, "summary")
+        verified = validate_outcome("done", outcome, require_structured_reason=True)
+        assert verified is not None
+        if not isinstance(verified.get("repository"), Mapping):
+            raise QueueError("handoff reverification requires repository evidence")
+        canonical = _canonical_json(verified)
+        self.initialize()
+        with self._connect() as connection:
+            task_row = connection.execute(
+                "SELECT * FROM tasks WHERE id=?", (task_id,),
+            ).fetchone()
+            if task_row is None or task_row["kind"] != "oneoff":
+                raise QueueError("handoff reverification requires a one-off task")
+            done = self._verified_done_row(connection, task_id)
+            if done is None or done["rowid_pk"] != from_done_rowid:
+                raise QueueError("the exact verified done row is unavailable or changed")
+            try:
+                original = json.loads(done["outcome_json"] or "null")
+                validate_outcome("done", original, require_structured_reason=True)
+            except (ValueError, QueueError) as exc:
+                raise QueueError("source done row lacks structured verified completion") from exc
+            original_repository = original.get("repository")
+            if not isinstance(original_repository, Mapping):
+                raise QueueError("source done row lacks repository identity")
+            revised_repository = verified["repository"]
+            if any(
+                original_repository.get(field) != revised_repository.get(field)
+                for field in ("remote", "target_ref", "branch_ref")
+            ):
+                raise QueueError("handoff reverification cannot change repository identity")
+            task = self._task_from_row(task_row)
+        base = self._resolve_dependency_outcomes(task, [(task_id, verified)])
+        if base is None:
+            raise QueueError("repository handoff could not be verified")
+        now = float(time.time() if now_epoch is None else now_epoch)
+        stamp = datetime.fromtimestamp(now, timezone.utc).replace(
+            microsecond=0,
+        ).isoformat().replace("+00:00", "Z")
+        with self._transaction() as connection:
+            current = self._verified_done_row(connection, task_id)
+            if current is None or current["rowid_pk"] != from_done_rowid:
+                raise QueueError("source done row changed during reverification")
+            revision = self._handoff_revision_row(connection, task_id)
+            current_revision_id = int(revision["id"]) if revision is not None else None
+            if current_revision_id != after_revision_id:
+                raise QueueError("handoff revision changed during reverification")
+            cursor = connection.execute(
+                """INSERT INTO handoff_revisions(
+                     task_id,source_run_rowid,prior_revision_id,outcome_json,summary,created_at
+                   ) VALUES(?,?,?,?,?,?)""",
+                (task_id, from_done_rowid, after_revision_id, canonical, bounded_summary, stamp),
+            )
+            return {
+                "id": int(cursor.lastrowid),
+                "task_id": task_id,
+                "source_run_rowid": from_done_rowid,
+                "prior_revision_id": after_revision_id,
+                "outcome": verified,
+                "summary": bounded_summary,
+                "created_at": stamp,
+            }
+
+    def handoff_revision(self, task_id: str) -> dict[str, Any]:
+        """Return the exact completion and revision identifiers for operator CAS."""
+
+        _require_task_id(task_id)
+        self.initialize()
+        with self._connect() as connection:
+            done = self._verified_done_row(connection, task_id)
+            if done is None:
+                raise QueueError("task has no verified done row")
+            revision = self._handoff_revision_row(connection, task_id)
+            if revision is not None and revision["source_run_rowid"] != done["rowid_pk"]:
+                raise QueueError("handoff revision belongs to an older done row")
+            return {
+                "task_id": task_id,
+                "from_done_rowid": int(done["rowid_pk"]),
+                "after_revision_id": int(revision["id"]) if revision is not None else None,
+                "summary": revision["summary"] if revision is not None else None,
+            }
 
     def recover_complete(
         self,

@@ -65,6 +65,7 @@ class TickPlan:
     snapshots: Mapping[Any, Any]
     plan: PlanResult
     allocations: Mapping[tuple[str, str], tuple[Any, ...]]
+    dependency_holds: tuple[dict[str, Any], ...] = ()
 
 
 class _InitializedQueueReader(QueueDB):
@@ -300,13 +301,34 @@ def plan_tick(
     reader = _initialized_queue_reader(queue)
     snapshots = read_all(config, cache_root, now_epoch=now)
     anchor = _cycle_anchor(config, snapshots, now)
+    dependency_checks: dict[str, bool] = {}
+    dependency_holds: dict[str, dict[str, Any]] = {}
+
+    def dependency_ready(task: Any) -> bool:
+        if not task.depends_on:
+            return True
+        if task.id not in dependency_checks:
+            readiness = queue.readiness(task.id, now_epoch=now)
+            ready = readiness["ready"]
+            dependency_checks[task.id] = ready
+            if not ready:
+                dependency_holds[task.id] = {
+                    "kind": "dependency_not_ready",
+                    "task_id": task.id,
+                    "reason": readiness["reason"],
+                    "hold_reason": readiness["hold_reason"],
+                }
+        return dependency_checks[task.id]
+
     availability: dict[tuple[str, str], int] = {}
     for account in config.accounts:
         provider = config.provider(account.provider_id)
-        availability[(account.provider_id, account.id)] = reader.count_eligible(
-            anchor,
-            provider_id=provider.id,
-            capabilities=provider.capabilities, automatic=True, now_epoch=now,
+        availability[(account.provider_id, account.id)] = sum(
+            dependency_ready(task) for task in reader.eligible_tasks(
+                anchor,
+                provider_id=provider.id,
+                capabilities=provider.capabilities, automatic=True, now_epoch=now,
+            )
         )
     plan = build_plan(config, snapshots, eligible_count=availability, now_epoch=now)
     active_account_ids, identity_failures = resolve_active_accounts(config, reader)
@@ -343,6 +365,7 @@ def plan_tick(
             provider_id=provider.id,
             capabilities=provider.capabilities, automatic=True, now_epoch=now,
         ))
+        candidates = [task for task in candidates if dependency_ready(task)]
         batch_slots: list[int] = []
         for _index in range(batch.batch_size):
             slot = len(slots)
@@ -426,7 +449,10 @@ def plan_tick(
         tuple(adjusted_gates),
         plan.generated_at,
     )
-    return TickPlan(anchor, snapshots, adjusted_plan, allocations)
+    return TickPlan(
+        anchor, snapshots, adjusted_plan, allocations,
+        tuple(dependency_holds.values()),
+    )
 
 
 def run_once(
@@ -486,7 +512,7 @@ def run_once(
 
     unavailable = [item for item in router_preflight if not item["available"]]
     if unavailable:
-        blockers = lifecycle_blockers + tuple({
+        blockers = lifecycle_blockers + tick.dependency_holds + tuple({
             "kind": "router_unavailable",
             "adapter_id": item["adapter_id"],
             "executable": item["executable"],
@@ -535,6 +561,7 @@ def run_once(
 
     return ScoutReport(
         now, dry_run, plan, tuple(dispatched), tuple(previews),
-        lifecycle_errors + tuple(errors), lifecycle_blockers, router_preflight,
+        lifecycle_errors + tuple(errors), lifecycle_blockers + tick.dependency_holds,
+        router_preflight,
         reconciliation, goal_updates, recoveries,
     )
