@@ -314,6 +314,15 @@ def _command(args: argparse.Namespace) -> int:
             f"recorded recovered completion: {args.task}"
         )
         return 0
+    if command == "continue-progress":
+        _cfg, queue = _terminal_queue(args)
+        result = queue.open_same_thread_continuation(
+            args.task, expected_attempt_id=args.from_attempt,
+        )
+        _json(result) if args.json else print(
+            f"continuation in progress: {args.task} {result['attempt_id']}"
+        )
+        return 0
     if command == "inflight":
         _cfg, queue = _queue(args)
         provider = args.provider
@@ -789,6 +798,10 @@ def build_parser() -> argparse.ArgumentParser:
     source.add_argument("--from-legacy-run-rowid", type=int)
     recovered.add_argument("--outcome-file", required=True)
     recovered.add_argument("--summary", required=True)
+
+    continued = sub.add_parser("continue-progress"); _add_common(continued); _add_json(continued)
+    continued.add_argument("--task", required=True)
+    continued.add_argument("--from-attempt", required=True)
 
     inflight = sub.add_parser("inflight"); _add_common(inflight); _add_json(inflight)
     inflight.add_argument("--provider"); inflight.add_argument("--claude", action="store_true"); inflight.add_argument("--codex", action="store_true"); inflight.add_argument("--now", type=int)

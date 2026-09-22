@@ -2270,14 +2270,14 @@ class QueueDB:
                     )
                     if deleted.rowcount != 1:
                         raise QueueError("attempt terminal record lost its claim CAS")
-                    if attempt["mode"] != "normal":
+                    if attempt["mode"] != "normal" or attempt["origin"] == "continuation":
                         recovered = connection.execute(
                             """DELETE FROM task_recovery
                                  WHERE task_id=? AND state='consumed'
                                    AND consumed_by_attempt_id=?""",
                             (task_id, attempt_id),
                         )
-                        if recovered.rowcount != 1:
+                        if attempt["mode"] != "normal" and recovered.rowcount != 1:
                             raise QueueError(
                                 "recovery terminal record lost its projection CAS"
                             )
@@ -2446,6 +2446,31 @@ class QueueDB:
                 "reason": recovery["detail"] or recovery["reason_code"].replace("_", " ").capitalize(),
             }
         return {"allowed": True, "reason": "Operator retry is available"}
+
+    def continuation_lacks_separate_liveness(self, run: RunEvent) -> bool:
+        """True when this continuation only reuses an already terminal router job.
+
+        The router's completed or failed state can be the original attempt's end.
+        That is not proof the continuation died, so reconciliation must hold it.
+        """
+
+        if run.trigger != "continuation" or not run.router_job_id or run.attempt_id is None:
+            return False
+        events = self.runs(task_id=run.task)
+        prior_attempt_ids = {
+            event.attempt_id
+            for event in events
+            if event.attempt_id
+            and event.attempt_id != run.attempt_id
+            and event.router_job_id == run.router_job_id
+            and event.rowid_pk < run.rowid_pk
+        }
+        if not prior_attempt_ids:
+            return False
+        return any(
+            event.attempt_id in prior_attempt_ids and event.status in TERMINAL_STATUSES
+            for event in events
+        )
 
     def runs(self, *, limit: int | None = None, task_id: str | None = None) -> list[RunEvent]:
         self.initialize()
@@ -3058,6 +3083,221 @@ class QueueDB:
             ).fetchone()
             assert row is not None
             return self._run_from_row(row)
+
+    def open_same_thread_continuation(
+        self,
+        task_id: str,
+        *,
+        expected_attempt_id: str,
+        now_epoch: float | None = None,
+    ) -> dict[str, Any]:
+        """Show same-thread resumed work as running without a second router launch.
+
+        The original terminal attempt stays immutable. A new continuation attempt
+        reuses that attempt's router job, so scout and reconciliation see the same
+        worker. A held or exhausted recovery is refused. A scheduled recovery for
+        this same source is consumed so it cannot launch a second worker later.
+        """
+
+        from .goals import recovery_admission
+
+        _require_task_id(task_id)
+        if not expected_attempt_id:
+            raise QueueError("exactly one continuation source attempt is required")
+        now = float(time.time() if now_epoch is None else now_epoch)
+        stamp = datetime.fromtimestamp(now, timezone.utc).replace(
+            microsecond=0,
+        ).isoformat().replace("+00:00", "Z")
+        detail = f"continuation-of:{expected_attempt_id}"
+        self.initialize()
+
+        def payload(
+            owner: sqlite3.Row,
+            run: sqlite3.Row,
+            *,
+            idempotent: bool,
+        ) -> dict[str, Any]:
+            return {
+                "attempt_id": owner["id"],
+                "source_attempt_id": expected_attempt_id,
+                "router_job_id": run["router_job_id"],
+                "eligibility_key": run["eligibility_key"],
+                "provider_id": run["provider_id"],
+                "account_id": run["account_id"],
+                "idempotent": idempotent,
+            }
+
+        with self._transaction() as connection:
+            task_row = connection.execute(
+                "SELECT * FROM tasks WHERE id=?", (task_id,),
+            ).fetchone()
+            if task_row is None:
+                raise QueueError(f"unknown task: {task_id}")
+            task = self._task_from_row(task_row)
+            if task.kind != "oneoff":
+                raise QueueError("only one-off work can continue in the same thread")
+            source = connection.execute(
+                "SELECT * FROM task_attempts WHERE id=? AND task_id=?",
+                (expected_attempt_id, task_id),
+            ).fetchone()
+            if source is None:
+                raise QueueError(
+                    f"continuation source attempt is stale: {expected_attempt_id}"
+                )
+            claim = connection.execute(
+                "SELECT * FROM dispatch_claims WHERE task_id=?", (task_id,),
+            ).fetchone()
+            if claim is not None:
+                owner = connection.execute(
+                    "SELECT * FROM task_attempts WHERE id=? AND task_id=?",
+                    (claim["attempt_id"], task_id),
+                ).fetchone()
+                run = None
+                if owner is not None:
+                    run = connection.execute(
+                        """SELECT * FROM runs
+                             WHERE task=? AND attempt_id=? AND status='dispatched'
+                             ORDER BY rowid_pk DESC LIMIT 1""",
+                        (task_id, owner["id"]),
+                    ).fetchone()
+                if (
+                    owner is not None
+                    and run is not None
+                    and owner["origin"] == "continuation"
+                    and owner["mode"] == "normal"
+                    and owner["state"] in {"claimed", "dispatched"}
+                    and owner["recovery_of"] is None
+                    and claim["detail"] == detail
+                    and run["router_job_id"]
+                ):
+                    return payload(owner, run, idempotent=True)
+                successor = claim["attempt_id"] or "unknown"
+                raise QueueError(f"successor attempt {successor} owns the task")
+            if connection.execute(
+                "SELECT 1 FROM activation_leases WHERE task_id=?", (task_id,),
+            ).fetchone():
+                raise QueueError("successor attempt unknown owns the task")
+            latest = self._latest_effective_attempt(connection, task_id)
+            if latest is None or latest["id"] != expected_attempt_id:
+                successor = latest["id"] if latest is not None else "none"
+                raise QueueError(
+                    f"continuation source is stale; latest successor is {successor}"
+                )
+            if source["state"] not in OPERATOR_RECOVERY_SOURCES:
+                raise QueueError(
+                    "continuation source is "
+                    f"{source['state']}, not failed, skipped, or awaiting_human"
+                )
+            # Authority and unknown-launch holds apply even when scout has not
+            # written a recovery row yet. Standalone tasks never get that row.
+            # awaiting_human stays continuable: Brian is doing the parked step.
+            if (
+                source["state"] != "awaiting_human"
+                and source["reason_code"] in {
+                    "authority_required", "permanent", "unknown_launch",
+                }
+            ):
+                raise QueueError(
+                    f"recovery is held or changed: {source['reason_code']}"
+                )
+            contract_hash = _contract_hash(task)
+            if source["contract_hash"] != contract_hash:
+                raise QueueError("source contract changed; continuation refused")
+            admitted, admission_reason = recovery_admission(
+                connection, task_id, now_epoch=now,
+            )
+            if not admitted:
+                raise QueueError(admission_reason)
+            recovery = connection.execute(
+                "SELECT * FROM task_recovery WHERE task_id=?", (task_id,),
+            ).fetchone()
+            consume_recovery = False
+            if recovery is not None:
+                if recovery["state"] in {"held", "exhausted"}:
+                    raise QueueError(
+                        f"recovery is held or changed: {recovery['reason_code']}"
+                    )
+                if (
+                    recovery["state"] not in {"scheduled", "backoff"}
+                    or recovery["after_attempt_id"] != expected_attempt_id
+                    or recovery["after_legacy_run_rowid"] is not None
+                    or recovery["contract_hash"] != contract_hash
+                    or recovery["consumed_by_attempt_id"] is not None
+                ):
+                    raise QueueError(
+                        f"recovery is held or changed: {recovery['state']}"
+                    )
+                consume_recovery = True
+            source_run = connection.execute(
+                """SELECT * FROM runs
+                     WHERE task=? AND attempt_id=? AND router_job_id IS NOT NULL
+                       AND provider_id IS NOT NULL AND eligibility_key IS NOT NULL
+                     ORDER BY rowid_pk DESC LIMIT 1""",
+                (task_id, expected_attempt_id),
+            ).fetchone()
+            if source_run is None:
+                raise QueueError(
+                    "same-thread continuation requires the original router job"
+                )
+            ordinal = int(connection.execute(
+                "SELECT COALESCE(MAX(ordinal),0)+1 FROM task_attempts WHERE task_id=?",
+                (task_id,),
+            ).fetchone()[0])
+            attempt_id = uuid.uuid4().hex
+            connection.execute(
+                """INSERT INTO task_attempts(
+                     id,task_id,ordinal,eligibility_key,mode,origin,state,recovery_of,
+                     recovery_of_legacy_run_rowid,contract_hash,created_at
+                   ) VALUES(?,?,?,?,'normal','continuation','dispatched',NULL,NULL,?,?)""",
+                (
+                    attempt_id, task_id, ordinal, source_run["eligibility_key"],
+                    contract_hash, stamp,
+                ),
+            )
+            if consume_recovery:
+                updated = connection.execute(
+                    """UPDATE task_recovery
+                         SET state='consumed', consumed_by_attempt_id=?, updated_at=?
+                         WHERE task_id=? AND state IN ('scheduled','backoff')
+                           AND after_attempt_id=? AND after_legacy_run_rowid IS NULL
+                           AND contract_hash=? AND consumed_by_attempt_id IS NULL""",
+                    (attempt_id, stamp, task_id, expected_attempt_id, contract_hash),
+                )
+                if updated.rowcount != 1:
+                    raise QueueError("continuation lost the recovery projection CAS")
+            connection.execute(
+                """INSERT INTO dispatch_claims(
+                     task_id,eligibility_key,provider_id,account_id,state,claimed_at,detail,attempt_id
+                   ) VALUES(?,?,?,?, 'claimed', ?, ?, ?)""",
+                (
+                    task_id, source_run["eligibility_key"], source_run["provider_id"],
+                    source_run["account_id"], stamp, detail, attempt_id,
+                ),
+            )
+            connection.execute(
+                """INSERT INTO runs(
+                     task,kind,cycle,eligibility_key,status,ts,received_at,branch,summary,engine,
+                     provider_id,account_id,router_job_id,trigger,attempt_id,outcome_json
+                   ) VALUES(?,?,?,?,'dispatched',?,?,NULL,?,?,?,?,?,'continuation',?,NULL)""",
+                (
+                    task_id, task.kind, int(source_run["cycle"]),
+                    source_run["eligibility_key"], stamp, stamp,
+                    "same-thread continuation",
+                    source_run["engine"] or source_run["provider_id"],
+                    source_run["provider_id"], source_run["account_id"],
+                    source_run["router_job_id"], attempt_id,
+                ),
+            )
+            owner = connection.execute(
+                "SELECT * FROM task_attempts WHERE id=?", (attempt_id,),
+            ).fetchone()
+            run = connection.execute(
+                """SELECT * FROM runs WHERE attempt_id=? AND status='dispatched'
+                     ORDER BY rowid_pk DESC LIMIT 1""",
+                (attempt_id,),
+            ).fetchone()
+            assert owner is not None and run is not None
+            return payload(owner, run, idempotent=False)
 
     def requeue(
         self,

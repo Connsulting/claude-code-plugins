@@ -180,13 +180,17 @@ replacement with the correct immutable candidate through `goal advance`. A skipp
 verifier cannot supply a passing observation. The goal never silently rewrites a
 dependency or treats obsolete verification as successful.
 
-If a user continues the same failed implementation or integration thread and it later proves
-done-when, the worker uses the exact stable package CLI `recover-complete` command embedded in its
-original prompt, not the configurable terminal-record adapter. GoalStore must admit the completion
-against the unchanged contract and exact failed attempt. The command retains the task ID, appends
+If a user continues the same failed implementation or integration thread, the worker first runs
+the prompt's `continue-progress` command. That shows the same router job as running and does not
+launch another worker. GoalStore must admit it against the unchanged contract and exact failed
+attempt. When the continued work finishes, the worker records the terminal result on the attempt
+that command returns. If `continue-progress` was not opened and the work later proves done-when,
+the worker uses the exact stable package CLI `recover-complete` command embedded in its original
+prompt, not the configurable terminal-record adapter. That command retains the task ID, appends
 verified evidence without a new router launch or claim, and works without a scheduled recovery
-projection; it atomically consumes one when present. It refuses an active or queued successor. It
-refuses coordinator and acceptance completion; use the fresh-turn and fresh-verifier flows above.
+projection; it atomically consumes one when present. Either command refuses an active or queued
+successor and a held recovery. Both refuse coordinator and acceptance completion; use the
+fresh-turn and fresh-verifier flows above. A refusal does not authorize a second dispatch.
 
 ## External operations and recovery
 
