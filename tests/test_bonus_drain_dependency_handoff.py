@@ -374,6 +374,28 @@ class RepositoryHandoffCase(unittest.TestCase):
             },
         )
 
+    def test_unmerged_handoff_selects_target_after_merge_and_branch_deletion(self) -> None:
+        remote, work, base = self.repository("unmerged-then-merged")
+        head = self.branch(work, "task/parent", base, "parent.txt", "parent\n")
+        self.complete_parent(
+            "parent", work, self.handoff(remote, base, "task/parent", head),
+        )
+        self.git(work, "switch", "main")
+        self.git(work, "merge", "--no-ff", "-m", "Merge parent", "task/parent")
+        self.git(work, "push", "origin", "main")
+        self.git(work, "push", "origin", "--delete", "task/parent")
+        target = self.git(work, "rev-parse", "HEAD")
+
+        self.assertEqual(
+            self.dependency_base(self.launch("child", work, ["parent"])),
+            {
+                "base_oid": target,
+                "branch_ref": "refs/heads/main",
+                "target_ref": "refs/heads/main",
+                "parent_ids": ["parent"],
+            },
+        )
+
     def test_verified_merge_and_squash_resolve_target_after_source_branch_deletion(self) -> None:
         remote, work, base = self.repository("deleted-integrated-branches")
         merged_head = self.branch(

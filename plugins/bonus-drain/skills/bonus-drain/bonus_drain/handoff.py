@@ -199,14 +199,6 @@ def _resolve_parent(cwd: Path, parent_id: str, repository: Mapping[str, Any]) ->
     target_oid = _remote_ref_oid(cwd, remote_name, target_ref)
     for oid in (target_base_oid, head_oid, target_oid):
         _require_commit(cwd, oid)
-    if integration_state == "unmerged":
-        branch_oid = _remote_ref_oid(cwd, remote_name, branch_ref)
-        _require_commit(cwd, branch_oid)
-        if branch_oid != head_oid:
-            raise _fail(
-                "dependency_integration_ambiguous",
-                "the completed parent head does not match its exact branch ref",
-            )
     if not _is_ancestor(cwd, target_base_oid, head_oid):
         raise _fail(
             "dependency_integration_ambiguous",
@@ -234,6 +226,15 @@ def _resolve_parent(cwd: Path, parent_id: str, repository: Mapping[str, Any]) ->
         # child starts there instead of the stale unmerged branch tip.
         selected_oid, selected_ref = target_oid, target_ref
     elif integration_state == "unmerged":
+        # Only a head that is not yet on the target needs its branch. A merged
+        # parent's branch is routinely deleted, so it is checked only here.
+        branch_oid = _remote_ref_oid(cwd, remote_name, branch_ref)
+        _require_commit(cwd, branch_oid)
+        if branch_oid != head_oid:
+            raise _fail(
+                "dependency_integration_ambiguous",
+                "the completed parent head does not match its exact branch ref",
+            )
         selected_oid, selected_ref = head_oid, branch_ref
     else:
         raise _fail(
