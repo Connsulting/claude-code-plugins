@@ -348,6 +348,33 @@ class RepositoryHandoffCase(unittest.TestCase):
             },
         )
 
+    def test_mixed_github_transports_select_one_verified_parent_head(self) -> None:
+        _remote, work, base = self.repository("github-transports")
+        first = self.branch(work, "task/first", base, "first.txt", "first\n")
+        second = self.branch(work, "task/second", first, "second.txt", "second\n")
+        ssh = "git@github.com:curie-eng/curie.git"
+        https = "https://github.com/curie-eng/curie.git"
+        self.git(work, "remote", "set-url", "origin", ssh)
+        self.complete_parent("first", work, self.handoff(Path(ssh), base, "task/first", first))
+        second_handoff = self.handoff(Path(ssh), base, "task/second", second)
+        second_handoff["remote"] = https
+        self.complete_parent("second", work, second_handoff)
+        self.queue.add_task(task("child", work, depends_on=["first", "second"]))
+        refs = {
+            "refs/heads/main": base,
+            "refs/heads/task/first": first,
+            "refs/heads/task/second": second,
+        }
+        with mock.patch.object(handoff, "_remote_ref_oid", side_effect=lambda _cwd, _remote, ref: refs[ref]):
+            readiness = self.queue.readiness("child", now_epoch=NOW)
+            self.assertTrue(readiness["ready"], readiness)
+            self.assertEqual(readiness["dependency_base"], {
+                "base_oid": second,
+                "branch_ref": "refs/heads/task/second",
+                "target_ref": "refs/heads/main",
+                "parent_ids": ["first", "second"],
+            })
+
     def test_recorded_ancestor_selects_target_after_generated_index_changes(self) -> None:
         remote, work, base = self.repository("generated-index")
         head = self.branch(
@@ -1230,6 +1257,44 @@ class HandoffReverificationCase(RepositoryHandoffCase):
             self.queue.dependency_base("child")
         with self.assertRaisesRegex(db.QueueError, "older done row"):
             self.queue.handoff_revision("parent")
+
+
+class GitHubRemoteIdentityCase(unittest.TestCase):
+    def test_transport_forms_match_only_the_same_repository(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            subprocess.run(["git", "init", str(work)], check=True, capture_output=True)
+            subprocess.run(
+                ["git", "remote", "add", "origin", "git@github.com:curie-eng/curie.git"],
+                cwd=work, check=True, capture_output=True,
+            )
+            self.assertEqual(
+                handoff._remote_name(work, "https://github.com/curie-eng/curie.git")[0],
+                "origin",
+            )
+            for claimed in (
+                "https://github.com/curie-eng/other.git",
+                "https://other.example.com/curie-eng/curie.git",
+                "https://github.com/curie-eng/curie.git?token=example",
+                "https://github.com/curie-eng/curie.git/extra",
+            ):
+                with self.subTest(claimed=claimed), self.assertRaises(handoff.DependencyHandoffError):
+                    handoff._remote_name(work, claimed)
+
+    def test_two_configured_transports_for_one_repository_remain_ambiguous(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            subprocess.run(["git", "init", str(work)], check=True, capture_output=True)
+            subprocess.run(
+                ["git", "remote", "add", "origin", "git@github.com:curie-eng/curie.git"],
+                cwd=work, check=True, capture_output=True,
+            )
+            subprocess.run(
+                ["git", "remote", "add", "second", "https://github.com/curie-eng/curie.git"],
+                cwd=work, check=True, capture_output=True,
+            )
+            with self.assertRaisesRegex(handoff.DependencyHandoffError, "one exact configured remote"):
+                handoff._remote_name(work, "https://github.com/curie-eng/curie.git")
 
 
 if __name__ == "__main__":

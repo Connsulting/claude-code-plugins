@@ -316,6 +316,8 @@ parent at its recorded result commit, which must remain on the current exact tar
 merge requires parent head ancestry at that result; a squash requires parent delta equivalence
 there. A full revert holds the child. An unmerged branch may advance, but the child uses only its
 recorded verified head. A replaced head needs fresh verified evidence through `reverify-handoff`.
+GitHub SSH and HTTPS clone URLs for the same owner and repository share one canonical identity;
+different repositories or multiple configured remotes remain ambiguous.
 Unavailable identity holds dispatch, and divergent multiple parent heads require an explicitly
 authorized integration task. Never merge or expand external authority to make a dependency ready.
 

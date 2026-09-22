@@ -71,10 +71,25 @@ def _git(
 
 
 def _canonical_remote(value: str, cwd: Path) -> str:
-    """Canonicalize local paths while leaving network identities exact."""
+    """Canonicalize local paths and exact GitHub transport forms."""
 
     raw = value.strip()
     parsed = urlsplit(raw)
+    github_path: str | None = None
+    if raw.startswith("git@github.com:"):
+        github_path = raw.removeprefix("git@github.com:")
+    elif (
+        parsed.scheme == "https" and parsed.netloc == "github.com"
+        and not parsed.query and not parsed.fragment
+    ):
+        github_path = parsed.path.removeprefix("/")
+    if github_path is not None:
+        parts = github_path.split("/")
+        if len(parts) == 2:
+            owner, repo = parts
+            repo = repo.removesuffix(".git")
+            if all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", part) for part in (owner, repo)):
+                return f"github.com/{owner}/{repo}"
     if parsed.scheme == "file":
         if parsed.netloc not in {"", "localhost"}:
             return raw
