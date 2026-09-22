@@ -343,6 +343,8 @@ head. A merge receipt is checked at its recorded result commit on the current ta
 merge needs parent head ancestry there; a squash needs parent delta equivalence there. A full
 revert holds the child. Otherwise it uses the recorded verified unmerged parent head, even if
 its branch advances. A replaced head needs fresh verified evidence through `reverify-handoff`.
+GitHub SSH and HTTPS clone URLs for the same owner and repository share one canonical identity.
+Different repositories and multiple configured remotes for that identity still hold dispatch.
 Missing or conflicting identity holds dispatch, and divergent parent heads require an explicitly
 authorized integration job. No recovery or handoff grants merge, push, deployment, or other
 external authority.
