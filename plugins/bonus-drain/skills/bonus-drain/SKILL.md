@@ -81,6 +81,19 @@ context, constraints, precondition, done-when, and compatible provider/task rout
 source thread/plan reference when available, a work group when useful, and explicit prerequisite
 task IDs. Never infer dependencies or authorization from similar titles. Priority is urgency/drain
 order; size is the best available estimate of autonomous scope and effort.
+
+A precondition is an external fact the worker cannot create. If it is false, the worker records
+skipped and stops, and that stop is correct. Be critical of the sentence before queueing it.
+Do not write a precondition that is really setup the worker is already allowed to perform: a
+clean checkout, a named branch, a private worktree, free default ports, an unlocked shared
+baseline, or installed local dependencies. Put the base ref and the test commands in constraints
+or done-when. The worker creates its own worktree from that remote base, binds private ports,
+and installs dependencies, and it does not clean another owner's checkout. Write a precondition
+only for a fact outside that setup: missing authority, a prerequisite or release fact the worker
+cannot create, an unavailable provider or required service, a frozen contract, another owner
+already editing the same paths, or a validation gate the worker must not weaken. If none of
+those applies, leave the precondition empty. Do not invent a checkout check so the task looks
+guarded.
 Work groups are optional navigation labels, not task titles: use them only for a meaningful
 cross-task cluster and keep each at 15 characters or fewer. Use title case; the soak-observation
 group is `Soak Obs`.

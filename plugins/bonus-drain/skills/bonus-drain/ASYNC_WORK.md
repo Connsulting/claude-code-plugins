@@ -39,8 +39,10 @@ Self-dependencies and cycles are rejected transactionally. Readiness is checked 
 claiming, including for Run now. A newly ready child waits for a subsequent normal scheduler
 tick; completion does not launch a cascade.
 
-Use task dependencies for workflow ordering. The task's textual precondition still describes
-external checks performed by the runner. Record skipped when that check is a genuine external
+Use task dependencies for workflow ordering. When queueing, a precondition is only an external
+fact the worker cannot create. Leave it empty rather than requiring a clean checkout, a named
+branch, free ports, or installed dependencies. Those are setup. The task's textual precondition
+still describes external checks performed by the runner. Record skipped when that check is a genuine external
 failure: missing authority, a prerequisite the runner cannot create, an unavailable provider
 or required service, a frozen contract, another owner of the same paths, or a validation gate
 setup cannot remove. A dirty or wrong-branch shared checkout, untracked worktree directories,

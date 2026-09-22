@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from tests.test_bonus_dependency_recovery import (
@@ -19,6 +20,22 @@ def authority(detail: str = "the controlling decision is still draft") -> dict[s
             "signature": "authority_required:draft-decision",
         }
     }
+
+
+class PreconditionAuthoringTests(unittest.TestCase):
+    def test_queueing_skill_rejects_setup_as_a_precondition(self) -> None:
+        skill = (
+            Path(__file__).resolve().parents[1]
+            / "plugins/bonus-drain/skills/bonus-drain/SKILL.md"
+        ).read_text(encoding="utf-8")
+        guide = (
+            Path(__file__).resolve().parents[1]
+            / "plugins/bonus-drain/skills/bonus-drain/ASYNC_WORK.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("leave the precondition empty", skill)
+        self.assertIn("Do not invent a checkout check", skill)
+        self.assertIn("If it is false, the worker records\nskipped and stops", skill)
+        self.assertIn("Leave it empty rather than requiring a clean checkout", guide)
 
 
 class PreconditionPromptTests(RecoveryCase):
