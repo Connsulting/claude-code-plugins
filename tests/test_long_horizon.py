@@ -1,5 +1,6 @@
 """Goal coordination on the real SQLite queue; provider execution is a separate proof."""
 import json
+import hashlib
 import sqlite3
 import sys
 import tempfile
@@ -82,6 +83,17 @@ class GoalTests(unittest.TestCase):
                      size='small', done_when='Evidence retained', use_implement=True)
         value.update(changes)
         return {'task': value, 'role': 'implementation'}
+
+    def test_optional_start_ref_preserves_old_goal_hash_until_set(self):
+        queued = self.queue.add_task(self.job('standalone')['task'])
+        value = queued.to_dict()
+        self.assertIsNone(value.pop('start_ref'))
+        for field in ('priority', 'size', 'active'):
+            value.pop(field)
+        old_hash = hashlib.sha256(goals._json(value).encode()).hexdigest()
+        self.assertEqual(goals._contract_hash(queued), old_hash)
+        selected = self.queue.edit_task('standalone', {'start_ref': 'epic/next'})
+        self.assertNotEqual(goals._contract_hash(selected), old_hash)
 
     def advance(self, turn, revision, **changes):
         value = dict(expected_revision=revision, action='wait', summary='Ready for jobs',

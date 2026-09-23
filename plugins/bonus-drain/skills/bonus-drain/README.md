@@ -316,14 +316,19 @@ of runtime removal.
 Every ready task is eligible for Bonus capacity; `run-now` accelerates an individual task.
 Tasks can carry source references, 15-character work groups, and one-off prerequisites.
 See [ASYNC_WORK.md](ASYNC_WORK.md) for the contract and commands.
+Repository tasks may also set `start_ref` with `--start-ref` on add or through `start_ref` in
+edit changes. The viewer's read only `--local` queue and gates view shows the selected start
+branch and uses the same readiness result as dispatch. It has no pending verification state.
 
 Every claimed launch receives a unique attempt ID. The prompt's exact record command binds the
 terminal event to that attempt and reads structured outcome evidence from its protected state
 path. `done` requires reason code `done_when_verified`, `completion.verified: true`, one of
 `command`, `artifact`, `operator_receipt`, or `goal_acceptance`, and nonempty evidence that proves
-done-when. A run that opened or updated a PR is done, even while the PR awaits review, approval,
-or pending CI, with `artifact` completion and the PR URL as evidence; PR presence alone still does
-not prove integration for a dependency handoff. `awaiting_human` parks a run whose remaining step
+done-when. Normal PR work is done only after all checks pass for the current head. Epic Forge
+work also requires a confirmed merge into the exact authorized epic branch. Opening a PR,
+pending or failing checks, and an unmerged epic PR are not completion. Use `artifact` completion
+with evidence of the PR, passing checks, and any required merge. Pending human review alone does
+not block normal completion once checks pass. `awaiting_human` parks a run whose remaining step
 needs Brian personally; it requires a reason detail naming that step, is never requeued or
 recovered automatically, and leaves dependents waiting until operator recovery (requeue or
 recover-complete) continues it.
@@ -333,27 +338,27 @@ worker cannot close or release a newer attempt.
 Automatic recovery applies only to failed or skipped one-off prerequisites with active dependent
 work. It allows at most two recovery attempts, after 5-minute and 30-minute backoffs, and stops
 early when the normalized failure reason repeats. Unknown launch state, missing authority, and
-unavailable or divergent repository identity stay held. Ordinary requeue schedules an operator
+unavailable or malformed repository identity stay held. Divergent parent refs require an explicit
+child start_ref. Ordinary requeue schedules an operator
 recovery without deleting history. Goal-managed public requeue remains rejected; the goal runtime
 may admit implementation or integration recovery under its existing guards, while coordinator and
 frozen acceptance failures require fresh follow-up jobs.
 
-A repository-producing success records the exact remote, target, prior target base, branch, and
-head. A merge receipt is checked at its recorded result commit on the current target. A normal
-merge needs parent head ancestry there; a squash needs parent delta equivalence there. A full
-revert holds the child. Otherwise it uses the recorded verified unmerged parent head, even if
-its branch advances. A replaced head needs fresh verified evidence through `reverify-handoff`.
-GitHub SSH and HTTPS clone URLs for the same owner and repository share one canonical identity.
-Different repositories and multiple configured remotes for that identity still hold dispatch.
-Missing or conflicting identity holds dispatch, and divergent parent heads require an explicitly
-authorized integration job. No recovery or handoff grants merge, push, deployment, or other
-external authority.
+A repository producing task records `remote`, `target_ref`, `branch_ref`, and `integration_state`.
+Those fields establish the handoff identity. Commit OIDs and merge receipts may remain as audit
+evidence, but dependency readiness does not require them. `reverify-handoff` records a structural
+correction for the same remote, target_ref, and branch_ref. It preserves the original done row
+and accepts only the exact done row and revision supplied by the caller. It does not run Git or
+require fresh repository proof.
 
-For a completed parent whose branch was replaced, first prove the new head satisfies the
-parent's done condition. Then inspect `bonus-drain handoff-revision PARENT --json` for the exact
-`from_done_rowid` and `after_revision_id`. Supply a fresh structured done outcome with verified
-completion and repository evidence in a private outcome file. Run `bonus-drain reverify-handoff
---task PARENT --from-done-rowid ROW --after-revision-id none --outcome-file FILE --summary TEXT`
-for the first revision, or use the reported numeric revision id for a later revision. The command
-validates the Git handoff, preserves the original terminal row, and rejects stale revision ids.
-It does not waive failing checks or authorize a child to run before the new parent proof exists.
+Use optional `--start-ref` on add or `start_ref` in edit to choose the branch where repository
+work begins. Branch shorthand such as `task/base` and full refs such as `refs/heads/task/base`
+are normalized to `refs/heads/task/base`. An explicit child start_ref wins only when repository
+parent metadata is valid. It cannot override missing or malformed remote, target_ref, branch_ref,
+or integration_state fields. When start_ref is unset, parents with the same remote and target
+select their unique unmerged branch; if all are merged, they select the shared target. Different
+remotes or targets, or multiple unmerged branches, require an explicit child start_ref. Queue, scout, and dispatch use saved metadata only, with no Git
+calls, remote checks, or immutable SHA pin. The worker fetches the selected branch's current tip
+during setup. If it is missing, setup stops with reason code `verification_needed` and does not
+fall back to the target. No recovery or handoff grants merge, push, deployment, or other external
+authority.

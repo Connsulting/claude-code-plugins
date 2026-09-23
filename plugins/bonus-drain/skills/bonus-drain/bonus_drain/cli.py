@@ -94,7 +94,8 @@ def _load_config(args: argparse.Namespace, *, graph_required: bool) -> config_mo
 
 def _queue(args: argparse.Namespace, *, graph_required: bool = False) -> tuple[config_module.RuntimeConfig, db.QueueDB]:
     cfg = _load_config(args, graph_required=graph_required)
-    queue = db.QueueDB(cfg.database, recurrence_timezone=cfg.recurrence_timezone)
+    reader_type = db.LocalQueueReader if getattr(args, "local", False) else db.QueueDB
+    queue = reader_type(cfg.database, recurrence_timezone=cfg.recurrence_timezone)
     return cfg, queue
 
 
@@ -139,6 +140,7 @@ def _task_values(args: argparse.Namespace) -> dict[str, Any]:
 
     return {
         "source_ref": args.source_ref,
+        "start_ref": args.start_ref,
         "work_group": args.work_group,
         "depends_on": [x.strip() for x in (args.depends_on or "").split(",") if x.strip()],
         "id": args.id,
@@ -796,7 +798,7 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--context"); add.add_argument("--constraints"); add.add_argument("--precondition")
     add.add_argument("--done-when", dest="done_when"); add.add_argument("--claude-only", type=int, default=0)
     add.add_argument("--model"); add.add_argument("--mcp"); add.add_argument("--use-implement", type=int, default=0)
-    add.add_argument("--source-ref"); add.add_argument("--work-group"); add.add_argument("--depends-on")
+    add.add_argument("--source-ref"); add.add_argument("--start-ref"); add.add_argument("--work-group"); add.add_argument("--depends-on")
     edit = sub.add_parser("edit"); _add_common(edit); _add_json(edit); edit.add_argument("task"); edit.add_argument("--changes", required=True)
     ready = sub.add_parser("readiness"); _add_common(ready); _add_json(ready); ready.add_argument("task"); ready.add_argument("--now", type=int)
     add.add_argument("--providers"); add.add_argument("--capabilities")
@@ -841,6 +843,7 @@ def build_parser() -> argparse.ArgumentParser:
     inflight.add_argument("--provider"); inflight.add_argument("--claude", action="store_true"); inflight.add_argument("--codex", action="store_true"); inflight.add_argument("--now", type=int)
     for name in ("queue", "queue-status"):
         item = sub.add_parser(name); _add_common(item); _add_json(item); item.add_argument("cycle", type=int, nargs="?"); item.add_argument("--run-limit", type=int, default=50); item.add_argument("--now", type=int)
+        item.add_argument("--local", action="store_true")
     runs = sub.add_parser("runs"); _add_common(runs); _add_json(runs); runs.add_argument("--limit", type=int, default=50); runs.add_argument("--task")
     requeue = sub.add_parser("requeue"); _add_common(requeue); _add_json(requeue); requeue.add_argument("task"); requeue.add_argument("--eligibility-key"); requeue.add_argument("--attempt-id"); requeue.add_argument("--mode", choices=("retry", "verification")); requeue.add_argument("--now", type=int)
     priority = sub.add_parser("set-priority"); _add_common(priority); priority.add_argument("task"); priority.add_argument("priority", type=int)
@@ -853,6 +856,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     for name in ("gates", "plan"):
         item = sub.add_parser(name); _add_common(item); _add_json(item); item.add_argument("--now", type=int)
+        if name == "gates":
+            item.add_argument("--local", action="store_true")
     usage_parser = sub.add_parser("usage"); _add_common(usage_parser, database=False); _add_json(usage_parser)
     usage_parser.add_argument("--provider"); usage_parser.add_argument("--account"); usage_parser.add_argument("--now", type=int)
     usage_parser.add_argument("--legacy-line", action="store_true"); usage_parser.add_argument("--legacy-json", action="store_true")

@@ -1,4 +1,4 @@
-"""Local Git handoff and end-to-end dependency recovery contracts."""
+"""Dependency branch choice, queue ownership, and local dispatch proof."""
 
 from __future__ import annotations
 
@@ -15,15 +15,13 @@ from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
-CLI = SKILL_ROOT / "bin" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
 
 from bonus_drain import config as config_module
-from bonus_drain import db, dispatcher, handoff, scout, usage
+from bonus_drain import cli, db, dispatcher, handoff, scout, usage
 
 NOW = 2_000_000_000
-KEY = "alpha-account/alpha-weekly/2000001000"
-BASE_FIELDS = {"base_oid", "branch_ref", "target_ref", "parent_ids"}
+BRANCH_FIELDS = {"branch_ref", "parent_ids"}
 
 
 def iso(epoch: int) -> str:
@@ -47,64 +45,60 @@ def task(task_id: str, cwd: Path, **changes: object) -> dict[str, object]:
     return value
 
 
-def failed_outcome(signature: str = "tests:failed") -> dict[str, object]:
+def repository(
+    branch: str, *, state: str = "unmerged", target: str = "main",
+    remote: str = "https://github.com/example/repository.git",
+) -> dict[str, object]:
     return {
-        "reason": {
-            "code": "retryable",
-            "detail": "the local test command failed",
-            "signature": signature,
-        },
+        "remote": remote,
+        "target_ref": f"refs/heads/{target}",
+        "branch_ref": f"refs/heads/{branch}",
+        "integration_state": state,
+        "target_base_oid": "a" * 40,
+        "head_oid": "b" * 40,
     }
 
 
-def verified_outcome(
-    repository: dict[str, object], evidence: str,
-) -> dict[str, object]:
-    return {
+def verified_outcome(repo: dict[str, object] | None = None) -> dict[str, object]:
+    outcome: dict[str, object] = {
         "reason": {
             "code": "done_when_verified",
-            "detail": "the done-when was checked",
-            "signature": "done_when_verified:git-fixture",
+            "detail": "the done when was checked",
+            "signature": "done_when_verified:fixture",
         },
         "completion": {
             "verified": True,
             "mechanism": "command",
-            "evidence": [evidence],
+            "evidence": ["fixture://proof"],
         },
-        "repository": repository,
     }
+    if repo is not None:
+        outcome["repository"] = repo
+    return outcome
 
 
-def runtime(database: Path, router: Path | str = "/bin/true") -> config_module.RuntimeConfig:
+def runtime(database: Path) -> config_module.RuntimeConfig:
     return config_module.RuntimeConfig(
         schema_version=1,
         source_path=None,
         database=database,
-        record_command=(str(CLI), "record"),
+        record_command=("/bin/true", "record"),
         secret_refs=(),
-        adapters=(
-            config_module.AdapterConfig(
-                "router", "agent-router", (str(router),),
-                timeout_seconds=10, max_output_bytes=65_536,
-            ),
-        ),
-        providers=(
-            config_module.ProviderConfig(
-                "alpha", config_module.DispatchBinding("router", "alpha"),
-                frozenset(), "single",
-            ),
-        ),
+        adapters=(config_module.AdapterConfig(
+            "router", "agent-router", ("/bin/true",),
+            timeout_seconds=10, max_output_bytes=65_536,
+        ),),
+        providers=(config_module.ProviderConfig(
+            "alpha", config_module.DispatchBinding("router", "alpha"),
+            frozenset(), "single",
+        ),),
         plans=(config_module.PlanConfig("alpha-plan", "alpha"),),
-        accounts=(
-            config_module.AccountConfig(
-                "alpha-account", "alpha", "alpha-plan",
-            ),
-        ),
-        limits=(
-            config_module.LimitConfig(
-                "alpha-weekly", "alpha-plan", 604_800, 95, 20_000, 6,
-            ),
-        ),
+        accounts=(config_module.AccountConfig(
+            "alpha-account", "alpha", "alpha-plan",
+        ),),
+        limits=(config_module.LimitConfig(
+            "alpha-weekly", "alpha-plan", 604_800, 95, 20_000, 6,
+        ),),
         viewer={},
         pr_exceptions=(),
         usage_max_age_seconds=3_600,
@@ -112,7 +106,113 @@ def runtime(database: Path, router: Path | str = "/bin/true") -> config_module.R
     )
 
 
-class RepositoryHandoffCase(unittest.TestCase):
+class SimpleBranchResolutionContract(unittest.TestCase):
+    def resolve(
+        self, outcomes: list[tuple[str, dict[str, object]]],
+        start_ref: str | None = None,
+    ) -> dict[str, object] | None:
+        with mock.patch.object(
+            subprocess, "run", side_effect=AssertionError("Git called"),
+        ):
+            return handoff.resolve_dependency_base(outcomes, start_ref=start_ref)
+
+    def test_explicit_start_ref_is_a_pure_branch_choice(self) -> None:
+        outcomes = [("parent", {"repository": repository("task/parent")})]
+        self.assertEqual(
+            self.resolve(outcomes, "refs/heads/next"),
+            {"branch_ref": "refs/heads/next", "parent_ids": ["parent"]},
+        )
+        self.assertEqual(
+            self.resolve(outcomes, "refs/heads/epic/next"),
+            {"branch_ref": "refs/heads/epic/next", "parent_ids": ["parent"]},
+        )
+
+    def test_explicit_start_without_repository_evidence_and_no_start_without_evidence(self) -> None:
+        self.assertIsNone(self.resolve([]))
+        self.assertIsNone(self.resolve([("parent", verified_outcome())]))
+        self.assertEqual(
+            self.resolve([("parent", verified_outcome())], "refs/heads/next"),
+            {"branch_ref": "refs/heads/next", "parent_ids": []},
+        )
+
+    def test_one_unmerged_branch_wins_and_merged_parents_select_common_target(self) -> None:
+        outcomes = [
+            ("merged", {"repository": repository("task/merged", state="merged")}),
+            ("open", {"repository": repository("task/open")}),
+        ]
+        self.assertEqual(
+            self.resolve(outcomes),
+            {"branch_ref": "refs/heads/task/open", "parent_ids": ["merged", "open"]},
+        )
+        outcomes[1][1]["repository"] = repository("task/open", state="merged")
+        self.assertEqual(
+            self.resolve(outcomes),
+            {"branch_ref": "refs/heads/main", "parent_ids": ["merged", "open"]},
+        )
+
+    def test_distinct_unmerged_branches_require_explicit_start_even_if_commits_match(self) -> None:
+        outcomes = [
+            ("a", {"repository": repository("task/a")}),
+            ("b", {"repository": repository("task/b")}),
+        ]
+        with self.assertRaises(handoff.DependencyHandoffError) as raised:
+            self.resolve(outcomes)
+        self.assertEqual(raised.exception.reason_code, "integration_required")
+        self.assertIn("start_ref", raised.exception.detail)
+        self.assertEqual(
+            self.resolve(outcomes, "refs/heads/epic/combined"),
+            {"branch_ref": "refs/heads/epic/combined", "parent_ids": ["a", "b"]},
+        )
+
+    def test_automatic_choice_requires_common_repository_and_target(self) -> None:
+        equivalent = [
+            ("ssh", {"repository": repository(
+                "task/a", state="merged", remote="git@github.com:example/repository.git",
+            )}),
+            ("https", {"repository": repository("task/b", state="merged")}),
+        ]
+        self.assertEqual(self.resolve(equivalent), {
+            "branch_ref": "refs/heads/main", "parent_ids": ["ssh", "https"],
+        })
+        for changed in (
+            repository("task/b", remote="https://github.com/example/other.git"),
+            repository("task/b", target="next"),
+        ):
+            with self.subTest(changed=changed):
+                outcomes = [
+                    ("a", {"repository": repository("task/a", state="merged")}),
+                    ("b", {"repository": changed | {"integration_state": "merged"}}),
+                ]
+                with self.assertRaises(handoff.DependencyHandoffError):
+                    self.resolve(outcomes)
+
+    def test_explicit_choice_still_rejects_malformed_parent_metadata(self) -> None:
+        for field, value in (
+            ("remote", ""),
+            ("target_ref", "main"),
+            ("branch_ref", "refs/tags/v1"),
+            ("integration_state", "unknown"),
+        ):
+            with self.subTest(field=field):
+                bad = repository("task/parent")
+                bad[field] = value
+                with self.assertRaises(handoff.DependencyHandoffError):
+                    self.resolve([("parent", {"repository": bad})], "refs/heads/next")
+
+    def test_obsolete_sha_and_receipt_are_not_git_proof_gates(self) -> None:
+        evidence = repository("task/parent")
+        evidence.update({
+            "head_oid": "obsolete",
+            "target_base_oid": "obsolete",
+            "merge_receipt": {"kind": "squash", "result_oid": "obsolete"},
+        })
+        self.assertEqual(
+            self.resolve([("parent", {"repository": evidence})]),
+            {"branch_ref": "refs/heads/task/parent", "parent_ids": ["parent"]},
+        )
+
+
+class QueueBranchChoiceContract(unittest.TestCase):
     maxDiff = None
 
     def setUp(self) -> None:
@@ -122,1130 +222,248 @@ class RepositoryHandoffCase(unittest.TestCase):
         self.queue = db.QueueDB(self.root / "queue.db")
         self.queue.initialize()
 
-    def git(self, cwd: Path, *argv: str) -> str:
-        return subprocess.run(
-            ["git", *argv], cwd=cwd, text=True, capture_output=True, check=True,
-        ).stdout.strip()
+    def add(self, task_id: str, **changes: object) -> db.Task:
+        return self.queue.add_task(task(task_id, self.root, **changes))
 
-    def repository(self, name: str) -> tuple[Path, Path, str]:
-        bare = self.root / f"{name}.git"
-        work = self.root / f"{name}-work"
-        subprocess.run(
-            ["git", "init", "--bare", str(bare)], check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "clone", str(bare), str(work)], check=True, capture_output=True,
-        )
-        self.git(work, "config", "user.email", "fixture@example.test")
-        self.git(work, "config", "user.name", "Fixture")
-        (work / "base.txt").write_text("base\n", encoding="utf-8")
-        self.git(work, "add", "base.txt")
-        self.git(work, "commit", "-m", "base")
-        self.git(work, "branch", "-M", "main")
-        self.git(work, "push", "-u", "origin", "main")
-        return bare.resolve(), work, self.git(work, "rev-parse", "HEAD")
-
-    def branch(
-        self, work: Path, name: str, start: str, filename: str, content: str,
-    ) -> str:
-        self.git(work, "switch", "-C", name, start)
-        (work / filename).write_text(content, encoding="utf-8")
-        self.git(work, "add", filename)
-        self.git(work, "commit", "-m", name)
-        self.git(work, "push", "-f", "origin", f"HEAD:refs/heads/{name}")
-        return self.git(work, "rev-parse", "HEAD")
-
-    @staticmethod
-    def handoff(
-        remote: Path,
-        target_base_oid: str,
-        branch: str,
-        head_oid: str,
-        *,
-        integration_state: str = "unmerged",
-        receipt: dict[str, object] | None = None,
-    ) -> dict[str, object]:
-        value: dict[str, object] = {
-            "remote": str(remote),
-            "target_ref": "refs/heads/main",
-            "target_base_oid": target_base_oid,
-            "branch_ref": f"refs/heads/{branch}",
-            "head_oid": head_oid,
-            "integration_state": integration_state,
-        }
-        if receipt is not None:
-            value["merge_receipt"] = receipt
-        return value
-
-    def complete_parent(
-        self, task_id: str, work: Path, repository: dict[str, object],
-    ) -> None:
-        self.queue.add_task(task(task_id, work))
-        key = f"manual/{task_id}"
+    def complete(self, task_id: str, repo: dict[str, object] | None = None) -> None:
         attempt = self.queue.claim(
-            task_id, key, "alpha", "alpha-account", now_epoch=NOW,
+            task_id, f"manual/{task_id}", "alpha", "alpha-account", now_epoch=NOW,
         )
         self.assertIsNotNone(attempt)
         self.queue.record(
-            task_id,
-            key,
-            attempt_id=attempt.id,
-            status="done",
-            outcome=verified_outcome(repository, f"git:{repository['head_oid']}"),
-            provider_id="alpha",
-            account_id="alpha-account",
-            timestamp=iso(NOW),
-            now_epoch=NOW,
-            summary=f"verified {task_id}",
+            task_id, f"manual/{task_id}", attempt_id=attempt.id,
+            status="done", outcome=verified_outcome(repo),
+            provider_id="alpha", account_id="alpha-account",
+            timestamp=iso(NOW), now_epoch=NOW, summary="verified",
         )
 
-    def launch(self, task_id: str, work: Path, parents: list[str]) -> str:
-        self.queue.add_task(task(task_id, work, depends_on=parents))
-        result = dispatcher.dispatch(
-            runtime(self.queue.path),
-            self.queue,
-            task_id=task_id,
-            eligibility_key=f"manual/{task_id}",
-            requested_provider="alpha",
-            router_call=lambda *_args, **_kwargs: {
-                "provider": "alpha",
-                "dispatch": {"job_id": f"job-{task_id}", "launched": True},
-            },
-        )
-        return result.prompt
-
-    def dependency_base(self, prompt: str) -> dict[str, object]:
+    def prompt_branch(self, prompt: str) -> dict[str, object]:
         match = re.search(r"(?m)^DEPENDENCY_BASE(?:=|\s+)(\{[^\n]+\})$", prompt)
         self.assertIsNotNone(match, prompt)
         value = json.loads(match.group(1))
-        self.assertEqual(set(value), BASE_FIELDS)
+        self.assertEqual(set(value), BRANCH_FIELDS)
         return value
 
-    def assert_rejected(
-        self, child: str, work: Path, parent: str, expected_hold: str,
-    ) -> None:
-        self.queue.add_task(task(child, work, depends_on=[parent]))
-        readiness = self.queue.readiness(child, now_epoch=NOW)
-        self.assertFalse(readiness["ready"])
-        self.assertEqual(readiness["hold_reason"], expected_hold)
-        router = mock.Mock()
-        with self.assertRaises(dispatcher.DispatchError):
-            dispatcher.dispatch(
-                runtime(self.queue.path),
-                self.queue,
-                task_id=child,
-                eligibility_key=f"manual/{child}",
-                requested_provider="alpha",
-                router_call=router,
+    def test_incomplete_parent_waits_and_done_parent_needs_no_git_checkout(self) -> None:
+        self.add("parent")
+        self.add("child", depends_on=["parent"])
+        self.assertFalse(self.queue.readiness("child", now_epoch=NOW)["ready"])
+        self.assertIsNone(self.queue.claim(
+            "child", "manual/child", "alpha", "alpha-account", now_epoch=NOW,
+        ))
+        self.complete("parent", repository("task/parent"))
+        with mock.patch.object(
+            subprocess, "run", side_effect=AssertionError("Git called"),
+        ):
+            ready = self.queue.readiness("child", now_epoch=NOW)
+            self.assertTrue(ready["ready"], ready)
+            self.assertEqual(
+                self.queue.dependency_base("child"),
+                {"branch_ref": "refs/heads/task/parent", "parent_ids": ["parent"]},
             )
-        router.assert_not_called()
 
-    def test_unmerged_merge_receipt_squash_receipt_and_receipt_free_equivalence(self) -> None:
-        remote, work, initial = self.repository("selection")
-
-        unmerged_head = self.branch(
-            work, "task/unmerged", initial, "unmerged.txt", "unmerged\n",
-        )
-        self.complete_parent(
-            "unmerged",
-            work,
-            self.handoff(remote, initial, "task/unmerged", unmerged_head),
-        )
-        self.assertEqual(
-            self.dependency_base(self.launch("from-unmerged", work, ["unmerged"])),
-            {
-                "base_oid": unmerged_head,
-                "branch_ref": "refs/heads/task/unmerged",
-                "target_ref": "refs/heads/main",
-                "parent_ids": ["unmerged"],
-            },
-        )
-
-        self.git(work, "switch", "main")
-        self.git(work, "merge", "--no-ff", "task/unmerged", "-m", "merge parent")
-        self.git(work, "push", "origin", "main")
-        merged_tip = self.git(work, "rev-parse", "HEAD")
-        self.complete_parent(
-            "merged",
-            work,
-            self.handoff(
-                remote,
-                initial,
-                "task/unmerged",
-                unmerged_head,
-                integration_state="merged",
-                receipt={"kind": "merge", "result_oid": merged_tip},
-            ),
-        )
-        self.assertEqual(
-            self.dependency_base(self.launch("from-merge", work, ["merged"])),
-            {
-                "base_oid": merged_tip,
-                "branch_ref": "refs/heads/main",
-                "target_ref": "refs/heads/main",
-                "parent_ids": ["merged"],
-            },
-        )
-
-        equivalent_head = self.branch(
-            work, "task/equivalent", merged_tip, "equivalent.txt", "same bytes\n",
-        )
-        self.git(work, "switch", "main")
-        self.git(work, "checkout", "task/equivalent", "--", "equivalent.txt")
-        self.git(work, "add", "equivalent.txt")
-        self.git(work, "commit", "-m", "equivalent content")
-        self.git(work, "push", "origin", "main")
-        equivalent_tip = self.git(work, "rev-parse", "HEAD")
-        self.complete_parent(
-            "equivalent",
-            work,
-            self.handoff(
-                remote,
-                merged_tip,
-                "task/equivalent",
-                equivalent_head,
-                integration_state="merged",
-            ),
-        )
-        self.assertEqual(
-            self.dependency_base(self.launch("from-equivalent", work, ["equivalent"])),
-            {
-                "base_oid": equivalent_tip,
-                "branch_ref": "refs/heads/main",
-                "target_ref": "refs/heads/main",
-                "parent_ids": ["equivalent"],
-            },
-        )
-
-        squash_head = self.branch(
-            work, "task/squash", equivalent_tip, "squash.txt", "squashed bytes\n",
-        )
-        self.git(work, "switch", "main")
-        self.git(work, "checkout", "task/squash", "--", "squash.txt")
-        self.git(work, "add", "squash.txt")
-        self.git(work, "commit", "-m", "squashed equivalent")
-        self.git(work, "push", "origin", "main")
-        squash_tip = self.git(work, "rev-parse", "HEAD")
-        self.complete_parent(
-            "squashed",
-            work,
-            self.handoff(
-                remote,
-                equivalent_tip,
-                "task/squash",
-                squash_head,
-                integration_state="merged",
-                receipt={"kind": "squash", "result_oid": squash_tip},
-            ),
-        )
-        self.assertEqual(
-            self.dependency_base(self.launch("from-squash", work, ["squashed"])),
-            {
-                "base_oid": squash_tip,
-                "branch_ref": "refs/heads/main",
-                "target_ref": "refs/heads/main",
-                "parent_ids": ["squashed"],
-            },
-        )
-
-    def test_mixed_github_transports_select_one_verified_parent_head(self) -> None:
-        _remote, work, base = self.repository("github-transports")
-        first = self.branch(work, "task/first", base, "first.txt", "first\n")
-        second = self.branch(work, "task/second", first, "second.txt", "second\n")
-        ssh = "git@github.com:curie-eng/curie.git"
-        https = "https://github.com/curie-eng/curie.git"
-        self.git(work, "remote", "set-url", "origin", ssh)
-        self.complete_parent("first", work, self.handoff(Path(ssh), base, "task/first", first))
-        second_handoff = self.handoff(Path(ssh), base, "task/second", second)
-        second_handoff["remote"] = https
-        self.complete_parent("second", work, second_handoff)
-        self.queue.add_task(task("child", work, depends_on=["first", "second"]))
-        refs = {
-            "refs/heads/main": base,
-            "refs/heads/task/first": first,
-            "refs/heads/task/second": second,
-        }
-        with mock.patch.object(handoff, "_remote_ref_oid", side_effect=lambda _cwd, _remote, ref: refs[ref]):
-            readiness = self.queue.readiness("child", now_epoch=NOW)
-            self.assertTrue(readiness["ready"], readiness)
-            self.assertEqual(readiness["dependency_base"], {
-                "base_oid": second,
-                "branch_ref": "refs/heads/task/second",
-                "target_ref": "refs/heads/main",
-                "parent_ids": ["first", "second"],
-            })
-
-    def test_recorded_ancestor_selects_target_after_generated_index_changes(self) -> None:
-        remote, work, base = self.repository("generated-index")
-        head = self.branch(
-            work, "task/parent", base, "adr-index.md", "ADR 1\n",
-        )
-        self.complete_parent(
-            "parent", work, self.handoff(remote, base, "task/parent", head),
-        )
-        self.git(work, "switch", "main")
-        self.git(work, "merge", "--ff-only", "task/parent")
-        (work / "adr-index.md").write_text("ADR 1\nADR 2\n", encoding="utf-8")
-        self.git(work, "add", "adr-index.md")
-        self.git(work, "commit", "-m", "Regenerate ADR index")
-        self.git(work, "push", "origin", "main")
-        target = self.git(work, "rev-parse", "HEAD")
-
-        self.assertEqual(
-            self.dependency_base(self.launch("child", work, ["parent"])),
-            {
-                "base_oid": target,
-                "branch_ref": "refs/heads/main",
-                "target_ref": "refs/heads/main",
-                "parent_ids": ["parent"],
-            },
-        )
-
-    def test_merge_receipt_remains_valid_after_later_target_edit_of_parent_path(self) -> None:
-        remote, work, base = self.repository("receipt-later-edit")
-        head = self.branch(
-            work, "task/parent", base, "shared.txt", "parent value\n",
-        )
-        self.git(work, "switch", "main")
-        self.git(work, "merge", "--no-ff", "task/parent", "-m", "Merge parent")
-        receipt_result = self.git(work, "rev-parse", "HEAD")
-        (work / "shared.txt").write_text(
-            "parent value\nlater accepted edit\n", encoding="utf-8",
-        )
-        self.git(work, "add", "shared.txt")
-        self.git(work, "commit", "-m", "Edit shared path after parent merge")
-        self.git(work, "push", "origin", "main")
-        target = self.git(work, "rev-parse", "HEAD")
-        self.complete_parent(
-            "parent",
-            work,
-            self.handoff(
-                remote,
-                base,
-                "task/parent",
-                head,
-                integration_state="merged",
-                receipt={"kind": "merge", "result_oid": receipt_result},
-            ),
-        )
-
-        self.assertEqual(
-            self.dependency_base(self.launch("child", work, ["parent"])),
-            {
-                "base_oid": target,
-                "branch_ref": "refs/heads/main",
-                "target_ref": "refs/heads/main",
-                "parent_ids": ["parent"],
-            },
-        )
-
-    def test_complete_revert_after_merge_receipt_holds(self) -> None:
-        remote, work, base = self.repository("receipt-reverted")
-        head = self.branch(
-            work, "task/parent", base, "parent.txt", "parent delta\n",
-        )
-        self.git(work, "switch", "main")
-        self.git(work, "checkout", "task/parent", "--", "parent.txt")
-        self.git(work, "add", "parent.txt")
-        self.git(work, "commit", "-m", "Apply parent delta")
-        receipt_result = self.git(work, "rev-parse", "HEAD")
-        self.git(work, "revert", "--no-edit", receipt_result)
-        self.git(work, "push", "origin", "main")
-        self.complete_parent(
-            "parent",
-            work,
-            self.handoff(
-                remote,
-                base,
-                "task/parent",
-                head,
-                integration_state="merged",
-                receipt={"kind": "squash", "result_oid": receipt_result},
-            ),
-        )
-
-        self.assert_rejected(
-            "child", work, "parent", "dependency_integration_ambiguous",
-        )
-
-    def test_advanced_unmerged_branch_keeps_recorded_head_base(self) -> None:
-        remote, work, base = self.repository("advanced-unmerged")
-        recorded_head = self.branch(
-            work, "task/parent", base, "parent.txt", "parent delta\n",
-        )
-        self.complete_parent(
-            "parent",
-            work,
-            self.handoff(remote, base, "task/parent", recorded_head),
-        )
-        (work / "followup.txt").write_text("unverified followup\n", encoding="utf-8")
-        self.git(work, "add", "followup.txt")
-        self.git(work, "commit", "-m", "Advance parent branch")
-        self.git(work, "push", "origin", "task/parent")
-
-        self.assertEqual(
-            self.dependency_base(self.launch("child", work, ["parent"])),
-            {
-                "base_oid": recorded_head,
-                "branch_ref": "refs/heads/task/parent",
-                "target_ref": "refs/heads/main",
-                "parent_ids": ["parent"],
-            },
-        )
-
-    def test_rebased_unmerged_branch_holds_with_actionable_verification_reason(self) -> None:
-        remote, work, base = self.repository("rebased-unmerged")
-        recorded_head = self.branch(
-            work, "task/parent", base, "parent.txt", "parent delta\n",
-        )
-        self.complete_parent(
-            "parent",
-            work,
-            self.handoff(remote, base, "task/parent", recorded_head),
-        )
-        self.git(work, "switch", "main")
-        (work / "target.txt").write_text("new target work\n", encoding="utf-8")
-        self.git(work, "add", "target.txt")
-        self.git(work, "commit", "-m", "Advance target")
-        self.git(work, "push", "origin", "main")
-        self.git(work, "switch", "task/parent")
-        self.git(work, "rebase", "main")
-        self.git(work, "push", "--force", "origin", "task/parent")
-
-        self.queue.add_task(task("child", work, depends_on=["parent"]))
-        readiness = self.queue.readiness("child", now_epoch=NOW)
-
-        self.assertFalse(readiness["ready"])
-        self.assertEqual(
-            readiness["hold_reason"], "dependency_integration_ambiguous",
-        )
-        self.assertIn("refs/heads/task/parent", readiness["reason"])
-        self.assertRegex(
-            readiness["reason"].lower(), r"\b(?:verify|verification)\b",
-        )
-        router = mock.Mock()
-        with self.assertRaises(dispatcher.DispatchError):
-            dispatcher.dispatch(
-                runtime(self.queue.path),
-                self.queue,
-                task_id="child",
-                eligibility_key="manual/child",
-                requested_provider="alpha",
-                router_call=router,
-            )
-        router.assert_not_called()
-
-    def test_changed_unmerged_branch_delta_holds_with_actionable_verification_reason(self) -> None:
-        remote, work, base = self.repository("changed-unmerged")
-        recorded_head = self.branch(
-            work, "task/parent", base, "parent.txt", "original delta\n",
-        )
-        self.complete_parent(
-            "parent",
-            work,
-            self.handoff(remote, base, "task/parent", recorded_head),
-        )
-        self.git(work, "switch", "-C", "task/parent", base)
-        (work / "parent.txt").write_text("changed delta\n", encoding="utf-8")
-        self.git(work, "add", "parent.txt")
-        self.git(work, "commit", "-m", "Replace parent delta")
-        self.git(work, "push", "--force", "origin", "task/parent")
-
-        self.queue.add_task(task("child", work, depends_on=["parent"]))
-        readiness = self.queue.readiness("child", now_epoch=NOW)
-
-        self.assertFalse(readiness["ready"])
-        self.assertEqual(
-            readiness["hold_reason"], "dependency_integration_ambiguous",
-        )
-        self.assertIn("refs/heads/task/parent", readiness["reason"])
-        self.assertRegex(
-            readiness["reason"].lower(), r"\b(?:verify|verification)\b",
-        )
-        router = mock.Mock()
-        with self.assertRaises(dispatcher.DispatchError):
-            dispatcher.dispatch(
-                runtime(self.queue.path),
-                self.queue,
-                task_id="child",
-                eligibility_key="manual/child",
-                requested_provider="alpha",
-                router_call=router,
-            )
-        router.assert_not_called()
-
-    def test_scout_skips_held_dependency_and_allocates_ready_work(self) -> None:
-        remote, work, base = self.repository("scout-held-parent")
-        recorded_head = self.branch(
-            work, "task/parent", base, "parent.txt", "verified delta\n",
-        )
-        self.complete_parent(
-            "parent", work, self.handoff(remote, base, "task/parent", recorded_head),
-        )
-        self.git(work, "switch", "-C", "task/parent", base)
-        (work / "parent.txt").write_text("replacement delta\n", encoding="utf-8")
-        self.git(work, "add", "parent.txt")
-        self.git(work, "commit", "-m", "Replace verified parent")
-        self.git(work, "push", "--force", "origin", "task/parent")
-        self.queue.add_task(task("held-child", work, depends_on=["parent"], priority=1))
-        self.queue.add_task(task("ready-child", work, priority=3))
+    def test_many_parent_explicit_branch_is_shared_by_view_scout_and_dispatch(self) -> None:
+        for name in ("a", "b"):
+            self.add(name)
+            self.complete(name, repository(f"task/{name}"))
+        self.add("child", depends_on=["a", "b"], start_ref="epic/next")
+        selected = {"branch_ref": "refs/heads/epic/next", "parent_ids": ["a", "b"]}
+        self.assertEqual(self.queue.task("child").start_ref, "refs/heads/epic/next")
+        self.assertEqual(self.queue.readiness("child", now_epoch=NOW)["dependency_base"], selected)
+        self.assertEqual(self.queue.snapshot(now_epoch=NOW)["readiness"]["child"]["dependency_base"], selected)
         snapshots = {
             ("alpha", "alpha-account"): usage.UsageSnapshot(
                 "alpha", "alpha-account", NOW,
                 {"alpha-weekly": {"used_percent": 70, "resets_at": NOW + 1_000}},
             ),
         }
-
         with mock.patch.object(scout, "read_all", return_value=snapshots):
             tick = scout.plan_tick(
                 runtime(self.queue.path), self.queue, now_epoch=NOW, provider_holds=(),
             )
+        self.assertIn("child", [
+            item.id for tasks in tick.allocations.values() for item in tasks
+        ])
+        router = mock.Mock(return_value={
+            "provider": "alpha",
+            "dispatch": {"job_id": "local-child", "launched": True},
+        })
+        result = dispatcher.dispatch(
+            runtime(self.queue.path), self.queue,
+            task_id="child", eligibility_key="manual/child",
+            requested_provider="alpha", router_call=router,
+        )
+        self.assertEqual(self.prompt_branch(result.prompt), selected)
+        self.assertIn("refs/heads/epic/next", result.prompt)
+        self.assertIn("current tip", result.prompt)
+        self.assertIn("verification_needed", result.prompt)
+        self.assertIn("Do not substitute another branch", result.prompt)
+        self.assertIn("grants no merge authority", result.prompt)
+        router.assert_called_once()
 
-        self.assertEqual(
-            [item.id for tasks in tick.allocations.values() for item in tasks],
-            ["ready-child"],
-        )
-        self.assertEqual(tick.dependency_holds[0]["task_id"], "held-child")
-        self.assertEqual(
-            tick.dependency_holds[0]["hold_reason"], "dependency_integration_ambiguous",
-        )
-
-    def test_unmerged_handoff_selects_target_after_merge_and_branch_deletion(self) -> None:
-        remote, work, base = self.repository("unmerged-then-merged")
-        head = self.branch(work, "task/parent", base, "parent.txt", "parent\n")
-        self.complete_parent(
-            "parent", work, self.handoff(remote, base, "task/parent", head),
-        )
-        self.git(work, "switch", "main")
-        self.git(work, "merge", "--no-ff", "-m", "Merge parent", "task/parent")
-        self.git(work, "push", "origin", "main")
-        self.git(work, "push", "origin", "--delete", "task/parent")
-        target = self.git(work, "rev-parse", "HEAD")
-
-        self.assertEqual(
-            self.dependency_base(self.launch("child", work, ["parent"])),
-            {
-                "base_oid": target,
-                "branch_ref": "refs/heads/main",
-                "target_ref": "refs/heads/main",
-                "parent_ids": ["parent"],
-            },
-        )
-
-    def test_verified_merge_and_squash_resolve_target_after_source_branch_deletion(self) -> None:
-        remote, work, base = self.repository("deleted-integrated-branches")
-        merged_head = self.branch(
-            work, "task/merged-deleted", base, "merged.txt", "merged\n",
-        )
-        self.git(work, "switch", "main")
-        self.git(work, "merge", "--no-ff", "task/merged-deleted", "-m", "merge deleted branch")
-        self.git(work, "push", "origin", "main")
-        merged_target = self.git(work, "rev-parse", "HEAD")
-        self.git(work, "push", "origin", "--delete", "task/merged-deleted")
-        self.complete_parent(
-            "merged-deleted", work,
-            self.handoff(
-                remote, base, "task/merged-deleted", merged_head,
-                integration_state="merged",
-                receipt={"kind": "merge", "result_oid": merged_target},
-            ),
-        )
-        self.queue.add_task(task(
-            "merged-deleted-child", work, depends_on=["merged-deleted"],
-        ))
-        self.assertEqual(
-            self.queue.dependency_base("merged-deleted-child"),
-            {
-                "base_oid": merged_target,
-                "branch_ref": "refs/heads/main",
-                "target_ref": "refs/heads/main",
-                "parent_ids": ["merged-deleted"],
-            },
-        )
-
-        squash_head = self.branch(
-            work, "task/squash-deleted", merged_target, "squash-deleted.txt", "squash\n",
-        )
-        self.git(work, "switch", "main")
-        self.git(work, "checkout", "task/squash-deleted", "--", "squash-deleted.txt")
-        self.git(work, "add", "squash-deleted.txt")
-        self.git(work, "commit", "-m", "squash deleted branch")
-        self.git(work, "push", "origin", "main")
-        squash_target = self.git(work, "rev-parse", "HEAD")
-        self.git(work, "push", "origin", "--delete", "task/squash-deleted")
-        self.complete_parent(
-            "squash-deleted", work,
-            self.handoff(
-                remote, merged_target, "task/squash-deleted", squash_head,
-                integration_state="merged",
-                receipt={"kind": "squash", "result_oid": squash_target},
-            ),
-        )
-        self.queue.add_task(task(
-            "squash-deleted-child", work, depends_on=["squash-deleted"],
-        ))
-        self.assertEqual(
-            self.queue.dependency_base("squash-deleted-child"),
-            {
-                "base_oid": squash_target,
-                "branch_ref": "refs/heads/main",
-                "target_ref": "refs/heads/main",
-                "parent_ids": ["squash-deleted"],
-            },
-        )
-
-    def test_rename_receipt_rejects_target_that_retains_the_deleted_source(self) -> None:
-        remote, work, base = self.repository("rename-equivalence")
-        self.git(work, "config", "diff.renames", "true")
-        self.git(work, "switch", "-C", "task/rename", base)
-        self.git(work, "mv", "base.txt", "renamed.txt")
-        self.git(work, "commit", "-m", "rename source")
-        self.git(work, "push", "-f", "origin", "HEAD:refs/heads/task/rename")
-        head = self.git(work, "rev-parse", "HEAD")
-
-        self.git(work, "switch", "main")
-        (work / "renamed.txt").write_text("base\n", encoding="utf-8")
-        self.git(work, "add", "renamed.txt")
-        self.git(work, "commit", "-m", "copy without deleting source")
-        self.git(work, "push", "origin", "main")
-        target = self.git(work, "rev-parse", "HEAD")
-        self.complete_parent(
-            "false-rename-receipt", work,
-            self.handoff(
-                remote, base, "task/rename", head, integration_state="merged",
-                receipt={"kind": "squash", "result_oid": target},
-            ),
-        )
-
-        self.assert_rejected(
-            "false-rename-child", work, "false-rename-receipt",
-            "dependency_integration_ambiguous",
-        )
-
-    def test_false_receipt_and_remote_ref_object_or_branch_identity_mismatch_hold(self) -> None:
-        remote, work, base = self.repository("rejections")
-        head = self.branch(work, "task/parent", base, "parent.txt", "parent delta\n")
-        other = self.branch(work, "task/other", base, "other.txt", "other delta\n")
-
-        cases: list[tuple[str, dict[str, object], str]] = []
-        false_receipt = self.handoff(
-            remote,
-            base,
-            "task/parent",
-            head,
-            integration_state="merged",
-            receipt={"kind": "squash", "result_oid": base},
-        )
-        cases.append(("false-receipt", false_receipt, "dependency_integration_ambiguous"))
-
-        wrong_remote = self.handoff(remote, base, "task/parent", head)
-        wrong_remote["remote"] = str(self.root / "similarly-named.git")
-        cases.append(("wrong-remote", wrong_remote, "dependency_ref_unavailable"))
-
-        missing_target = self.handoff(remote, base, "task/parent", head)
-        missing_target["target_ref"] = "refs/heads/similar-main"
-        cases.append(("missing-target-ref", missing_target, "dependency_ref_unavailable"))
-
-        missing_object = self.handoff(remote, base, "task/parent", "f" * 40)
-        cases.append(("missing-object", missing_object, "dependency_ref_unavailable"))
-
-        mismatched_branch = self.handoff(remote, base, "task/parent", other)
-        cases.append(
-            ("mismatched-branch-head", mismatched_branch, "dependency_integration_ambiguous")
-        )
-
-        for name, repository, hold in cases:
-            with self.subTest(case=name):
-                self.complete_parent(name, work, repository)
-                self.assert_rejected(f"{name}-child", work, name, hold)
-
-    def test_compatible_parent_heads_choose_descendant_and_divergent_heads_hold(self) -> None:
-        remote, work, base = self.repository("multiple")
-        first = self.branch(work, "task/first", base, "first.txt", "first\n")
-        descendant = self.branch(
-            work, "task/descendant", first, "descendant.txt", "descendant\n",
-        )
-        self.complete_parent(
-            "first", work, self.handoff(remote, base, "task/first", first),
-        )
-        self.complete_parent(
-            "descendant",
-            work,
-            self.handoff(remote, base, "task/descendant", descendant),
-        )
-        self.assertEqual(
-            self.dependency_base(
-                self.launch("compatible-child", work, ["descendant", "first"]),
-            ),
-            {
-                "base_oid": descendant,
-                "branch_ref": "refs/heads/task/descendant",
-                "target_ref": "refs/heads/main",
-                "parent_ids": ["descendant", "first"],
-            },
-        )
-
-        left = self.branch(work, "task/left", base, "left.txt", "left\n")
-        right = self.branch(work, "task/right", base, "right.txt", "right\n")
-        self.complete_parent("left", work, self.handoff(remote, base, "task/left", left))
-        self.complete_parent("right", work, self.handoff(remote, base, "task/right", right))
-        self.queue.add_task(task("divergent-child", work, depends_on=["left", "right"]))
-        readiness = self.queue.readiness("divergent-child", now_epoch=NOW)
+    def test_ambiguous_child_is_held_before_router_and_scout_allocates_other_work(self) -> None:
+        for name in ("a", "b"):
+            self.add(name)
+            self.complete(name, repository(f"task/{name}"))
+        self.add("child", depends_on=["a", "b"], priority=1)
+        self.add("independent", priority=3)
+        readiness = self.queue.readiness("child", now_epoch=NOW)
         self.assertFalse(readiness["ready"])
         self.assertEqual(readiness["hold_reason"], "integration_required")
+        self.assertIn("start_ref", readiness["reason"])
         router = mock.Mock()
         with self.assertRaises(dispatcher.DispatchError):
             dispatcher.dispatch(
-                runtime(self.queue.path),
-                self.queue,
-                task_id="divergent-child",
-                eligibility_key="manual/divergent-child",
-                requested_provider="alpha",
-                router_call=router,
+                runtime(self.queue.path), self.queue,
+                task_id="child", eligibility_key="manual/child",
+                requested_provider="alpha", router_call=router,
             )
         router.assert_not_called()
-
-    def test_multi_parent_target_move_between_resolutions_requires_integration(self) -> None:
-        remote, work, base = self.repository("moving-target")
-        first = self.branch(work, "task/first", base, "first.txt", "first\n")
-        descendant = self.branch(
-            work, "task/descendant", first, "descendant.txt", "descendant\n",
-        )
-        self.git(work, "switch", "main")
-        (work / "target.txt").write_text("target moved\n", encoding="utf-8")
-        self.git(work, "add", "target.txt")
-        self.git(work, "commit", "-m", "move target")
-        self.git(work, "push", "origin", "main")
-        moved_target = self.git(work, "rev-parse", "HEAD")
-
-        self.complete_parent(
-            "first-moving-target", work,
-            self.handoff(remote, base, "task/first", first),
-        )
-        self.complete_parent(
-            "descendant-moving-target", work,
-            self.handoff(remote, base, "task/descendant", descendant),
-        )
-        self.queue.add_task(task(
-            "moving-target-child", work,
-            depends_on=["first-moving-target", "descendant-moving-target"],
-        ))
-
-        real_remote_ref_oid = handoff._remote_ref_oid
-        observed_targets = iter((base, moved_target))
-
-        def resolve_with_target_move(cwd: Path, remote_name: str, ref: str) -> str:
-            if ref == "refs/heads/main":
-                return next(observed_targets)
-            return real_remote_ref_oid(cwd, remote_name, ref)
-
-        with mock.patch.object(
-            handoff, "_remote_ref_oid", side_effect=resolve_with_target_move,
-        ):
-            readiness = self.queue.readiness("moving-target-child", now_epoch=NOW)
-
-        self.assertFalse(readiness["ready"])
-        self.assertEqual(readiness["hold_reason"], "integration_required")
-        self.assertIn("do not share one exact target", readiness["reason"])
-
-
-class FullLocalDependencyJourney(RepositoryHandoffCase):
-    def write_router(self) -> tuple[Path, Path]:
-        router = self.root / "agent-router"
-        log = self.root / "router.jsonl"
-        router.write_text(
-            "#!/usr/bin/env python3\n"
-            "import json, pathlib, sys\n"
-            f"log = pathlib.Path({str(log)!r})\n"
-            "argv = sys.argv[1:]\n"
-            "if argv and argv[0] == 'status':\n"
-            "    print(json.dumps({'rows': []}))\n"
-            "    raise SystemExit(0)\n"
-            "prompt = ''\n"
-            "if '--prompt-file' in argv:\n"
-            "    prompt = pathlib.Path(argv[argv.index('--prompt-file') + 1]).read_text()\n"
-            "else:\n"
-            "    for value in argv:\n"
-            "        if value.startswith('--prompt-file='):\n"
-            "            prompt = pathlib.Path(value.split('=', 1)[1]).read_text()\n"
-            "            break\n"
-            "    if not prompt and '--json' in argv and argv.index('--json') + 1 < len(argv):\n"
-            "        prompt = argv[argv.index('--json') + 1]\n"
-            "rows = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []\n"
-            "job_id = f'local-job-{len(rows) + 1}'\n"
-            "rows.append({'job_id': job_id, 'argv': argv, 'prompt': prompt})\n"
-            "log.write_text(''.join(json.dumps(row) + '\\n' for row in rows))\n"
-            "print(json.dumps({'provider': 'alpha', 'dispatch': "
-            "{'job_id': job_id, 'launched': True}}))\n",
-            encoding="utf-8",
-        )
-        router.chmod(0o755)
-        return router, log
-
-    def write_config(self, router: Path) -> Path:
-        config = self.root / "config.json"
-        config.write_text(
-            json.dumps({
-                "schema_version": 1,
-                "database": str(self.queue.path),
-                "cache_dir": str(self.root / "cache"),
-                "record_command": [str(CLI), "record"],
-                "secret_refs": [],
-                "adapters": [{
-                    "id": "router",
-                    "kind": "agent-router",
-                    "argv": [str(router)],
-                    "timeout_seconds": 10,
-                    "max_output_bytes": 65_536,
-                }],
-                "providers": [{
-                    "id": "alpha",
-                    "account_mode": "single",
-                    "dispatch": {"adapter_id": "router", "provider": "alpha"},
-                }],
-                "plans": [{"id": "alpha-plan", "provider_id": "alpha"}],
-                "accounts": [{
-                    "id": "alpha-account",
-                    "provider_id": "alpha",
-                    "plan_id": "alpha-plan",
-                }],
-                "limits": [{
-                    "id": "alpha-weekly",
-                    "plan_id": "alpha-plan",
-                    "window_seconds": 604_800,
-                    "ceiling_percent": 95,
-                    "lead_seconds": 20_000,
-                    "batch_size": 6,
-                }],
-                "viewer": {},
-                "pr_exceptions": [],
-            }, sort_keys=True),
-            encoding="utf-8",
-        )
-        return config
-
-    def write_usage(self, captured_at: int) -> None:
-        cache = self.root / "cache" / "usage" / "alpha"
-        cache.mkdir(parents=True, exist_ok=True)
-        (cache / "alpha-account.json").write_text(
-            json.dumps({
-                "provider_id": "alpha",
-                "account_id": "alpha-account",
-                "captured_at": captured_at,
-                "limits": {
-                    "alpha-weekly": {
-                        "used_percent": 20,
-                        "resets_at": NOW + 1_000,
-                    },
-                },
-            }),
-            encoding="utf-8",
-        )
-
-    def cli(self, config: Path, *argv: str) -> dict[str, object]:
-        completed = subprocess.run(
-            [
-                str(CLI),
-                *argv,
-                "--config", str(config),
-                "--database", str(self.queue.path),
-                "--json",
-            ],
-            text=True,
-            capture_output=True,
-            check=False,
-            timeout=30,
-        )
-        self.assertEqual(
-            completed.returncode,
-            0,
-            f"CLI failed: {completed.stdout}\n{completed.stderr}",
-        )
-        return json.loads(completed.stdout.strip().splitlines()[-1])
-
-    @staticmethod
-    def sql_rows(
-        database: Path, sql: str, parameters: tuple[object, ...] = (),
-    ) -> list[dict[str, object]]:
-        with sqlite3.connect(database) as connection:
-            connection.row_factory = sqlite3.Row
-            return [dict(row) for row in connection.execute(sql, parameters)]
-
-    def test_real_cli_scout_git_and_fake_router_prove_a_b_recovery_c_handoff(self) -> None:
-        remote, work, target_base = self.repository("journey")
-        a_head = self.branch(work, "task/a", target_base, "a.txt", "A\n")
-        router, router_log = self.write_router()
-        config = self.write_config(router)
-        for value in (
-            task("a", work),
-            task("b", work, depends_on=["a"]),
-            task("c", work, depends_on=["b"]),
-        ):
-            self.queue.add_task(value)
-
-        a_dispatch = self.cli(config, "dispatch", "a", "alpha", "--now", str(NOW))[
-            "dispatch"
-        ]
-        a_claim = self.queue.claim_for("a")
-        self.assertIsNotNone(a_claim)
-        self.queue.record(
-            "a",
-            a_dispatch["eligibility_key"],
-            attempt_id=a_claim.attempt_id,
-            status="done",
-            outcome=verified_outcome(
-                self.handoff(remote, target_base, "task/a", a_head), f"git:{a_head}",
+        snapshots = {
+            ("alpha", "alpha-account"): usage.UsageSnapshot(
+                "alpha", "alpha-account", NOW,
+                {"alpha-weekly": {"used_percent": 70, "resets_at": NOW + 1_000}},
             ),
-            provider_id="alpha",
-            account_id="alpha-account",
-            timestamp=iso(NOW),
-            now_epoch=NOW,
-            summary="A verified",
-        )
-
-        b_dispatch = self.cli(config, "dispatch", "b", "alpha", "--now", str(NOW))[
-            "dispatch"
-        ]
+        }
+        with mock.patch.object(scout, "read_all", return_value=snapshots):
+            tick = scout.plan_tick(
+                runtime(self.queue.path), self.queue, now_epoch=NOW, provider_holds=(),
+            )
         self.assertEqual(
-            self.dependency_base(b_dispatch["prompt"]),
-            {
-                "base_oid": a_head,
-                "branch_ref": "refs/heads/task/a",
-                "target_ref": "refs/heads/main",
-                "parent_ids": ["a"],
-            },
+            [item.id for tasks in tick.allocations.values() for item in tasks],
+            ["independent"],
         )
-        b_first = self.queue.claim_for("b")
-        self.assertIsNotNone(b_first)
+        self.assertEqual(tick.dependency_holds[0]["hold_reason"], "integration_required")
+
+    def test_read_only_local_queue_reports_the_same_held_decision(self) -> None:
+        for name in ("a", "b"):
+            self.add(name)
+            self.complete(name, repository(f"task/{name}"))
+        self.add("child", depends_on=["a", "b"])
+        strict = self.queue.readiness("child", now_epoch=NOW)
+        local = db.LocalQueueReader(self.queue.path)
+        self.assertEqual(local.readiness("child", now_epoch=NOW), strict)
+        with self.assertRaises(sqlite3.OperationalError):
+            with local._connect() as connection:
+                connection.execute("UPDATE tasks SET title='changed' WHERE id='child'")
+        self.assertEqual(self.queue.task("child").title, "child")
+        with mock.patch.object(cli, "_json") as output:
+            self.assertEqual(cli.main([
+                "queue", "--database", str(self.queue.path), "--local", "--now", str(NOW), "--json",
+            ]), 0)
+        self.assertEqual(output.call_args.args[0]["readiness"]["child"], strict)
+
+    def test_failed_middle_task_recovers_then_hands_branch_to_next_task(self) -> None:
+        self.add("a")
+        self.add("b", depends_on=["a"])
+        self.add("c", depends_on=["b"])
+        self.complete("a", repository("task/a"))
+        routed: list[str] = []
+
+        def router_call(*_args: object, **_kwargs: object) -> dict[str, object]:
+            routed.append("launched")
+            return {"provider": "alpha", "dispatch": {
+                "job_id": f"local-job-{len(routed)}", "launched": True,
+            }}
+
+        first = dispatcher.dispatch(
+            runtime(self.queue.path), self.queue,
+            task_id="b", eligibility_key="manual/b",
+            requested_provider="alpha", router_call=router_call,
+        )
+        self.assertEqual(self.prompt_branch(first.prompt)["branch_ref"], "refs/heads/task/a")
+        first_claim = self.queue.claim_for("b")
+        self.assertIsNotNone(first_claim)
         self.queue.record(
-            "b",
-            b_dispatch["eligibility_key"],
-            attempt_id=b_first.attempt_id,
-            status="failed",
-            outcome=failed_outcome(),
-            provider_id="alpha",
-            account_id="alpha-account",
-            timestamp=iso(NOW),
-            now_epoch=NOW,
-            summary="tests failed",
+            "b", first.eligibility_key, attempt_id=first_claim.attempt_id,
+            status="failed", outcome={"reason": {
+                "code": "retryable", "detail": "tests failed", "signature": "tests:failed",
+            }}, provider_id="alpha", account_id="alpha-account",
+            timestamp=iso(NOW), now_epoch=NOW, summary="tests failed",
         )
+        self.assertFalse(self.queue.readiness("c", now_epoch=NOW)["ready"])
 
-        self.write_usage(NOW + 300)
-        recovery_report = self.cli(config, "scout", "--now", str(NOW + 300))
+        snapshots = {("alpha", "alpha-account"): usage.UsageSnapshot(
+            "alpha", "alpha-account", NOW + 300,
+            {"alpha-weekly": {"used_percent": 20, "resets_at": NOW + 1_000}},
+        )}
+        with mock.patch.object(scout, "read_all", return_value=snapshots):
+            recovered = scout.run_once(
+                runtime(self.queue.path), self.queue, now_epoch=NOW + 300,
+                router_call=router_call,
+            )
+        self.assertEqual([item.task_id for item in recovered.dispatched], ["b"])
         self.assertEqual(
-            [item["task_id"] for item in recovery_report["dispatched"]], ["b"],
+            self.prompt_branch(recovered.dispatched[0].prompt)["branch_ref"],
+            "refs/heads/task/a",
         )
-        b_recovery = recovery_report["dispatched"][0]
-        self.assertEqual(
-            self.dependency_base(b_recovery["prompt"]),
-            {
-                "base_oid": a_head,
-                "branch_ref": "refs/heads/task/a",
-                "target_ref": "refs/heads/main",
-                "parent_ids": ["a"],
-            },
-        )
-        b_retry = self.queue.claim_for("b")
-        self.assertIsNotNone(b_retry)
-        self.assertNotEqual(b_retry.attempt_id, b_first.attempt_id)
-
-        b_head = self.branch(work, "task/b", a_head, "b.txt", "B\n")
+        retry_claim = self.queue.claim_for("b")
+        self.assertIsNotNone(retry_claim)
+        self.assertNotEqual(retry_claim.attempt_id, first_claim.attempt_id)
+        retry = recovered.dispatched[0]
         self.queue.record(
-            "b",
-            b_recovery["eligibility_key"],
-            attempt_id=b_retry.attempt_id,
-            status="done",
-            outcome=verified_outcome(
-                self.handoff(remote, target_base, "task/b", b_head), f"git:{b_head}",
-            ),
-            provider_id="alpha",
-            account_id="alpha-account",
-            timestamp=iso(NOW + 301),
-            now_epoch=NOW + 301,
-            summary="B recovered and verified",
+            "b", retry.eligibility_key, attempt_id=retry_claim.attempt_id,
+            status="done", outcome=verified_outcome(repository("task/b")),
+            provider_id="alpha", account_id="alpha-account",
+            timestamp=iso(NOW + 301), now_epoch=NOW + 301,
+            summary="recovery verified",
         )
-
-        self.write_usage(NOW + 301)
-        child_report = self.cli(config, "scout", "--now", str(NOW + 301))
-        self.assertEqual([item["task_id"] for item in child_report["dispatched"]], ["c"])
+        with mock.patch.object(scout, "read_all", return_value=snapshots):
+            successor = scout.run_once(
+                runtime(self.queue.path), self.queue, now_epoch=NOW + 301,
+                router_call=router_call,
+            )
+        self.assertEqual([item.task_id for item in successor.dispatched], ["c"])
         self.assertEqual(
-            self.dependency_base(child_report["dispatched"][0]["prompt"]),
-            {
-                "base_oid": b_head,
-                "branch_ref": "refs/heads/task/b",
-                "target_ref": "refs/heads/main",
-                "parent_ids": ["b"],
-            },
-        )
-
-        attempts = self.sql_rows(
-            self.queue.path,
-            "SELECT ordinal,state FROM task_attempts WHERE task_id='b' ORDER BY ordinal",
-        )
-        self.assertEqual(attempts, [{"ordinal": 1, "state": "failed"}, {"ordinal": 2, "state": "done"}])
-        self.assertEqual(
-            [row["status"] for row in self.sql_rows(
-                self.queue.path,
-                "SELECT status FROM runs WHERE task='b' ORDER BY rowid_pk",
-            )],
-            ["dispatched", "failed", "dispatched", "done"],
-        )
-        router_rows = [
-            json.loads(line)
-            for line in router_log.read_text(encoding="utf-8").splitlines()
-        ]
-        job_ids = [row["job_id"] for row in router_rows]
-        self.assertEqual(job_ids, ["local-job-1", "local-job-2", "local-job-3", "local-job-4"])
-        self.assertEqual(len(job_ids), len(set(job_ids)))
-        self.assertEqual(
-            [
-                self.dependency_base(router_rows[index]["prompt"])["base_oid"]
-                for index in (1, 2, 3)
-            ],
-            [a_head, a_head, b_head],
-        )
-
-
-class HandoffReverificationCase(RepositoryHandoffCase):
-    def test_squash_receipt_survives_later_target_edit(self) -> None:
-        remote, work, initial = self.repository("squash-later")
-        head = self.branch(work, "task/parent", initial, "shared.txt", "parent\n")
-        self.git(work, "switch", "main")
-        self.git(work, "checkout", "task/parent", "--", "shared.txt")
-        self.git(work, "add", "shared.txt")
-        self.git(work, "commit", "-m", "Squash parent delta")
-        receipt_result = self.git(work, "rev-parse", "HEAD")
-        (work / "shared.txt").write_text("parent\nlater edit\n", encoding="utf-8")
-        self.git(work, "add", "shared.txt")
-        self.git(work, "commit", "-m", "Later edit")
-        self.git(work, "push", "origin", "main")
-        target = self.git(work, "rev-parse", "HEAD")
-        self.complete_parent(
-            "parent", work,
-            self.handoff(
-                remote, initial, "task/parent", head,
-                integration_state="merged",
-                receipt={"kind": "squash", "result_oid": receipt_result},
-            ),
+            self.prompt_branch(successor.dispatched[0].prompt)["branch_ref"],
+            "refs/heads/task/b",
         )
         self.assertEqual(
-            self.dependency_base(self.launch("child", work, ["parent"]))["base_oid"],
-            target,
+            [row.state for row in self.queue.attempts(task_id="b")],
+            ["failed", "done"],
         )
 
-    def test_reverify_rebased_parent_preserves_original_and_unblocks_child(self) -> None:
-        remote, work, initial = self.repository("reverify")
-        old_head = self.branch(work, "task/parent", initial, "parent.txt", "old\n")
-        self.complete_parent(
-            "parent", work, self.handoff(remote, initial, "task/parent", old_head),
-        )
-        self.queue.add_task(task("child", work, depends_on=["parent"]))
+    def test_reverify_preserves_done_outcome_and_uses_latest_structural_claim(self) -> None:
+        self.add("parent")
+        self.complete("parent", repository("task/old"))
         source = self.queue.runs(task_id="parent")[-1]
-        self.assertEqual(
-            self.queue.handoff_revision("parent"),
-            {
-                "task_id": "parent", "from_done_rowid": source.rowid_pk,
-                "after_revision_id": None, "summary": None,
-            },
-        )
-
-        self.git(work, "switch", "-C", "task/parent", initial)
-        (work / "parent.txt").write_text("revised\n", encoding="utf-8")
-        self.git(work, "add", "parent.txt")
-        self.git(work, "commit", "-m", "revised parent")
-        new_head = self.git(work, "rev-parse", "HEAD")
-        self.git(work, "push", "-f", "origin", "HEAD:refs/heads/task/parent")
-        self.assertFalse(self.queue.readiness("child", now_epoch=NOW)["ready"])
-
         original = source.outcome
-        revised = verified_outcome(
-            self.handoff(remote, initial, "task/parent", new_head),
-            f"git:{new_head}",
-        )
+        self.add("child", depends_on=["parent"])
+        with self.assertRaisesRegex(db.QueueError, "repository identity"):
+            self.queue.reverify_handoff(
+                "parent", from_done_rowid=source.rowid_pk, after_revision_id=None,
+                outcome=verified_outcome(repository("task/other")),
+                summary="branch redirected",
+            )
+        replacement = repository("task/old")
+        replacement["head_oid"] = "changed without Git access"
         revision = self.queue.reverify_handoff(
-            "parent", from_done_rowid=source.rowid_pk,
-            after_revision_id=None, outcome=revised, summary="fresh parent proof",
-            now_epoch=NOW + 1,
-        )
-        self.assertEqual(revision["source_run_rowid"], source.rowid_pk)
-        self.assertEqual(
-            self.queue.handoff_revision("parent")["after_revision_id"], revision["id"],
+            "parent", from_done_rowid=source.rowid_pk, after_revision_id=None,
+            outcome=verified_outcome(replacement), summary="new evidence",
         )
         self.assertEqual(self.queue.runs(task_id="parent")[-1].outcome, original)
         self.assertEqual(
-            self.dependency_base(self.launch("grandchild", work, ["parent"]))["base_oid"],
-            new_head,
-        )
-
-    def test_reverify_requires_verified_repository_and_exact_revision_cas(self) -> None:
-        remote, work, initial = self.repository("reverify-cas")
-        head = self.branch(work, "task/parent", initial, "parent.txt", "proof\n")
-        self.complete_parent("parent", work, self.handoff(remote, initial, "task/parent", head))
-        source = self.queue.runs(task_id="parent")[-1]
-        valid = verified_outcome(
-            self.handoff(remote, initial, "task/parent", head), f"git:{head}",
+            self.queue.handoff_revision("parent")["after_revision_id"], revision["id"],
         )
         with self.assertRaises(db.QueueError):
             self.queue.reverify_handoff(
-                "parent", from_done_rowid=source.rowid_pk,
-                after_revision_id=None, outcome={"repository": valid["repository"]},
-                summary="missing proof",
+                "parent", from_done_rowid=source.rowid_pk, after_revision_id=None,
+                outcome=verified_outcome(replacement), summary="stale revision",
             )
-        with self.assertRaises(db.QueueError):
-            self.queue.reverify_handoff(
-                "parent", from_done_rowid=source.rowid_pk,
-                after_revision_id=None, outcome=verified_outcome({}, "unproven"),
-                summary="missing repository fields",
-            )
-        first = self.queue.reverify_handoff(
-            "parent", from_done_rowid=source.rowid_pk,
-            after_revision_id=None, outcome=valid, summary="first proof",
+        self.assertEqual(
+            self.queue.dependency_base("child"),
+            {"branch_ref": "refs/heads/task/old", "parent_ids": ["parent"]},
         )
-        with self.assertRaises(db.QueueError):
-            self.queue.reverify_handoff(
-                "parent", from_done_rowid=source.rowid_pk,
-                after_revision_id=None, outcome=valid, summary="stale proof",
-            )
-        second = self.queue.reverify_handoff(
-            "parent", from_done_rowid=source.rowid_pk,
-            after_revision_id=first["id"], outcome=valid, summary="second proof",
-        )
-        self.assertGreater(second["id"], first["id"])
 
-    def test_reverify_cannot_redirect_parent_repository_identity(self) -> None:
-        remote, work, initial = self.repository("reverify-identity")
-        head = self.branch(work, "task/parent", initial, "parent.txt", "proof\n")
-        self.complete_parent("parent", work, self.handoff(remote, initial, "task/parent", head))
-        source = self.queue.runs(task_id="parent")[-1]
-        for field, replacement in (
-            ("remote", str(remote.parent / "other.git")),
-            ("target_ref", "refs/heads/task/parent"),
-            ("branch_ref", "refs/heads/main"),
-        ):
-            changed = self.handoff(remote, initial, "task/parent", head)
-            changed[field] = replacement
-            with self.subTest(field=field), self.assertRaisesRegex(
-                db.QueueError, "repository identity",
-            ):
-                self.queue.reverify_handoff(
-                    "parent", from_done_rowid=source.rowid_pk,
-                    after_revision_id=None,
-                    outcome=verified_outcome(changed, f"git:{head}"),
-                    summary="redirected proof",
-                )
-
-    def test_revision_cannot_override_a_newer_verified_done_row(self) -> None:
-        remote, work, initial = self.repository("reverify-new-done")
-        head = self.branch(work, "task/parent", initial, "parent.txt", "proof\n")
-        self.complete_parent("parent", work, self.handoff(remote, initial, "task/parent", head))
+    def test_newer_done_row_cannot_be_overridden_by_old_revision(self) -> None:
+        self.add("parent")
+        self.complete("parent", repository("task/parent"))
         source = self.queue.runs(task_id="parent")[-1]
         self.queue.reverify_handoff(
-            "parent", from_done_rowid=source.rowid_pk,
-            after_revision_id=None, outcome=verified_outcome(
-                self.handoff(remote, initial, "task/parent", head), f"git:{head}",
-            ), summary="fresh proof",
+            "parent", from_done_rowid=source.rowid_pk, after_revision_id=None,
+            outcome=verified_outcome(repository("task/parent")), summary="revision",
         )
-        self.queue.add_task(task("child", work, depends_on=["parent"]))
+        self.add("child", depends_on=["parent"])
         with sqlite3.connect(self.queue.path) as connection:
             connection.execute(
                 """INSERT INTO runs(task,kind,cycle,status,ts,attempt_id,outcome_json)
@@ -1255,46 +473,6 @@ class HandoffReverificationCase(RepositoryHandoffCase):
             )
         with self.assertRaisesRegex(db.QueueError, "older done row"):
             self.queue.dependency_base("child")
-        with self.assertRaisesRegex(db.QueueError, "older done row"):
-            self.queue.handoff_revision("parent")
-
-
-class GitHubRemoteIdentityCase(unittest.TestCase):
-    def test_transport_forms_match_only_the_same_repository(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            work = Path(temporary)
-            subprocess.run(["git", "init", str(work)], check=True, capture_output=True)
-            subprocess.run(
-                ["git", "remote", "add", "origin", "git@github.com:curie-eng/curie.git"],
-                cwd=work, check=True, capture_output=True,
-            )
-            self.assertEqual(
-                handoff._remote_name(work, "https://github.com/curie-eng/curie.git")[0],
-                "origin",
-            )
-            for claimed in (
-                "https://github.com/curie-eng/other.git",
-                "https://other.example.com/curie-eng/curie.git",
-                "https://github.com/curie-eng/curie.git?token=example",
-                "https://github.com/curie-eng/curie.git/extra",
-            ):
-                with self.subTest(claimed=claimed), self.assertRaises(handoff.DependencyHandoffError):
-                    handoff._remote_name(work, claimed)
-
-    def test_two_configured_transports_for_one_repository_remain_ambiguous(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            work = Path(temporary)
-            subprocess.run(["git", "init", str(work)], check=True, capture_output=True)
-            subprocess.run(
-                ["git", "remote", "add", "origin", "git@github.com:curie-eng/curie.git"],
-                cwd=work, check=True, capture_output=True,
-            )
-            subprocess.run(
-                ["git", "remote", "add", "second", "https://github.com/curie-eng/curie.git"],
-                cwd=work, check=True, capture_output=True,
-            )
-            with self.assertRaisesRegex(handoff.DependencyHandoffError, "one exact configured remote"):
-                handoff._remote_name(work, "https://github.com/curie-eng/curie.git")
 
 
 if __name__ == "__main__":

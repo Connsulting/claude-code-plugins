@@ -35,11 +35,19 @@ future UTC epoch for the real run):
   "max_turns": 8,
   "max_inflight": 3,
   "coordinator": {"model": "gpt-6-astra"},
+  "start_ref": "refs/heads/task/release-base",
   "task_ids": ["existing-root-a", "existing-root-b"],
   "source_ref": "planning-thread-reference",
   "work_group": "Example"
 }
 ```
+
+Goal `start_ref` is optional. It accepts a branch shorthand or full heads ref and is normalized
+to `refs/heads/...`. It applies to the coordinator and every new member task that does not set
+its own `start_ref`. A member value overrides the goal value. An explicit shared base is
+an intentional choice that disables automatic branch stacking for those tasks. Leave both values
+unset when repository dependencies should select a unique unmerged parent branch or their shared
+target. Existing linked tasks keep their original contracts.
 
 `authority` must resolve scope and permitted effects before queueing. `stack` means
 unmerged PRs; `merge` explicitly grants the coordinator the approved merges and must
@@ -113,7 +121,8 @@ GoalStore admission replace the ordinary active-dependent requirement. Admission
 original task ID and every attempt, and rechecks goal authority, pause, deadline, concurrency, contract,
 operation, dependency-base, and frozen-candidate guards. At most two automatic attempts are made,
 after 5-minute and 30-minute backoffs; a repeated normalized reason stops early. Unknown launch
-ownership, missing authority, and unavailable or divergent repository state remain held.
+ownership, missing authority, and unavailable or malformed repository identity remain held.
+Divergent parent refs require a member start_ref to resolve.
 Coordinator and acceptance jobs do not use this recovery path: a coordinator resumes through a
 fresh turn, and acceptance always uses a fresh verifier bound to the exact candidate.
 
@@ -208,15 +217,18 @@ operations in `goal show` and reconcile the actual effect before retrying. Stack
 goals reject recorded merge operations. The CLI records evidence; it does not itself
 perform Git or GitHub operations. An unresolved operation blocks goal completion.
 
-Repository handoff also binds the exact canonical remote, target ref, prior target base, branch,
-and parent head. A PR or receipt does not by itself prove completion or integration. A normal
-merge requires the parent head to be an ancestor of the recorded result, which must remain on the
-current exact target. A squash requires parent delta equivalence at the recorded result. A full
-revert holds the child. An explicitly unmerged parent supplies only its recorded verified head,
-even if the branch advances. A replaced head needs fresh verified evidence. One compatible
-descendant may contain all parent heads; divergent heads require an explicitly authorized
-integration member and, where applicable, its immutable operation receipt. The runtime does not
-merge branches or expand the stored authority.
+Repository dependencies select a starting branch from saved handoff metadata. Valid repository
+parent metadata records the remote, target_ref, branch_ref, and integration_state. Commit OIDs and
+receipts may remain as audit evidence, but readiness does not require ancestry or content proof.
+An explicit member start_ref can select between valid parent branches, but it cannot override
+missing or malformed repository identity metadata. When a member start_ref is unset, parents with
+the same remote and target select their unique unmerged branch, or the shared target when all are
+merged. Different remotes or targets, or multiple unmerged branches, require a member start_ref.
+Queue, scout, and dispatch resolve the branch without Git calls, remote checks, or an immutable
+SHA pin. The worker fetches the selected branch's current tip. If the branch is missing, setup
+stops with reason code `verification_needed` and does not fall back to the target. This selection
+does not grant merge or other authority. The runtime does not merge branches or expand the stored
+authority.
 
 Explicit planning-thread controls use the current revision:
 

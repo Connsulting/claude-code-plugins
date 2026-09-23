@@ -928,9 +928,7 @@ class DependencyPreflightTransactionContracts(RecoveryCase):
             key=f"manual/{parent_id}",
         )
         return {
-            "base_oid": repository["head_oid"],
             "branch_ref": repository["branch_ref"],
-            "target_ref": repository["target_ref"],
             "parent_ids": [parent_id],
         }
 
@@ -940,7 +938,8 @@ class DependencyPreflightTransactionContracts(RecoveryCase):
         self.add("claim-child", depends_on=[parent_id])
         writer_opened = False
 
-        def resolve(_cwd: str, _outcomes: object) -> dict[str, object]:
+        def resolve(_outcomes: object, *, start_ref: str | None) -> dict[str, object]:
+            self.assertIsNone(start_ref)
             nonlocal writer_opened
             with sqlite3.connect(self.queue.path, timeout=0) as independent:
                 independent.execute("BEGIN IMMEDIATE")
@@ -948,7 +947,7 @@ class DependencyPreflightTransactionContracts(RecoveryCase):
                 independent.rollback()
             concurrent_queue = db.QueueDB(self.queue.path)
             concurrent_queue.edit_task(
-                "claim-child", {"goal": "contract changed during network preflight"},
+                "claim-child", {"start_ref": "next"},
             )
             return dependency_base
 
@@ -964,8 +963,8 @@ class DependencyPreflightTransactionContracts(RecoveryCase):
         resolver.assert_called_once()
         self.assertIsNone(claimed)
         self.assertEqual(
-            self.queue.task("claim-child").goal,
-            "contract changed during network preflight",
+            self.queue.task("claim-child").start_ref,
+            "refs/heads/next",
         )
         self.assertEqual(self.queue.claims(), [])
         self.assertEqual(self.queue.inflight(), [])
@@ -988,7 +987,8 @@ class DependencyPreflightTransactionContracts(RecoveryCase):
         )
         writer_opened = False
 
-        def resolve(_cwd: str, _outcomes: object) -> dict[str, object]:
+        def resolve(_outcomes: object, *, start_ref: str | None) -> dict[str, object]:
+            self.assertIsNone(start_ref)
             nonlocal writer_opened
             with sqlite3.connect(self.queue.path, timeout=0) as independent:
                 independent.execute("BEGIN IMMEDIATE")
@@ -1039,8 +1039,7 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
         required_fields = {
             "reason", "code", "detail", "signature",
             "completion", "verified", "mechanism", "evidence",
-            "repository", "remote", "target_ref", "target_base_oid",
-            "branch_ref", "head_oid", "integration_state",
+            "repository", "remote", "target_ref", "branch_ref", "integration_state",
         }
         self.assertEqual(required_fields - tokens, set(), prompt)
         valid_mechanisms = {

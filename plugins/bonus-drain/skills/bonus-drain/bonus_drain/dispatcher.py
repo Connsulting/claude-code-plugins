@@ -355,15 +355,8 @@ def _outcome_contract_line() -> str:
         "repository": {
             "remote": "<exact canonical remote URL>",
             "target_ref": "refs/heads/<exact target branch>",
-            "target_base_oid": "<full starting commit OID>",
             "branch_ref": "refs/heads/<exact result branch>",
-            "head_oid": "<full result commit OID>",
             "integration_state": {"allowed": ["merged", "unmerged"]},
-            "merge_receipt": {
-                "optional": True,
-                "kind": {"allowed": ["merge", "squash"]},
-                "result_oid": "<full verified target result OID>",
-            },
         },
     }
     return "OUTCOME_SCHEMA=" + json.dumps(schema, sort_keys=True, separators=(",", ":"))
@@ -425,7 +418,12 @@ def _pr_policy(config: RuntimeConfig, task: Task) -> str:
         except ValueError:
             continue
         if bool(exception.get("allow_pr", exception.get("allow_push", False))):
-            return "This configured repository permits a branch push and pull request; never merge it."
+            return (
+                "This configured repository permits a branch push and pull request. "
+                "Merge only when the task contract explicitly grants merge authority into a named "
+                "epic/* branch, and only into that branch after all PR checks pass. "
+                "Otherwise, do not merge."
+            )
         if bool(exception.get("allow_push", False)):
             return "This configured repository permits pushing the committed branch; do not open or merge a pull request."
     return "Produce a branch and committed artifact only; do not push, publish, merge, or delete unrelated files."
@@ -477,10 +475,12 @@ def render_prompt(
         sections.extend([
             f"DEPENDENCY_BASE={encoded_base}",
             (
-                "Use this exact verified dependency head for the isolated worktree. "
-                "It overrides /implement's default target-base selection. Confirm the exact "
-                "remote and object identity; the branch ref may have advanced beyond the "
-                "verified base object. Never substitute its newer tip or another local base."
+                "Fetch DEPENDENCY_BASE.branch_ref from the task repository, confirm it exists, "
+                "and start the isolated worktree from the current tip of that fetched branch. This branch "
+                "selection overrides the default starting branch. If it is unavailable, stop as a setup "
+                "failure with reason.code=verification_needed and a detail and signature naming "
+                "dependency_ref_unavailable. Do not substitute another branch. This selection "
+                "grants no merge authority."
             ),
         ])
     if attempt is not None:
@@ -542,7 +542,7 @@ def render_prompt(
     contract.extend(
         [
             "Never leave this background run blocked, waiting for input, or otherwise non-terminal.",
-            "A run that opened or updated a pull request is done, even while that PR awaits review, approval, or pending CI; record done with completion.mechanism=artifact and the PR URL as evidence, never failed or awaiting_human for that reason alone.",
+            "Opening or updating a pull request is not done. Normal PR work is done only after all PR checks pass for the current head. Epic Forge work, or a task whose contract requires an epic merge, is done only after all PR checks pass and the PR is confirmed merged into the exact authorized epic branch. Follow /implement's check watcher and epic merge procedure when applicable. Pending or failing checks, a running check watcher, and an unmerged epic PR must never be recorded as done. Keep working or waiting while progress remains possible. Record done with completion.mechanism=artifact and evidence of the PR URL, passing checks, and the required merge. Pending human review alone does not block normal PR completion once checks pass.",
             "Record awaiting_human only when you finished everything you can and the remaining step needs Brian personally: hands-on testing only he can do (for example a real human review comment or a live Slack check) or a decision or approval (for example approving a CI or automation diff before commit, or choosing between conflicting acceptance criteria). Its reason.detail must name exactly what Brian must do.",
             "If the work itself cannot be completed, record failed with the blocker before exiting; do not request input or set a blocked status.",
             "Failed, skipped, or awaiting_human results require the structured reason and must not claim verified completion.",
@@ -573,10 +573,9 @@ def render_prompt(
             ),
             (
                 "If this task produces a branch or commit that a dependent task must use, include "
-                "repository with remote, target_ref, target_base_oid, branch_ref, head_oid, and "
-                "integration_state from verified exact Git identity. Include merge_receipt only "
-                "when its merge or squash kind and result_oid are verified. PR presence or state "
-                "does not prove integration, and this handoff grants no push or merge authority."
+                "repository with remote, target_ref, branch_ref, and integration_state from "
+                "the task's observed Git branch metadata. Record whether the branch is merged "
+                "or unmerged. This handoff grants no push or merge authority."
             ),
         ])
     if attempt is not None and outcome_path is not None and task.kind == "oneoff":

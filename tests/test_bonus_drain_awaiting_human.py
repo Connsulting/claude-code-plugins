@@ -6,6 +6,7 @@ import json
 import sqlite3
 import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -305,7 +306,11 @@ class PromptTests(RecoveryCase):
 
     def _assert_contract(self, prompt: str) -> None:
         self.assertIn("done|skipped|failed|awaiting_human", prompt)
-        self.assertIn("opened or updated a pull request is done", prompt)
+        self.assertIn("Opening or updating a pull request is not done", prompt)
+        self.assertIn("all PR checks pass for the current head", prompt)
+        self.assertIn("confirmed merged into the exact authorized epic branch", prompt)
+        self.assertIn("must never be recorded as done", prompt)
+        self.assertNotIn("even while that PR awaits", prompt)
         self.assertIn("completion.mechanism=artifact", prompt)
         self.assertIn("Record awaiting_human only when", prompt)
         self.assertIn("name exactly what Brian must do", prompt)
@@ -323,6 +328,19 @@ class PromptTests(RecoveryCase):
     def test_recurring_prompt_carries_awaiting_human_contract(self) -> None:
         self.add("weekly", kind="recurring", cadence="weekly")
         self._assert_contract(self._prompt("weekly"))
+
+    def test_configured_pr_permission_preserves_explicit_epic_merge_authority(self) -> None:
+        item = self.add("epic", constraints="Merge only into epic/example. Done means merged.")
+        config = replace(runtime(self.queue.path), pr_exceptions=(
+            {"path": str(self.root), "allow_push": True, "allow_pr": True},
+        ))
+        prompt = dispatcher.render_prompt(
+            config, item, "manual/epic", "alpha", "alpha-account",
+        )
+        self.assertIn("explicitly grants merge authority into a named epic/* branch", prompt)
+        self.assertIn("Otherwise, do not merge", prompt)
+        self.assertNotIn("never merge it", prompt)
+        self._assert_contract(prompt)
 
 
 class FactoryTerminalTests(unittest.TestCase):

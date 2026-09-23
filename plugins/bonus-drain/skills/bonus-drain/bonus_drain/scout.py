@@ -76,6 +76,8 @@ class _InitializedQueueReader(QueueDB):
 
 
 def _initialized_queue_reader(queue: Any) -> Any:
+    if isinstance(queue, db.LocalQueueReader):
+        return queue
     if isinstance(queue, _InitializedQueueReader):
         return queue
     if isinstance(queue, QueueDB):

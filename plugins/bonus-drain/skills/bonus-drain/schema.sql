@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   allowed_providers_json TEXT,
   required_capabilities_json TEXT,
   source_ref            TEXT,
+  start_ref             TEXT,
   work_group            TEXT,
   depends_on_json       TEXT
 );

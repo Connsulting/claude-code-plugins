@@ -312,17 +312,25 @@ stay in history.
 
 When a failed or skipped one-off blocks active dependent work, the scout may make at most two
 automatic recovery attempts after 5-minute and 30-minute backoffs. Repeating the same failure
-reason stops recovery early. Missing authority, unknown launch ownership, and unavailable or
-divergent repository state remain held. An ordinary operator requeue preserves prior attempts.
+reason stops recovery early. Missing authority, unknown launch ownership, and unavailable
+repository identity remain held. Divergent parent refs need an explicit child start_ref. An
+ordinary operator requeue preserves prior attempts.
 Public requeue remains unavailable for goal-managed work; admitted implementation and integration
 recovery stays under the goal contract, while coordinators and frozen acceptance use fresh
 follow-up jobs.
 
-Repository handoff records the exact remote, target, base, branch, and head. A merged parent must
-be present in the current exact target by ancestry and content proof; squash merges use the same
-content proof. An unmerged parent supplies its verified head as the child base. Divergent parent
-heads require an explicitly authorized integration job. Bonus Drain does not merge or expand the
-task's external authority.
+Repository handoff readiness uses the recorded remote, target_ref, branch_ref, and
+integration_state. Commit OIDs and receipts may remain as audit evidence, but readiness does not
+require Git ancestry or content proof. A child may set `start_ref` with `--start-ref`; edits use
+the `start_ref` field. Branch shorthands are normalized to `refs/heads/...`. An explicit child
+start_ref resolves valid parent branches that differ, but it cannot override missing or malformed
+repository identity metadata. Without an override, parents with the same remote and target select
+their unique unmerged branch, or the shared target when all are merged. Different remotes or
+targets, and multiple unmerged branches, require the child to set start_ref. Queue, scout, and
+dispatch resolve from saved metadata without Git calls, remote checks, or an immutable SHA pin.
+The worker fetches the selected branch's current tip. A missing branch stops setup with reason
+code `verification_needed`; the worker does not fall back to the target. This branch choice grants
+no merge, push, deployment, or other external authority.
 
 The bundled [Long Horizon skill](skills/long-horizon/SKILL.md) coordinates whole goals
 through those jobs, stacked or authorized merged PRs, combined acceptance, and further

@@ -1,5 +1,6 @@
 """Async queue contracts: shared eligibility, dependency safety and editable handoffs."""
 import json
+import hashlib
 import sqlite3
 import sys
 import tempfile
@@ -110,6 +111,43 @@ class AsyncWorkTests(unittest.TestCase):
             with self.assertRaises(db.QueueError):
                 self.queue.edit_task('a', changes)
 
+    def test_start_ref_add_edit_cli_roundtrip_and_safe_branch_validation(self):
+        for name in ('next', 'main', 'epic/x', 'refs/heads/task/example'):
+            with self.subTest(name=name):
+                changed = self.queue.edit_task('a', {'start_ref': name})
+                self.assertEqual(changed.start_ref, 'refs/heads/' + name.removeprefix('refs/heads/'))
+                self.assertEqual(self.queue.task('a').to_dict()['start_ref'], changed.start_ref)
+        for name in ('refs/tags/v1', '../main', 'epic//x', 'main/',
+                     'refs/heads/main/', 'a.lock', 'a b', '-bad', 'a@{b}'):
+            with self.subTest(name=name), self.assertRaises(db.QueueError):
+                self.queue.edit_task('a', {'start_ref': name})
+        with mock.patch.object(cli, '_json') as output:
+            self.assertEqual(cli.main(['add', '--database', str(self.queue.path), '--id', 'cli-start',
+                '--title', 'CLI start', '--kind', 'oneoff', '--size', 'small', '--cwd', '/tmp',
+                '--goal', 'proof', '--start-ref', 'epic/next', '--json']), 0)
+        self.assertEqual(self.queue.task('cli-start').start_ref, 'refs/heads/epic/next')
+        self.assertEqual(output.call_args.args[0]['task']['start_ref'], 'refs/heads/epic/next')
+        with mock.patch.object(cli, '_json'):
+            self.assertEqual(cli.main(['edit', '--database', str(self.queue.path), 'cli-start',
+                '--changes', json.dumps({'start_ref': 'next'}), '--json']), 0)
+        self.assertEqual(self.queue.task('cli-start').start_ref, 'refs/heads/next')
+
+    def test_null_start_ref_preserves_old_hash_and_explicit_edit_fences_stale_claim(self):
+        original = self.queue.task('a')
+        self.assertIsNone(original.start_ref)
+        value = original.to_dict()
+        self.assertIsNone(value.pop('start_ref'))
+        for field in ('priority', 'size', 'active'):
+            value.pop(field)
+        legacy_hash = hashlib.sha256(json.dumps(value, sort_keys=True,
+            separators=(',', ':')).encode()).hexdigest()
+        self.assertEqual(db._contract_hash(original), legacy_hash)
+        self.assertIsNone(original.legacy_contract_dict()['start_ref'])
+        self.queue.edit_task('a', {'start_ref': 'epic/next'})
+        self.assertNotEqual(db._contract_hash(self.queue.task('a')), legacy_hash)
+        self.assertFalse(self.queue.claim('a', 'account/manual/2000000000', 'alpha', 'account',
+            expected_task=original))
+
     def test_work_group_is_a_compact_navigation_label(self):
         self.queue.edit_task('a', {'work_group': 'Curie v0.8.7'})
         self.assertEqual(self.queue.edit_task('a', {'work_group': 'soak-obs'}).work_group, 'Soak Obs')
@@ -131,10 +169,11 @@ class AsyncWorkTests(unittest.TestCase):
 
     def test_migration_keeps_existing_work_metadata(self):
         with sqlite3.connect(self.queue.path) as connection:
-            for column in ('source_ref', 'work_group', 'depends_on_json'):
+            for column in ('source_ref', 'work_group', 'depends_on_json', 'start_ref'):
                 connection.execute(f'ALTER TABLE tasks DROP COLUMN {column}')
         self.queue.initialize()
         self.assertIsNone(self.queue.task('a').source_ref)
+        self.assertIsNone(self.queue.task('a').start_ref)
 
     def test_legacy_execution_column_is_ignored(self):
         with sqlite3.connect(self.queue.path) as connection:

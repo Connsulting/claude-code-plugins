@@ -86,14 +86,15 @@ A precondition is an external fact the worker cannot create. If it is false, the
 skipped and stops, and that stop is correct. Be critical of the sentence before queueing it.
 Do not write a precondition that is really setup the worker is already allowed to perform: a
 clean checkout, a named branch, a private worktree, free default ports, an unlocked shared
-baseline, or installed local dependencies. Put the base ref and the test commands in constraints
-or done-when. The worker creates its own worktree from that remote base, binds private ports,
-and installs dependencies, and it does not clean another owner's checkout. Write a precondition
-only for a fact outside that setup: missing authority, a prerequisite or release fact the worker
-cannot create, an unavailable provider or required service, a frozen contract, another owner
-already editing the same paths, or a validation gate the worker must not weaken. If none of
-those applies, leave the precondition empty. Do not invent a checkout check so the task looks
-guarded.
+baseline, or installed local dependencies. Set `start_ref` for a task specific starting branch.
+Keep merge target, authority, and test requirements in constraints or done-when. The worker
+creates its own worktree from the selected starting branch, binds private ports, and installs
+dependencies, and it does not clean another owner's checkout. Write a precondition only for a
+fact outside that setup: missing authority, a prerequisite or release fact the worker cannot
+create, an unavailable provider or required service, a frozen contract, another owner already
+editing the same paths, or a validation gate the worker must not weaken. If none of those applies,
+leave the precondition empty. Do not invent a checkout check so the task looks guarded. When
+`start_ref` is unset, repository dependencies choose the branch from their recorded metadata.
 Work groups are optional navigation labels, not task titles: use them only for a meaningful
 cross-task cluster and keep each at 15 characters or fewer. Use title case; the soak-observation
 group is `Soak Obs`.
@@ -123,7 +124,7 @@ Preview the validated task, then add it with the CLI and its required estimate:
 bonus-drain add --id TASK_ID --title "TASK TITLE" --kind oneoff --priority 2 \
   --size medium --cwd /absolute/project/path --goal "CONCRETE GOAL" \
   --source-ref "THREAD_OR_PLAN_REFERENCE" \
-  --work-group "WORK GROUP" --depends-on PREREQUISITE_ID --json
+  --work-group "WORK GROUP" --depends-on PREREQUISITE_ID --start-ref refs/heads/task/base --json
 ```
 
 After adding, read the canonical JSON task back by ID:
@@ -132,7 +133,9 @@ After adding, read the canonical JSON task back by ID:
 bonus-drain contract-task --id TASK_ID --title "TASK TITLE"
 ```
 
-Inspect the exact-ID task object and compare every execution field, including `size`.
+Inspect the exact-ID task object and compare every execution field, including `size` and
+`start_ref` when supplied. `--start-ref` accepts a branch shorthand or a full heads ref and
+stores the normalized `refs/heads/...` value. The edit command changes it through `start_ref`.
 Human `queue-status` output is not add verification. A duplicate, extra canonical match, or
 mismatched canonical identity is an error, not permission to create a near-duplicate.
 
@@ -229,7 +232,8 @@ concrete provider and account, DB/config identity, precondition, constraints, do
 protected path for structured outcome evidence. Use that command exactly.
 
 A background task must not exit blocked or waiting for input while its claim and activation
-lease remain live. A run that opened or updated a PR records `done`. When only a step Brian must
+lease remain live. Keep working or waiting while checks and authorized merges are in progress;
+neither opening a PR nor a running check watcher permits recording `done`. When only a step Brian must
 take personally remains, it records `awaiting_human`. If the work itself cannot be completed, it
 records `failed` with that blocker before exiting.
 
@@ -237,10 +241,12 @@ Replaying the same terminal status and evidence for the same attempt is idempote
 different attempt ID cannot release its claim, and a conflicting replay is a reconciliation
 error. Prior attempts stay immutable.
 
-- `done`: done-when is explicitly verified with supported evidence. A run that opened or updated
-  a PR is done, even while that PR awaits review, approval, or pending CI; it records
-  `completion.mechanism: artifact` with the PR URL as evidence. PR presence still does not prove
-  integration for a dependency handoff. Its outcome uses reason code `done_when_verified`, `completion.verified: true`,
+- `done`: done-when is explicitly verified with supported evidence. Normal PR work requires all
+  checks passing for the current head. Epic Forge work also requires a confirmed merge into the
+  exact authorized epic branch. Pending or failing checks and an unmerged epic PR are not done.
+  Record `completion.mechanism: artifact` with evidence of the PR, passing checks, and any required
+  merge. Pending human review alone does not block normal completion once checks pass.
+  Its outcome uses reason code `done_when_verified`, `completion.verified: true`,
   one of `command`, `artifact`, `operator_receipt`, or `goal_acceptance`, and nonempty evidence.
 - `skipped`: the work is already complete, or a genuine precondition is false. That means
   missing authority, a prerequisite the worker cannot create, an unavailable provider or
@@ -268,19 +274,25 @@ has this shape; omit `repository` when the task does not produce one:
   "repository": {
     "remote": "exact canonical remote URL",
     "target_ref": "refs/heads/main",
-    "target_base_oid": "full starting commit OID",
     "branch_ref": "refs/heads/task/example",
-    "head_oid": "full result commit OID",
-    "integration_state": "merged|unmerged",
-    "merge_receipt": {"kind": "merge|squash", "result_oid": "full verified target result OID"}
+    "integration_state": "merged|unmerged"
   }
 }
 ```
 
-`merge_receipt` is optional. For `failed`, `skipped`, or `awaiting_human`, omit `completion` and use a reason code of
+Optional audit fields may include `target_base_oid`, `head_oid`, and `merge_receipt`. For
+`failed`, `skipped`, or `awaiting_human`, omit `completion` and use a reason code of
 `retryable`, `verification_needed`, `authority_required`, `permanent`, or `unknown_launch`, with
 nonempty detail and a stable non-secret signature. Accepted completion mechanisms are `command`,
 `artifact`, `operator_receipt`, and `goal_acceptance`.
+
+For repository work, the required handoff identity is `remote`, `target_ref`, `branch_ref`, and
+`integration_state`. `target_base_oid`, `head_oid`, and `merge_receipt` may be retained as audit
+evidence but are not required for dependency readiness. A task may set optional `start_ref` to
+choose its starting branch. Queue, scout, and dispatch resolve that branch from saved metadata
+without Git calls, remote checks, or an immutable SHA pin. The worker fetches the selected
+branch's current tip during setup. If that branch is missing, setup stops with reason code
+`verification_needed`; it does not fall back to the target.
 
 Do not call an ambiguous router response failed: its claim remains held until `doctor` and an
 operator reconcile whether a job exists.
@@ -288,8 +300,8 @@ operator reconcile whether a job exists.
 Automatic recovery applies only when active work depends on a failed or skipped one-off. It keeps
 the task ID and all attempts, allows at most two automatic recovery attempts after 5-minute and
 30-minute backoffs, and stops early when the normalized reason repeats. Legacy or unspecified
-failure is verification-first. Missing authority, unknown launch ownership, unavailable Git
-identity, and divergent parent heads remain held.
+failure is verification-first. Missing authority, unknown launch ownership, and unavailable
+repository identity remain held. Divergent parent refs require an explicit child start_ref.
 
 Ordinary public `requeue` schedules an operator recovery without deleting history. Public requeue
 for goal-managed tasks remains rejected. GoalStore may internally admit implementation or
@@ -311,15 +323,20 @@ without a new claim or router launch and does not require a previously scheduled
 projection; if an exact projection exists, it consumes it atomically. If it refuses because a
 successor owns the task, keep the evidence for that successor and do not overwrite its state.
 
-For repository dependencies, use the resolved handoff in the prompt. A merge receipt proves the
-parent at its recorded result commit, which must remain on the current exact target. A normal
-merge requires parent head ancestry at that result; a squash requires parent delta equivalence
-there. A full revert holds the child. An unmerged branch may advance, but the child uses only its
-recorded verified head. A replaced head needs fresh verified evidence through `reverify-handoff`.
-GitHub SSH and HTTPS clone URLs for the same owner and repository share one canonical identity;
-different repositories or multiple configured remotes remain ambiguous.
-Unavailable identity holds dispatch, and divergent multiple parent heads require an explicitly
-authorized integration task. Never merge or expand external authority to make a dependency ready.
+For repository dependencies, use the resolved branch in the prompt. An explicit child start_ref
+wins only when repository parent metadata is valid. It cannot override missing or malformed
+remote, target_ref, branch_ref, or integration_state fields. Otherwise, parents with the same
+remote and target select their unique unmerged branch; if
+all are merged, they select the shared target. Different remotes or targets, or multiple
+unmerged branches, require an explicit child start_ref. The selected ref is normalized under
+`refs/heads/`; a shorthand such as `task/base` is accepted. GitHub SSH and HTTPS clone URLs for
+the same owner and repository share one canonical identity. Never merge or expand external
+authority to make a dependency ready.
+
+`reverify-handoff` is a structural correction for the same remote, target_ref, and branch_ref.
+It preserves the original done row and accepts only the exact done row and revision supplied by
+the caller. It does not run Git or require fresh repository proof. Repository metadata is enough
+to resolve the child start branch; historical commit OIDs and receipts are optional audit data.
 
 ## Operations
 
@@ -331,6 +348,8 @@ authorized integration task. Never merge or expand external authority to make a 
   slot; it does not stop the provider worker. Tailscale Serve is the sole access
   boundary; there is no application login. Exact Host/HTTPS Origin and JSON-only checks
   protect browser mutations; see `SECURITY.md` before remote use.
+- The read only `--local` queue and gates view shows the selected start branch and uses the
+  same readiness result as dispatch. It has no pending verification state.
 - Install/status/doctor/removal: see `README.md`.
 - DB/unit cutover and rollback: dry-run report plus the manual procedure in `MIGRATION.md`.
 - Legacy markdown/jsonl: separate `bonus-drain import-legacy` only.

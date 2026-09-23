@@ -26,8 +26,9 @@ Failed and skipped attempts remain attached to the original task ID. When such a
 active dependent work, the automatic scout may schedule at most two recovery attempts: the first
 after 5 minutes and the second after 30 minutes. A legacy or unstructured failure is verified
 before it can be retried as successful. Recovery stops early when the normalized reason repeats.
-Unknown launch ownership, missing authority, unavailable repository identity, and ambiguous or
-divergent dependency state remain held; none is interpreted as success.
+Unknown launch ownership, missing authority, unavailable repository identity, and ambiguous
+dependency state remain held; none is interpreted as success. Set child start_ref to resolve
+different parent remotes, targets, or unmerged branches.
 Authority-required, permanent, unknown-launch, and no-progress recovery holds never retry
 silently. Continuing that work requires a fresh, explicit follow-up task under reviewed policy
 and authority; requeue or edit does not reinterpret the retained hold.
@@ -47,16 +48,20 @@ failure: missing authority, a prerequisite the runner cannot create, an unavaila
 or required service, a frozen contract, another owner of the same paths, or a validation gate
 setup cannot remove. A dirty or wrong-branch shared checkout, untracked worktree directories,
 occupied default ports, a shared baseline lock, or a missing local dependency is not that
-failure. The runner creates its own clean worktree from the named remote base, binds private
-ports, and installs dependencies, and it leaves every other checkout alone.
+failure. The runner creates its own clean worktree from the selected starting branch, binds
+private ports, and installs dependencies, and it leaves every other checkout alone. Set
+`start_ref` when the child must begin from a specific branch. When `start_ref` is unset,
+repository dependencies choose the branch from their recorded metadata.
 
 Each claimed launch receives a new immutable attempt ID. The dispatched prompt contains the exact
 terminal command and protected outcome-evidence path bound to that attempt. A new `done` event
 requires reason code `done_when_verified`, `completion.verified: true`, a supported completion
 mechanism (`command`, `artifact`, `operator_receipt`, or `goal_acceptance`), and nonempty evidence
-that verifies done-when. A run that opened or updated a PR is done, even while that PR awaits
-review, approval, or pending CI: it records `completion.mechanism: artifact` with the PR URL as
-evidence. PR presence still does not prove integration for a dependency handoff. Failed, skipped,
+that verifies done-when. Normal PR work is done only after all checks pass for the current head.
+Epic Forge work also requires a confirmed merge into the exact authorized epic branch.
+Opening a PR, pending or failing checks, and an unmerged epic PR are not completion.
+Record `completion.mechanism: artifact` with evidence of the PR, passing checks, and any required
+merge. Pending human review alone does not block normal completion once checks pass. Failed, skipped,
 and `awaiting_human` outcomes use one of `retryable`, `verification_needed`, `authority_required`,
 `permanent`, or `unknown_launch` with nonempty detail and a stable non-secret signature.
 `awaiting_human` means the worker finished everything it can and the remaining step needs Brian
@@ -80,14 +85,27 @@ matching projection. It refuses changed contracts, ambiguous ownership, a held r
 already queued or active successor; the worker then keeps its evidence for that successor instead
 of recording over it. A refusal does not authorize a second dispatch.
 
-Repository-producing completion includes the exact remote, target ref, prior target base, branch,
-and head. A receipt proves integration at its recorded result commit, which must remain on the
-current target. A normal merge needs parent head ancestry at that result; a squash needs parent
-delta equivalence there. A full revert holds the child. An unmerged branch may advance while the
-child keeps its recorded verified head. A replaced head needs fresh verified evidence through
-`reverify-handoff`. Missing or conflicting identity holds dispatch. For multiple parents, one compatible descendant may contain
-all heads; divergent heads require an explicitly authorized integration task. The queue does not
-merge branches or add push, PR, deployment, or other external authority.
+Repository work carries its exact remote, target_ref, branch_ref, and integration_state. These
+fields identify the parent work and its integration status. Older head OIDs and merge receipts
+may remain as audit evidence, but readiness does not require them. A done parent remains done
+when its branch advances or disappears. `reverify-handoff` records a structural correction for
+the same remote, target_ref, and branch_ref. It preserves the original done row and accepts only
+the exact done row and revision named by its compare and swap fields. It does not run Git or
+require fresh repository proof.
+
+An optional task start_ref chooses the branch where repository work begins. Add accepts
+`--start-ref`; edit accepts `start_ref`. Branch shorthand such as `task/base` and full refs such
+as `refs/heads/task/base` are normalized to `refs/heads/task/base`. An explicit child start_ref
+wins only when repository parent metadata is valid. It cannot override missing or malformed
+remote, target_ref, branch_ref, or integration_state fields. When start_ref is unset, parents
+with the same remote and target select their unique unmerged branch; if all are merged, they
+select the shared target. Different remotes or targets, or multiple unmerged branches, are
+ambiguous and require an explicit child start_ref. Queue, scout, and
+dispatch resolve this from saved metadata without Git calls, remote checks, or an immutable SHA
+pin. The worker fetches the selected branch's current tip during setup. If the selected branch
+is missing, setup stops with reason code `verification_needed` and does not fall back to the
+target branch. Dependency selection adds no merge, push, PR, deployment, or other external
+authority.
 
 ## Thread handoff and editing
 
@@ -95,9 +113,9 @@ merge branches or add push, PR, deployment, or other external authority.
 bonus-drain add --id build-report --title 'Build Report' --kind oneoff \
   --size small --cwd /absolute/project --goal 'Produce the agreed report' \
   --source-ref 'THREAD_OR_PLAN_REFERENCE' \
-  --work-group 'Report work' --depends-on gather-evidence --json
+  --work-group 'Report work' --depends-on gather-evidence --start-ref task/base --json
 bonus-drain readiness build-report --json
-bonus-drain edit build-report --changes '{"goal":"Produce the revised report"}' --json
+bonus-drain edit build-report --changes '{"goal":"Produce the revised report","start_ref":"task/base"}' --json
 bonus-drain run-now build-report auto --json
 ```
 
@@ -106,7 +124,7 @@ thread contents. The stored task contract must remain self-contained. Only HTTP(
 references become links in the viewer; other references are displayed as text.
 
 Editing allows title, priority, size, cwd, goal, context, constraints, precondition, done_when,
-source_ref, work_group, and depends_on. Active claims and already-run one-off
+source_ref, start_ref, work_group, and depends_on. Active claims and already-run one-off
 contracts cannot be edited. For ordinary tasks outside managed goals, a failed/skipped
 task must first be explicitly requeued; that schedules an operator recovery and preserves every
 prior attempt. Its contract can then be edited only before that exact recovery is claimed.

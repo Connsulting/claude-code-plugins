@@ -74,6 +74,24 @@ class AsyncViewerTests(unittest.TestCase):
         self.assertEqual(buttons.count(' disabled'), 4)
         self.assertIn('Waiting for parent', buttons)
 
+    def test_viewer_preserves_local_dependency_hold_and_structured_start_ref(self):
+        payload = {
+            'tasks': [{'id': 'child', 'title': 'Child', 'priority': 2,
+                       'kind': 'oneoff', 'start_ref': 'refs/heads/epic/next'}],
+            'eligible_task_ids': [], 'eligible_provider_ids': {},
+            'readiness': {'child': {'state': 'held', 'ready': False,
+                                   'reason': 'integration_required: set start_ref on the child',
+                                   'hold_reason': 'integration_required'}},
+        }
+        with mock.patch.object(self.viewer.subprocess, 'run',
+            return_value=mock.Mock(returncode=0, stdout=json.dumps(payload), stderr='')) as run:
+            remaining = self.viewer._remaining_snapshot(0)
+        self.assertIn('--local', run.call_args.args[0])
+        self.assertEqual(remaining[0]['start_ref'], 'refs/heads/epic/next')
+        self.assertEqual(remaining[0]['readiness'], payload['readiness']['child'])
+        self.assertIn('set start_ref', self.viewer._work_meta(remaining[0]))
+        self.assertIn('start from refs/heads/epic/next', self.viewer._work_meta(remaining[0]))
+
     def test_graph_queue_timeout_is_explicit_and_never_uses_legacy_pick(self):
         legacy = mock.Mock(
             returncode=0,

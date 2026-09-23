@@ -87,7 +87,8 @@ def validate_outcome(
 ) -> dict[str, Any] | None:
     """Validate and canonicalize attempt outcome evidence.
 
-    A run that opened or updated a PR records done with an artifact completion naming the PR.
+    PR completion evidence must establish passing checks and any required epic merge.
+    This validates the evidence structure, not the external PR state.
     awaiting_human parks work for Brian and must never claim verified completion.
     Legacy callers can omit outcomes only when ``require_structured_reason`` is false.
     """
@@ -149,6 +150,8 @@ def _contract_hash(task: "Task") -> str:
     value = task.to_dict()
     for field in ("priority", "size", "active"):
         value.pop(field)
+    if value["start_ref"] is None:
+        value.pop("start_ref")
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -265,6 +268,7 @@ class Task:
     required_capabilities: tuple[str, ...] = ()
     size: str | None = None
     source_ref: str | None = None
+    start_ref: str | None = None
     work_group: str | None = None
     depends_on: tuple[str, ...] = ()
 
@@ -298,6 +302,7 @@ class Task:
             "use_implement": int(self.use_implement),
             "size": self.size,
             "source_ref": self.source_ref,
+            "start_ref": self.start_ref,
             "work_group": self.work_group,
             "depends_on": list(self.depends_on),
         }
@@ -567,6 +572,7 @@ class QueueDB:
             "required_capabilities_json": "TEXT",
             "size": "TEXT",
             "source_ref": "TEXT",
+            "start_ref": "TEXT",
             "work_group": "TEXT",
             "depends_on_json": "TEXT",
         }
@@ -711,7 +717,7 @@ class QueueDB:
             allowed_providers=_json_tuple(row["allowed_providers_json"]),
             required_capabilities=_json_tuple(row["required_capabilities_json"]),
             size=row["size"],
-            source_ref=row["source_ref"], work_group=row["work_group"],
+            source_ref=row["source_ref"], start_ref=row["start_ref"], work_group=row["work_group"],
             depends_on=_json_tuple(row["depends_on_json"]),
         )
 
@@ -810,12 +816,12 @@ class QueueDB:
               id,title,kind,priority,cadence,cwd,goal,context,constraints,
               precondition,done_when,created_at,active,claude_only,model,mcp,
               use_implement,allowed_providers_json,required_capabilities_json,size,
-              source_ref,work_group,depends_on_json
+              source_ref,start_ref,work_group,depends_on_json
             ) VALUES(
               :id,:title,:kind,:priority,:cadence,:cwd,:goal,:context,:constraints,
               :precondition,:done_when,:created_at,:active,:claude_only,:model,:mcp,
               :use_implement,:allowed,:required,:size,
-              :source_ref,:work_group,:depends_on_json
+              :source_ref,:start_ref,:work_group,:depends_on_json
             )
             """, parameters,
         )
@@ -832,12 +838,20 @@ class QueueDB:
         for field in ("source_ref", "work_group"):
             if values.get(field) is not None and not isinstance(values[field], str):
                 raise QueueError(f"{field} must be text")
+        start_ref = values.get("start_ref")
+        if start_ref is not None:
+            from .handoff import DependencyHandoffError, normalize_branch_ref
+            try:
+                start_ref = normalize_branch_ref(start_ref)
+            except DependencyHandoffError as exc:
+                raise QueueError(str(exc)) from exc
         work_group = values.get("work_group")
         if isinstance(work_group, str) and work_group.lower().replace("-", " ") == "soak obs":
             work_group = "Soak Obs"
         if validate_work_group and work_group is not None and len(work_group) > WORK_GROUP_MAX_LENGTH:
             raise QueueError(f"work_group must be at most {WORK_GROUP_MAX_LENGTH} characters")
-        return {"source_ref": values.get("source_ref"), "work_group": work_group,
+        return {"source_ref": values.get("source_ref"), "start_ref": start_ref,
+                "work_group": work_group,
                 "depends_on_json": json.dumps(sorted(set(dependencies)))}
 
     @staticmethod
@@ -984,7 +998,7 @@ class QueueDB:
             outcome = json.loads(
                 revision["outcome_json"] if revision is not None else done["outcome_json"]
             )
-            if isinstance(outcome, dict) and isinstance(outcome.get("repository"), dict):
+            if isinstance(outcome, dict) and outcome.get("repository") is not None:
                 result.append((dependency, outcome))
         return result
 
@@ -1017,10 +1031,8 @@ class QueueDB:
 
     @staticmethod
     def _resolve_dependency_outcomes(
-        task: Task, outcomes: list[tuple[str, dict[str, Any]]],
+        outcomes: list[tuple[str, dict[str, Any]]], *, start_ref: str | None,
     ) -> dict[str, Any] | None:
-        if not outcomes:
-            return None
         try:
             from .handoff import DependencyHandoffError, resolve_dependency_base
         except ImportError as exc:
@@ -1028,7 +1040,7 @@ class QueueDB:
                 "dependency_ref_unavailable: dependency handoff validator is unavailable"
             ) from exc
         try:
-            return resolve_dependency_base(task.cwd, outcomes)
+            return resolve_dependency_base(outcomes, start_ref=start_ref)
         except DependencyHandoffError as exc:
             reason_code = getattr(exc, "reason_code", "dependency_ref_unavailable")
             detail = getattr(exc, "detail", str(exc))
@@ -1040,7 +1052,7 @@ class QueueDB:
     ) -> dict[str, Any] | None:
         QueueDB._dependency_evidence(connection, task)
         outcomes = QueueDB._dependency_outcomes(connection, task)
-        return QueueDB._resolve_dependency_outcomes(task, outcomes)
+        return QueueDB._resolve_dependency_outcomes(outcomes, start_ref=task.start_ref)
 
     def _dependency_preflight(self, task_id: str) -> _DependencySnapshot:
         with self._connect() as connection:
@@ -1052,7 +1064,7 @@ class QueueDB:
             task = self._task_from_row(row)
             evidence = self._dependency_evidence(connection, task)
             outcomes = self._dependency_outcomes(connection, task)
-        base = self._resolve_dependency_outcomes(task, outcomes)
+        base = self._resolve_dependency_outcomes(outcomes, start_ref=task.start_ref)
         return _DependencySnapshot(task.id, _contract_hash(task), evidence, base)
 
     @staticmethod
@@ -1292,7 +1304,7 @@ class QueueDB:
     def edit_task(self, task_id: str, changes: Mapping[str, Any]) -> Task:
         from .goals import guard_contract_edit
         allowed = {"title", "priority", "size", "cwd", "goal", "context", "constraints",
-                   "precondition", "done_when", "source_ref", "work_group", "depends_on"}
+                   "precondition", "done_when", "source_ref", "start_ref", "work_group", "depends_on"}
         if not changes or set(changes) - allowed:
             raise QueueError("edit requires supported task contract fields")
         self.initialize()
@@ -1341,7 +1353,7 @@ class QueueDB:
             fields = self._work_fields(merged, validate_work_group="work_group" in changes)
             self._validate_dependencies(connection, task_id, fields["depends_on_json"])
             for key, value in changes.items():
-                if key in {"source_ref", "work_group", "depends_on"}:
+                if key in {"source_ref", "start_ref", "work_group", "depends_on"}:
                     continue
                 if key == "priority":
                     if type(value) is not int or value not in range(5):
@@ -2993,10 +3005,11 @@ class QueueDB:
         summary: str,
         now_epoch: float | None = None,
     ) -> dict[str, Any]:
-        """Append fresh operator proof for one completed parent's Git handoff.
+        """Append revised branch metadata for one completed parent's handoff.
 
         The original terminal run and attempt remain immutable. The caller must
         identify both that run and the revision it observed before writing.
+        This checks recorded identity and does not inspect Git history.
         """
 
         _require_task_id(task_id)
@@ -3036,10 +3049,9 @@ class QueueDB:
                 for field in ("remote", "target_ref", "branch_ref")
             ):
                 raise QueueError("handoff reverification cannot change repository identity")
-            task = self._task_from_row(task_row)
-        base = self._resolve_dependency_outcomes(task, [(task_id, verified)])
+        base = self._resolve_dependency_outcomes([(task_id, verified)], start_ref=None)
         if base is None:
-            raise QueueError("repository handoff could not be verified")
+            raise QueueError("repository handoff could not be selected")
         now = float(time.time() if now_epoch is None else now_epoch)
         stamp = datetime.fromtimestamp(now, timezone.utc).replace(
             microsecond=0,
@@ -3580,6 +3592,23 @@ class QueueDB:
                 task.id: self.readiness(task.id, now_epoch=now) for task in tasks
             },
         }
+
+
+class LocalQueueReader(QueueDB):
+    """Read an initialized local queue without schema or queue mutations."""
+
+    def initialize(self) -> None:
+        return None
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(
+            self.path.as_uri() + "?mode=ro", timeout=self.timeout_seconds,
+            isolation_level=None, uri=True,
+        )
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA busy_timeout=5000")
+        connection.execute("PRAGMA foreign_keys=ON")
+        return connection
 
 
 def doctor(queue: QueueDB) -> DoctorReport:

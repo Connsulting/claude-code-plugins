@@ -86,6 +86,8 @@ def _contract_hash(task: Task) -> str:
     # Scheduling/display controls do not change what the worker is authorized to do.
     for field in ('priority', 'size', 'active'):
         value.pop(field)
+    if value['start_ref'] is None:
+        value.pop('start_ref')
     return hashlib.sha256(_json(value).encode()).hexdigest()
 
 
@@ -226,7 +228,7 @@ class GoalStore:
         value = dict(contract)
         allowed = {'id', 'title', 'cwd', 'outcome', 'authority', 'acceptance', 'merge_policy',
                    'max_turns', 'deadline', 'max_inflight', 'coordinator', 'task_ids',
-                   'source_ref', 'work_group'}
+                   'source_ref', 'start_ref', 'work_group'}
         if set(value) - allowed:
             raise QueueError('unknown goal contract fields: ' + ', '.join(sorted(set(value) - allowed)))
         if not is_safe_task_id(value.get('id')):
@@ -263,7 +265,9 @@ class GoalStore:
             _text(routing['mcp'], 'coordinator mcp')
         value['coordinator'] = routing
         value['task_ids'] = _ids(value.get('task_ids', []), 'task_ids')
-        self.queue._work_fields(value)
+        work_fields = self.queue._work_fields(value)
+        if 'start_ref' in value:
+            value['start_ref'] = work_fields['start_ref']
         self.queue.initialize()
         with self.queue._transaction() as connection:
             previous = connection.execute('SELECT contract_json FROM goals WHERE id=?', (value['id'],)).fetchone()
@@ -409,7 +413,8 @@ class GoalStore:
                                    'No direct provider dispatch. An ambiguous operation needs reconciliation before retry.',
                     'done_when': 'A durable goal decision has been accepted, with task/acceptance evidence and cleanup links. '
                                  'Waiting for jobs is a successful coordination decision, not goal completion.',
-                    'source_ref': contract.get('source_ref'), 'work_group': contract.get('work_group'),
+                    'source_ref': contract.get('source_ref'), 'start_ref': contract.get('start_ref'),
+                    'work_group': contract.get('work_group'),
                     **contract['coordinator'],
                 }
                 inserted = self.queue._insert_task(connection, values)
@@ -480,6 +485,7 @@ class GoalStore:
                     tested = _candidate(item.get('candidate'))
                 task = dict(raw)
                 task.setdefault('source_ref', contract.get('source_ref'))
+                task.setdefault('start_ref', contract.get('start_ref'))
                 task.setdefault('work_group', contract.get('work_group'))
                 task['constraints'] = (task.get('constraints') or '') + '\nGoal authority: ' + contract['authority'] + '\nMerge policy: ' + contract['merge_policy']
                 task['constraints'] += '\nAny goal merge authority belongs to the coordinator; this task must not merge.'

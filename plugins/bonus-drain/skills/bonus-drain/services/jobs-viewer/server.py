@@ -395,7 +395,7 @@ esac
 emit windows_left_claude "$WLC"; emit windows_left_codex "$WLX"; emit windows_left_grok "$WLG"
 # The positional planner protocol was retired with the graph-backed CLI. Keep the shell
 # half above for account-display snapshots, but ask the owning CLI for its gates.
-"$BONUSDB" gates --json
+"$BONUSDB" gates --json --local
 """
 
 _gates_cache: dict = {"t": 0.0, "key": None, "val": None}
@@ -614,7 +614,7 @@ def _remaining_snapshot(cycle: int) -> list[dict]:
     """Read graph-backed remaining work plus the providers the scout can use."""
     try:
         result = subprocess.run(
-            ["bash", str(BONUSDB_SH), "queue", "--json", str(cycle)],
+            ["bash", str(BONUSDB_SH), "queue", "--json", "--local", str(cycle)],
             capture_output=True, text=True, timeout=15,
         )
     except subprocess.TimeoutExpired:
@@ -1432,14 +1432,12 @@ def _work_meta(t: dict) -> str:
         if detail and detail != status.get("reason"):
             recovery_bits.append(esc(detail))
     dependency_base = status.get("dependency_base")
-    if isinstance(dependency_base, dict):
-        base_oid = dependency_base.get("base_oid")
-        branch_ref = dependency_base.get("branch_ref")
-        if base_oid:
-            recovery_bits.append(
-                f"base {esc(str(base_oid)[:12])}"
-                + (f" from {esc(branch_ref)}" if branch_ref else "")
-            )
+    branch_ref = (
+        dependency_base.get("branch_ref")
+        if isinstance(dependency_base, dict) else t.get("start_ref")
+    )
+    if branch_ref:
+        recovery_bits.append(f"start from {esc(str(branch_ref))}")
     recovery_html = (
         '<div class="recovery-meta">' + " · ".join(recovery_bits) + "</div>"
         if recovery_bits else ""
