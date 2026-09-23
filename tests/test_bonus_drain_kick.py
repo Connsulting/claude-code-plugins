@@ -1347,6 +1347,29 @@ class KickContractTests(unittest.TestCase):
                 self.assertIn("codex app-server daemon start", str(raised.exception))
                 self.assertEqual(self.queue.claim_for(task_id, key), None)
 
+    def test_codex_daemon_start_timeout_is_known_not_launched(self) -> None:
+        codex = config_module.ProviderConfig(
+            "codex", config_module.DispatchBinding("router", "codex"), frozenset(), "single",
+        )
+        cfg = replace(self.config, providers=(codex,), plans=(), accounts=(), limits=())
+        task_id = "daemon-timeout"
+        key = "manual/daemon-timeout"
+        self.queue.add_task(_task(task_id))
+        rejected = subprocess.CompletedProcess(
+            [], 1, b"", (
+                b"agent-router: `/home/user/.local/bin/codex app-server daemon start` "
+                b"timed out after 10s\n"
+            ),
+        )
+        with mock.patch("bonus_drain.adapters.run_bounded_process", return_value=rejected):
+            for _attempt in range(2):
+                with self.assertRaises(dispatcher.KnownDispatchFailure):
+                    dispatcher.dispatch(
+                        cfg, self.queue, task_id=task_id, eligibility_key=key,
+                        requested_provider="codex",
+                    )
+                self.assertIsNone(self.queue.claim_for(task_id, key))
+
     def test_codex_ignores_task_mcp_scoping_for_explicit_and_auto_kicks(self) -> None:
         codex = config_module.ProviderConfig(
             "codex", config_module.DispatchBinding("router", "codex"), frozenset(), "single",

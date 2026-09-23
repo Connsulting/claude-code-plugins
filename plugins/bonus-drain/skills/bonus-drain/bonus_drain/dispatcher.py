@@ -100,6 +100,10 @@ _CODEX_APP_SERVER_MISSING_RE = re.compile(
     r"could not run [`']codex app-server daemon start[`']:\s*No such file or directory",
     re.IGNORECASE,
 )
+_CODEX_DAEMON_START_TIMEOUT_RE = re.compile(
+    r"^agent-router: [`'][^`'\n]*codex app-server daemon start[`'] "
+    r"timed out after \d+(?:\.\d+)?s$",
+)
 
 
 class _DuplicateJSONKey(ValueError):
@@ -1031,11 +1035,14 @@ def _positive_prelaunch_mcp_flag_rejection(stdout: str, stderr: str) -> str | No
 
 
 def _positive_prelaunch_codex_executable_rejection(stdout: str, stderr: str) -> str | None:
-    """Return the exact router diagnostic proving Codex could not be executed."""
+    """Return a Codex daemon startup error that precedes every thread launch."""
 
     for line in reversed((stderr + "\n" + stdout).splitlines()):
         normalized = line.strip()
-        if _CODEX_APP_SERVER_MISSING_RE.search(normalized):
+        if (
+            _CODEX_APP_SERVER_MISSING_RE.search(normalized)
+            or _CODEX_DAEMON_START_TIMEOUT_RE.fullmatch(normalized)
+        ):
             return normalized
     return None
 
