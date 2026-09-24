@@ -15,7 +15,7 @@ Use Big Plan for substantial plans that benefit from structured review, anchored
 4. Determine the server root from `BIG_PLAN_ROOT`, defaulting to `$HOME/git`, and calculate the plan path relative to that root.
 5. Before any POST, verify `http://127.0.0.1:${BIG_PLAN_PORT:-8765}/` responds. If the staged unit is inactive, start it with `systemctl --user start big-plan.service`, then verify the endpoint again. Do not POST to an unavailable service.
 6. Register provenance with `POST /api/session/<relative-path>` when the current engine and session ID are available. Registration also creates `<plan>.md.big-plan`, making the plan visible in the index. If there is intentionally no session provenance, publish it with `POST /api/promote/<relative-path>` instead.
-7. Return the direct plan URL, not only the index URL.
+7. Return the plan's review URL, not only the index URL. Check its transport and page response as described below before handing it off.
 
 For Claude, send `{engine:"claude", sessionId:$CLAUDE_CODE_SESSION_ID, name, cwd}`. For Grok, use `{engine:"grok", sessionId:$GROK_SESSION_ID, name, cwd}`. For Codex, use the current rollout UUID as `sessionId` and `engine:"codex"`. Never invent a session ID; promote without provenance when it is unavailable.
 
@@ -23,7 +23,11 @@ The local API base defaults to `http://127.0.0.1:${BIG_PLAN_PORT:-8765}`. URL-en
 
 ## Derive the review URL
 
-Never hardcode a machine or tailnet hostname. The launcher uses a bounded five-second status probe and selects `0.0.0.0` only when `BackendState` is `Running`, `Self.DNSName` is nonempty, and `Self.TailscaleIPs` contains an IPv4 address; otherwise it binds to `127.0.0.1`. The healthy-path bind preserves localhost callbacks, direct tailnet access, and an existing Tailscale Serve proxy. Because `0.0.0.0` listens on every interface, it is suitable only on a trusted or firewalled host. Derive the node name at handoff time. The direct URL is `http://<Self.DNSName-without-trailing-dot>:${BIG_PLAN_PORT:-8765}/<relative-path>`. Use HTTPS only when the operator separately configured Tailscale Serve; otherwise use direct HTTP. When Tailscale is unavailable, use `http://127.0.0.1:${BIG_PLAN_PORT:-8765}/<relative-path>`.
+Never hardcode a machine or tailnet hostname. The launcher uses a bounded five-second status probe and selects `0.0.0.0` only when `BackendState` is `Running`, `Self.DNSName` is nonempty, and `Self.TailscaleIPs` contains an IPv4 address; otherwise it binds to `127.0.0.1`. The healthy-path bind preserves localhost callbacks, direct tailnet access, and an existing Tailscale Serve proxy. Because `0.0.0.0` listens on every interface, it is suitable only on a trusted or firewalled host.
+
+Derive the node name from `Self.DNSName` in `tailscale status --json` at handoff time and remove its trailing dot. Inspect `tailscale serve status --json`. Use `https://<node>/<encoded-relative-path>` only when `TCP["443"].HTTPS` is true and `Web["<node>:443"].Handlers["/"].Proxy` points to the local API at `http://127.0.0.1:${BIG_PLAN_PORT:-8765}`. Port 443 is implicit in that review URL. Make a normal HTTPS GET to the exact plan URL and require HTTP 200 before handing it to the reviewer. A HEAD request does not verify the rendered page. If the mapping exists but the GET fails, investigate before handing off the URL.
+
+The local API remains plain HTTP at `http://127.0.0.1:${BIG_PLAN_PORT:-8765}` for registration and other POST requests. If Tailscale Serve is not configured, the direct review URL is `http://<node>:${BIG_PLAN_PORT:-8765}/<encoded-relative-path>`. When Tailscale is unavailable, use `http://127.0.0.1:${BIG_PLAN_PORT:-8765}/<encoded-relative-path>`.
 
 ## Revise from feedback
 

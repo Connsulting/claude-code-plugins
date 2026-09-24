@@ -80,7 +80,7 @@ Serve Markdown plans in the unchanged Big Plan commentable review UI, including 
 codex plugin add big-plan@connsulting-plugins
 ```
 
-Plugin installation does not start a service or change Tailscale. Run the plugin's `install.sh --enable` only when ready to activate its stable local runtime. After a healthy bounded Tailscale probe the launcher binds to `0.0.0.0`, preserving localhost callbacks and tailnet access; otherwise it binds to localhost. Because `0.0.0.0` listens on every interface, use it only on a trusted or firewalled host. Direct remote URLs use `http://<MagicDNS-name>:8765/`, while HTTPS requires separately configured Tailscale Serve. See [plugins/big-plan/README.md](plugins/big-plan/README.md) for the portable defaults and lifecycle.
+Plugin installation does not start a service or change Tailscale. Run the plugin's `install.sh --enable` only when ready to activate its stable local runtime. After a healthy bounded Tailscale probe the launcher binds to `0.0.0.0`, preserving localhost callbacks and tailnet access; otherwise it binds to localhost. Because `0.0.0.0` listens on every interface, use it only on a trusted or firewalled host. The local API uses HTTP on port `8765`. For reviewer URLs, derive the MagicDNS name, check that Tailscale Serve maps HTTPS on port `443` to that API, and require a normal HTTPS GET returning 200 before sharing `https://<MagicDNS-name>/<encoded-path>` without an explicit port. Without that Serve mapping, use the direct `http://<MagicDNS-name>:8765/<encoded-path>` URL. See [plugins/big-plan/README.md](plugins/big-plan/README.md) for the portable defaults and lifecycle.
 
 ## Development
 

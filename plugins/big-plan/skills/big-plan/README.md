@@ -2,19 +2,22 @@
 
 Serve markdown project plans as commentable HTML over Tailscale.
 
-The Big Plan skill tells Claude or Codex to save plan-sized files under `<repo>/.projects/`, register the ready-to-review plan, and surface a direct `http://<MagicDNS-name>:8765/<path>` URL (or localhost when Tailscale is unavailable). There is no slash command; this is a persistent service, not a workflow. Before using a POST endpoint, verify the staged service responds locally; start it with `systemctl --user start big-plan.service` if needed, then check again.
+The Big Plan skill tells Claude or Codex to save plans under `<repo>/.projects/`, register the plan for review, and share its verified `https://<MagicDNS-name>/<path>` URL when Tailscale Serve proxies HTTPS on port 443. There is no slash command; this is a persistent service, not a workflow. Before using a POST endpoint, verify the staged service responds locally over HTTP on port `8765`; start it with `systemctl --user start big-plan.service` if needed, then check again.
 
 When an operator configures `tailscale serve` (`sudo tailscale serve --bg --https=443 http://127.0.0.1:8765`), it terminates TLS on 443 for the node's MagicDNS name and proxies to the local plain-HTTP server. That optional serve config persists across reboots; disable it with `tailscale serve --https=443 off`. Without it, the direct `http://<MagicDNS-name>:8765/` URL works on the tailnet. The plugin installer does not change Tailscale configuration.
 
 ## Deriving the review URL
 
-With separately configured Tailscale Serve, the rendered URL is `https://<node>/<relpath-from-~/git/>`; otherwise the direct URL is `http://<node>:8765/<relpath-from-~/git/>`. Derive `<node>`, never hardcode it:
+Derive `<node>` from the current Tailscale status, never hardcode it:
 
 ```bash
-tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))'
+ts_node=$(tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')
+tailscale serve status --json
 ```
 
-When the optional HTTPS proxy is configured, its URL carries no port. Otherwise use the direct HTTP URL with port `8765`.
+Check that the Serve result has `TCP["443"].HTTPS` set to true and `Web["<node>:443"].Handlers["/"].Proxy` set to `http://127.0.0.1:8765`. Then use `https://<node>/<encoded-relpath-from-~/git/>`, with no explicit port. Before handing it to a reviewer, make a normal HTTPS GET to that exact plan URL and require HTTP 200. For example, run `curl -sS -o /dev/null -w '%{http_code}\n' "https://$ts_node/<encoded-path>"` with the actual encoded plan path. A HEAD request is insufficient. If the mapping exists but the GET fails, investigate before sharing the URL.
+
+When Serve is not configured, use the direct `http://<node>:8765/<encoded-relpath-from-~/git/>` URL. When Tailscale is unavailable, use `http://127.0.0.1:8765/<encoded-relpath-from-~/git/>`. The local API also uses plain HTTP on port `8765` for registration and other POST requests.
 
 **Heading text must stay stable once a reviewer has commented.** Review comments
 flow back into the doc in the next session;
@@ -230,9 +233,11 @@ systemctl --user status big-plan.service
 # 4. Survive logout (only needed once per user per machine):
 sudo loginctl enable-linger $USER
 
-# 5. If Tailscale is connected, derive and verify this node's direct HTTP URL:
+# 5. If Tailscale is connected, derive this node's name and inspect its Serve mapping:
 ts_node=$(tailscale status --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')
-curl -s -o /dev/null -w "%{http_code}\n" "http://$ts_node:8765/"
+tailscale serve status --json
+# If HTTPS on 443 proxies to 127.0.0.1:8765, verify the review page with a normal GET:
+curl -sS -o /dev/null -w "%{http_code}\n" "https://$ts_node/<encoded-path>"
 ```
 
 Serves `~/git/` with `--filter plans` on port 8765.
