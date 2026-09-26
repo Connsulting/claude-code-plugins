@@ -141,6 +141,15 @@ uncertainty is retry-safe. Once a concrete launch has been attempted, timeout, m
 output, missing job identity, or bookkeeping uncertainty is ambiguous: no caller retries it,
 and the claim and applicable activation lease stay fail-closed until reconciliation.
 
+Top-level `launch_surface` chooses where concrete launches run: `background` (the default,
+and the unchanged argv) or `t3`, which adds `--surface t3` so agent-router opens a T3 Code
+thread. A provider may set its own `launch_surface` to override the global value. The
+classification dry-run never passes `--surface`. On `t3`, the returned job identity is the T3
+thread ID and is stored verbatim. The run records its surface, and the viewer badges t3 jobs
+in flight. T3 threads do not accept `--mcp-config`, so a Claude task with an MCP scope launches
+without it: Bonus Drain skips the scoped MCP file and notes the dropped scope in the
+dispatched run's summary.
+
 Scout reserves actual compatible task IDs in nearest-reset order, preventing a portable task
 from consuming two provider slots while preserving exclusive work for a capable provider.
 Within one priority, eligible tasks are oldest-waiting-first. Weekly tasks are automatically
