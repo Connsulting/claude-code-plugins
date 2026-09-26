@@ -1346,7 +1346,10 @@ def dispatch(
     if trigger not in {"manual", "bonus", "scheduled"}:
         raise InvalidRoute("invalid run trigger")
     readiness = queue.readiness(task_id, now_epoch=now_epoch)
-    if not readiness["ready"]:
+    # The weekend window gates only automatic launches; an explicit start may run a due
+    # weekly task on any day and consumes that week's slot.
+    manual_window = trigger != "bonus" and readiness.get("hold_reason") == "weekend_window"
+    if not readiness["ready"] and not manual_window:
         raise AlreadyClaimed(readiness["reason"])
     try:
         selected_dependency_base = queue.dependency_base(task_id)

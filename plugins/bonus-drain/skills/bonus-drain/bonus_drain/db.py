@@ -1256,6 +1256,14 @@ class QueueDB:
                     connection, task, 0, now_epoch=now, automatic=False,
                 ):
                     state, reason = "cooldown", "Waiting for recurrence cooldown"
+                elif state == "ready" and not self._eligible_in_connection(
+                    connection, task, 0, now_epoch=now, automatic=True,
+                ):
+                    # Due this week, but the scout only launches weekly work on the weekend.
+                    # Report that here so the viewer never shows it as available on a weekday.
+                    state, reason, hold_reason = (
+                        "cooldown", "Waiting for weekend window", "weekend_window",
+                    )
             requeue_allowed = bool(
                 task.kind == "oneoff" and claim is None and done is None
                 and not goal_owned
@@ -1413,15 +1421,14 @@ class QueueDB:
                 return False
         return set(task.required_capabilities).issubset(capability_set)
 
-    def _weekly_window(self, now_epoch: float) -> tuple[float, float, float]:
-        """Return Saturday week start and the Sunday-only automatic window."""
+    def _weekly_window(self, now_epoch: float) -> tuple[float, float]:
+        """Return the Saturday week start and the end of its Saturday-Sunday automatic window."""
 
         local_now = datetime.fromtimestamp(now_epoch, self.recurrence_timezone)
         saturday = local_now.date() - timedelta(days=(local_now.weekday() - 5) % 7)
         week_start = datetime.combine(saturday, datetime.min.time(), self.recurrence_timezone)
-        sunday_start = week_start + timedelta(days=1)
-        sunday_end = sunday_start + timedelta(days=1)
-        return week_start.timestamp(), sunday_start.timestamp(), sunday_end.timestamp()
+        weekend_end = week_start + timedelta(days=2)
+        return week_start.timestamp(), weekend_end.timestamp()
 
     def _eligible_in_connection(
         self,
@@ -1476,8 +1483,8 @@ class QueueDB:
             (task.id,),
         ).fetchone()
         if cadence == "weekly":
-            week_start, sunday_start, sunday_end = self._weekly_window(now)
-            if automatic and not sunday_start <= now < sunday_end:
+            week_start, weekend_end = self._weekly_window(now)
+            if automatic and not week_start <= now < weekend_end:
                 return False
             if row is None:
                 return True
@@ -1523,8 +1530,8 @@ class QueueDB:
             return created_at
         if task.cadence == "weekly":
             now = time.time() if now_epoch is None else float(now_epoch)
-            week_start, sunday_start, _week_end = self._weekly_window(now)
-            return max(created_at, sunday_start if automatic else week_start)
+            week_start, _weekend_end = self._weekly_window(now)
+            return max(created_at, week_start)
         row = connection.execute(
             "SELECT ts FROM runs WHERE task=? ORDER BY rowid_pk DESC LIMIT 1",
             (task.id,),

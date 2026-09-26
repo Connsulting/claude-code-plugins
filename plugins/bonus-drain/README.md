@@ -154,9 +154,12 @@ run's summary.
 Scout reserves actual compatible task IDs in nearest-reset order, preventing a portable task
 from consuming two provider slots while preserving exclusive work for a capable provider.
 Within one priority, eligible tasks are oldest-waiting-first. Weekly tasks are automatically
-eligible only on Sunday in the configured recurrence timezone, and at most once in the week
-that began Saturday at midnight. A manual run outside Sunday consumes the same weekly slot. If
-Sunday passes without a run, the task waits for the next Sunday instead of catching up Monday.
+eligible only on the weekend (Saturday or Sunday) in the configured recurrence timezone, and at
+most once in the week that began Saturday at midnight, so a Saturday run is not repeated Sunday.
+A manual weekday run consumes that week's slot. If the weekend passes without a run, the task
+waits for the next weekend instead of catching up Monday. Outside the weekend, a due weekly
+task reports `cooldown` ("Waiting for weekend window") rather than ready, so the viewer matches
+the scout; a manual start may still launch it.
 Monthly tasks start waiting when their 28-day cooldown ends. Before any claim, scout reports
 queue reconciliation blockers, global in-flight runs with their ages, and the resolved executable
 identity for every router needed by the tick. A lifecycle or router failure stops the tick once

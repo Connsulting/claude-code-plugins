@@ -157,10 +157,11 @@ reserved for future queue-backed timer integration.
 
 `bg-schedule` still owns exact clock times and general calendar recurrence. General queue
 handoffs should use this skill; timed jobs remain on the Schedules tab. Weekly Bonus Drain work
-has a bounded calendar window: the automatic scout may launch it only on Sunday in the configured
-recurrence timezone, at most once in the week that began Saturday at midnight. Missed Sundays do
-not catch up on Monday. Manual acceleration may launch a weekly task on another day, but that run
-consumes the same weekly slot. Monthly work retains its 28-day elapsed cooldown.
+has a bounded calendar window: the automatic scout may launch it only on Saturday or Sunday in the
+configured recurrence timezone, at most once in the week that began Saturday at midnight. A
+missed weekend does not catch up on Monday, and on weekdays a due weekly task shows as waiting
+for the weekend window rather than ready. Manual acceleration may launch a weekly task on another
+day, but that run consumes the same weekly slot. Monthly work retains its 28-day elapsed cooldown.
 
 ## Isolated review preview
 

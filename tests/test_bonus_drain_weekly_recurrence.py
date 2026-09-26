@@ -52,18 +52,22 @@ class WeeklyRecurrenceTests(unittest.TestCase):
             epoch(value), automatic=automatic, now_epoch=epoch(value),
         ))
 
-    def test_automatic_weekly_work_runs_only_on_eastern_sunday(self) -> None:
-        self.assertFalse(self.eligible("2026-09-12T23:59:59Z", automatic=True))
-        self.assertFalse(self.eligible("2026-09-13T03:59:59Z", automatic=True))
-        self.assertTrue(self.eligible("2026-09-13T04:00:00Z", automatic=True))
+    def ready(self, value: str) -> dict:
+        return self.queue.readiness("weekly-job", now_epoch=epoch(value))
+
+    def test_automatic_weekly_work_runs_only_on_the_eastern_weekend(self) -> None:
+        self.assertFalse(self.eligible("2026-09-12T03:59:59Z", automatic=True))
+        self.assertTrue(self.eligible("2026-09-12T04:00:00Z", automatic=True))
+        self.assertTrue(self.eligible("2026-09-12T23:59:59Z", automatic=True))
+        self.assertTrue(self.eligible("2026-09-13T16:00:00Z", automatic=True))
         self.assertTrue(self.eligible("2026-09-14T03:59:59Z", automatic=True))
         self.assertFalse(self.eligible("2026-09-14T04:00:00Z", automatic=True))
 
-    def test_manual_run_outside_sunday_consumes_the_saturday_starting_week(self) -> None:
-        self.assertTrue(self.eligible("2026-09-12T16:00:00Z", automatic=False))
+    def test_saturday_run_consumes_sunday_and_the_rest_of_the_week(self) -> None:
+        self.assertTrue(self.eligible("2026-09-12T16:00:00Z", automatic=True))
         self.queue.record(
             "weekly-job",
-            "alpha/manual/2026-W37",
+            "alpha/weekly/2026-W37",
             status="done",
             timestamp=timestamp("2026-09-12T16:00:00Z"),
         )
@@ -74,8 +78,16 @@ class WeeklyRecurrenceTests(unittest.TestCase):
         self.assertFalse(self.eligible("2026-09-14T16:00:00Z", automatic=True))
         self.assertFalse(self.eligible("2026-09-19T03:59:59Z", automatic=False))
         self.assertTrue(self.eligible("2026-09-19T04:00:00Z", automatic=False))
-        self.assertFalse(self.eligible("2026-09-19T04:00:00Z", automatic=True))
-        self.assertTrue(self.eligible("2026-09-20T16:00:00Z", automatic=True))
+        self.assertTrue(self.eligible("2026-09-19T04:00:00Z", automatic=True))
+
+    def test_manual_weekday_run_consumes_that_weekend(self) -> None:
+        self.assertTrue(self.eligible("2026-09-09T16:00:00Z", automatic=False))
+        self.queue.record(
+            "weekly-job", "alpha/manual/2026-W36", status="done",
+            timestamp=timestamp("2026-09-09T16:00:00Z"),
+        )
+        self.assertFalse(self.eligible("2026-09-11T16:00:00Z", automatic=True))
+        self.assertTrue(self.eligible("2026-09-12T16:00:00Z", automatic=True))
 
     def test_sunday_run_stays_spent_on_monday_and_friday(self) -> None:
         self.queue.record(
@@ -87,12 +99,43 @@ class WeeklyRecurrenceTests(unittest.TestCase):
                 self.assertFalse(self.eligible(value, automatic=False))
                 self.assertFalse(self.eligible(value, automatic=True))
 
-    def test_missed_sunday_does_not_carry_into_monday(self) -> None:
+    def test_missed_weekend_does_not_carry_into_monday(self) -> None:
         self.assertTrue(self.eligible("2026-09-13T16:00:00Z", automatic=True))
         self.assertFalse(self.eligible("2026-09-14T16:00:00Z", automatic=True))
-        self.assertTrue(self.eligible("2026-09-20T16:00:00Z", automatic=True))
+        self.assertFalse(self.eligible("2026-09-18T16:00:00Z", automatic=True))
+        self.assertTrue(self.eligible("2026-09-19T16:00:00Z", automatic=True))
 
-    def test_atomic_automatic_claim_rechecks_the_sunday_window(self) -> None:
+    def test_readiness_matches_the_automatic_scout(self) -> None:
+        for value in (
+            "2026-09-11T16:00:00Z", "2026-09-12T03:59:59Z", "2026-09-12T04:00:00Z",
+            "2026-09-13T16:00:00Z", "2026-09-14T03:59:59Z", "2026-09-14T04:00:00Z",
+            "2026-09-16T16:00:00Z",
+        ):
+            with self.subTest(value=value):
+                self.assertEqual(
+                    self.ready(value)["ready"], self.eligible(value, automatic=True),
+                )
+
+    def test_weekday_readiness_waits_for_the_weekend_window(self) -> None:
+        status = self.ready("2026-09-16T16:00:00Z")
+        self.assertFalse(status["ready"])
+        self.assertEqual(status["state"], "cooldown")
+        self.assertEqual(status["reason"], "Waiting for weekend window")
+        self.assertEqual(status["hold_reason"], "weekend_window")
+        self.assertEqual(self.ready("2026-09-19T16:00:00Z")["state"], "ready")
+
+    def test_readiness_after_this_weeks_run_is_recurrence_cooldown(self) -> None:
+        self.queue.record(
+            "weekly-job", "alpha/weekly/2026-W37", status="done",
+            timestamp=timestamp("2026-09-12T16:00:00Z"),
+        )
+        for value in ("2026-09-13T16:00:00Z", "2026-09-16T16:00:00Z"):
+            with self.subTest(value=value):
+                status = self.ready(value)
+                self.assertEqual(status["state"], "cooldown")
+                self.assertEqual(status["reason"], "Waiting for recurrence cooldown")
+
+    def test_atomic_automatic_claim_rechecks_the_weekend_window(self) -> None:
         with mock.patch.object(db.time, "time", return_value=epoch("2026-09-14T16:00:00Z")):
             self.assertFalse(self.queue.claim(
                 "weekly-job",
@@ -111,9 +154,9 @@ class WeeklyRecurrenceTests(unittest.TestCase):
             ))
 
     def test_spring_dst_week_uses_local_midnight_boundaries(self) -> None:
-        self.assertFalse(self.eligible("2026-03-08T04:59:59Z", automatic=True))
-        self.assertTrue(self.eligible("2026-03-08T05:00:00Z", automatic=True))
-        # The DST transition makes this Sunday window 23 elapsed hours.
+        self.assertFalse(self.eligible("2026-03-07T04:59:59Z", automatic=True))
+        self.assertTrue(self.eligible("2026-03-07T05:00:00Z", automatic=True))
+        # The DST transition makes this weekend window 47 elapsed hours.
         self.assertTrue(self.eligible("2026-03-09T03:59:59Z", automatic=True))
         self.assertFalse(self.eligible("2026-03-09T04:00:00Z", automatic=True))
 
