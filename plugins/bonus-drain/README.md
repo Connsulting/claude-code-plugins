@@ -146,9 +146,10 @@ and the unchanged argv) or `t3`, which adds `--surface t3` so agent-router opens
 thread. A provider may set its own `launch_surface` to override the global value. The
 classification dry-run never passes `--surface`. On `t3`, the returned job identity is the T3
 thread ID and is stored verbatim. The run records its surface, and the viewer badges t3 jobs
-in flight. T3 threads do not accept `--mcp-config`, so a Claude task with an MCP scope launches
-without it: Bonus Drain skips the scoped MCP file and notes the dropped scope in the
-dispatched run's summary.
+in flight. agent-router accepts `--mcp-config` and `--strict-mcp-config` on `t3` but ignores
+them with a warning, so they cannot enforce a Claude task's MCP scope. Bonus Drain therefore
+omits both flags, skips the scoped MCP file, and notes the dropped scope in the dispatched
+run's summary.
 
 Scout reserves actual compatible task IDs in nearest-reset order, preventing a portable task
 from consuming two provider slots while preserving exclusive work for a capable provider.

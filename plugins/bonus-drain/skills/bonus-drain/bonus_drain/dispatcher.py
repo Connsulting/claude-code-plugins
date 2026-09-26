@@ -1598,7 +1598,7 @@ def dispatch(
                 if task.mcp is not None and task.mcp.strip():
                     run_summary = (
                         f"t3 surface: task MCP scope {task.mcp.strip()!r} dropped; "
-                        "T3 Code threads do not accept --mcp-config"
+                        "agent-router ignores --mcp-config for T3 Code threads"
                     )[:500]
             else:
                 mcp_path = _materialize_mcp_config(config, task, eligibility_key)
