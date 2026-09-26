@@ -110,7 +110,9 @@ Estimate size before previewing or adding the task:
   when it cannot remain one autonomous job (safely skippable when using Bonus).
 
 When between sizes, choose the larger. `unknown` is display-only for legacy/null rows and is
-never valid on add. Prefer `mcp=none` unless the task demonstrably needs a named server. Mark
+never valid on add. Prefer `mcp=none` unless the task demonstrably needs a named server. When
+the provider's `launch_surface` is `t3`, the MCP scope is dropped at launch (T3 Code threads
+ignore `--mcp-config`) and the run notes it, so do not rely on a scope to restrict a t3 job. Mark
 build-shaped work only through the explicit implementation flag; do not infer it from cwd or
 prose.
 

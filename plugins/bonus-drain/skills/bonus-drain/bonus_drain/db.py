@@ -335,6 +335,7 @@ class RunEvent:
     attempt_id: str | None = None
     outcome: dict[str, Any] | None = None
     requeue: dict[str, Any] | None = None
+    surface: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -586,6 +587,7 @@ class QueueDB:
             "attempt_id": "TEXT",
             "outcome_json": "TEXT",
             "received_at": "TEXT",
+            "surface": "TEXT",
         }
         for table, columns in (("tasks", task_columns), ("runs", run_columns)):
             existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
@@ -731,6 +733,7 @@ class QueueDB:
             received_at=row["received_at"], branch=row["branch"], summary=row["summary"], provider_id=provider_id,
             account_id=row["account_id"], router_job_id=row["router_job_id"], engine=row["engine"],
             trigger=row["trigger"], attempt_id=row["attempt_id"], outcome=outcome,
+            surface=row["surface"],
         )
 
     @staticmethod
@@ -2086,6 +2089,7 @@ class QueueDB:
         cycle: int | None = None, ts: str | None = None, branch: str | None = None,
         summary: str | None = None, router_job_id: str | None = None,
         timestamp: str | None = None, trigger: str | None = None,
+        surface: str | None = None,
         release_activation: Callable[[], None] | None = None,
         now_epoch: float | None = None,
     ) -> RunEvent:
@@ -2291,13 +2295,13 @@ class QueueDB:
                 cursor = connection.execute(
                     """INSERT INTO runs(
                          task,kind,cycle,eligibility_key,status,ts,received_at,branch,summary,engine,
-                         provider_id,account_id,router_job_id,trigger,attempt_id,outcome_json
-                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                         provider_id,account_id,router_job_id,trigger,attempt_id,outcome_json,surface
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         task_id, resolved_kind, resolved_cycle, eligibility_key, status,
                         event_timestamp, receipt_timestamp, branch, summary, provider_id,
                         provider_id, account_id,
-                        router_job_id, trigger, attempt_id, canonical_json,
+                        router_job_id, trigger, attempt_id, canonical_json, surface,
                     ),
                 )
                 reason = canonical.get("reason") if isinstance(canonical, dict) else None
@@ -2395,13 +2399,13 @@ class QueueDB:
             cursor = connection.execute(
                 """INSERT INTO runs(
                      task,kind,cycle,eligibility_key,status,ts,received_at,branch,summary,engine,
-                     provider_id,account_id,router_job_id,trigger,attempt_id,outcome_json
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?)""",
+                     provider_id,account_id,router_job_id,trigger,attempt_id,outcome_json,surface
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?)""",
                 (
                     task_id, resolved_kind, resolved_cycle, eligibility_key, status,
                     event_timestamp, receipt_timestamp, branch, summary, provider_id,
                     provider_id, account_id,
-                    router_job_id, trigger, canonical_json,
+                    router_job_id, trigger, canonical_json, surface,
                 ),
             )
             if status in TERMINAL_STATUSES and legacy_claim is not None:
@@ -3434,15 +3438,15 @@ class QueueDB:
             connection.execute(
                 """INSERT INTO runs(
                      task,kind,cycle,eligibility_key,status,ts,received_at,branch,summary,engine,
-                     provider_id,account_id,router_job_id,trigger,attempt_id,outcome_json
-                   ) VALUES(?,?,?,?,'dispatched',?,?,NULL,?,?,?,?,?,'continuation',?,NULL)""",
+                     provider_id,account_id,router_job_id,trigger,attempt_id,outcome_json,surface
+                   ) VALUES(?,?,?,?,'dispatched',?,?,NULL,?,?,?,?,?,'continuation',?,NULL,?)""",
                 (
                     task_id, task.kind, int(source_run["cycle"]),
                     source_run["eligibility_key"], stamp, stamp,
                     "same-thread continuation",
                     source_run["engine"] or source_run["provider_id"],
                     source_run["provider_id"], source_run["account_id"],
-                    source_run["router_job_id"], attempt_id,
+                    source_run["router_job_id"], attempt_id, source_run["surface"],
                 ),
             )
             owner = connection.execute(

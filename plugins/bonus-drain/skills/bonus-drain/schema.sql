@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS runs (
   router_job_id   TEXT,
   trigger         TEXT,
   attempt_id      TEXT,
-  outcome_json    TEXT
+  outcome_json    TEXT,
+  surface         TEXT
 );
 
 CREATE TABLE IF NOT EXISTS dispatch_claims (

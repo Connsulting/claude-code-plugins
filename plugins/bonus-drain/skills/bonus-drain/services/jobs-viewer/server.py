@@ -755,7 +755,8 @@ def get_inflight() -> list[dict]:
     try:
         with _db() as cx:
             rows = cx.execute(
-                """SELECT r.ts, r.task, COALESCE(t.title, r.task) AS title, r.engine, t.cwd
+                """SELECT r.ts, r.task, COALESCE(t.title, r.task) AS title, r.engine, t.cwd,
+                          r.surface
                    FROM runs r LEFT JOIN tasks t ON t.id = r.task
                    WHERE r.status='dispatched'
                      AND NOT EXISTS (SELECT 1 FROM runs r2 WHERE r2.task=r.task
@@ -865,7 +866,8 @@ def run_task_now(task_id: str, engine: str) -> tuple[bool, str]:
         return False, str(exc)[:500] or "could not launch this job"
     except (graph_config.ConfigError, OSError, ValueError):
         return False, "could not launch this job"
-    return True, f"launched on {result.provider_id} as {result.job_id}"
+    surface = " (t3)" if result.surface == "t3" else ""
+    return True, f"launched on {result.provider_id} as {result.job_id}{surface}"
 
 
 def requeue_task(task_id: str) -> tuple[bool, str]:
@@ -2409,6 +2411,7 @@ def render_bonus_body() -> str:
             <span class="fltitle">{esc(j["title"])}</span>
             <span class="dimtxt">{esc(Path(j.get("cwd") or "").name or "—")}</span>
             <span class="dimtxt ebadge">{ico(j.get("engine") if j.get("engine") in RUN_ENGINES else "claude")}{esc(j.get("engine") or "claude")}</span>
+            {'<span class="dimtxt surfbadge" title="T3 Code thread">t3</span>' if j.get("surface") == "t3" else ""}
             <span class="elapsed">{dur(time.time() - started) if started else "—"}</span>
             {_finish_buttons(j)}
           </div>""")
