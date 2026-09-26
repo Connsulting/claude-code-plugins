@@ -43,7 +43,10 @@ the remaining-headroom floor (`max_percent_per_window` points per
 `min(batch_size, floor(surplus / estimated_percent_per_job))` with one point equal
 to one job, then subtracts already-running jobs on that provider. `batch_size` is
 the per-provider cap (3 in the example). Optional top-level `max_jobs` is a
-cross-provider ceiling including in-flight work; omit it for no global cap. Bonus Drain is
+cross-provider ceiling including in-flight work; omit it for no global cap. Optional
+`launch_surface` (`background` by default, or `t3`, also settable per provider) launches work
+as T3 Code threads through `agent-router run --surface t3`; Claude MCP scopes are dropped on
+t3 and the dropped scope is noted on the dispatched run. Bonus Drain is
 the last `urgency_seconds` (24 hours) and uses the same floor. For a provider with multiple
 accounts, Scout applies the complete gates to each account and prefers the proven active
 account among those that can drain. It attempts verified activation only when the inactive

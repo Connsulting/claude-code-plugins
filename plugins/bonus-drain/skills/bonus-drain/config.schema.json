@@ -24,6 +24,11 @@
       "minimum": 1,
       "description": "Maximum concurrent jobs across providers, including in-flight. Omitted means no global cap."
     },
+    "launch_surface": {
+      "enum": ["background", "t3"],
+      "default": "background",
+      "description": "Where agent-router launches queued work: detached background jobs, or T3 Code threads (agent-router run --surface t3). Providers may override it."
+    },
     "secret_refs": {
       "type": "array",
       "items": {"$ref": "#/$defs/secretRef"}
@@ -134,7 +139,11 @@
           }
         },
         "capabilities": {"type": "array", "items": {"$ref": "#/$defs/id"}},
-        "account_mode": {"type": "string", "enum": ["single", "multi"], "default": "multi"}
+        "account_mode": {"type": "string", "enum": ["single", "multi"], "default": "multi"},
+        "launch_surface": {
+          "enum": ["background", "t3"],
+          "description": "Overrides the top-level launch_surface for this provider. Omitted means inherit."
+        }
       }
     },
     "plan": {

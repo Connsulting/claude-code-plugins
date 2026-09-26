@@ -383,6 +383,25 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertIn("/api/bonus/task/finish", self.viewer.SCRIPT)
         self.assertNotIn("unavailable", row)
 
+    def test_inflight_t3_jobs_are_badged_as_t3(self) -> None:
+        inflight = [
+            {
+                "ts": "2026-08-26T12:00:00Z", "task": "t3-job", "title": "Thread job",
+                "engine": "claude", "cwd": "/tmp/t3", "surface": "t3",
+            },
+            {
+                "ts": "2026-08-26T12:00:00Z", "task": "bg-job", "title": "Background job",
+                "engine": "claude", "cwd": "/tmp/bg", "surface": "background",
+            },
+        ]
+        body = self._bonus_body([], inflight=inflight)
+        t3_start = body.index('<span class="fltitle">Thread job</span>')
+        t3_row = body[t3_start:body.index('<span class="fltitle">Background job</span>')]
+        bg_row = body[body.index('<span class="fltitle">Background job</span>'):]
+        self.assertIn('class="dimtxt surfbadge"', t3_row)
+        self.assertIn(">t3<", t3_row)
+        self.assertNotIn("surfbadge", bg_row.split('<div class="fl">')[0])
+
     def test_inflight_cutoffs_are_disabled_when_the_viewer_is_read_only(self) -> None:
         inflight = [{
             "ts": "2026-08-26T12:00:00Z", "task": "runaway-job",

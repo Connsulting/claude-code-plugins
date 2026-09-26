@@ -23,6 +23,7 @@ class ConfigError(ValueError):
 
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+LAUNCH_SURFACES = ("background", "t3")
 _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _ALLOWED_PLACEHOLDERS = {
     "account_id",
@@ -131,6 +132,7 @@ class ProviderConfig:
     dispatch: DispatchBinding
     capabilities: frozenset[str] = frozenset()
     account_mode: str = "multi"
+    launch_surface: str | None = None
 
 
 @dataclass(frozen=True)
@@ -183,6 +185,7 @@ class RuntimeConfig:
     usage_max_age_seconds: int = 3_600
     cache_dir: Path = Path(".")
     max_jobs: int | None = None
+    launch_surface: str = "background"
 
     @property
     def state_dir(self) -> Path:
@@ -210,6 +213,9 @@ class RuntimeConfig:
     def accounts_for_provider(self, provider_id: str) -> tuple[AccountConfig, ...]:
         return tuple(account for account in self.accounts if account.provider_id == provider_id)
 
+    def launch_surface_for(self, provider: ProviderConfig) -> str:
+        return provider.launch_surface or self.launch_surface
+
 
 def _lookup(items: Iterable[Any], item_id: str, label: str) -> Any:
     for item in items:
@@ -227,6 +233,12 @@ def _require_mapping(value: Any, label: str) -> Mapping[str, Any]:
 def _require_list(value: Any, label: str) -> list[Any]:
     if not isinstance(value, list):
         raise ConfigError(f"{label} must be an array")
+    return value
+
+
+def _launch_surface(value: Any, label: str) -> str:
+    if value not in LAUNCH_SURFACES:
+        raise ConfigError(f"{label} must be one of {', '.join(LAUNCH_SURFACES)}")
     return value
 
 
@@ -354,7 +366,7 @@ def validate_config(
     data = _require_mapping(raw, "config")
     _reject_unknown(data, {
         "schema_version", "database", "cache_dir", "record_command",
-        "usage_max_age_seconds", "max_jobs", "recurrence_timezone", "secret_refs", "adapters", "providers", "plans",
+        "usage_max_age_seconds", "max_jobs", "launch_surface", "recurrence_timezone", "secret_refs", "adapters", "providers", "plans",
         "accounts", "limits", "viewer", "pr_exceptions",
     }, "config")
     _reject_inline_secrets(data)
@@ -459,7 +471,10 @@ def validate_config(
 
     providers: list[ProviderConfig] = []
     for index, row in enumerate(provider_rows):
-        _reject_unknown(row, {"id", "dispatch", "capabilities", "account_mode"}, f"providers[{index}]")
+        _reject_unknown(
+            row, {"id", "dispatch", "capabilities", "account_mode", "launch_surface"},
+            f"providers[{index}]",
+        )
         item_id = _identifier(row.get("id"), f"providers[{index}].id")
         dispatch = _require_mapping(row.get("dispatch"), f"providers[{index}].dispatch")
         _reject_unknown(dispatch, {"adapter_id", "provider"}, f"providers[{index}].dispatch")
@@ -473,7 +488,14 @@ def validate_config(
         account_mode = _string(row.get("account_mode", "multi"), f"providers[{index}].account_mode")
         if account_mode not in {"single", "multi"}:
             raise ConfigError(f"providers[{index}].account_mode must be single or multi")
-        providers.append(ProviderConfig(item_id, DispatchBinding(adapter_id, router_provider), capabilities, account_mode))
+        provider_surface = (
+            None if row.get("launch_surface") is None
+            else _launch_surface(row.get("launch_surface"), f"providers[{index}].launch_surface")
+        )
+        providers.append(ProviderConfig(
+            item_id, DispatchBinding(adapter_id, router_provider), capabilities, account_mode,
+            provider_surface,
+        ))
     provider_ids = {provider.id for provider in providers}
 
     plans: list[PlanConfig] = []
@@ -773,6 +795,7 @@ def validate_config(
             None if data.get("max_jobs") is None
             else _integer(data.get("max_jobs"), "max_jobs", minimum=1)
         ),
+        launch_surface=_launch_surface(data.get("launch_surface", "background"), "launch_surface"),
     )
 
 

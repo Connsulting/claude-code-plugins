@@ -134,6 +134,7 @@ class DispatchResult:
     factory_run_id: str | None = None
     attempt_id: str | None = None
     dependency_base: Mapping[str, Any] | None = None
+    surface: str = "background"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -1586,10 +1587,23 @@ def dispatch(
         model = canonical_model(task.model)
         if model:
             launch_argv.extend(["--model", model])
+        surface = config.launch_surface_for(provider)
+        run_summary: str | None = None
+        if surface == "t3":
+            launch_argv.extend(["--surface", "t3"])
         if _uses_claude_mcp_scoping(provider):
-            mcp_path = _materialize_mcp_config(config, task, eligibility_key)
-            if mcp_path is not None:
-                launch_argv.extend(["--mcp-config", str(mcp_path), "--strict-mcp-config"])
+            if surface == "t3":
+                # agent-router ignores MCP flags for T3 Code threads, so a scoped file would
+                # only pretend to restrict the thread. Record the dropped scope instead.
+                if task.mcp is not None and task.mcp.strip():
+                    run_summary = (
+                        f"t3 surface: task MCP scope {task.mcp.strip()!r} dropped; "
+                        "agent-router ignores --mcp-config for T3 Code threads"
+                    )[:500]
+            else:
+                mcp_path = _materialize_mcp_config(config, task, eligibility_key)
+                if mcp_path is not None:
+                    launch_argv.extend(["--mcp-config", str(mcp_path), "--strict-mcp-config"])
         launch_argv.extend(["--json", prompt])
         response = _call_router(router_call, launch_argv, config, adapter, phase="launch")
         dispatch_data = response.get("dispatch")
@@ -1601,6 +1615,7 @@ def dispatch(
                 task.id, eligibility_key, attempt_id=attempt.id,
                 status="dispatched", provider_id=provider.id,
                 account_id=account_id, router_job_id=job_id, trigger=trigger,
+                summary=run_summary, surface=surface,
             )
         except Exception as exc:
             raise AmbiguousDispatch("router launched but dispatch bookkeeping failed") from exc
@@ -1640,6 +1655,7 @@ def dispatch(
             factory_run_id=factory_run_id,
             attempt_id=attempt.id,
             dependency_base=rechecked_dependency_base,
+            surface=surface,
         )
     except AmbiguousDispatch as exc:
         claim = queue.claim_for(task.id, eligibility_key)
