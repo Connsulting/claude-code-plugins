@@ -168,6 +168,16 @@ class LimitConfig:
 
 
 @dataclass(frozen=True)
+class HostLoadGateConfig:
+    """Host thresholds past which the scout launches nothing this tick."""
+
+    enabled: bool = True
+    cpu_some_avg60_max: float = 40.0
+    mem_available_min_gib: float = 4.0
+    load_per_cpu_max: float = 1.5
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     schema_version: int
     source_path: Path | None
@@ -186,6 +196,7 @@ class RuntimeConfig:
     cache_dir: Path = Path(".")
     max_jobs: int | None = None
     launch_surface: str = "background"
+    host_load_gate: HostLoadGateConfig = field(default_factory=HostLoadGateConfig)
 
     @property
     def state_dir(self) -> Path:
@@ -281,6 +292,35 @@ def _integer(value: Any, label: str, *, minimum: int = 0) -> int:
     return value
 
 
+def _host_load_gate(value: Any) -> HostLoadGateConfig:
+    gate = _require_mapping(value, "host_load_gate")
+    _reject_unknown(gate, {
+        "enabled", "cpu_some_avg60_max", "mem_available_min_gib", "load_per_cpu_max",
+    }, "host_load_gate")
+    defaults = HostLoadGateConfig()
+    enabled = gate.get("enabled", defaults.enabled)
+    if not isinstance(enabled, bool):
+        raise ConfigError("host_load_gate.enabled must be boolean")
+    load_per_cpu_max = _number(
+        gate.get("load_per_cpu_max", defaults.load_per_cpu_max),
+        "host_load_gate.load_per_cpu_max",
+    )
+    if load_per_cpu_max <= 0:
+        raise ConfigError("host_load_gate.load_per_cpu_max must be greater than 0")
+    return HostLoadGateConfig(
+        enabled=enabled,
+        cpu_some_avg60_max=_number(
+            gate.get("cpu_some_avg60_max", defaults.cpu_some_avg60_max),
+            "host_load_gate.cpu_some_avg60_max", minimum=0, maximum=100,
+        ),
+        mem_available_min_gib=_number(
+            gate.get("mem_available_min_gib", defaults.mem_available_min_gib),
+            "host_load_gate.mem_available_min_gib", minimum=0,
+        ),
+        load_per_cpu_max=load_per_cpu_max,
+    )
+
+
 def _safe_path(value: Any, label: str, source_dir: Path) -> Path:
     text = _string(value, label)
     path = Path(text).expanduser()
@@ -367,7 +407,7 @@ def validate_config(
     _reject_unknown(data, {
         "schema_version", "database", "cache_dir", "record_command",
         "usage_max_age_seconds", "max_jobs", "launch_surface", "recurrence_timezone", "secret_refs", "adapters", "providers", "plans",
-        "accounts", "limits", "viewer", "pr_exceptions",
+        "accounts", "limits", "viewer", "pr_exceptions", "host_load_gate",
     }, "config")
     _reject_inline_secrets(data)
     env = os.environ if environ is None else environ
@@ -796,6 +836,7 @@ def validate_config(
             else _integer(data.get("max_jobs"), "max_jobs", minimum=1)
         ),
         launch_surface=_launch_surface(data.get("launch_surface", "background"), "launch_surface"),
+        host_load_gate=_host_load_gate(data.get("host_load_gate", {})),
     )
 
 

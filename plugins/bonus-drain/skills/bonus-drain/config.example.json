@@ -4,6 +4,10 @@
   "record_command": ["/ABSOLUTE/PATH/TO/.local/bin/bonus-drain", "record"],
   "usage_max_age_seconds": 3600,
   "launch_surface": "background",
+  "host_load_gate": {
+    "enabled": true, "cpu_some_avg60_max": 40, "mem_available_min_gib": 4,
+    "load_per_cpu_max": 1.5
+  },
   "secret_refs": [],
   "adapters": [
     {

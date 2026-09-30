@@ -123,7 +123,9 @@ def _tick(args: argparse.Namespace) -> tuple[config_module.RuntimeConfig, db.Que
     cfg, queue = _queue(args, graph_required=True)
     queue.initialize()
     now = _now(args)
-    return cfg, queue, scout.plan_tick(cfg, queue, now_epoch=now)
+    return cfg, queue, scout.plan_tick(
+        cfg, queue, now_epoch=now, host_load_reader=scout.read_host_load,
+    )
 
 
 def _plan(args: argparse.Namespace) -> tuple[config_module.RuntimeConfig, db.QueueDB, planner.PlanResult]:
@@ -493,6 +495,7 @@ def _command(args: argparse.Namespace) -> int:
         _json({
             "generated_at": tick.plan.generated_at,
             "gates": [gate.to_dict() for gate in tick.plan.gates],
+            "host_pressure": tick.host_pressure,
             "allocations": [
                 {
                     "task_id": task.id,
@@ -551,6 +554,7 @@ def _command(args: argparse.Namespace) -> int:
         cfg, queue = _queue(args, graph_required=True)
         report = scout.run_once(
             cfg, queue, now_epoch=_now(args), dry_run=args.dry_run,
+            host_load_reader=scout.read_host_load,
         )
         _json(report.to_dict())
         return 0 if not report.errors else 1

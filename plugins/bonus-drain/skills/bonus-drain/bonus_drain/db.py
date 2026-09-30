@@ -29,6 +29,9 @@ OPERATOR_RECOVERY_SOURCES = frozenset({"failed", "skipped", "awaiting_human"})
 ATTEMPT_STATES = frozenset({
     "claimed", "dispatched", "done", "skipped", "failed", "awaiting_human", "ambiguous", "aborted",
 })
+# Touched after any commit that moves an attempt or run into a terminal state, so a systemd
+# path unit can wake the scout as soon as a slot frees instead of waiting for its timer.
+SLOT_FREED_MARKER = "slot-freed"
 RECOVERY_MODES = frozenset({"retry", "verification"})
 RECOVERY_STATES = frozenset({"scheduled", "backoff", "consumed", "held", "exhausted"})
 TRANSIENT_RECOVERY_HOLDS = frozenset({
@@ -465,10 +468,68 @@ class QueueDB:
         connection.execute("PRAGMA foreign_keys=ON")
         return connection
 
+    @property
+    def slot_freed_marker(self) -> Path:
+        return self.path.parent / SLOT_FREED_MARKER
+
+    @staticmethod
+    def _watch_terminal_transitions(connection: sqlite3.Connection) -> list[bool]:
+        """Flag this connection's terminal run inserts and attempt transitions.
+
+        Every terminal write goes through ``_transaction``, so connection-local TEMP triggers
+        catch all of them without each writer remembering to signal. The callback only sets a
+        flag; the marker is written after commit so a rolled-back transition never wakes anyone.
+        """
+
+        fired = [False]
+
+        def mark() -> None:
+            fired[0] = True
+
+        run_states = ", ".join(f"'{status}'" for status in sorted(TERMINAL_STATUSES))
+        attempt_states = ", ".join(
+            f"'{state}'" for state in sorted(TERMINAL_STATUSES | {"aborted"})
+        )
+        connection.create_function("bonus_drain_slot_freed", 0, mark)
+        try:
+            connection.execute(
+                "CREATE TEMP TRIGGER bonus_drain_run_terminal AFTER INSERT ON main.runs "
+                f"WHEN NEW.status IN ({run_states}) "
+                "BEGIN SELECT bonus_drain_slot_freed(); END"
+            )
+            connection.execute(
+                "CREATE TEMP TRIGGER bonus_drain_attempt_terminal "
+                "AFTER UPDATE OF state ON main.task_attempts "
+                f"WHEN NEW.state IN ({attempt_states}) AND OLD.state IS NOT NEW.state "
+                "BEGIN SELECT bonus_drain_slot_freed(); END"
+            )
+        except sqlite3.OperationalError:
+            # Queue tables do not exist yet (pre-initialize); nothing can become terminal.
+            pass
+        return fired
+
+    def _touch_slot_freed(self) -> None:
+        """Rewrite the marker so PathChanged sees IN_CLOSE_WRITE; never fail the caller."""
+
+        try:
+            fd = os.open(
+                self.slot_freed_marker,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+            )
+            try:
+                os.write(fd, f"{time.time():.6f}\n".encode("ascii"))
+            finally:
+                os.close(fd)
+        except Exception:
+            # The transition already committed; a missing wake-up only defers to the timer.
+            pass
+
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
         connection = self._connect()
         try:
+            fired = self._watch_terminal_transitions(connection)
             connection.execute("BEGIN IMMEDIATE")
             yield connection
             connection.commit()
@@ -477,6 +538,8 @@ class QueueDB:
             raise
         finally:
             connection.close()
+        if fired[0]:
+            self._touch_slot_freed()
 
     def initialize(self) -> None:
         schema_path = Path(__file__).resolve().parents[1] / "schema.sql"

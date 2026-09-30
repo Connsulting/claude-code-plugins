@@ -1,11 +1,11 @@
 [Unit]
-Description=Run the Bonus Drain scout hourly
+Description=Run the Bonus Drain scout every ten minutes
 
 [Timer]
 OnBootSec=5min
-OnUnitActiveSec=1h
-RandomizedDelaySec=5min
-AccuracySec=1min
+OnUnitActiveSec=10min
+RandomizedDelaySec=30s
+AccuracySec=15s
 Persistent=true
 Unit=bonus-drain-scout.service
 

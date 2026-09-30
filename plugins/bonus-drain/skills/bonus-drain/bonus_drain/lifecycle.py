@@ -32,6 +32,7 @@ class OwnershipError(LifecycleError):
 UNIT_NAMES = (
     "bonus-drain-refresh.service",
     "bonus-drain-refresh.timer",
+    "bonus-drain-scout.path",
     "bonus-drain-scout.service",
     "bonus-drain-scout.timer",
     "bonus-drain-viewer.service",
@@ -39,7 +40,7 @@ UNIT_NAMES = (
 _OWNED_NAME = ".bonus-drain-owned.json"
 _INSTALL_NAME = ".bonus-drain-install.json"
 _WRAPPER_MARKER = "# managed-by: bonus-drain lifecycle v1"
-_DEFAULT_VERSION = "0.3.9"
+_DEFAULT_VERSION = "0.3.10"
 _BYTECODE_CACHE_NAME = re.compile(
     r"^(?P<module>[A-Za-z_][A-Za-z0-9_]*)\."
     r"(?P<tag>[A-Za-z][A-Za-z0-9_]*-\d+)(?:\.opt-\d+)?\.pyc$"

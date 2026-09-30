@@ -511,6 +511,7 @@ def get_gates(n_elig: int, n_codex: int, n_grok: int,
             if batch > 0:
                 candidates.append(gate)
         out["account_gates"] = account_gates
+        out["host_pressure"] = gate_payload.get("host_pressure") if gate_payload else None
         if candidates:
             next_gate = min(candidates, key=lambda gate: _f(gate.get("resets_at")) or float("inf"))
             out["coordinator"] = next_gate["provider_id"]
@@ -1194,7 +1195,7 @@ def _family(unit: str) -> str:
 
 FAMILY_META = {
     "bg-schedule": ("Background jobs", "Ad-hoc + recurring bg-schedule jobs (automatic routing, explicit Claude, or Codex app server threads)", "var(--acc)"),
-    "bonus-drain": ("Bonus-drain infrastructure", "Hourly scout + weekly usage-window anchor", "var(--ok)"),
+    "bonus-drain": ("Bonus-drain infrastructure", "Ten-minute scout + slot-freed trigger + weekly usage-window anchor", "var(--ok)"),
     "rotator": ("Token rotator", "Multi-account credential rotation", "var(--warn)"),
     "other": ("Other timers", "Unrelated system timers", "var(--dim2)"),
 }
@@ -1611,6 +1612,9 @@ def _card_state(c: dict) -> tuple[str, str]:
     kind = "bonus drain" if c.get("urgent") else "async"
     if c["batch"] > 0:
         return f'{kind} · batch {c["batch"]}/{c["batch_n"]}', "acc"
+    # A pressured host holds every account regardless of budget.
+    if c.get("host_pressure"):
+        return "waiting · host pressure", "warn"
     # Unknown is not zero. A missing reading must never render as a full budget.
     if c["u7"] is None:
         return "unknown · no usage reading", "dim"
@@ -2387,6 +2391,9 @@ def render_bonus_body() -> str:
     cards = _claude_cards(gates, usage, len(remaining), coord, c_batch)
     cards.extend(_codex_cards(gates, codex, n_codex, coord, x_batch))
     cards.extend(_grok_cards(gates, grok, n_grok, coord, g_batch))
+    if gates.get("host_pressure"):
+        for card in cards:
+            card["host_pressure"] = gates["host_pressure"]
     scout_at = next_scout()
     when = f"async scheduler {rel(scout_at)}" if scout_at else "async scheduler timing unavailable"
     nxt = " ".join(

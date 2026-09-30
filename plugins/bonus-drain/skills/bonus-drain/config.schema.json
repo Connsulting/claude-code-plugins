@@ -29,6 +29,26 @@
       "default": "background",
       "description": "Where agent-router launches queued work: detached background jobs, or T3 Code threads (agent-router run --surface t3). Providers may override it."
     },
+    "host_load_gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Host thresholds past which a scout tick launches nothing. CPU uses PSI some avg60 and falls back to load per CPU when PSI is unreadable; an unreadable source gives no verdict.",
+      "properties": {
+        "enabled": {"type": "boolean", "default": true},
+        "cpu_some_avg60_max": {
+          "type": "number", "minimum": 0, "maximum": 100, "default": 40,
+          "description": "Block when /proc/pressure/cpu some avg60 exceeds this percent."
+        },
+        "mem_available_min_gib": {
+          "type": "number", "minimum": 0, "default": 4,
+          "description": "Block when MemAvailable falls below this many GiB."
+        },
+        "load_per_cpu_max": {
+          "type": "number", "exclusiveMinimum": 0, "default": 1.5,
+          "description": "Fallback when PSI is unreadable: block when the 1-minute load average per CPU exceeds this."
+        }
+      }
+    },
     "secret_refs": {
       "type": "array",
       "items": {"$ref": "#/$defs/secretRef"}

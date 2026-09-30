@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import time
 from dataclasses import asdict, dataclass, replace
@@ -9,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from . import db, goals
-from .config import RuntimeConfig
+from .config import HostLoadGateConfig, RuntimeConfig
 from .db import QueueDB, hour_round, task_requires_legacy_exclusive
 from .dispatcher import (
     ActivationUnavailable,
@@ -29,6 +30,142 @@ from .reconcile import reconcile_inflight
 from .usage import read_all
 
 
+# Held for a whole tick so a timer run and a slot-freed path run never overlap.
+TICK_LOCK_NAME = "scout.lock"
+_GIB = 2 ** 30
+
+
+@dataclass(frozen=True)
+class HostLoad:
+    """One host reading; each field is None when its source could not be read."""
+
+    cpu_some_avg60: float | None
+    mem_available_bytes: int | None
+    load1: float | None
+    cpu_count: int | None
+
+
+def _read_text(path: Path) -> str:
+    """Return a source's text, or "" when it cannot be read, so parsers yield None."""
+
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return ""
+
+
+def _psi_some_avg60(text: str) -> float | None:
+    for line in text.splitlines():
+        fields = line.split()
+        if not fields or fields[0] != "some":
+            continue
+        for item in fields[1:]:
+            key, _sep, value = item.partition("=")
+            if key == "avg60":
+                try:
+                    return float(value)
+                except ValueError:
+                    return None
+    return None
+
+
+def _mem_available_bytes(text: str) -> int | None:
+    for line in text.splitlines():
+        key, _sep, rest = line.partition(":")
+        if key.strip() != "MemAvailable":
+            continue
+        fields = rest.split()
+        try:
+            amount = int(fields[0])
+        except (IndexError, ValueError):
+            return None
+        unit = fields[1].lower() if len(fields) > 1 else ""
+        return amount * 1024 if unit == "kb" else amount
+    return None
+
+
+def _load1(text: str) -> float | None:
+    try:
+        return float(text.split()[0])
+    except (IndexError, ValueError):
+        return None
+
+
+def read_host_load(
+    proc_root: str | os.PathLike[str] | Path = "/proc",
+    *,
+    cpu_count: Callable[[], int | None] = os.cpu_count,
+) -> HostLoad:
+    """Read CPU PSI, MemAvailable, and the 1-minute load average; never raises."""
+
+    root = Path(proc_root)
+    try:
+        cpus = cpu_count()
+    except Exception:
+        cpus = None
+    return HostLoad(
+        cpu_some_avg60=_psi_some_avg60(_read_text(root / "pressure" / "cpu")),
+        mem_available_bytes=_mem_available_bytes(_read_text(root / "meminfo")),
+        load1=_load1(_read_text(root / "loadavg")),
+        cpu_count=cpus if isinstance(cpus, int) and cpus > 0 else None,
+    )
+
+
+def host_pressure(gate: HostLoadGateConfig, load: HostLoad) -> dict[str, Any] | None:
+    """Return a host_pressure blocker when a readable source exceeds its threshold.
+
+    CPU uses PSI when available and falls back to load per CPU; an unreadable source gives
+    no verdict rather than blocking, so a host without /proc still drains.
+    """
+
+    if not gate.enabled:
+        return None
+    reasons: list[str] = []
+    source: str | None = None
+    load_per_cpu = (
+        load.load1 / load.cpu_count
+        if load.load1 is not None and load.cpu_count else None
+    )
+    if load.cpu_some_avg60 is not None:
+        source = "psi"
+        if load.cpu_some_avg60 > gate.cpu_some_avg60_max:
+            reasons.append(
+                f"cpu some avg60 {load.cpu_some_avg60:.1f}% > {gate.cpu_some_avg60_max:g}%"
+            )
+    elif load_per_cpu is not None:
+        source = "loadavg"
+        if load_per_cpu > gate.load_per_cpu_max:
+            reasons.append(
+                f"load per cpu {load_per_cpu:.2f} > {gate.load_per_cpu_max:g}"
+            )
+    mem_available_gib = (
+        None if load.mem_available_bytes is None else load.mem_available_bytes / _GIB
+    )
+    if (
+        load.mem_available_bytes is not None
+        and load.mem_available_bytes < gate.mem_available_min_gib * _GIB
+    ):
+        reasons.append(
+            f"memory available {mem_available_gib:.2f} GiB < {gate.mem_available_min_gib:g} GiB"
+        )
+    if not reasons:
+        return None
+    return {
+        "kind": "host_pressure",
+        "message": "; ".join(reasons),
+        "reasons": reasons,
+        "source": source,
+        "cpu_some_avg60": load.cpu_some_avg60,
+        "load_per_cpu": load_per_cpu,
+        "mem_available_gib": mem_available_gib,
+        "thresholds": {
+            "cpu_some_avg60_max": gate.cpu_some_avg60_max,
+            "mem_available_min_gib": gate.mem_available_min_gib,
+            "load_per_cpu_max": gate.load_per_cpu_max,
+        },
+    }
+
+
 @dataclass(frozen=True)
 class ScoutReport:
     generated_at: int
@@ -42,6 +179,7 @@ class ScoutReport:
     reconciliation: tuple[dict[str, Any], ...] = ()
     goal_updates: tuple[dict[str, Any], ...] = ()
     recoveries: tuple[dict[str, Any], ...] = ()
+    skipped: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -56,6 +194,7 @@ class ScoutReport:
             "reconciliation": list(self.reconciliation),
             "goal_updates": list(self.goal_updates),
             "recoveries": list(self.recoveries),
+            "skipped": self.skipped,
         }
 
 
@@ -66,6 +205,7 @@ class TickPlan:
     plan: PlanResult
     allocations: Mapping[tuple[str, str], tuple[Any, ...]]
     dependency_holds: tuple[dict[str, Any], ...] = ()
+    host_pressure: dict[str, Any] | None = None
 
 
 class _InitializedQueueReader(QueueDB):
@@ -296,8 +436,12 @@ def plan_tick(
     *,
     now_epoch: int | None = None,
     provider_holds: tuple[str, ...] | None = None,
+    host_load_reader: Callable[[], HostLoad] | None = None,
 ) -> TickPlan:
-    """Build one adjusted tick plan from cache and initialized SQLite reads only."""
+    """Build one adjusted tick plan from cache and initialized SQLite reads only.
+
+    ``host_load_reader`` is injected at the CLI boundary; None means no host reading.
+    """
 
     now = int(time.time() if now_epoch is None else now_epoch)
     reader = _initialized_queue_reader(queue)
@@ -349,6 +493,13 @@ def plan_tick(
         active_account_ids=active_account_ids,
         eligible_count=availability,
     )
+    blocker = (
+        None if host_load_reader is None
+        else host_pressure(config.host_load_gate, host_load_reader())
+    )
+    if blocker is not None:
+        reason = f"host pressure: {blocker['message']}"
+        plan = close_providers(plan, {gate.provider_id: reason for gate in plan.gates})
     allocations: dict[tuple[str, str], tuple[Any, ...]] = {}
 
     # Build a capacity-expanded bipartite graph and find an augmenting-path matching. Processing
@@ -453,7 +604,7 @@ def plan_tick(
     )
     return TickPlan(
         anchor, snapshots, adjusted_plan, allocations,
-        tuple(dependency_holds.values()),
+        tuple(dependency_holds.values()), blocker,
     )
 
 
@@ -466,16 +617,52 @@ def run_once(
     dry_run: bool = False,
     router_call: Callable[..., Any] | None = None,
     activation_call: Callable[[str, str], Any] | None = None,
+    host_load_reader: Callable[[], HostLoad] | None = None,
 ) -> ScoutReport:
     """Plan and dispatch one tick using cache only.
 
     The scout never invokes a usage adapter.  ``refresh`` is the sole usage producer.
+    A tick that finds another tick holding the lock returns a skipped report untouched.
     """
 
     now = int(time.time() if now_epoch is None else now_epoch)
     queue = queue or QueueDB(
         config.database, recurrence_timezone=config.recurrence_timezone,
     )
+    lock_path = queue.path.parent / TICK_LOCK_NAME
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(
+        lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+    )
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return ScoutReport(
+                now, dry_run, PlanResult((), {}, (), now), (), (), (),
+                skipped={"reason": "tick_in_progress", "lock": str(lock_path)},
+            )
+        return _run_locked(
+            config, queue, cache_root, now=now, dry_run=dry_run,
+            router_call=router_call, activation_call=activation_call,
+            host_load_reader=host_load_reader,
+        )
+    finally:
+        # Closing the descriptor releases the flock.
+        os.close(fd)
+
+
+def _run_locked(
+    config: RuntimeConfig,
+    queue: QueueDB,
+    cache_root: str | Path | None,
+    *,
+    now: int,
+    dry_run: bool,
+    router_call: Callable[..., Any] | None,
+    activation_call: Callable[[str, str], Any] | None,
+    host_load_reader: Callable[[], HostLoad] | None,
+) -> ScoutReport:
     queue.initialize()
     dispatched: list[DispatchResult] = []
     previews: list[dict[str, Any]] = []
@@ -508,13 +695,16 @@ def run_once(
     tick = plan_tick(
         config, queue, cache_root, now_epoch=now,
         provider_holds=lifecycle_report.provider_holds,
+        host_load_reader=host_load_reader,
     )
     plan = tick.plan
+    # A pressured host launches nothing; its batches are already empty, so only report why.
+    host_blockers = (tick.host_pressure,) if tick.host_pressure is not None else ()
     router_preflight = _router_preflight(config, plan)
 
     unavailable = [item for item in router_preflight if not item["available"]]
     if unavailable:
-        blockers = lifecycle_blockers + tick.dependency_holds + tuple({
+        blockers = lifecycle_blockers + tick.dependency_holds + host_blockers + tuple({
             "kind": "router_unavailable",
             "adapter_id": item["adapter_id"],
             "executable": item["executable"],
@@ -563,7 +753,8 @@ def run_once(
 
     return ScoutReport(
         now, dry_run, plan, tuple(dispatched), tuple(previews),
-        lifecycle_errors + tuple(errors), lifecycle_blockers + tick.dependency_holds,
+        lifecycle_errors + tuple(errors),
+        lifecycle_blockers + tick.dependency_holds + host_blockers,
         router_preflight,
         reconciliation, goal_updates, recoveries,
     )
