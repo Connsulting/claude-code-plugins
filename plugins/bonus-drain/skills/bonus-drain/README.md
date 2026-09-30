@@ -11,6 +11,21 @@ the router is queried with a dry run, Bonus Drain validates the result, then cla
 launches once with a concrete provider and account. Missing, malformed, resetless, or
 stale cache data closes only the affected account. Leaving work queued is expected.
 
+Set `scout_ntfy_url` in the config to a full ntfy topic URL such as
+`https://ntfy.sh/your-topic` to receive scout health notices. Omit it or set it to
+`null` to disable notifications. The scout sends a notice on a nonzero result or a
+`reconciliation_required` blocker, repeats at most once per 24 hours while stuck,
+and sends one recovery notice when the next completed tick is healthy. Normal
+closed capacity gates and zero dispatch ticks do not alert. Dry runs and ticks
+skipped because another scout holds the lock leave notification state untouched.
+
+Notices contain blocker kinds, task IDs, and `bonus-drain doctor --json`, without
+error text or credentials. Deduplication lives in the queue SQLite database.
+Each notice is reserved before its HTTP request, so failed deliveries consume
+the daily reservation. Notification storage or delivery failures do not change
+the scout result or dispatch decisions. The URL accepts HTTP or HTTPS and must
+not contain credentials, query parameters, or a fragment.
+
 Scout reserves concrete compatible task IDs in nearest-reset order before dispatch. A task
 can occupy only one batch per tick, so a portable task consumed by an earlier reset cannot
 also consume a later provider slot, while exclusive work remains available to a provider

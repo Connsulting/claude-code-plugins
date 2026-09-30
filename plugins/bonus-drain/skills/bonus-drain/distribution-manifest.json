@@ -25,6 +25,7 @@
     "bonus_drain/handoff.py",
     "bonus_drain/kick.py",
     "bonus_drain/lifecycle.py",
+    "bonus_drain/notifications.py",
     "bonus_drain/planner.py",
     "bonus_drain/scout.py",
     "bonus_drain/reconcile.py",

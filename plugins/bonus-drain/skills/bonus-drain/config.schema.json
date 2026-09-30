@@ -17,6 +17,12 @@
     "schema_version": {"const": 1},
     "database": {"type": "string", "minLength": 1},
     "cache_dir": {"type": "string", "minLength": 1},
+    "scout_ntfy_url": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "maxLength": 2048,
+      "description": "Absolute HTTP or HTTPS ntfy topic URL without credentials, query, or fragment. Omitted or null disables scout failure and recovery notifications."
+    },
     "record_command": {"$ref": "#/$defs/argv"},
     "usage_max_age_seconds": {"type": "integer", "minimum": 1},
     "max_jobs": {
