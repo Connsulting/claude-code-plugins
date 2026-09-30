@@ -82,6 +82,14 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
   applied_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS scout_notification_state (
+  singleton       INTEGER PRIMARY KEY CHECK (singleton = 1),
+  stuck           INTEGER NOT NULL CHECK (stuck IN (0,1)),
+  last_notice_at  INTEGER NOT NULL,
+  kinds_json      TEXT NOT NULL,
+  tasks_json      TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(task);
 CREATE INDEX IF NOT EXISTS idx_runs_cycle ON runs(cycle);
 CREATE INDEX IF NOT EXISTS idx_claims_task ON dispatch_claims(task_id);

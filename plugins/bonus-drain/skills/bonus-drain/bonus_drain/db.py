@@ -556,6 +556,44 @@ class QueueDB:
             )
             self._relax_status_checks(connection)
 
+    def reserve_scout_notice(
+        self, *, stuck: bool, kinds: list[str], tasks: list[str], now_epoch: int,
+    ) -> dict[str, Any] | None:
+        """Reserve a health transition or daily reminder before attempting delivery.
+
+        Delivery failures consume the reservation, keeping a broken notification service
+        from causing repeated requests. This state never changes queue or dispatch rows.
+        """
+
+        self.initialize()
+        with self._transaction() as connection:
+            previous = connection.execute(
+                "SELECT * FROM scout_notification_state WHERE singleton=1",
+            ).fetchone()
+            was_stuck = previous is not None and bool(previous["stuck"])
+            if not stuck and not was_stuck:
+                return None
+            due = not was_stuck or now_epoch - previous["last_notice_at"] >= 86_400
+            notice = None
+            if not stuck:
+                notice = {
+                    "stuck": False,
+                    "kinds": json.loads(previous["kinds_json"]),
+                    "tasks": json.loads(previous["tasks_json"]),
+                }
+            elif due:
+                notice = {"stuck": True, "kinds": kinds, "tasks": tasks}
+            last_notice = now_epoch if notice is not None else previous["last_notice_at"]
+            connection.execute(
+                """INSERT INTO scout_notification_state(
+                     singleton,stuck,last_notice_at,kinds_json,tasks_json
+                   ) VALUES(1,?,?,?,?) ON CONFLICT(singleton) DO UPDATE SET
+                     stuck=excluded.stuck,last_notice_at=excluded.last_notice_at,
+                     kinds_json=excluded.kinds_json,tasks_json=excluded.tasks_json""",
+                (int(stuck), last_notice, json.dumps(kinds), json.dumps(tasks)),
+            )
+            return notice
+
     @staticmethod
     def _relax_status_checks(connection: sqlite3.Connection) -> None:
         """Admit awaiting_human into the CHECK constraints of databases created before it existed.

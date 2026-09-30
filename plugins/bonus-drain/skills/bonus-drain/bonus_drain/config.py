@@ -197,6 +197,7 @@ class RuntimeConfig:
     max_jobs: int | None = None
     launch_surface: str = "background"
     host_load_gate: HostLoadGateConfig = field(default_factory=HostLoadGateConfig)
+    scout_ntfy_url: str | None = None
 
     @property
     def state_dir(self) -> Path:
@@ -407,7 +408,7 @@ def validate_config(
     _reject_unknown(data, {
         "schema_version", "database", "cache_dir", "record_command",
         "usage_max_age_seconds", "max_jobs", "launch_surface", "recurrence_timezone", "secret_refs", "adapters", "providers", "plans",
-        "accounts", "limits", "viewer", "pr_exceptions", "host_load_gate",
+        "accounts", "limits", "viewer", "pr_exceptions", "host_load_gate", "scout_ntfy_url",
     }, "config")
     _reject_inline_secrets(data)
     env = os.environ if environ is None else environ
@@ -762,6 +763,24 @@ def validate_config(
     cache_value = data.get("cache_dir")
     cache_dir = _safe_path(cache_value, "cache_dir", base) if cache_value else default_cache_dir(env)
 
+    scout_ntfy_url = data.get("scout_ntfy_url")
+    if scout_ntfy_url is not None:
+        scout_ntfy_url = _string(scout_ntfy_url, "scout_ntfy_url")
+        try:
+            parsed = urlsplit(scout_ntfy_url)
+            port = parsed.port
+        except ValueError as exc:
+            raise ConfigError("scout_ntfy_url must be an absolute HTTP or HTTPS topic URL") from exc
+        if (
+            parsed.scheme not in {"http", "https"} or not parsed.hostname
+            or parsed.path in {"", "/"} or parsed.username is not None
+            or parsed.password is not None or parsed.query or parsed.fragment
+            or any(char.isspace() for char in scout_ntfy_url)
+            or len(scout_ntfy_url) > 2048
+            or (port is not None and not 1 <= port <= 65535)
+        ):
+            raise ConfigError("scout_ntfy_url must be an absolute HTTP or HTTPS topic URL without credentials")
+
     viewer = dict(_require_mapping(data.get("viewer", {}), "viewer"))
     _reject_unknown(viewer, {"bind", "mutations_enabled", "remote", "preview"}, "viewer")
     if not isinstance(viewer.get("preview", False), bool):
@@ -837,6 +856,7 @@ def validate_config(
         ),
         launch_surface=_launch_surface(data.get("launch_surface", "background"), "launch_surface"),
         host_load_gate=_host_load_gate(data.get("host_load_gate", {})),
+        scout_ntfy_url=scout_ntfy_url,
     )
 
 

@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from . import db, goals
+from . import db, goals, notifications
 from .config import HostLoadGateConfig, RuntimeConfig
 from .db import QueueDB, hour_round, task_requires_legacy_exclusive
 from .dispatcher import (
@@ -642,11 +642,25 @@ def run_once(
                 now, dry_run, PlanResult((), {}, (), now), (), (), (),
                 skipped={"reason": "tick_in_progress", "lock": str(lock_path)},
             )
-        return _run_locked(
-            config, queue, cache_root, now=now, dry_run=dry_run,
-            router_call=router_call, activation_call=activation_call,
-            host_load_reader=host_load_reader,
+        try:
+            report = _run_locked(
+                config, queue, cache_root, now=now, dry_run=dry_run,
+                router_call=router_call, activation_call=activation_call,
+                host_load_reader=host_load_reader,
+            )
+        except Exception:
+            notifications.scout_health(
+                config, queue, now_epoch=now, exit_status=1, dry_run=dry_run,
+            )
+            raise
+        # Record health before releasing the tick lock so an older report cannot
+        # overwrite a newer tick's state or send a false recovery.
+        notifications.scout_health(
+            config, queue, now_epoch=now, exit_status=0 if not report.errors else 1,
+            errors=report.errors, blockers=report.blockers, dry_run=report.dry_run,
+            skipped=report.skipped is not None,
         )
+        return report
     finally:
         # Closing the descriptor releases the flock.
         os.close(fd)
