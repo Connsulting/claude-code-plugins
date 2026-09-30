@@ -72,6 +72,7 @@ _LEGACY_UNIT_RE = re.compile(
 _OWNED_UNIT_NAMES = {
     "bonus-drain-refresh.service",
     "bonus-drain-refresh.timer",
+    "bonus-drain-scout.path",
     "bonus-drain-scout.service",
     "bonus-drain-scout.timer",
     "bonus-drain-viewer.service",

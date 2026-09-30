@@ -262,7 +262,7 @@ The safe order is:
 4. after quiescence, re-count the queue so late-added jobs are included, then create and read
    back the authoritative backup before selecting the new DB;
 5. install and validate the new config, run `doctor`, `refresh`, `gates`, and `plan`;
-6. enable only the refresh timer, observe it, then enable the scout timer; enable the remote
+6. enable only the refresh timer, observe it, then enable the scout timer and path unit; enable the remote
    viewer only after its tailnet-only trusted-proxy profile has been reviewed;
 7. keep the old writers masked through at least one observed scheduling cycle.
 
@@ -280,7 +280,8 @@ not treat an unread backup as a rollback point.
 
 ## Rollback
 
-Disable, stop, and mask the new scout and refresh timers and stop the viewer. Prove no new
+Disable, stop, and mask the new scout path unit (`bonus-drain-scout.path`), scout and refresh
+timers, and their services, and stop the viewer. Prove no new
 writer holds the DB files. Preserve the failed-cutover DB and logs, restore the verified
 DB/config/unit backup with recorded modes and prior unit state, run the old read-only
 checks, then unmask and start only the previously active writers. Prove that exactly one
@@ -295,7 +296,7 @@ After rollback or final retirement has been separately completed and verified:
 
 ```sh
 systemctl --user disable --now \
-  bonus-drain-scout.timer bonus-drain-refresh.timer bonus-drain-viewer.service
+  bonus-drain-scout.path bonus-drain-scout.timer bonus-drain-refresh.timer bonus-drain-viewer.service
 cd skills/bonus-drain
 ./uninstall.sh
 ```
@@ -350,3 +351,25 @@ through those jobs, stacked or authorized merged PRs, combined acceptance, and f
 fix rounds. Durable joins leave the coordinator idle between short queue jobs. See
 [GOALS.md](skills/bonus-drain/GOALS.md) for goal contracts, commands, bounds, and recovery.
 Existing groups are linked by explicit task IDs without rewriting their contracts.
+
+## Scout cadence and host load gate
+
+The scout runs from two triggers. `bonus-drain-scout.timer` fires every ten minutes (30 seconds
+of randomized delay). `bonus-drain-scout.path` fires an extra tick when a job frees its slot:
+whenever an attempt reaches a terminal state, Bonus Drain writes a `slot-freed` marker next to
+the queue DB, and the path unit watches the default XDG state location
+`~/.local/state/bonus-drain/slot-freed`. A custom `database` location needs a matching drop-in
+that overrides `PathChanged=`. The path unit allows 60 triggers per ten minutes and is the only start limit on scout starts (the
+service disables its own with `StartLimitIntervalSec=0`); if that burst limit is hit, systemd stops
+watching until you run
+`systemctl --user reset-failed bonus-drain-scout.path bonus-drain-scout.service && systemctl --user start bonus-drain-scout.path`.
+The ten-minute timer keeps covering in the meantime.
+
+A tick holds `scout.lock` in the state dir. A concurrent tick exits 0 and reports
+`skipped: tick_in_progress`.
+
+The optional `host_load_gate` config block gates launches on host pressure: `enabled`,
+`cpu_some_avg60_max` (default 40.0, from `/proc/pressure/cpu`), `mem_available_min_gib`
+(default 4.0), and `load_per_cpu_max` (default 1.5, used only when `/proc/pressure/cpu` is
+unavailable). When nothing is readable, no gating happens. A gated tick still reconciles,
+launches nothing, and reports a `host_pressure` blocker.

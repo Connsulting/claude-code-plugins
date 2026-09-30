@@ -48,6 +48,7 @@
     "scripts/uninstall.sh",
     "systemd/bonus-drain-refresh.service",
     "systemd/bonus-drain-refresh.timer",
+    "systemd/bonus-drain-scout.path",
     "systemd/bonus-drain-scout.service",
     "systemd/bonus-drain-scout.timer",
     "systemd/bonus-drain-viewer.service",

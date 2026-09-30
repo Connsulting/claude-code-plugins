@@ -67,7 +67,7 @@ key may run only once.
 - Optional activation adapters for installations that switch among accounts.
 - `ai-token-rotator` is not required; when used, configure it as an activation adapter and
   let `doctor` report whether its executable is present.
-- systemd user services only if hourly scout and ten-minute refresh timers are wanted.
+- systemd user services only if the ten-minute scout timer, slot-freed path trigger, and ten-minute refresh timer are wanted.
 - Tailnet-only Tailscale Serve if the viewer is used remotely. Tailscale is the viewer's only
   access boundary; Bonus Drain adds no password or identity session.
 
@@ -213,7 +213,7 @@ an operator enable scheduling:
 
 ```sh
 systemctl --user daemon-reload
-systemctl --user enable --now bonus-drain-refresh.timer bonus-drain-scout.timer
+systemctl --user enable --now bonus-drain-refresh.timer bonus-drain-scout.timer bonus-drain-scout.path
 systemctl --user list-timers 'bonus-drain-*'
 ```
 
@@ -303,7 +303,7 @@ To remove runtime-owned files while preserving config, DB, cache, and operator s
 
 ```sh
 systemctl --user disable --now \
-  bonus-drain-scout.timer bonus-drain-refresh.timer bonus-drain-viewer.service
+  bonus-drain-scout.path bonus-drain-scout.timer bonus-drain-refresh.timer bonus-drain-viewer.service
 ./uninstall.sh
 ```
 
@@ -365,3 +365,25 @@ calls, remote checks, or immutable SHA pin. The worker fetches the selected bran
 during setup. If it is missing, setup stops with reason code `verification_needed` and does not
 fall back to the target. No recovery or handoff grants merge, push, deployment, or other external
 authority.
+
+## Scout cadence and host load gate
+
+The scout runs from two triggers. `bonus-drain-scout.timer` fires every ten minutes (30 seconds
+of randomized delay). `bonus-drain-scout.path` fires an extra tick when a job frees its slot:
+whenever an attempt reaches a terminal state, Bonus Drain writes a `slot-freed` marker next to
+the queue DB, and the path unit watches the default XDG state location
+`~/.local/state/bonus-drain/slot-freed`. A custom `database` location needs a matching drop-in
+that overrides `PathChanged=`. The path unit allows 60 triggers per ten minutes and is the only start limit on scout starts (the
+service disables its own with `StartLimitIntervalSec=0`); if that burst limit is hit, systemd stops
+watching until you run
+`systemctl --user reset-failed bonus-drain-scout.path bonus-drain-scout.service && systemctl --user start bonus-drain-scout.path`.
+The ten-minute timer keeps covering in the meantime.
+
+A tick holds `scout.lock` in the state dir. A concurrent tick exits 0 and reports
+`skipped: tick_in_progress`.
+
+The optional `host_load_gate` config block gates launches on host pressure: `enabled`,
+`cpu_some_avg60_max` (default 40.0, from `/proc/pressure/cpu`), `mem_available_min_gib`
+(default 4.0), and `load_per_cpu_max` (default 1.5, used only when `/proc/pressure/cpu` is
+unavailable). When nothing is readable, no gating happens. A gated tick still reconciles,
+launches nothing, and reports a `host_pressure` blocker.

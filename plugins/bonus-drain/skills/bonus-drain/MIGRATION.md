@@ -80,7 +80,7 @@ With old writers masked and the backup verified:
 6. Run `gates --json` and `plan --json`. Do not dispatch until provider/account identities,
    reset times, and closed/open reasons are expected.
 7. Enable only `bonus-drain-refresh.timer`. Observe one successful refresh, then enable
-   `bonus-drain-scout.timer`.
+   `bonus-drain-scout.timer` and `bonus-drain-scout.path`.
 8. Keep old writer units masked through at least one observed scheduling cycle.
 
 The viewer service, when separately enabled, runs the established two-tab UI on loopback port
@@ -127,7 +127,8 @@ Retain the exact commands and output proving:
 
 Rollback is also manual:
 
-1. Disable, stop, and mask the new scout and refresh timers/services. Stop the viewer.
+1. Disable, stop, and mask `bonus-drain-scout.path` and the new scout and refresh
+   timers/services. Stop the viewer.
 2. Prove no new process has the queue DB, WAL, or SHM open for writing.
 3. Preserve the failed-cutover DB and logs separately for diagnosis.
 4. Restore the verified DB/config backup with its recorded modes and restore the recorded

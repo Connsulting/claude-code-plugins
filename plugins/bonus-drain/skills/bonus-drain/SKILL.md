@@ -344,7 +344,8 @@ to resolve the child start branch; historical commit OIDs and receipts are optio
 ## Operations
 
 - Ten-minute cache refresh: `bonus-drain-refresh.timer`.
-- Hourly scout: `bonus-drain-scout.timer`.
+- Ten-minute scout: `bonus-drain-scout.timer`, plus `bonus-drain-scout.path`, which triggers an
+  extra tick when a job frees its slot (see README "Scout cadence and host load gate").
 - Optional viewer: the established two-tab background-jobs UI. Run now is manual and delegates
   only to the shared `kick_task` to `agent-router` path. In-flight Mark done / Mark failed
   records a terminal event through the same `record` path as the CLI and frees the dispatch
