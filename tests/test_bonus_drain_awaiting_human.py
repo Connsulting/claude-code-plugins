@@ -351,14 +351,14 @@ class FactoryTerminalTests(unittest.TestCase):
         self.assertEqual(factory_terminal.LEDGER_TO_RUN_STATUS.get("awaiting_human"), "awaiting_human")
         fills = factory_terminal.candidate_fills(
             self.ROW, "awaiting_human", "2026-09-14T15:00:00Z", "Needs Brian to approve.", "/tmp",
-            lambda ref, cwd: None,
+            lambda ref, branch, cwd: None,
         )
         self.assertEqual(fills["status"], "awaiting_human")
 
     def test_done_with_pr_maps_to_complete_with_pr_url(self) -> None:
         fills = factory_terminal.candidate_fills(
             self.ROW, "done", "2026-09-14T15:00:00Z", f"Opened {PR_URL} awaiting review.", "/tmp",
-            lambda ref, cwd: ref if ref.startswith("https://") else None,
+            lambda ref, branch, cwd: factory_terminal.PullRequest(ref, None, None) if ref and ref.startswith("https://") else None,
         )
         self.assertEqual(fills["status"], "complete")
         self.assertEqual(fills["pr_url"], PR_URL)

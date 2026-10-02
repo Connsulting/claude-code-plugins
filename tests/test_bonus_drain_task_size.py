@@ -368,7 +368,7 @@ class TaskSizeContractTests(unittest.TestCase):
         self.queue.record("weekly-current", status="done", cycle=cycle)
         self.queue.record(
             "weekly-prior", status="done", cycle=cycle - 604_800,
-            timestamp=(datetime.now(timezone.utc) - timedelta(days=4)).isoformat(),
+            timestamp=(datetime.now(timezone.utc) - timedelta(days=8)).isoformat(),
         )
         self.assertTrue(self.queue.claim(
             "claimed", f"alpha-account/alpha-weekly/{cycle}", "alpha", "alpha-account",
