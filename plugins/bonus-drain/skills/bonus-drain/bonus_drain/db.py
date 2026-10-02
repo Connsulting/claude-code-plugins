@@ -13,8 +13,11 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, Literal, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Literal, Mapping
 from zoneinfo import ZoneInfo
+
+if TYPE_CHECKING:
+    from . import checks
 
 
 class QueueError(RuntimeError):
@@ -23,6 +26,8 @@ class QueueError(RuntimeError):
 
 VALID_STATUSES = frozenset({"dispatched", "done", "skipped", "failed", "awaiting_human"})
 TERMINAL_STATUSES = frozenset({"done", "skipped", "failed", "awaiting_human"})
+# awaiting_human is retired for new records; historical rows stay valid and readable.
+RECORDABLE_STATUSES = VALID_STATUSES - {"awaiting_human"}
 # Automatic recovery only continues failed/skipped work; an operator may also continue parked
 # awaiting_human work, because Brian doing the parked step is exactly the authority it waited on.
 OPERATOR_RECOVERY_SOURCES = frozenset({"failed", "skipped", "awaiting_human"})
@@ -34,6 +39,12 @@ ATTEMPT_STATES = frozenset({
 SLOT_FREED_MARKER = "slot-freed"
 RECOVERY_MODES = frozenset({"retry", "verification"})
 RECOVERY_STATES = frozenset({"scheduled", "backoff", "consumed", "held", "exhausted"})
+# A recovery in one of these states already owns the task's next attempt.
+PENDING_RECOVERY_STATES = ("scheduled", "backoff", "consumed")
+# A proved account or launcher failure holds the account, never the task.
+ACCOUNT_HOLD_CAUSES = frozenset({"activation_unswitched", "codex_daemon_start"})
+BACKOFF_INITIAL_SECONDS = 1800
+BACKOFF_MAX_SECONDS = 14400
 TRANSIENT_RECOVERY_HOLDS = frozenset({
     "goal_paused",
     "goal_concurrency_held",
@@ -96,6 +107,7 @@ def validate_outcome(
     Legacy callers can omit outcomes only when ``require_structured_reason`` is false.
     """
 
+    from . import checks
     if outcome is None:
         if status in TERMINAL_STATUSES and require_structured_reason:
             raise QueueError(f"{status} requires a structured outcome")
@@ -142,6 +154,20 @@ def validate_outcome(
             "mechanism": mechanism,
             "evidence": [item.strip() for item in evidence],
         }
+    if "resume_when" in value:
+        reason_value = value.get("reason")
+        if (
+            status != "failed" or not isinstance(reason_value, Mapping)
+            or reason_value.get("code") != "authority_required"
+        ):
+            raise QueueError("resume_when is only valid on failed authority_required outcomes")
+        try:
+            specs = checks.normalize_checks(value["resume_when"])
+        except checks.CheckError as exc:
+            raise QueueError(f"resume_when: {exc}") from exc
+        if not specs:
+            raise QueueError("resume_when must list at least one check")
+        value["resume_when"] = [json.loads(item) for item in specs]
     repository = value.get("repository")
     if repository is not None and not isinstance(repository, Mapping):
         raise QueueError("outcome repository must be an object")
@@ -155,6 +181,11 @@ def _contract_hash(task: "Task") -> str:
         value.pop(field)
     if value["start_ref"] is None:
         value.pop("start_ref")
+    # Omitted when empty so retained recoveries written before v3 keep their contract CAS.
+    if not value["checks"]:
+        value.pop("checks")
+    if not value["merged_depends_on"]:
+        value.pop("merged_depends_on")
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -189,6 +220,12 @@ def _timestamp_epoch(value: str) -> float:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.timestamp()
+
+
+def _epoch_iso(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, timezone.utc).replace(
+        microsecond=0,
+    ).isoformat().replace("+00:00", "Z")
 
 
 def hour_round(epoch: int) -> int:
@@ -274,6 +311,9 @@ class Task:
     start_ref: str | None = None
     work_group: str | None = None
     depends_on: tuple[str, ...] = ()
+    # Canonical JSON per declared check spec, and the depends_on subset that must be merged.
+    checks: tuple[str, ...] = ()
+    merged_depends_on: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -282,6 +322,8 @@ class Task:
         value["use_implement"] = int(self.use_implement)
         value["allowed_providers"] = list(self.allowed_providers)
         value["required_capabilities"] = list(self.required_capabilities)
+        value["checks"] = [json.loads(item) for item in self.checks]
+        value["merged_depends_on"] = list(self.merged_depends_on)
         return value
 
     def legacy_pick_dict(self) -> dict[str, Any]:
@@ -431,6 +473,14 @@ class _DependencySnapshot:
 
 
 @dataclass(frozen=True)
+class AccountHold:
+    provider_id: str
+    account_id: str
+    cause: str
+    detail: str
+
+
+@dataclass(frozen=True)
 class DoctorReport:
     ok: bool
     reconciliation_required: tuple[str, ...]
@@ -444,6 +494,29 @@ class DoctorReport:
             "diagnostics": list(self.diagnostics),
             "provider_holds": list(self.provider_holds),
         }
+
+
+@dataclass(frozen=True)
+class _StoredCheck:
+    """One spec's identity and its last completed result (``row`` is None when never stored)."""
+
+    context: dict[str, Any]
+    check_id: str
+    row: sqlite3.Row | None
+
+    def age(self, now: float) -> float:
+        assert self.row is not None
+        return now - _timestamp_epoch(self.row["checked_at"])
+
+    def fresh(self, spec: Mapping[str, Any], now: float) -> bool:
+        """Whether the stored result still gates: within its TTL, or a permanent pass."""
+
+        from . import checks
+        assert self.row is not None
+        return (
+            self.age(now) < checks.RESULT_TTL_SECONDS
+            or QueueDB._permanent_pass(spec, self.row["status"])
+        )
 
 
 class QueueDB:
@@ -555,6 +628,7 @@ class QueueDB:
                 (utc_now(),),
             )
             self._relax_status_checks(connection)
+            self._seed_blocker_notices(connection)
 
     def reserve_scout_notice(
         self, *, stuck: bool, kinds: list[str], tasks: list[str], now_epoch: int,
@@ -677,6 +751,8 @@ class QueueDB:
             "start_ref": "TEXT",
             "work_group": "TEXT",
             "depends_on_json": "TEXT",
+            "checks_json": "TEXT",
+            "merged_depends_on_json": "TEXT",
         }
         run_columns = {
             "engine": "TEXT",
@@ -811,6 +887,7 @@ class QueueDB:
 
     @staticmethod
     def _task_from_row(row: sqlite3.Row) -> Task:
+        from . import checks
         return Task(
             id=row["id"], title=row["title"], kind=row["kind"], priority=int(row["priority"]),
             cadence=row["cadence"], cwd=row["cwd"], goal=row["goal"], context=row["context"],
@@ -822,6 +899,10 @@ class QueueDB:
             size=row["size"],
             source_ref=row["source_ref"], start_ref=row["start_ref"], work_group=row["work_group"],
             depends_on=_json_tuple(row["depends_on_json"]),
+            checks=tuple(
+                checks.canonical(item) for item in json.loads(row["checks_json"])
+            ) if row["checks_json"] else (),
+            merged_depends_on=_json_tuple(row["merged_depends_on_json"]),
         )
 
     @staticmethod
@@ -920,12 +1001,12 @@ class QueueDB:
               id,title,kind,priority,cadence,cwd,goal,context,constraints,
               precondition,done_when,created_at,active,claude_only,model,mcp,
               use_implement,allowed_providers_json,required_capabilities_json,size,
-              source_ref,start_ref,work_group,depends_on_json
+              source_ref,start_ref,work_group,depends_on_json,checks_json,merged_depends_on_json
             ) VALUES(
               :id,:title,:kind,:priority,:cadence,:cwd,:goal,:context,:constraints,
               :precondition,:done_when,:created_at,:active,:claude_only,:model,:mcp,
               :use_implement,:allowed,:required,:size,
-              :source_ref,:start_ref,:work_group,:depends_on_json
+              :source_ref,:start_ref,:work_group,:depends_on_json,:checks_json,:merged_depends_on_json
             )
             """, parameters,
         )
@@ -933,12 +1014,27 @@ class QueueDB:
         return self._task_from_row(row)
 
     @staticmethod
-    def _work_fields(values: Mapping[str, Any], *, validate_work_group: bool = True) -> dict[str, Any]:
+    def _work_fields(
+        values: Mapping[str, Any], *, validate_work_group: bool = True,
+        validate_start_ref: bool = True,
+    ) -> dict[str, Any]:
+        from . import checks
         dependencies = values.get("depends_on", ())
         if not isinstance(dependencies, (list, tuple)) or any(not isinstance(x, str) for x in dependencies):
             raise QueueError("depends_on must be a list of task IDs")
         for dependency in dependencies:
             _require_task_id(dependency)
+        merged = values.get("merged_depends_on") or ()
+        if not isinstance(merged, (list, tuple)) or any(not isinstance(x, str) for x in merged):
+            raise QueueError("merged_depends_on must be a list of task IDs")
+        for dependency in merged:
+            _require_task_id(dependency)
+        if not set(merged) <= set(dependencies):
+            raise QueueError("merged_depends_on must name prerequisites in depends_on")
+        try:
+            specs = checks.normalize_checks(values.get("checks"))
+        except checks.CheckError as exc:
+            raise QueueError(f"checks: {exc}") from exc
         for field in ("source_ref", "work_group"):
             if values.get(field) is not None and not isinstance(values[field], str):
                 raise QueueError(f"{field} must be text")
@@ -946,7 +1042,14 @@ class QueueDB:
         if start_ref is not None:
             from .handoff import DependencyHandoffError, normalize_branch_ref
             try:
-                start_ref = normalize_branch_ref(start_ref)
+                # Stored legacy values stay editable for unrelated fields; new values must
+                # name a branch, never a remote-tracking ref such as origin/main.
+                start_ref = (
+                    checks.normalize_queue_ref(start_ref, "start_ref")
+                    if validate_start_ref else normalize_branch_ref(start_ref)
+                )
+            except checks.CheckError as exc:
+                raise QueueError(str(exc)) from exc
             except DependencyHandoffError as exc:
                 raise QueueError(str(exc)) from exc
         work_group = values.get("work_group")
@@ -956,7 +1059,9 @@ class QueueDB:
             raise QueueError(f"work_group must be at most {WORK_GROUP_MAX_LENGTH} characters")
         return {"source_ref": values.get("source_ref"), "start_ref": start_ref,
                 "work_group": work_group,
-                "depends_on_json": json.dumps(sorted(set(dependencies)))}
+                "depends_on_json": json.dumps(sorted(set(dependencies))),
+                "checks_json": json.dumps([json.loads(item) for item in specs]) if specs else None,
+                "merged_depends_on_json": json.dumps(sorted(set(merged))) if merged else None}
 
     @staticmethod
     def _validate_dependencies(connection: sqlite3.Connection, task_id: str, raw: str) -> None:
@@ -1039,9 +1144,12 @@ class QueueDB:
         ).fetchone()
 
     @staticmethod
-    def _dependency_statuses(connection: sqlite3.Connection, task: Task) -> list[dict[str, Any]]:
+    def _dependency_statuses(
+        connection: sqlite3.Connection, task: Task, *, now_epoch: float,
+    ) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         for dependency in task.depends_on:
+            satisfy = "merged" if dependency in task.merged_depends_on else "done"
             parent = connection.execute(
                 "SELECT title,kind FROM tasks WHERE id=?", (dependency,),
             ).fetchone()
@@ -1072,16 +1180,28 @@ class QueueDB:
                 status = legacy["status"]
             else:
                 status = "queued"
+            edge = (
+                QueueDB._merged_edge(connection, task, dependency, done, now_epoch)
+                if done is not None and satisfy == "merged"
+                else {"satisfied": done is not None, "status": status, "detail": None}
+            )
+            if not edge["satisfied"] and done is not None:
+                # A done parent whose merged edge is unsatisfied reports why it still blocks.
+                status = edge["status"]
             item: dict[str, Any] = {
                 "id": dependency,
                 "title": parent["title"] if parent else dependency,
                 "status": status,
-                "satisfied": done is not None,
+                "satisfied": edge["satisfied"],
+                "satisfy": satisfy,
+                "detail": edge["detail"],
                 "attempt_id": done["attempt_id"] if done is not None else (
                     latest["id"] if latest is not None else None
                 ),
                 "verified_completion": bool(done is not None),
             }
+            if edge.get("check") is not None:
+                item["merge_check"] = edge["check"]
             if recovery is not None:
                 item["recovery"] = QueueDB._recovery_from_row(recovery).to_dict()
             result.append(item)
@@ -1096,15 +1216,117 @@ class QueueDB:
             done = QueueDB._verified_done_row(connection, dependency)
             if done is None or not done["outcome_json"]:
                 continue
-            revision = QueueDB._current_handoff_revision(
-                connection, dependency, int(done["rowid_pk"]),
-            )
-            outcome = json.loads(
-                revision["outcome_json"] if revision is not None else done["outcome_json"]
-            )
+            outcome = json.loads(QueueDB._handoff_outcome_json(connection, dependency, done))
             if isinstance(outcome, dict) and outcome.get("repository") is not None:
+                if dependency in task.merged_depends_on:
+                    outcome = QueueDB._merged_base_outcome(connection, task, outcome)
                 result.append((dependency, outcome))
         return result
+
+    @staticmethod
+    def _handoff_outcome_json(
+        connection: sqlite3.Connection, dependency: str, done: sqlite3.Row,
+    ) -> str | None:
+        """The current handoff revision's outcome, else the done row's own outcome."""
+
+        revision = QueueDB._current_handoff_revision(
+            connection, dependency, int(done["rowid_pk"]),
+        )
+        return revision["outcome_json"] if revision is not None else done["outcome_json"]
+
+    @staticmethod
+    def _merged_base_outcome(
+        connection: sqlite3.Connection, task: Task, outcome: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Start a merged edge's child from the target once the merge is known.
+
+        Any stored pass selects the target: this only picks the starting branch, and
+        readiness gates the edge's freshness before any claim.  An unverified merge keeps
+        the parent branch, which still holds the work.
+        """
+
+        kind, spec = QueueDB._merge_rule(task, outcome.get("repository"))
+        merged = kind == "recorded"
+        if kind == "check":
+            row = QueueDB._stored_result(connection, task, spec).row
+            merged = row is not None and row["status"] == "pass"
+        if not merged:
+            return outcome
+        return {**outcome, "repository": {**outcome["repository"], "integration_state": "merged"}}
+
+    @staticmethod
+    def _merge_rule(task: Task, repository: Any) -> tuple[str, dict[str, Any] | None]:
+        """Classify a merged edge's handoff: none, invalid, recorded, nongithub, or check."""
+
+        from . import checks
+        if not isinstance(repository, Mapping):
+            return "none", None
+        target_ref, branch_ref = repository.get("target_ref"), repository.get("branch_ref")
+        if not isinstance(target_ref, str) or not isinstance(branch_ref, str):
+            return "invalid", None
+        base = task.start_ref or target_ref
+        if repository.get("integration_state") == "merged" and target_ref == base:
+            return "recorded", None
+        slug = checks.github_slug(repository.get("remote"))
+        if slug is None:
+            return "nongithub", None
+        return "check", {
+            "type": "pr_merged", "repo": slug,
+            "head": checks._short(branch_ref),
+            "base": checks._short(base),
+        }
+
+    @staticmethod
+    def _merged_edge_spec(
+        connection: sqlite3.Connection, task: Task, dependency: str, done: sqlite3.Row,
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Return the merge rule for one done parent; ambiguous when the handoff is unclear."""
+
+        try:
+            raw = QueueDB._handoff_outcome_json(connection, dependency, done)
+        except QueueError:
+            return "ambiguous", None
+        outcome = json.loads(raw) if raw else None
+        repository = outcome.get("repository") if isinstance(outcome, dict) else None
+        return QueueDB._merge_rule(task, repository)
+
+    @staticmethod
+    def _merged_edge(
+        connection: sqlite3.Connection, task: Task, dependency: str, done: sqlite3.Row,
+        now: float,
+    ) -> dict[str, Any]:
+        kind, spec = QueueDB._merged_edge_spec(connection, task, dependency, done)
+        if kind == "ambiguous":
+            return {"satisfied": False, "status": "ambiguous",
+                    "detail": "handoff revision belongs to an older done row"}
+        if kind == "invalid":
+            return {"satisfied": False, "status": "ambiguous",
+                    "detail": "repository handoff has no exact branch refs"}
+        if kind == "none":
+            return {"satisfied": True, "status": "done", "detail": "no repository handoff"}
+        if kind == "recorded":
+            return {"satisfied": True, "status": "done", "detail": None}
+        if kind == "nongithub":
+            return {"satisfied": True, "status": "done",
+                    "detail": "merge unverifiable: non-GitHub remote"}
+        assert spec is not None
+        verdict = QueueDB._check_verdicts(connection, task, [("dependency", spec)], now)[0]
+        head, base = spec["head"], spec["base"]
+        status = verdict["status"]
+        if status == "pass":
+            return {"satisfied": True, "status": "done", "detail": None}
+        if status == "unverified":
+            # The worker verifies this merge itself; readiness surfaces it as a prompt check.
+            return {"satisfied": True, "status": "done", "detail": "merge unverified: tool errors",
+                    "check": verdict}
+        if status == "fail":
+            return {"satisfied": False, "status": "unmerged",
+                    "detail": f"{head} not merged into {base}: {verdict['detail']}"}
+        if status == "unknown":
+            return {"satisfied": False, "status": "merge_check_unknown",
+                    "detail": f"merge of {head} into {base} could not be verified yet: {verdict['detail']}"}
+        return {"satisfied": False, "status": "merge_check_pending",
+                "detail": f"waiting for merge check of {head} into {base}"}
 
     @staticmethod
     def _dependency_evidence(
@@ -1190,7 +1412,7 @@ class QueueDB:
             if row is None:
                 raise QueueError(f"unknown task: {task_id}")
             task = self._task_from_row(row)
-            dependencies = self._dependency_statuses(connection, task)
+            dependencies = self._dependency_statuses(connection, task, now_epoch=time.time())
             if any(not item["satisfied"] for item in dependencies):
                 raise QueueError("dependencies_unsatisfied: prerequisite completion is not verified")
             return self._resolve_dependency_base(connection, task)
@@ -1248,8 +1470,17 @@ class QueueDB:
             if row is None:
                 raise QueueError(f"unknown task: {task_id}")
             task = self._task_from_row(row)
-            dependencies = self._dependency_statuses(connection, task)
+            dependencies = self._dependency_statuses(connection, task, now_epoch=now)
             waiting = [item for item in dependencies if not item["satisfied"]]
+            goal_owned = self._goal_owned(connection, task_id)
+            # Stored results only: readiness never evaluates a check or touches the network.
+            launch_verdicts = self._launch_verdicts(connection, task, now, goal_owned)
+            # Merged edges satisfied only as unverified still need the worker to verify them.
+            launch_checks = [*launch_verdicts, *(
+                item["merge_check"] for item in dependencies
+                if item["satisfied"] and item.get("merge_check") is not None
+            )]
+            root_blocker: dict[str, Any] | None = None
             claim = connection.execute(
                 "SELECT * FROM dispatch_claims WHERE task_id=?", (task_id,),
             ).fetchone()
@@ -1291,13 +1522,6 @@ class QueueDB:
                 ).to_dict()
                 if recovery is not None else None
             )
-            goal_owned = connection.execute(
-                """SELECT 1 FROM goal_turns WHERE task_id=?
-                     UNION ALL
-                     SELECT 1 FROM goal_members WHERE task_id=? AND managed=1
-                     LIMIT 1""",
-                (task_id, task_id),
-            ).fetchone() is not None
             admitted = True
             state, reason, hold_reason = "ready", "Ready to run", None
             dependency_base: dict[str, Any] | None = None
@@ -1314,8 +1538,10 @@ class QueueDB:
                 state, reason = "done", "Verified completion is retained"
             elif waiting:
                 state, reason = "waiting", "Waiting for " + ", ".join(
-                    item["id"] for item in waiting
+                    item["id"] + (f" ({item['detail']})" if item["detail"] else "")
+                    for item in waiting
                 )
+                root_blocker = self._root_blocker(connection, task, dependencies, now)
             else:
                 try:
                     dependency_base = self._resolve_dependency_base(connection, task)
@@ -1353,18 +1579,23 @@ class QueueDB:
                         detail = (source_outcome.get("reason") or {}).get("detail")
                         if detail:
                             reason = f"Awaiting Brian: {detail}"
-                elif state == "ready" and not self._eligible_in_connection(
-                    connection, task, 0, now_epoch=now, automatic=False,
+                elif state == "ready" and not self._cadence_eligible(
+                    connection, task, 0, now=now, automatic=False,
                 ):
                     state, reason = "cooldown", "Waiting for recurrence cooldown"
-                elif state == "ready" and not self._eligible_in_connection(
-                    connection, task, 0, now_epoch=now, automatic=True,
+                elif state == "ready" and not self._cadence_eligible(
+                    connection, task, 0, now=now, automatic=True,
                 ):
                     # Due this week, but the scout only launches weekly work on the weekend.
                     # Report that here so the viewer never shows it as available on a weekday.
                     state, reason, hold_reason = (
                         "cooldown", "Waiting for weekend window", "weekend_window",
                     )
+                # Preflight gates only demote work that is otherwise ready to launch.
+                if state == "ready":
+                    gate = self._preflight_gate(connection, task, launch_verdicts, goal_owned)
+                    if gate is not None:
+                        state, (hold_reason, reason) = "waiting", gate
             requeue_allowed = bool(
                 task.kind == "oneoff" and claim is None and done is None
                 and not goal_owned
@@ -1411,12 +1642,15 @@ class QueueDB:
                 "recovery": recovery_value,
                 "dependency_base": dependency_base,
                 "requeue": {"allowed": requeue_allowed, "reason": requeue_reason},
+                "checks": launch_checks,
+                "root_blocker": root_blocker,
             }
 
     def edit_task(self, task_id: str, changes: Mapping[str, Any]) -> Task:
         from .goals import guard_contract_edit
         allowed = {"title", "priority", "size", "cwd", "goal", "context", "constraints",
-                   "precondition", "done_when", "source_ref", "start_ref", "work_group", "depends_on"}
+                   "precondition", "done_when", "source_ref", "start_ref", "work_group", "depends_on",
+                   "checks", "merged_depends_on"}
         if not changes or set(changes) - allowed:
             raise QueueError("edit requires supported task contract fields")
         self.initialize()
@@ -1460,12 +1694,19 @@ class QueueDB:
             elif last and last[0] == "dispatched":
                 raise QueueError("only queued tasks can be edited")
             merged = {**task.to_dict(), **changes}
+            if "depends_on" in changes and "merged_depends_on" not in changes:
+                # Dropping a prerequisite also drops its edge mode; kept edges keep theirs.
+                kept = changes["depends_on"] if isinstance(changes["depends_on"], (list, tuple)) else ()
+                merged["merged_depends_on"] = [d for d in task.merged_depends_on if d in kept]
             # Old imported groups may be longer.  Preserve them until their group is explicitly
             # revised; otherwise an unrelated queued-contract edit would be unexpectedly blocked.
-            fields = self._work_fields(merged, validate_work_group="work_group" in changes)
+            fields = self._work_fields(
+                merged, validate_work_group="work_group" in changes,
+                validate_start_ref="start_ref" in changes,
+            )
             self._validate_dependencies(connection, task_id, fields["depends_on_json"])
             for key, value in changes.items():
-                if key in {"source_ref", "start_ref", "work_group", "depends_on"}:
+                if key in {"source_ref", "start_ref", "work_group", "depends_on", "checks", "merged_depends_on"}:
                     continue
                 if key == "priority":
                     if type(value) is not int or value not in range(5):
@@ -1546,10 +1787,25 @@ class QueueDB:
         now = time.time() if now_epoch is None else float(now_epoch)
         if not task_admitted(connection, task.id, now_epoch=now):
             return False
-        if any(not d["satisfied"] for d in QueueDB._dependency_statuses(connection, task)):
+        if any(
+            not d["satisfied"]
+            for d in QueueDB._dependency_statuses(connection, task, now_epoch=now)
+        ):
             return False
         if connection.execute("SELECT 1 FROM dispatch_claims WHERE task_id=? LIMIT 1", (task.id,)).fetchone():
             return False
+        goal_owned = QueueDB._goal_owned(connection, task.id)
+        if QueueDB._preflight_gate(
+            connection, task, QueueDB._launch_verdicts(connection, task, now, goal_owned), goal_owned,
+        ) is not None:
+            return False
+        return self._cadence_eligible(connection, task, cycle, now=now, automatic=automatic)
+
+    def _cadence_eligible(
+        self, connection: sqlite3.Connection, task: Task, cycle: int, *, now: float, automatic: bool,
+    ) -> bool:
+        """The run-history half of eligibility, which readiness classifies on its own."""
+
         if task.kind == "oneoff":
             if self._verified_done_row(connection, task.id) is not None:
                 return False
@@ -1991,9 +2247,17 @@ class QueueDB:
         reason: str,
         *,
         release_activation: Callable[[], None] | None = None,
+        account_hold: AccountHold | None = None,
     ) -> bool:
-        """Atomically retain a proved-unlaunched attempt and release only its ownership."""
+        """Atomically retain a proved-unlaunched attempt and release only its ownership.
 
+        With ``account_hold`` the failure belongs to the account, not the task: the
+        never-launched claimed attempt is deleted instead of aborted, and the account's
+        backoff is recorded (doubling from 30 minutes, capped at 4 hours).
+        """
+
+        if account_hold is not None and account_hold.cause not in ACCOUNT_HOLD_CAUSES:
+            raise QueueError(f"unsupported account hold cause: {account_hold.cause}")
         self.initialize()
         detail = str(reason)[:1000]
         signature = "aborted:" + re.sub(r"[^a-z0-9]+", ":", detail.lower()).strip(":")[:500]
@@ -2043,14 +2307,15 @@ class QueueDB:
                     "DELETE FROM activation_leases WHERE task_id=? AND eligibility_key=? AND attempt_id=?",
                     (task_id, eligibility_key, attempt_id),
                 )
-            cursor = connection.execute(
-                """UPDATE task_attempts
-                     SET state='aborted',reason_code='unknown_launch',reason_signature=?,terminal_at=?
-                     WHERE id=? AND task_id=? AND state='claimed'""",
-                (signature, utc_now(), attempt_id, task_id),
-            )
-            if cursor.rowcount != 1:
-                raise QueueError("attempt abort lost its state CAS")
+            if account_hold is None:
+                cursor = connection.execute(
+                    """UPDATE task_attempts
+                         SET state='aborted',reason_code='unknown_launch',reason_signature=?,terminal_at=?
+                         WHERE id=? AND task_id=? AND state='claimed'""",
+                    (signature, utc_now(), attempt_id, task_id),
+                )
+                if cursor.rowcount != 1:
+                    raise QueueError("attempt abort lost its state CAS")
             connection.execute(
                 """UPDATE task_recovery
                      SET state='scheduled',consumed_by_attempt_id=NULL,updated_at=?,detail=?
@@ -2064,7 +2329,40 @@ class QueueDB:
             )
             if cursor.rowcount != 1:
                 raise QueueError("attempt abort lost its claim CAS")
+            if account_hold is not None:
+                # A claimed row with no run never launched, so it is not an execution
+                # identity; the next claim reuses its ordinal.
+                cursor = connection.execute(
+                    "DELETE FROM task_attempts WHERE id=? AND task_id=? AND state='claimed'",
+                    (attempt_id, task_id),
+                )
+                if cursor.rowcount != 1:
+                    raise QueueError("attempt hold lost its state CAS")
+                self._record_account_backoff(connection, account_hold)
             return True
+
+    @staticmethod
+    def _record_account_backoff(connection: sqlite3.Connection, hold: AccountHold) -> None:
+        now = time.time()
+        previous = connection.execute(
+            "SELECT failures FROM account_backoff WHERE provider_id=? AND account_id=?",
+            (hold.provider_id, hold.account_id),
+        ).fetchone()
+        failures = int(previous["failures"]) + 1 if previous is not None else 1
+        delay = min(BACKOFF_INITIAL_SECONDS * 2 ** (failures - 1), BACKOFF_MAX_SECONDS)
+        connection.execute(
+            """INSERT INTO account_backoff(
+                 provider_id,account_id,cause,failures,not_before,detail,updated_at
+               ) VALUES(?,?,?,?,?,?,?)
+               ON CONFLICT(provider_id,account_id) DO UPDATE SET
+                 cause=excluded.cause,failures=excluded.failures,
+                 not_before=excluded.not_before,detail=excluded.detail,
+                 updated_at=excluded.updated_at""",
+            (
+                hold.provider_id, hold.account_id, hold.cause, failures,
+                _epoch_iso(now + delay), str(hold.detail)[:1000], _epoch_iso(now),
+            ),
+        )
 
     def abandon_unproven_activation(self, task_id: str, eligibility_key: str) -> bool:
         """Drop an unproven ``activating`` lease after a known failed switch.
@@ -2203,6 +2501,12 @@ class QueueDB:
     ) -> RunEvent:
         if trigger not in {None, "manual", "bonus", "scheduled", "continuation"}:
             raise QueueError("invalid run trigger")
+        if status == "awaiting_human":
+            raise QueueError(
+                "awaiting_human is retired: record done for a green PR that waits only on review "
+                "or merge, or failed with reason.code=authority_required and resume_when for an "
+                "external blocker"
+            )
         if status not in VALID_STATUSES:
             raise QueueError(f"invalid run status: {status}")
         if provider_id == "auto":
@@ -2427,6 +2731,12 @@ class QueueDB:
                 )
                 if update.rowcount != 1:
                     raise QueueError("attempt record lost its state CAS")
+                if status == "dispatched":
+                    # A proven launch clears the account hold for this exact account.
+                    connection.execute(
+                        "DELETE FROM account_backoff WHERE provider_id=? AND account_id=?",
+                        (provider_id, account_id or "*"),
+                    )
                 if status in TERMINAL_STATUSES:
                     deleted = connection.execute(
                         """DELETE FROM dispatch_claims
@@ -3736,6 +4046,623 @@ class QueueDB:
                 task.id: self.readiness(task.id, now_epoch=now) for task in tasks
             },
         }
+
+
+    # --- Preflight checks, collisions, account holds, and external blockers -------------
+
+    @staticmethod
+    def _seed_blocker_notices(connection: sqlite3.Connection) -> None:
+        """Migration v3: existing authority blockers are treated as already notified."""
+
+        if connection.execute(
+            "SELECT 1 FROM schema_migrations WHERE version=3",
+        ).fetchone():
+            return
+        connection.execute(
+            """INSERT OR IGNORE INTO blocker_notices(attempt_id,task_id,notified_at,seeded)
+                 SELECT id,task_id,?,1 FROM task_attempts
+                   WHERE state='failed' AND reason_code='authority_required'""",
+            (utc_now(),),
+        )
+        connection.execute(
+            "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(3, ?)",
+            (utc_now(),),
+        )
+
+    @staticmethod
+    def _goal_owned(connection: sqlite3.Connection, task_id: str) -> bool:
+        return connection.execute(
+            """SELECT 1 FROM goal_turns WHERE task_id=?
+                 UNION ALL
+                 SELECT 1 FROM goal_members WHERE task_id=? AND managed=1
+                 LIMIT 1""",
+            (task_id, task_id),
+        ).fetchone() is not None
+
+    @staticmethod
+    def _launch_check_specs(task: Task, goal_owned: bool) -> list[tuple[str, dict[str, Any]]]:
+        """Declared checks plus derived built-ins; goal-owned work gets no built-ins."""
+
+        from . import checks
+        specs = [("declared", json.loads(item)) for item in task.checks]
+        if not goal_owned:
+            if task.start_ref is not None:
+                specs.append(("builtin", {"type": "base_ref_exists", "ref": task.start_ref}))
+            issue = checks.parse_issue_ref(task.source_ref)
+            if issue is not None:
+                specs.append(("builtin", {"type": "issue_open", "repo": issue[0], "number": issue[1]}))
+        unique: dict[str, tuple[str, dict[str, Any]]] = {}
+        for origin, spec in specs:
+            unique.setdefault(checks.canonical(spec), (origin, spec))
+        return list(unique.values())
+
+    @staticmethod
+    def _launch_verdicts(
+        connection: sqlite3.Connection, task: Task, now: float, goal_owned: bool,
+    ) -> list[dict[str, Any]]:
+        return QueueDB._check_verdicts(
+            connection, task, QueueDB._launch_check_specs(task, goal_owned), now,
+        )
+
+    @staticmethod
+    def _preflight_gate(
+        connection: sqlite3.Connection, task: Task, verdicts: Iterable[Mapping[str, Any]],
+        goal_owned: bool,
+    ) -> tuple[str, str] | None:
+        """(hold_reason, reason) demoting otherwise-ready work: a gating check, then a collision."""
+
+        block = QueueDB._check_block(verdicts)
+        if block is not None:
+            return block
+        collision = QueueDB._collision_holder(connection, task, goal_owned)
+        if collision is not None:
+            return "collision", f"Serialized behind {collision['task_id']} (shared {collision['key']})"
+        return None
+
+    @staticmethod
+    def _check_verdicts(
+        connection: sqlite3.Connection,
+        task: Task,
+        specs: Iterable[tuple[str, Mapping[str, Any]]],
+        now: float,
+    ) -> list[dict[str, Any]]:
+        """Read stored results as pass, fail, pending, unknown, or unverified (no evaluation)."""
+
+        from . import checks
+        stored = QueueDB._stored_results(connection, task)
+        verdicts: list[dict[str, Any]] = []
+        for origin, spec in specs:
+            result = QueueDB._stored_result(connection, task, spec, stored)
+            row = result.row
+            status, detail, checked_at = "pending", None, None
+            if row is not None:
+                checked_at = row["checked_at"]
+                if result.fresh(spec, now):
+                    status, detail = row["status"], row["detail"]
+                    if status == "unknown" and row["unknown_since"] is not None and (
+                        now - _timestamp_epoch(row["unknown_since"]) >= checks.UNKNOWN_GRACE_SECONDS
+                    ):
+                        status = "unverified"
+            verdicts.append({
+                "origin": origin, "type": spec.get("type"), "spec": dict(spec),
+                "status": status, "detail": detail, "checked_at": checked_at,
+            })
+        return verdicts
+
+    @staticmethod
+    def _stored_results(connection: sqlite3.Connection, task: Task) -> dict[str, sqlite3.Row]:
+        return {
+            row["check_id"]: row for row in connection.execute(
+                "SELECT * FROM check_results WHERE task_id=?", (task.id,),
+            )
+        }
+
+    @staticmethod
+    def _stored_result(
+        connection: sqlite3.Connection, task: Task, spec: Mapping[str, Any],
+        stored: Mapping[str, sqlite3.Row] | None = None,
+    ) -> _StoredCheck:
+        """Identify one spec and read its completed result from ``stored`` or the table."""
+
+        from . import checks
+        context = checks.check_context(spec, cwd=task.cwd)
+        identity = checks.check_id(spec, context)
+        if stored is None:
+            row = connection.execute(
+                "SELECT * FROM check_results WHERE task_id=? AND check_id=?", (task.id, identity),
+            ).fetchone()
+        else:
+            row = stored.get(identity)
+        return _StoredCheck(context, identity, row if row is not None and row["status"] is not None else None)
+
+    @staticmethod
+    def _pending_recovery(connection: sqlite3.Connection, task_id: str) -> sqlite3.Row | None:
+        """The task's recovery row while it is in a PENDING_RECOVERY_STATES state."""
+
+        return connection.execute(
+            "SELECT * FROM task_recovery WHERE task_id=? AND state IN (?,?,?)",
+            (task_id, *PENDING_RECOVERY_STATES),
+        ).fetchone()
+
+    @staticmethod
+    def _permanent_pass(spec: Mapping[str, Any], status: str | None) -> bool:
+        # A merged numbered pull request cannot become unmerged; a head name can be reused.
+        return status == "pass" and spec.get("type") == "pr_merged" and "pr" in spec
+
+    @staticmethod
+    def _check_block(verdicts: Iterable[Mapping[str, Any]]) -> tuple[str, str] | None:
+        from . import checks
+        verdicts = list(verdicts)
+        for status, hold_reason, label in (
+            ("fail", "check_failed", "Check failed"),
+            ("unknown", "check_unknown", "Check could not be verified yet"),
+        ):
+            for item in verdicts:
+                if item["status"] == status:
+                    return hold_reason, f"{label}: {checks.describe(item['spec'])}: {item['detail']}"
+        for item in verdicts:
+            if item["status"] == "pending":
+                return "check_pending", (
+                    f"Waiting for preflight check evaluation: {checks.describe(item['spec'])}"
+                )
+        return None
+
+    @staticmethod
+    def _raw_collision_keys(task: Task) -> frozenset[str]:
+        from . import checks
+        keys = set()
+        if task.work_group:
+            keys.add(f"group:{task.work_group}")
+        issue = checks.parse_issue_ref(task.source_ref)
+        if issue is not None:
+            keys.add(f"issue:{issue[0]}#{issue[1]}")
+        return frozenset(keys)
+
+    @staticmethod
+    def _collision_holder(
+        connection: sqlite3.Connection, task: Task, goal_owned: bool,
+    ) -> dict[str, str] | None:
+        """Return the claimed task sharing a work group or issue key, if any.
+
+        Goal-owned work never waits (its goal bounds concurrency), but its claims still
+        hold their keys, so non-goal work waits behind it.
+        """
+
+        if goal_owned:
+            return None
+        keys = QueueDB._raw_collision_keys(task)
+        if not keys:
+            return None
+        for row in connection.execute(
+            """SELECT t.* FROM dispatch_claims c JOIN tasks t ON t.id=c.task_id
+                 WHERE c.task_id!=? ORDER BY c.claimed_at,c.task_id""",
+            (task.id,),
+        ):
+            shared = keys & QueueDB._raw_collision_keys(QueueDB._task_from_row(row))
+            if shared:
+                return {"task_id": row["id"], "key": sorted(shared)[0]}
+        return None
+
+    def collision_keys(self, task_ids: Iterable[str]) -> dict[str, frozenset[str]]:
+        """Keys each task waits on in one tick; empty for goal-owned work, which never waits."""
+
+        return self._tick_collision_keys(task_ids, exempt_goal=True)
+
+    def reserved_collision_keys(self, task_ids: Iterable[str]) -> dict[str, frozenset[str]]:
+        """Keys each task holds once allocated in one tick, goal-owned work included."""
+
+        return self._tick_collision_keys(task_ids, exempt_goal=False)
+
+    def _tick_collision_keys(
+        self, task_ids: Iterable[str], *, exempt_goal: bool,
+    ) -> dict[str, frozenset[str]]:
+        self.initialize()
+        result: dict[str, frozenset[str]] = {}
+        with self._connect() as connection:
+            for task_id in task_ids:
+                row = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+                if row is None or (exempt_goal and self._goal_owned(connection, task_id)):
+                    result[task_id] = frozenset()
+                else:
+                    result[task_id] = self._raw_collision_keys(self._task_from_row(row))
+        return result
+
+    def account_backoffs(self, *, now_epoch: float) -> list[dict[str, Any]]:
+        self.initialize()
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM account_backoff ORDER BY provider_id,account_id",
+            ).fetchall()
+        return [
+            dict(row) for row in rows
+            if _timestamp_epoch(row["not_before"]) > float(now_epoch)
+        ]
+
+    @staticmethod
+    def _authority_resume(attempt: sqlite3.Row | None) -> list[dict[str, Any]] | None:
+        """Return resume_when for a failed authority_required attempt, else None."""
+
+        if (
+            attempt is None or attempt["state"] != "failed"
+            or attempt["reason_code"] != "authority_required"
+        ):
+            return None
+        outcome = json.loads(attempt["outcome_json"]) if attempt["outcome_json"] else None
+        resume = outcome.get("resume_when") if isinstance(outcome, dict) else None
+        if not isinstance(resume, list):
+            return []
+        return [spec for spec in resume if isinstance(spec, dict)]
+
+    @staticmethod
+    def _resume_repeats(connection: sqlite3.Connection, attempt: sqlite3.Row) -> bool:
+        """True when this blocker already came back after an automatic resume."""
+
+        if attempt["recovery_of"] is None:
+            return False
+        source = connection.execute(
+            "SELECT reason_code,reason_signature FROM task_attempts WHERE id=?",
+            (attempt["recovery_of"],),
+        ).fetchone()
+        return bool(
+            source is not None and source["reason_code"] == "authority_required"
+            and source["reason_signature"] == attempt["reason_signature"]
+        )
+
+    def check_work(
+        self, *, now_epoch: float, task_ids: Iterable[str] | None = None,
+    ) -> list[checks.CheckWork]:
+        """List due evaluations, never-evaluated and currently gating results first."""
+
+        from . import checks
+        now = float(now_epoch)
+        wanted = None if task_ids is None else set(task_ids)
+        self.initialize()
+        ordered: list[tuple[tuple[Any, ...], checks.CheckWork]] = []
+        with self._connect() as connection:
+            for row in connection.execute(
+                "SELECT * FROM tasks WHERE active=1 ORDER BY priority,created_at,id",
+            ).fetchall():
+                task = self._task_from_row(row)
+                if wanted is not None and task.id not in wanted:
+                    continue
+                if connection.execute(
+                    "SELECT 1 FROM dispatch_claims WHERE task_id=? LIMIT 1", (task.id,),
+                ).fetchone():
+                    continue
+                if task.kind == "oneoff" and self._verified_done_row(connection, task.id) is not None:
+                    continue
+                latest = self._latest_effective_attempt(connection, task.id)
+                legacy = self._latest_legacy_run(connection, task.id)
+                recovery = self._pending_recovery(connection, task.id)
+                pending_recovery = recovery is not None
+                items: list[tuple[str, dict[str, Any], float | None]] = []
+                launchable = (
+                    task.kind == "recurring"
+                    or (latest is None and legacy is None)
+                    or (recovery is not None and recovery["state"] in {"scheduled", "backoff"})
+                )
+                dependencies = self._dependency_statuses(connection, task, now_epoch=now)
+                if launchable and all(item["verified_completion"] for item in dependencies):
+                    items.extend(
+                        (origin, spec, None)
+                        for origin, spec in self._launch_check_specs(
+                            task, self._goal_owned(connection, task.id),
+                        )
+                    )
+                    for dependency in task.merged_depends_on:
+                        done = self._verified_done_row(connection, dependency)
+                        if done is None:
+                            continue
+                        kind, spec = self._merged_edge_spec(connection, task, dependency, done)
+                        if kind == "check":
+                            items.append(("dependency", spec, None))
+                resume = self._authority_resume(latest)
+                if resume and not pending_recovery and not self._resume_repeats(connection, latest):
+                    failed_at = _timestamp_epoch(latest["terminal_at"])
+                    items.extend(("resume", spec, failed_at) for spec in resume)
+                if not items:
+                    continue
+                stored = self._stored_results(connection, task)
+                seen: set[str] = set()
+                for origin, spec, resume_after in items:
+                    stored_check = self._stored_result(connection, task, spec, stored)
+                    context, identity, result = (
+                        stored_check.context, stored_check.check_id, stored_check.row,
+                    )
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    if result is None:
+                        category = 0
+                    else:
+                        checked = _timestamp_epoch(result["checked_at"])
+                        age = now - checked
+                        permanent = self._permanent_pass(spec, result["status"])
+                        if result["status"] == "pass":
+                            due = not permanent and age >= checks.PASS_REFRESH_SECONDS
+                        else:
+                            due = age >= checks.RETRY_TTL_SECONDS
+                        # Resume evidence must postdate the failure it would resume.
+                        if resume_after is not None and checked <= resume_after:
+                            due = True
+                        if not due:
+                            continue
+                        category = 2 if stored_check.fresh(spec, now) else 1
+                    ordered.append((
+                        (category, task.priority, task.created_at, task.id),
+                        checks.CheckWork(task.id, task.cwd, origin, spec, context, identity),
+                    ))
+        ordered.sort(key=lambda entry: entry[0])
+        return [work for _key, work in ordered]
+
+    def begin_check(self, work: checks.CheckWork, *, now_epoch: float) -> int:
+        """Reserve the next evaluation generation; the last completed result stays readable."""
+
+        from . import checks
+        self.initialize()
+        with self._transaction() as connection:
+            connection.execute(
+                """INSERT INTO check_results(task_id,check_id,spec_json,context_json,generation)
+                     VALUES(?,?,?,?,1)
+                   ON CONFLICT(task_id,check_id) DO UPDATE SET generation=generation+1""",
+                (
+                    work.task_id, work.check_id, checks.canonical(work.spec),
+                    checks.canonical(work.context),
+                ),
+            )
+            row = connection.execute(
+                "SELECT generation FROM check_results WHERE task_id=? AND check_id=?",
+                (work.task_id, work.check_id),
+            ).fetchone()
+            assert row is not None
+            return int(row["generation"])
+
+    def store_check_result(
+        self,
+        work: checks.CheckWork,
+        status: str,
+        detail: str | None,
+        *,
+        generation: int,
+        observed_context: Mapping[str, Any] | None,
+        now_epoch: float,
+    ) -> bool:
+        """Store one completion under its generation; False when a later evaluation began."""
+
+        from . import checks
+        if status not in {"pass", "fail", "unknown"}:
+            raise QueueError(f"invalid check status: {status}")
+        context: dict[str, Any] = {}
+        if work.spec.get("type") == "base_ref_exists":
+            observed = dict(observed_context or {})
+            context = {"cwd": work.context.get("cwd"), "origin": observed.get("origin")}
+        stamp = _epoch_iso(float(now_epoch))
+        self.initialize()
+        with self._transaction() as connection:
+            cursor = connection.execute(
+                """UPDATE check_results
+                     SET status=?,detail=?,checked_at=?,context_json=?,
+                         unknown_since=CASE
+                           WHEN ?!='unknown' THEN NULL
+                           WHEN status='unknown' AND unknown_since IS NOT NULL THEN unknown_since
+                           ELSE ? END
+                     WHERE task_id=? AND check_id=? AND generation=?""",
+                (
+                    status, (str(detail)[:1000] if detail is not None else None), stamp,
+                    checks.canonical(context), status, stamp,
+                    work.task_id, work.check_id, int(generation),
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def resume_satisfied_holds(self, *, now_epoch: float) -> list[dict[str, Any]]:
+        """Schedule an automatic retry for each blocker whose resume_when checks freshly pass."""
+
+        from . import checks
+        from .goals import recovery_admission
+        now = float(now_epoch)
+        stamp = _epoch_iso(now)
+        self.initialize()
+        resumed: list[dict[str, Any]] = []
+        with self._transaction() as connection:
+            for row in connection.execute(
+                "SELECT * FROM tasks WHERE active=1 AND kind='oneoff' ORDER BY priority,created_at,id",
+            ).fetchall():
+                task = self._task_from_row(row)
+                if connection.execute(
+                    "SELECT 1 FROM dispatch_claims WHERE task_id=? LIMIT 1", (task.id,),
+                ).fetchone() or self._verified_done_row(connection, task.id) is not None:
+                    continue
+                latest = self._latest_effective_attempt(connection, task.id)
+                resume = self._authority_resume(latest)
+                if not resume:
+                    continue
+                if not recovery_admission(connection, task.id, now_epoch=now)[0]:
+                    continue
+                contract_hash = _contract_hash(task)
+                if latest["contract_hash"] != contract_hash:
+                    continue
+                recovery = self._pending_recovery(connection, task.id)
+                if recovery is not None and recovery["after_attempt_id"] == latest["id"]:
+                    continue
+                if self._resume_repeats(connection, latest):
+                    continue
+                failed_at = _timestamp_epoch(latest["terminal_at"])
+                verdicts = self._check_verdicts(
+                    connection, task, [("resume", spec) for spec in resume], now,
+                )
+                if not all(
+                    item["status"] == "pass"
+                    and _timestamp_epoch(item["checked_at"]) > failed_at
+                    for item in verdicts
+                ):
+                    continue
+                detail = ("resume_when satisfied: " + "; ".join(
+                    checks.describe(spec) for spec in resume
+                ))[:1000]
+                connection.execute(
+                    """INSERT INTO task_recovery(
+                         task_id,after_attempt_id,after_legacy_run_rowid,mode,origin,state,
+                         consumed_by_attempt_id,contract_hash,not_before,reason_code,
+                         reason_signature,detail,updated_at
+                       ) VALUES(?,?,NULL,'verification','automatic','scheduled',NULL,?,?,
+                                'authority_required',?,?,?)
+                       ON CONFLICT(task_id) DO UPDATE SET
+                         after_attempt_id=excluded.after_attempt_id,
+                         after_legacy_run_rowid=NULL,mode=excluded.mode,
+                         origin=excluded.origin,state=excluded.state,
+                         consumed_by_attempt_id=NULL,contract_hash=excluded.contract_hash,
+                         not_before=excluded.not_before,reason_code=excluded.reason_code,
+                         reason_signature=excluded.reason_signature,detail=excluded.detail,
+                         updated_at=excluded.updated_at""",
+                    (
+                        task.id, latest["id"], contract_hash, stamp,
+                        latest["reason_signature"], detail, stamp,
+                    ),
+                )
+                resumed.append({"task_id": task.id, "after_attempt_id": latest["id"], "detail": detail})
+        return resumed
+
+    def reserve_blocker_notices(self, *, now_epoch: float) -> list[dict[str, Any]]:
+        """Reserve one notice per external blocker that cannot resume by itself."""
+
+        stamp = _epoch_iso(float(now_epoch))
+        self.initialize()
+        reserved: list[dict[str, Any]] = []
+        with self._transaction() as connection:
+            for row in connection.execute(
+                "SELECT id FROM tasks WHERE active=1 AND kind='oneoff' ORDER BY priority,created_at,id",
+            ).fetchall():
+                task_id = row["id"]
+                latest = self._latest_effective_attempt(connection, task_id)
+                resume = self._authority_resume(latest)
+                if resume is None:
+                    continue
+                if resume and not self._resume_repeats(connection, latest):
+                    continue
+                if connection.execute(
+                    "SELECT 1 FROM blocker_notices WHERE attempt_id=?", (latest["id"],),
+                ).fetchone():
+                    continue
+                if self._pending_recovery(connection, task_id) is not None:
+                    continue
+                connection.execute(
+                    "INSERT INTO blocker_notices(attempt_id,task_id,notified_at,seeded) VALUES(?,?,?,0)",
+                    (latest["id"], task_id, stamp),
+                )
+                reserved.append({"task_id": task_id, "attempt_id": latest["id"]})
+        return reserved
+
+    def held_authority_report(self) -> list[dict[str, Any]]:
+        """List held and standalone authority blockers with their dependents (read-only)."""
+
+        self.initialize()
+        with self._connect() as connection:
+            counts = self._blocked_descendant_counts(connection)
+            children: dict[str, set[str]] = {}
+            for row in connection.execute("SELECT id,depends_on_json FROM tasks WHERE active=1"):
+                for parent in _json_tuple(row["depends_on_json"]):
+                    children.setdefault(parent, set()).add(row["id"])
+
+            def descendants(task_id: str) -> list[str]:
+                found: set[str] = set()
+                pending = list(children.get(task_id, ()))
+                while pending:
+                    child = pending.pop()
+                    if child in found or child == task_id:
+                        continue
+                    found.add(child)
+                    pending.extend(children.get(child, ()))
+                return sorted(found)
+
+            def item(source: str, task_row: sqlite3.Row, held_since: str, detail: str | None,
+                     attempt: sqlite3.Row | None) -> dict[str, Any]:
+                resume = self._authority_resume(attempt) if attempt is not None else None
+                return {
+                    "source": source, "task_id": task_row["id"], "title": task_row["title"],
+                    "held_since": held_since, "detail": detail,
+                    "blocked_descendants": counts.get(task_row["id"], 0),
+                    "descendants": descendants(task_row["id"]),
+                    "source_attempt_id": attempt["id"] if attempt is not None else None,
+                    "resume_when": resume or None,
+                }
+
+            report: list[dict[str, Any]] = []
+            listed: set[str] = set()
+            for recovery in connection.execute(
+                """SELECT r.* FROM task_recovery r JOIN tasks t ON t.id=r.task_id
+                     WHERE r.state='held' AND r.reason_code='authority_required'""",
+            ).fetchall():
+                task_row = connection.execute(
+                    "SELECT * FROM tasks WHERE id=?", (recovery["task_id"],),
+                ).fetchone()
+                attempt = connection.execute(
+                    "SELECT * FROM task_attempts WHERE id=?", (recovery["after_attempt_id"],),
+                ).fetchone() if recovery["after_attempt_id"] is not None else None
+                report.append(item(
+                    "held_recovery", task_row, recovery["updated_at"], recovery["detail"], attempt,
+                ))
+                listed.add(recovery["task_id"])
+            for task_row in connection.execute(
+                "SELECT * FROM tasks WHERE active=1 AND kind='oneoff'",
+            ).fetchall():
+                task_id = task_row["id"]
+                if task_id in listed or self._verified_done_row(connection, task_id) is not None:
+                    continue
+                latest = self._latest_effective_attempt(connection, task_id)
+                if self._authority_resume(latest) is None:
+                    continue
+                if self._pending_recovery(connection, task_id) is not None:
+                    continue
+                outcome = json.loads(latest["outcome_json"]) if latest["outcome_json"] else {}
+                reason = outcome.get("reason") if isinstance(outcome, dict) else None
+                detail = reason.get("detail") if isinstance(reason, dict) else None
+                report.append(item("failed_attempt", task_row, latest["terminal_at"], detail, latest))
+        report.sort(key=lambda entry: (str(entry["held_since"] or ""), entry["task_id"]))
+        return report
+
+    @staticmethod
+    def _root_blocker(
+        connection: sqlite3.Connection, task: Task,
+        dependencies: Iterable[Mapping[str, Any]], now: float,
+    ) -> dict[str, Any] | None:
+        """Walk unsatisfied edges from ``task``'s computed statuses to the first ancestor
+        that is not itself waiting."""
+
+        seen: set[str] = {task.id}
+
+        def visit(statuses: Iterable[Mapping[str, Any]], depth: int) -> dict[str, Any] | None:
+            unsatisfied = sorted(
+                (item for item in statuses if not item["satisfied"]),
+                key=lambda item: item["id"],
+            )
+            for edge in unsatisfied:
+                parent_id = edge["id"]
+                if parent_id in seen:
+                    continue
+                seen.add(parent_id)
+                row = connection.execute("SELECT * FROM tasks WHERE id=?", (parent_id,)).fetchone()
+                if row is not None and depth < 64:
+                    parent = QueueDB._task_from_row(row)
+                    parent_statuses = QueueDB._dependency_statuses(connection, parent, now_epoch=now)
+                    if any(not item["satisfied"] for item in parent_statuses):
+                        found = visit(parent_statuses, depth + 1)
+                        if found is not None:
+                            return found
+                        continue
+                recovery = connection.execute(
+                    "SELECT detail FROM task_recovery WHERE task_id=?", (parent_id,),
+                ).fetchone()
+                status = edge["status"]
+                reason = (
+                    (recovery["detail"] if recovery is not None else None)
+                    or edge["detail"]
+                    or ("Queued" if status == "queued" else f"Last run: {status}")
+                )
+                return {"task_id": parent_id, "title": edge["title"], "status": status, "reason": reason}
+            return None
+
+        return visit(dependencies, 0)
 
 
 class LocalQueueReader(QueueDB):

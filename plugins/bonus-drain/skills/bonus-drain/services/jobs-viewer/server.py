@@ -1406,6 +1406,19 @@ def _work_meta(t: dict) -> str:
     dependencies = status.get("dependencies", [])
     edges = "".join(f'<li><span class="dep-dot {"done" if d["satisfied"] else "waiting"}"></span>{esc(d["title"])} <code>{esc(d["id"])}</code> <span class="dimtxt">{esc(d["status"])}</span></li>' for d in dependencies)
     dependency_html = f'<details class="dependencies"><summary>{sum(d["satisfied"] for d in dependencies)}/{len(dependencies)} prerequisites complete</summary><ul>{edges}</ul></details>' if dependencies else ""
+    root = status.get("root_blocker")
+    if isinstance(root, dict) and root.get("task_id"):
+        root_reason = root.get("reason")
+        root_html = (
+            '<div class="recovery-meta">Root blocker: '
+            + esc(root.get("title") or root["task_id"])
+            + ' <code>' + esc(root["task_id"]) + '</code> · '
+            + esc(root.get("status", ""))
+            + (' · ' + esc(root_reason) if root_reason else '')
+            + '</div>'
+        )
+    else:
+        root_html = ""
     recovery_bits: list[str] = []
     attempt = status.get("attempt")
     if isinstance(attempt, dict):
@@ -1445,7 +1458,7 @@ def _work_meta(t: dict) -> str:
         '<div class="recovery-meta">' + " · ".join(recovery_bits) + "</div>"
         if recovery_bits else ""
     )
-    return f'<div class="work-meta"><span class="work-state {esc(state)}">{esc(state)}</span>{group}{source_html}</div><div class="readiness-reason">{esc(status.get("reason", "Ready to run"))}</div>{recovery_html}{dependency_html}'
+    return f'<div class="work-meta"><span class="work-state {esc(state)}">{esc(state)}</span>{group}{source_html}</div><div class="readiness-reason">{esc(status.get("reason", "Ready to run"))}</div>{recovery_html}{root_html}{dependency_html}'
 
 
 def _run_buttons(t: dict) -> str:

@@ -18,7 +18,8 @@ compatibility, atomic claims, or activation leases. Paused tasks cannot run.
 ## Dependencies
 
 Use `--depends-on parent-id,other-parent-id` on add, or update the prerequisite list from a planning thread with the CLI.
-The graph can branch and join. A child becomes ready only when **every prerequisite is done**.
+Use repeatable `--check JSON` for structured preflight checks (see SKILL.md); waiting on a failing check consumes no attempt. `bonus-drain held-report --json` lists held authority-required work and its blocked dependents. Tasks that share a work group or the same `source_ref` issue run one at a time; goal-managed tasks use the goal's own concurrency bound.
+The graph can branch and join. Each edge is `done` or `merged`; write `--depends-on parent-id:merged,other-id:done`. An edge without a suffix defaults to `merged` when the parent runs in a repository configured to open pull requests, and to `done` otherwise. A `done` edge needs the parent's verified completion. A `merged` edge also needs the parent's recorded branch merged into the child's base (the child's `start_ref`, or the parent's target branch); the scout verifies that on GitHub, and the child waits with the reason until it lands. A child becomes ready only when **every edge is satisfied**.
 Failed and skipped prerequisites leave it waiting; they do not launch a child or mark it failed.
 A waiting child creates no run, consumes no claim, and does not call the router.
 
@@ -62,13 +63,7 @@ that verifies done-when. Normal PR work is done only after all checks pass for t
 Epic Forge work also requires a confirmed merge into the exact authorized epic branch.
 Opening a PR, pending or failing checks, and an unmerged epic PR are not completion.
 Record `completion.mechanism: artifact` with evidence of the PR, passing checks, and any required
-merge. Pending human review alone does not block normal completion once checks pass. Failed, skipped,
-and `awaiting_human` outcomes use one of `retryable`, `verification_needed`, `authority_required`,
-`permanent`, or `unknown_launch` with nonempty detail and a stable non-secret signature.
-`awaiting_human` means the worker finished everything it can and the remaining step needs Brian
-personally; its detail names exactly what Brian must do. It is never requeued or recovered
-automatically, and dependents keep waiting; only operator recovery (requeue or
-recover-complete) continues it. Terminal
+merge. Pending human review or merge alone does not block normal completion once checks pass. Failed and skipped outcomes use one of `retryable`, `verification_needed`, `authority_required`, `permanent`, or `unknown_launch` with nonempty detail and a stable non-secret signature. An external blocker records `failed` with `authority_required` and a `resume_when` check list; the scout schedules a retry when every check passes. `record` refuses `awaiting_human`; historical rows stay readable and operator recovery still continues them. Terminal
 replay is idempotent only for the same attempt, and an old attempt cannot release a newer claim.
 Failed, skipped, ambiguous, and proved-not-launched aborted attempts remain in history.
 

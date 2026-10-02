@@ -15,6 +15,7 @@
     "bonus_drain/__init__.py",
     "bonus_drain/__main__.py",
     "bonus_drain/adapters.py",
+    "bonus_drain/checks.py",
     "bonus_drain/cli.py",
     "bonus_drain/config.py",
     "bonus_drain/cutover.py",

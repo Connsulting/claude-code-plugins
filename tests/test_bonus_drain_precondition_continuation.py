@@ -263,23 +263,24 @@ class ContinuationTests(RecoveryCase):
         )
         self.assertEqual(self.queue.recovery_for("parked").state, "consumed")
         self.queue.record(
-            "parked", KEY, attempt_id=opened["attempt_id"], status="awaiting_human",
+            "parked", KEY, attempt_id=opened["attempt_id"], status="failed",
             outcome=authority("need an explicit approval before continuing"),
             provider_id="alpha", account_id="alpha-account",
             timestamp=iso(NOW + 4), now_epoch=NOW + 4,
-            summary="continuation parked for approval",
+            summary="continuation blocked on an external approval",
         )
         self.assertIsNone(self.queue.recovery_for("parked"))
         child = self.queue.readiness("child", now_epoch=NOW + 4)
         parent = next(item for item in child["dependencies"] if item["id"] == "parked")
-        self.assertEqual(parent["status"], "awaiting_human")
+        self.assertEqual(parent["status"], "failed")
         self.assertNotEqual(parent["status"], "recovering")
-        resumed = self.queue.open_same_thread_continuation(
-            "parked", expected_attempt_id=opened["attempt_id"], now_epoch=NOW + 5,
-        )
-        self.assertNotEqual(resumed["attempt_id"], opened["attempt_id"])
-        self.assertFalse(resumed["idempotent"])
-        self.assertEqual(self.queue.readiness("parked", now_epoch=NOW + 5)["state"], "running")
+        # An authority blocker is not continued in the same thread; it waits for resume_when
+        # or an operator decision instead.
+        with self.assertRaisesRegex(db.QueueError, "authority_required"):
+            self.queue.open_same_thread_continuation(
+                "parked", expected_attempt_id=opened["attempt_id"], now_epoch=NOW + 5,
+            )
+        self.assertEqual(self.queue.readiness("parked", now_epoch=NOW + 5)["state"], "failed")
         self.assertEqual(self.source_row(source.id)["state"], "skipped")
 
     def test_reconcile_holds_a_live_continuation_and_keeps_the_original_skip(self) -> None:

@@ -278,9 +278,15 @@ class TaskSizeContractTests(unittest.TestCase):
                 connection.execute("PRAGMA table_info(tasks)").fetchall(),
                 columns_after_first_init,
             )
+            # Initialization records v1, may record v2 (status CHECK relaxation), and records
+            # v3 (preflight schema); a second initialize adds nothing.
+            versions = {
+                row[0] for row in connection.execute("SELECT version FROM schema_migrations")
+            }
+            self.assertTrue({1, 3} <= versions <= {1, 2, 3}, versions)
             self.assertEqual(
                 connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0],
-                1,
+                len(versions),
             )
 
     def test_all_sizes_round_trip_through_lower_level_and_required_cli_add(self) -> None:
@@ -532,7 +538,11 @@ class TaskSizeContractTests(unittest.TestCase):
             _key: str,
             _provider: str,
             _account: str | None,
+            *,
+            preflight_checks: object,
         ) -> str:
+            # render-prompt-json builds a Task with no stored checks, so it renders none.
+            self.assertEqual(preflight_checks, ())
             rendered_tasks.append(task)
             return f"rendered {task.id}"
 

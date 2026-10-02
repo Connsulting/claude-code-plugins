@@ -533,10 +533,6 @@ class SlotFreedMarkerTests(unittest.TestCase):
                 "code": "retryable", "detail": "fixture failure",
                 "signature": "retryable:fixture",
             }},
-            "awaiting_human": {"reason": {
-                "code": "authority_required", "detail": "Approve the fixture diff",
-                "signature": "authority_required:fixture",
-            }},
         }
         for status, outcome in outcomes.items():
             with self.subTest(status=status):

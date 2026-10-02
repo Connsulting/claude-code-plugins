@@ -90,6 +90,9 @@ class GoalTests(unittest.TestCase):
         self.assertIsNone(value.pop('start_ref'))
         for field in ('priority', 'size', 'active'):
             value.pop(field)
+        for field in ('checks', 'merged_depends_on'):
+            if not value[field]:
+                value.pop(field)
         old_hash = hashlib.sha256(goals._json(value).encode()).hexdigest()
         self.assertEqual(goals._contract_hash(queued), old_hash)
         selected = self.queue.edit_task('standalone', {'start_ref': 'epic/next'})

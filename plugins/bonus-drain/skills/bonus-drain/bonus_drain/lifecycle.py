@@ -1,6 +1,8 @@
 """Safe, versioned installation and operational checks for Bonus Drain.
 
-The lifecycle layer deliberately does not start services or mutate queue state.  It
+The lifecycle layer deliberately does not start services. Its only queue mutation is
+applying additive schema migrations to an existing queue database before a new release
+becomes current.  It
 installs only files it can later prove it owns, leaves XDG state/config/cache alone,
 and refuses uninstall when an operator has added or changed an owned installation
 file.
@@ -40,7 +42,7 @@ UNIT_NAMES = (
 _OWNED_NAME = ".bonus-drain-owned.json"
 _INSTALL_NAME = ".bonus-drain-install.json"
 _WRAPPER_MARKER = "# managed-by: bonus-drain lifecycle v1"
-_DEFAULT_VERSION = "0.3.11"
+_DEFAULT_VERSION = "0.3.12"
 _BYTECODE_CACHE_NAME = re.compile(
     r"^(?P<module>[A-Za-z_][A-Za-z0-9_]*)\."
     r"(?P<tag>[A-Za-z][A-Za-z0-9_]*-\d+)(?:\.opt-\d+)?\.pyc$"
@@ -281,8 +283,53 @@ def _refuse_foreign(
     raise OwnershipError(f"refusing to replace unowned path: {path}")
 
 
+_PATH_OVERRIDES = (
+    "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "BONUS_DRAIN_CONFIG", "BONUS_DB",
+)
+
+
+def _migrate_queue(home_path: Path, *, selected: bool) -> None:
+    """Apply additive schema migrations to an existing queue database, if any.
+
+    The default install (no selected home) is the caller's live install and honors the
+    caller's path overrides; a selected home resolves its queue within that home.
+    """
+
+    import sqlite3
+
+    from . import config, db
+
+    env = dict(os.environ)
+    if selected:
+        # Caller overrides pointing outside the selected home would migrate the caller's
+        # queue and leave the published release reading an unmigrated one.
+        for key in _PATH_OVERRIDES:
+            value = env.get(key)
+            if value and not Path(value).expanduser().resolve().is_relative_to(home_path):
+                del env[key]
+    env["HOME"] = str(home_path)
+    try:
+        config_path = config.default_config_path(env)
+        if config_path.is_file():
+            database = Path(config.load_config(config_path, environ=env).database)
+        else:
+            database = config.default_state_dir(env) / "queue.db"
+    except config.ConfigError as exc:
+        raise LifecycleError(f"cannot resolve queue database for migration: {exc}") from exc
+    if not database.is_file():
+        return
+    try:
+        db.QueueDB(database).initialize()
+    except (OSError, sqlite3.Error, db.QueueError) as exc:
+        raise LifecycleError(f"queue migration failed; current release unchanged: {exc}") from exc
+
+
 def install(source: str | Path, home: str | Path | None = None, *, version: str | None = None) -> InstalledPaths:
-    """Install a version without enabling or starting any services."""
+    """Install a version without enabling or starting any services.
+
+    An existing queue database is migrated by this release before ``current`` switches;
+    a migration failure leaves the previous release current.
+    """
 
     source_path = Path(source).expanduser().resolve()
     if not source_path.is_dir() or source_path.is_symlink():
@@ -357,6 +404,7 @@ def install(source: str | Path, home: str | Path | None = None, *, version: str 
                 shutil.rmtree(staging)
         installed_hashes = _verify_version_dir(version_dir)
 
+    _migrate_queue(home_path, selected=home is not None)
     temporary_link = lib / f".current.{os.getpid()}"
     try:
         temporary_link.unlink(missing_ok=True)

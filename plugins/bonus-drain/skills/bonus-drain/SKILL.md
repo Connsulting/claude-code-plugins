@@ -45,7 +45,8 @@ source private helper functions or invent a second DB path.
    other externally consequential action is implied by being bonus work. The task contract
    must grant it explicitly.
 9. Only explicit done-when verification satisfies a dependency. A PR, branch, router status,
-   failed attempt, or skipped attempt is not completion evidence.
+   failed attempt, or skipped attempt is not completion evidence. A `merged` dependency edge
+   additionally requires the parent's recorded branch to be merged into the child's base.
 10. Recovery keeps the original task ID and prior attempts. It cannot weaken authority,
     dependency, activation, calendar, GoalStore, or frozen-candidate gates.
 
@@ -95,6 +96,7 @@ create, an unavailable provider or required service, a frozen contract, another 
 editing the same paths, or a validation gate the worker must not weaken. If none of those applies,
 leave the precondition empty. Do not invent a checkout check so the task looks guarded. When
 `start_ref` is unset, repository dependencies choose the branch from their recorded metadata.
+Translate every precondition a machine can check into `checks` at queue time, and keep the free-text precondition only for judgment the worker must make. Check types: `base_ref_exists` (`ref`), `issue_open` (`repo`, `number`), `issue_in_milestone` (`repo`, `number`, `milestone`), `pr_merged` (`repo` and `pr` or `head`, optional `base`), `release_exists` (`repo`, `tag`), and `file_matches` (`repo`, `ref`, `path`, `pattern`, optional `present`). Add each with a repeatable `--check '{"type":"issue_open","repo":"owner/repo","number":123}'`, or edit `checks`. The queue also checks automatically that a set `start_ref` exists on origin and that an issue named by `source_ref` (an issue URL or `owner/repo#N`) is still open. The scout evaluates checks before any claim: a failing check leaves the task waiting with its reason and spends no attempt; a check that cannot be evaluated because of a network or tool error waits at most one hour, then the launch proceeds and the worker is told to verify it. Write `start_ref` as a branch name such as `main`, never `origin/main`. When a prerequisite's pull request must land first, use a `merged` dependency edge instead of a precondition.
 Work groups are optional navigation labels, not task titles: use them only for a meaningful
 cross-task cluster and keep each at 15 characters or fewer. Use title case; the soak-observation
 group is `Soak Obs`.
@@ -175,7 +177,9 @@ is satisfied only by a verified successful (`done`) one-off prerequisite; failed
 running, and missing prerequisites keep the child waiting. A blocked active child may make its
 failed/skipped parent eligible for the bounded recovery policy described below. Self-dependencies,
 cycles, missing IDs, and recurring prerequisites are rejected. Both automatic and explicit
-launches enforce dependencies.
+launches enforce dependencies. Each edge is `done` or `merged` (`--depends-on parent-id:merged,other-id:done`); an unsuffixed edge defaults to `merged` when the parent runs in a repository configured to open pull requests, and to `done` otherwise. A `merged` edge is satisfied only when the parent is verified done and its recorded branch is merged into the child's base, so a pull request that is open or green does not count as dependency completion. Readiness names the root blocker of a waiting chain, and `bonus-drain held-report --json` lists held authority-required work with its blocked dependents, read-only.
+
+Provider and account failures hold the account, not the task. A proved account-activation failure or a Codex launcher startup failure deletes the never-launched attempt, spends nothing on the task, and backs off that provider account for 30 minutes, doubling to a 4 hour cap, while the scout uses a sibling account. Tasks that share a work group or the same `source_ref` issue run one at a time; goal-managed tasks use the goal's own concurrency bound. Installing a release migrates an existing queue database before the new release becomes current.
 
 Use `bonus-drain readiness TASK_ID --json` to explain readiness and
 `bonus-drain edit TASK_ID --changes '{"depends_on":["PARENT_ID"]}' --json`
@@ -236,9 +240,8 @@ protected path for structured outcome evidence. Use that command exactly.
 
 A background task must not exit blocked or waiting for input while its claim and activation
 lease remain live. Keep working or waiting while checks and authorized merges are in progress;
-neither opening a PR nor a running check watcher permits recording `done`. When only a step Brian must
-take personally remains, it records `awaiting_human`. If the work itself cannot be completed, it
-records `failed` with that blocker before exiting.
+neither opening a PR nor a running check watcher permits recording `done`.
+A green pull request that waits only on human review or merge is `done`. Automation and CI diffs are committed into the pull request, which is the review gate, and a bounded decision takes the recommended option and documents it there. A genuinely external blocker records `failed` with reason `authority_required` and a `resume_when` list of checks; the scout resumes the task when those checks pass, and a blocker with no checkable condition notifies Brian once. `record` refuses `awaiting_human`; historical rows stay readable.
 
 Replaying the same terminal status and evidence for the same attempt is idempotent. A missing or
 different attempt ID cannot release its claim, and a conflicting replay is a reconciliation
@@ -248,7 +251,7 @@ error. Prior attempts stay immutable.
   checks passing for the current head. Epic Forge work also requires a confirmed merge into the
   exact authorized epic branch. Pending or failing checks and an unmerged epic PR are not done.
   Record `completion.mechanism: artifact` with evidence of the PR, passing checks, and any required
-  merge. Pending human review alone does not block normal completion once checks pass.
+  merge. Pending human review or merge alone does not block normal completion once checks pass.
   Its outcome uses reason code `done_when_verified`, `completion.verified: true`,
   one of `command`, `artifact`, `operator_receipt`, or `goal_acceptance`, and nonempty evidence.
 - `skipped`: the work is already complete, or a genuine precondition is false. That means
@@ -261,11 +264,7 @@ error. Prior attempts stay immutable.
   checkout. Include the structured reason.
 - `failed`: work was attempted and did not satisfy done-when; record a structured reason that
   distinguishes retryable, verification-needed, authority, permanent, and unknown-launch cases.
-- `awaiting_human`: the worker finished everything it can and the remaining step needs Brian
-  personally, such as hands-on testing only he can do or a decision or approval. Its structured
-  reason must not use `done_when_verified`, its `reason.detail` must name exactly what Brian must
-  do, and it must not claim verified completion. It is not requeued or recovered automatically,
-  and dependents keep waiting; only operator recovery (requeue or recover-complete) continues it.
+- Historical `awaiting_human` rows remain visible in readiness, runs, and the viewer, and operator `requeue` or `recover-complete` still continues them. New records refuse the status.
 
 Follow the exact `OUTCOME_SCHEMA` printed in the prompt. A repository-producing verified success
 has this shape; omit `repository` when the task does not produce one:
@@ -284,10 +283,10 @@ has this shape; omit `repository` when the task does not produce one:
 ```
 
 Optional audit fields may include `target_base_oid`, `head_oid`, and `merge_receipt`. For
-`failed`, `skipped`, or `awaiting_human`, omit `completion` and use a reason code of
+`failed` or `skipped`, omit `completion` and use a reason code of
 `retryable`, `verification_needed`, `authority_required`, `permanent`, or `unknown_launch`, with
 nonempty detail and a stable non-secret signature. Accepted completion mechanisms are `command`,
-`artifact`, `operator_receipt`, and `goal_acceptance`.
+`artifact`, `operator_receipt`, and `goal_acceptance`. A `failed` outcome with reason `authority_required` may add `resume_when`, a list of check objects using the check types above.
 
 For repository work, the required handoff identity is `remote`, `target_ref`, `branch_ref`, and
 `integration_state`. `target_base_oid`, `head_oid`, and `merge_receipt` may be retained as audit

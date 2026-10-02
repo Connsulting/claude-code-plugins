@@ -17,9 +17,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+from . import checks
 from .config import AccountConfig, AdapterConfig, ConfigError, ProviderConfig, RuntimeConfig
 from .db import (
     COMPLETION_MECHANISMS,
+    AccountHold,
     LEGACY_EXCLUSIVE_CAPABILITY,
     REASON_CODES,
     QueueDB,
@@ -51,12 +53,22 @@ class ClassificationFailure(DispatchError):
     """A non-launching pre-claim router classification could not complete."""
 
 
+class ProviderLaunchUnavailable(KnownDispatchFailure):
+    """The router proved the provider launcher could not start; hold the account, not the task."""
+
+    # Set by dispatch once the managed account hold is recorded; the scout reports it.
+    account_hold: AccountHold | None = None
+
+
 class AmbiguousDispatch(DispatchError):
     """The router response cannot prove whether a launch occurred."""
 
 
 class ActivationUnavailable(DispatchError):
     """Another durable account lease currently owns this provider."""
+
+    # Set by dispatch when a managed account hold is recorded; the scout reports it.
+    account_hold: AccountHold | None = None
 
     def __init__(self, message: str, *, known_not_switched: bool = False):
         super().__init__(message)
@@ -74,6 +86,12 @@ def _trusted_unswitched_activation(exc: Exception, adapter_id: str) -> bool:
         f"bonus-drain-account-activation: {_PROVEN_UNSWITCHED_ACTIVATION}"
     )
     return str(exc) == expected
+
+
+def _account_activation_failed(exc: Exception) -> bool:
+    """Whether an activation refusal proved the requested account never became active."""
+
+    return _PROVEN_UNSWITCHED_ACTIVATION in str(exc)
 
 
 _MCP_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -331,7 +349,7 @@ def _record_line(
             "--kind", task.kind,
             "--eligibility-key", eligibility_key,
             "--cycle", str(cycle_from_key(eligibility_key)),
-            "--status", "done|skipped|failed|awaiting_human",
+            "--status", "done|skipped|failed",
             "--provider-id", provider_id,
         ]
     )
@@ -357,6 +375,10 @@ def _outcome_contract_line() -> str:
             "mechanism": {"allowed": sorted(COMPLETION_MECHANISMS)},
             "evidence": ["<non-empty verification reference>"],
         },
+        "resume_when": [{
+            "type": {"allowed": sorted(checks.CHECK_FIELDS)},
+            "fields": "required and optional fields per CHECK_TYPES",
+        }],
         "repository": {
             "remote": "<exact canonical remote URL>",
             "target_ref": "refs/heads/<exact target branch>",
@@ -408,6 +430,32 @@ def _recover_complete_line(
     return shlex.join(command)
 
 
+def _pr_exception(config: RuntimeConfig, cwd: str) -> Mapping[str, Any] | None:
+    """Return the first configured exception containing ``cwd`` that grants a push or PR."""
+
+    resolved = Path(cwd).expanduser().resolve(strict=False)
+    for exception in config.pr_exceptions:
+        root = Path(str(exception["path"])).expanduser().resolve(strict=False)
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            continue
+        if _allows_pr(exception) or bool(exception.get("allow_push", False)):
+            return exception
+    return None
+
+
+def _allows_pr(exception: Mapping[str, Any]) -> bool:
+    return bool(exception.get("allow_pr", exception.get("allow_push", False)))
+
+
+def task_produces_pr(config: RuntimeConfig, task: Task) -> bool:
+    """Whether this task runs in a repository configured to open pull requests."""
+
+    exception = _pr_exception(config, task.cwd)
+    return exception is not None and _allows_pr(exception)
+
+
 def _pr_policy(config: RuntimeConfig, task: Task) -> str:
     from .goals import coordinator_contract
     goal = coordinator_contract(QueueDB(config.database), task)
@@ -415,14 +463,9 @@ def _pr_policy(config: RuntimeConfig, task: Task) -> str:
         return ('This goal coordinator may merge verified PRs within the recorded goal authority. '
                 'Check exact heads, required checks, reviews, dependencies, and cleanup first. '
                 'This grant does not extend to task drivers or unrelated repositories and deployments.')
-    cwd = Path(task.cwd).expanduser().resolve(strict=False)
-    for exception in config.pr_exceptions:
-        root = Path(str(exception["path"])).expanduser().resolve(strict=False)
-        try:
-            cwd.relative_to(root)
-        except ValueError:
-            continue
-        if bool(exception.get("allow_pr", exception.get("allow_push", False))):
+    exception = _pr_exception(config, task.cwd)
+    if exception is not None:
+        if _allows_pr(exception):
             return (
                 "This configured repository permits a branch push and pull request. "
                 "Merge only when the task contract explicitly grants merge authority into a named "
@@ -464,6 +507,7 @@ def render_prompt(
     outcome_path: Path | None = None,
     dependency_base: Mapping[str, Any] | None = None,
     recovery: Mapping[str, Any] | None = None,
+    preflight_checks: Sequence[Mapping[str, Any]] = (),
 ) -> str:
     """Render one task and the stable terminal-record contract.
 
@@ -500,6 +544,24 @@ def render_prompt(
         sections.append(
             "ATTEMPT_CONTEXT="
             + json.dumps(attempt_context, sort_keys=True, separators=(",", ":"))
+        )
+    verified = [
+        item for item in preflight_checks if item.get("status") == "pass"
+    ]
+    unverified = [
+        item for item in preflight_checks if item.get("status") == "unverified"
+    ]
+    if verified:
+        sections.append(
+            "Preflight checks already verified by the queue before this launch (do not re-verify "
+            "them; evaluate only the free-text precondition):\n"
+            + "\n".join(f"- {checks.describe(item['spec'])}" for item in verified)
+        )
+    if unverified:
+        sections.append(
+            "Preflight checks the queue could not verify because of tool or network errors; verify "
+            "these yourself before starting and record skipped if one is false:\n"
+            + "\n".join(f"- {checks.describe(item['spec'])}" for item in unverified)
         )
     for label, value in (
         ("Source thread or plan", task.source_ref),
@@ -547,10 +609,10 @@ def render_prompt(
     contract.extend(
         [
             "Never leave this background run blocked, waiting for input, or otherwise non-terminal.",
-            "Opening or updating a pull request is not done. Normal PR work is done only after all PR checks pass for the current head. Epic Forge work, or a task whose contract requires an epic merge, is done only after all PR checks pass and the PR is confirmed merged into the exact authorized epic branch. Follow /implement's check watcher and epic merge procedure when applicable. Pending or failing checks, a running check watcher, and an unmerged epic PR must never be recorded as done. Keep working or waiting while progress remains possible. Record done with completion.mechanism=artifact and evidence of the PR URL, passing checks, and the required merge. Pending human review alone does not block normal PR completion once checks pass.",
-            "Record awaiting_human only when you finished everything you can and the remaining step needs Brian personally: hands-on testing only he can do (for example a real human review comment or a live Slack check) or a decision or approval (for example approving a CI or automation diff before commit, or choosing between conflicting acceptance criteria). Its reason.detail must name exactly what Brian must do.",
+            "Opening or updating a pull request is not done. Normal PR work is done only after all PR checks pass for the current head. Epic Forge work, or a task whose contract requires an epic merge, is done only after all PR checks pass and the PR is confirmed merged into the exact authorized epic branch. Follow /implement's check watcher and epic merge procedure when applicable. Pending or failing checks, a running check watcher, and an unmerged epic PR must never be recorded as done. Keep working or waiting while progress remains possible. Record done with completion.mechanism=artifact and evidence of the PR URL, passing checks, and the required merge. Pending human review or merge alone does not block normal PR completion once checks pass.",
+            "There is no awaiting_human status. Commit automation, CI, and workflow diffs into the branch and pull request; the pull request is the review gate. On a bounded decision, choose the recommended option, document the choice and the alternatives in the pull request, and continue. A pull request whose checks pass and that waits only on human review or merge is done. Record failed with reason.code=authority_required only for a genuinely external blocker you cannot remove, such as missing credentials or access, an external decision, or an unmerged prerequisite. Include resume_when: a list of CHECK_TYPES checks that become true when the blocker clears, so the queue resumes this task automatically. Omit resume_when only when no such check exists; Brian is then notified once.",
             "If the work itself cannot be completed, record failed with the blocker before exiting; do not request input or set a blocked status.",
-            "Failed, skipped, or awaiting_human results require the structured reason and must not claim verified completion.",
+            "Failed or skipped results require the structured reason and must not claim verified completion.",
             f"The concrete provider for this accounted run is {provider_id}.",
             "When finished, record exactly one terminal event with this command (replace only the status and summary placeholders):",
             f"  {_record_line(config, task, eligibility_key, provider_id, account_id, attempt.id if attempt is not None else None, outcome_path)}",
@@ -570,6 +632,9 @@ def render_prompt(
                 "choose one allowed reason code and, when done, one allowed completion mechanism."
             ),
             _outcome_contract_line(),
+            "CHECK_TYPES=" + json.dumps(
+                checks.check_type_reference(), sort_keys=True, separators=(",", ":"),
+            ),
             (
                 "Every terminal result requires reason.code, non-empty reason.detail, and a stable, "
                 "non-secret reason.signature. Status done requires reason.code=done_when_verified, "
@@ -587,7 +652,7 @@ def render_prompt(
         contract.extend([
             (
                 "If a later user message in this same thread continues the work after this "
-                "attempt recorded failed, skipped, or awaiting_human, keep this task and do not "
+                "attempt recorded failed or skipped, keep this task and do not "
                 "launch another worker. Before more work, run the exact continue-progress command "
                 "below. It marks this same router job in progress and does not start a dispatch. "
                 "If it refuses, stop without changing the original attempt and do not launch a replacement."
@@ -863,20 +928,22 @@ def _mcp_servers(
     return result
 
 
-def _resolved_mcp_servers(task: Task) -> dict[str, Mapping[str, Any]]:
-    raw_mcp = (task.mcp or "").strip()
+def resolve_mcp_selection(mcp: str | None, cwd: str) -> dict[str, Mapping[str, Any]]:
+    """Resolve a task MCP selection to sanitized server definitions, or raise DispatchError."""
+
+    raw_mcp = (mcp or "").strip()
     if not raw_mcp:
         return {}
     if raw_mcp == "none":
         return {}
 
-    cwd = Path(task.cwd).expanduser().resolve(strict=False)
+    root = Path(cwd).expanduser().resolve(strict=False)
     candidate = Path(raw_mcp).expanduser()
     if candidate.is_absolute() or "/" in raw_mcp or raw_mcp.endswith(".json"):
         if not candidate.is_absolute():
             if ".." in candidate.parts:
                 raise DispatchError("relative MCP config path may not traverse parents")
-            candidate = cwd / candidate
+            candidate = root / candidate
         return _mcp_servers(_read_mcp_json(candidate.resolve(strict=False), "task MCP config"), "task MCP config")
 
     names = [item.strip() for item in raw_mcp.split(",") if item.strip()]
@@ -896,14 +963,14 @@ def _resolved_mcp_servers(task: Task) -> dict[str, Mapping[str, Any]]:
 
     ancestors: list[Path] = []
     repository_found = False
-    for directory in (cwd, *cwd.parents):
+    for directory in (root, *root.parents):
         ancestors.append(directory)
         if (directory / ".git").exists():
             repository_found = True
             break
     if not repository_found:
         # Without a repository boundary, never walk arbitrary parents for MCP configuration.
-        ancestors = [cwd]
+        ancestors = [root]
     for directory in reversed(ancestors):
         path = directory / ".mcp.json"
         if path.is_file():
@@ -927,6 +994,33 @@ def _resolved_mcp_servers(task: Task) -> dict[str, Mapping[str, Any]]:
     if missing:
         raise DispatchError(f"MCP server is not resolvable: {missing[0]}")
     return {name: merged[name] for name in names}
+
+
+def validate_task_mcp(
+    config: RuntimeConfig,
+    *,
+    mcp: str | None,
+    cwd: str,
+    allowed_providers: Iterable[str],
+) -> None:
+    """Refuse an MCP selection at enqueue time that dispatch could never materialize.
+
+    Only providers that accept Claude's task MCP flags resolve the selection; a task that
+    can run only on other providers (Codex connectors such as ``project-connectors``) is
+    left unvalidated, exactly as dispatch ignores its selection.
+    """
+
+    raw = (mcp or "").strip()
+    if not raw or raw == "none":
+        return
+    allowed = set(allowed_providers)
+    if not any(
+        _uses_claude_mcp_scoping(provider)
+        for provider in config.providers
+        if not allowed or provider.id in allowed
+    ):
+        return
+    resolve_mcp_selection(raw, cwd)
 
 
 def _prune_owned_mcp_files(directory: Path, current: Path) -> None:
@@ -954,7 +1048,7 @@ def _prune_owned_mcp_files(directory: Path, current: Path) -> None:
 def _materialize_mcp_config(config: RuntimeConfig, task: Task, _eligibility_key: str) -> Path | None:
     if task.mcp is None or not task.mcp.strip():
         return None
-    servers = _resolved_mcp_servers(task)
+    servers = resolve_mcp_selection(task.mcp, task.cwd)
     directory = config.state_dir / "mcp"
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     metadata = directory.lstat()
@@ -1091,13 +1185,20 @@ def _completed_router_result(
                 (line for line in reversed(stderr.splitlines() + stdout.splitlines()) if line.strip()),
                 "no diagnostic",
             )
-            prelaunch_rejection = (
-                _positive_prelaunch_mcp_flag_rejection(stdout, stderr)
-                or _positive_prelaunch_codex_executable_rejection(stdout, stderr)
+            mcp_rejection = _positive_prelaunch_mcp_flag_rejection(stdout, stderr)
+            codex_rejection = (
+                None if mcp_rejection is not None
+                else _positive_prelaunch_codex_executable_rejection(stdout, stderr)
             )
-            if phase == "launch" and prelaunch_rejection is not None:
+            if phase == "launch" and mcp_rejection is not None:
                 raise KnownDispatchFailure(
-                    _router_diagnostic(config, adapter, prelaunch_rejection)
+                    _router_diagnostic(config, adapter, mcp_rejection)
+                ) from exc
+            if phase == "launch" and codex_rejection is not None:
+                # The Codex launcher never started, so no thread exists. The failure belongs
+                # to the provider account, not to this task.
+                raise ProviderLaunchUnavailable(
+                    _router_diagnostic(config, adapter, codex_rejection)
                 ) from exc
             raise _phase_uncertainty(
                 phase,
@@ -1331,6 +1432,7 @@ def dispatch(
     telemetry_call: Callable[[list[str], dict[str, Any]], Any] | None = None,
     trigger: str = "manual",
     now_epoch: int | None = None,
+    check_runner: checks.CheckRunner | None = None,
 ) -> DispatchResult:
     """Classify if requested, claim, activate, and launch through agent-router once.
 
@@ -1345,6 +1447,14 @@ def dispatch(
         raise InvalidRoute(f"unknown task: {task_id}")
     if trigger not in {"manual", "bonus", "scheduled"}:
         raise InvalidRoute("invalid run trigger")
+    if trigger != "bonus":
+        # An explicit start is an operator action, not a view load, so it may refresh this
+        # task's own checks. Automatic launches read only what the scout tick stored.
+        checks.refresh(
+            queue, runner=check_runner or checks.subprocess_runner,
+            now_epoch=int(time.time() if now_epoch is None else now_epoch),
+            task_ids=(task_id,), max_checks=checks.MAX_CHECKS_PER_TASK + 4,
+        )
     readiness = queue.readiness(task_id, now_epoch=now_epoch)
     # The weekend window gates only automatic launches; an explicit start may run a due
     # weekly task on any day and consumes that week's slot.
@@ -1413,7 +1523,7 @@ def dispatch(
     def release_lease() -> None:
         _activation(config, account, "release", None)
 
-    def abort_known_nonlaunch(reason: str) -> None:
+    def abort_known_nonlaunch(reason: str, account_hold: AccountHold | None = None) -> None:
         release_activation: Callable[[], None] | None = None
         if activated:
             if lease_managed:
@@ -1442,6 +1552,7 @@ def dispatch(
                 attempt.id,
                 reason,
                 release_activation=release_activation,
+                account_hold=account_hold,
             )
             if not changed and queue.claim_for(task.id, eligibility_key) is not None:
                 raise QueueError("exact attempt could not be aborted")
@@ -1577,6 +1688,7 @@ def dispatch(
             attempt=attempt,
             outcome_path=outcome_path,
             dependency_base=rechecked_dependency_base,
+            preflight_checks=tuple(readiness.get("checks") or ()),
             recovery=(
                 readiness.get("recovery")
                 if isinstance(readiness.get("recovery"), Mapping)
@@ -1676,7 +1788,19 @@ def dispatch(
                 pass
         raise
     except ActivationUnavailable as exc:
-        abort_known_nonlaunch(f"activation unavailable: {str(exc)[:500]}")
+        hold = (
+            AccountHold(provider.id, account_id or "*", "activation_unswitched", str(exc)[:500])
+            if _account_activation_failed(exc) else None
+        )
+        abort_known_nonlaunch(f"activation unavailable: {str(exc)[:500]}", hold)
+        if hold is not None:
+            # The scout reports a managed hold separately from scout failures.
+            exc.account_hold = hold
+        raise
+    except ProviderLaunchUnavailable as exc:
+        hold = AccountHold(provider.id, account_id or "*", "codex_daemon_start", str(exc)[:500])
+        abort_known_nonlaunch(f"provider launcher unavailable: {str(exc)[:500]}", hold)
+        exc.account_hold = hold
         raise
     except Exception as exc:
         abort_known_nonlaunch(f"known launch failure: {str(exc)[:500]}")

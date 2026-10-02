@@ -145,6 +145,7 @@ def _task_values(args: argparse.Namespace) -> dict[str, Any]:
         "start_ref": args.start_ref,
         "work_group": args.work_group,
         "depends_on": [x.strip() for x in (args.depends_on or "").split(",") if x.strip()],
+        "checks": [_json_check(item) for item in (getattr(args, "check", None) or [])],
         "id": args.id,
         "title": args.title,
         "kind": args.kind,
@@ -164,6 +165,64 @@ def _task_values(args: argparse.Namespace) -> dict[str, Any]:
         "allowed_providers": tuple(filter(None, (args.providers or "").split(","))),
         "required_capabilities": tuple(filter(None, (args.capabilities or "").split(","))),
     }
+
+
+def _json_check(raw: str) -> Any:
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise CLIError(f"--check must be a JSON object: {exc}") from exc
+
+
+_EDGE_MODES = frozenset({"done", "merged"})
+
+
+def _dependency_edges(
+    items: Sequence[Any],
+    queue: db.QueueDB,
+    cfg: config_module.RuntimeConfig,
+    existing: db.Task | None,
+) -> tuple[list[str], list[str]]:
+    """Split ``ID``, ``ID:done``, and ``ID:merged`` items into prerequisites and merged edges.
+
+    Without a suffix an edge already on ``existing`` keeps its mode; a new edge defaults to
+    ``merged`` when its parent runs in a repository configured to open pull requests.
+    """
+
+    depends_on: list[str] = []
+    merged: list[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            raise CLIError("depends_on items must be task IDs")
+        task_id, separator, mode = item.strip().partition(":")
+        task_id = task_id.strip()
+        mode = mode.strip()
+        if separator and mode not in _EDGE_MODES:
+            raise CLIError(f"dependency mode must be done or merged: {item}")
+        if not separator:
+            if existing is not None and task_id in existing.depends_on:
+                mode = "merged" if task_id in existing.merged_depends_on else "done"
+            else:
+                parent = queue.task(task_id) if db.TASK_ID_RE.fullmatch(task_id) else None
+                mode = (
+                    "merged"
+                    if parent is not None and dispatcher.task_produces_pr(cfg, parent)
+                    else "done"
+                )
+        if task_id not in depends_on:
+            depends_on.append(task_id)
+        if mode == "merged" and task_id not in merged:
+            merged.append(task_id)
+    return depends_on, merged
+
+
+def _validate_mcp(
+    cfg: config_module.RuntimeConfig, mcp: str | None, cwd: str, allowed: Sequence[str],
+) -> None:
+    try:
+        dispatcher.validate_task_mcp(cfg, mcp=mcp, cwd=cwd, allowed_providers=allowed)
+    except dispatcher.DispatchError as exc:
+        raise db.QueueError(str(exc)) from exc
 
 
 def _legacy_filter(args: argparse.Namespace) -> dict[str, Any]:
@@ -244,8 +303,13 @@ def _command(args: argparse.Namespace) -> int:
             _json({"ok": True, "database": str(queue.path)})
         return 0
     if command == "add":
-        _cfg, queue = _queue(args)
-        task = queue.add_task(_task_values(args))
+        cfg, queue = _queue(args)
+        values = _task_values(args)
+        values["depends_on"], values["merged_depends_on"] = _dependency_edges(
+            values["depends_on"], queue, cfg, None,
+        )
+        _validate_mcp(cfg, values["mcp"], values["cwd"], values["allowed_providers"])
+        task = queue.add_task(values)
         _json({"task": task.to_dict()}) if args.json else print(f"added: {task.id}")
         return 0
     if command in {"eligible", "count-eligible", "pick"}:
@@ -421,10 +485,18 @@ def _command(args: argparse.Namespace) -> int:
         _json({"runs": records}) if args.json else [print(f"{row['ts']}\t{row['task']}\t{row['status']}") for row in records]
         return 0
     if command == "edit":
-        _cfg, queue = _queue(args)
+        cfg, queue = _queue(args)
         changes = json.loads(args.changes)
         if not isinstance(changes, dict):
             raise CLIError("changes must be a JSON object")
+        if "depends_on" in changes:
+            if "merged_depends_on" in changes:
+                raise CLIError("use ID:merged suffixes in depends_on")
+            if not isinstance(changes["depends_on"], list):
+                raise CLIError("depends_on must be a list of task IDs")
+            changes["depends_on"], changes["merged_depends_on"] = _dependency_edges(
+                changes["depends_on"], queue, cfg, queue.task(args.task),
+            )
         _json({"task": queue.edit_task(args.task, changes).to_dict()})
         return 0
     if command == "readiness":
@@ -481,7 +553,10 @@ def _command(args: argparse.Namespace) -> int:
         queue.set_model(args.task, args.model)
         return 0
     if command == "set-mcp":
-        _cfg, queue = _queue(args)
+        cfg, queue = _queue(args)
+        current = queue.task(args.task)
+        if current is not None:
+            _validate_mcp(cfg, args.mcp, current.cwd, current.allowed_providers)
         queue.set_mcp(args.task, args.mcp)
         task = queue.task(args.task)
         assert task is not None
@@ -585,7 +660,10 @@ def _command(args: argparse.Namespace) -> int:
         if task is None:
             raise CLIError(f"unknown task: {args.task}")
         account_id = args.account
-        print(dispatcher.render_prompt(cfg, task, args.eligibility_key, args.provider, account_id))
+        print(dispatcher.render_prompt(
+            cfg, task, args.eligibility_key, args.provider, account_id,
+            preflight_checks=queue.readiness(task.id, now_epoch=_now(args))["checks"],
+        ))
         return 0
     if command == "render-prompt-json":
         cfg = _load_config(args, graph_required=False)
@@ -624,7 +702,9 @@ def _command(args: argparse.Namespace) -> int:
         if not task.id or task.kind not in {"oneoff", "recurring"}:
             raise CLIError("task JSON requires a valid id and kind")
         key = f"legacy/{args.cycle}"
-        print(dispatcher.render_prompt(cfg, task, key, args.provider, args.account))
+        print(dispatcher.render_prompt(
+            cfg, task, key, args.provider, args.account, preflight_checks=(),
+        ))
         return 0
     if command == "accounts":
         if args.accounts_command == "select":
@@ -633,6 +713,17 @@ def _command(args: argparse.Namespace) -> int:
             return _accounts_command(cfg, args, queue)
         cfg = _load_config(args, graph_required=True)
         return _accounts_command(cfg, args, None)
+    if command == "held-report":
+        _cfg, queue = _queue(args)
+        report = queue.held_authority_report()
+        if args.json:
+            _json({"held": report})
+        else:
+            for item in report:
+                print("\t".join(str(item.get(key) if item.get(key) is not None else "") for key in (
+                    "task_id", "held_since", "blocked_descendants", "detail",
+                )))
+        return 0
     if command == "doctor":
         from . import lifecycle
 
@@ -817,7 +908,7 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--source-ref"); add.add_argument("--start-ref"); add.add_argument("--work-group"); add.add_argument("--depends-on")
     edit = sub.add_parser("edit"); _add_common(edit); _add_json(edit); edit.add_argument("task"); edit.add_argument("--changes", required=True)
     ready = sub.add_parser("readiness"); _add_common(ready); _add_json(ready); ready.add_argument("task"); ready.add_argument("--now", type=int)
-    add.add_argument("--providers"); add.add_argument("--capabilities")
+    add.add_argument("--providers"); add.add_argument("--capabilities"); add.add_argument("--check", action="append")
 
     for name in ("eligible", "count-eligible"):
         item = sub.add_parser(name); _add_common(item); item.add_argument("cycle", type=int); _add_filters(item)
@@ -828,7 +919,7 @@ def build_parser() -> argparse.ArgumentParser:
     record = sub.add_parser("record"); _add_common(record); _add_json(record)
     record.add_argument("--task", required=True); record.add_argument("--kind", choices=("oneoff", "recurring"))
     record.add_argument("--eligibility-key"); record.add_argument("--cycle", type=int)
-    record.add_argument("--status", choices=sorted(db.VALID_STATUSES), required=True)
+    record.add_argument("--status", choices=sorted(db.RECORDABLE_STATUSES), required=True)
     record.add_argument("--provider-id"); record.add_argument("--engine"); record.add_argument("--account-id")
     record.add_argument("--attempt-id"); record.add_argument("--outcome-file")
     record.add_argument("--router-job-id"); record.add_argument("--ts"); record.add_argument("--branch"); record.add_argument("--summary")
@@ -887,6 +978,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     accounts = sub.add_parser("accounts"); _add_common(accounts); accounts.add_argument("accounts_command", choices=("labels", "count", "multi", "cycle", "canonical-cycle", "usage", "select")); accounts.add_argument("account", nargs="?"); accounts.add_argument("epoch", type=int, nargs="?"); accounts.add_argument("--now", type=int)
     doctor = sub.add_parser("doctor"); _add_common(doctor); _add_json(doctor)
+    held = sub.add_parser("held-report"); _add_common(held); _add_json(held)
 
     install = sub.add_parser("install"); install.add_argument("--source", type=Path, required=True); install.add_argument("--home", type=Path); install.add_argument("--version", dest="install_version"); _add_json(install)
     uninstall = sub.add_parser("uninstall"); uninstall.add_argument("--home", type=Path); _add_json(uninstall)

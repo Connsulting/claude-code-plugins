@@ -88,6 +88,11 @@ def _contract_hash(task: Task) -> str:
         value.pop(field)
     if value['start_ref'] is None:
         value.pop('start_ref')
+    # Omitted when empty so contracts written before checks and edge modes keep their hash.
+    if not value['checks']:
+        value.pop('checks')
+    if not value['merged_depends_on']:
+        value.pop('merged_depends_on')
     return hashlib.sha256(_json(value).encode()).hexdigest()
 
 

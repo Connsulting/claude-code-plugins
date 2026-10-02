@@ -271,6 +271,19 @@ class QueueBranchChoiceContract(unittest.TestCase):
         self.assertEqual(self.queue.task("child").start_ref, "refs/heads/epic/next")
         self.assertEqual(self.queue.readiness("child", now_epoch=NOW)["dependency_base"], selected)
         self.assertEqual(self.queue.snapshot(now_epoch=NOW)["readiness"]["child"]["dependency_base"], selected)
+        # The explicit start_ref derives a base_ref_exists preflight check. Store its passing
+        # result the way the scout refresher does, so view, scout, and dispatch agree.
+        work = [
+            item for item in self.queue.check_work(now_epoch=NOW, task_ids=["child"])
+            if item.spec == {"type": "base_ref_exists", "ref": "refs/heads/epic/next"}
+        ]
+        self.assertEqual(len(work), 1)
+        generation = self.queue.begin_check(work[0], now_epoch=NOW)
+        self.assertTrue(self.queue.store_check_result(
+            work[0], "pass", "refs/heads/epic/next exists on origin",
+            generation=generation, observed_context=None, now_epoch=NOW,
+        ))
+        self.assertTrue(self.queue.readiness("child", now_epoch=NOW)["ready"])
         snapshots = {
             ("alpha", "alpha-account"): usage.UsageSnapshot(
                 "alpha", "alpha-account", NOW,

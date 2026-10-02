@@ -3,11 +3,26 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 from urllib.request import Request, urlopen
 
 from .config import RuntimeConfig
 from .db import QueueDB, TASK_ID_RE
+
+
+def _task_ids(candidates: Iterable[Any]) -> list[str]:
+    """Sorted unique task identifiers; only these structured values ever leave the host."""
+
+    return sorted({task for task in candidates if isinstance(task, str) and TASK_ID_RE.fullmatch(task)})
+
+
+def _post_ntfy(config: RuntimeConfig, message: str) -> None:
+    request = Request(
+        config.scout_ntfy_url, data=message.encode("utf-8"), method="POST",
+        headers={"Content-Type": "text/plain; charset=utf-8"},
+    )
+    with urlopen(request, timeout=15) as response:
+        response.close()
 
 
 def scout_health(
@@ -34,11 +49,9 @@ def scout_health(
             item["kind"] for item in relevant
             if isinstance(item.get("kind"), str) and re.fullmatch(r"[A-Za-z0-9_]+", item["kind"])
         })
-        tasks = sorted({
-            task for item in relevant
-            for task in [item.get("task_id"), *item.get("tasks", [])]
-            if isinstance(task, str) and TASK_ID_RE.fullmatch(task)
-        })
+        tasks = _task_ids(
+            task for item in relevant for task in [item.get("task_id"), *item.get("tasks", [])]
+        )
         if stuck and not kinds:
             kinds = ["scout_failure"]
         notice = queue.reserve_scout_notice(
@@ -53,13 +66,36 @@ def scout_health(
             f"Tasks: {', '.join(notice['tasks']) or 'none reported'}. "
             "Inspect: bonus-drain doctor --json."
         )
-        request = Request(
-            config.scout_ntfy_url, data=message.encode("utf-8"), method="POST",
-            headers={"Content-Type": "text/plain; charset=utf-8"},
-        )
-        with urlopen(request, timeout=15) as response:
-            response.close()
+        _post_ntfy(config, message)
     except Exception:
         # The scout's dispatch decisions and exit status remain authoritative even when
         # SQLite is unavailable or ntfy rejects/times out the notification.
         pass
+
+
+def blocker_notice(config: RuntimeConfig, queue: QueueDB, *, now_epoch: int) -> list[str]:
+    """Notify Brian once about held work that has no checkable resume condition.
+
+    Reservation precedes the send, so a failed transport never repeats a notice. Only
+    task identifiers leave the host; blocker detail may contain sensitive text.
+    """
+
+    if not config.scout_ntfy_url:
+        return []
+    try:
+        items = queue.reserve_blocker_notices(now_epoch=now_epoch)
+    except Exception:
+        return []
+    task_ids = _task_ids(item.get("task_id") for item in items)
+    if not task_ids:
+        return []
+    try:
+        message = (
+            f"Bonus Drain needs you on {len(task_ids)} held task(s): {', '.join(task_ids)}. "
+            "Inspect: bonus-drain held-report --json."
+        )
+        _post_ntfy(config, message)
+    except Exception:
+        # The reservation is consumed either way, matching scout_health semantics.
+        pass
+    return task_ids

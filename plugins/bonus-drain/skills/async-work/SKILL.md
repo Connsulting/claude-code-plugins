@@ -13,6 +13,8 @@ Queueing alone does not authorize an immediate launch. Every ready task is eligi
 capacity; use an explicit start only to accelerate it. Use the same stable `bonus-drain` CLI and
 queue; never create another queue for this skill name. Runtime installation remains a separate action.
 
+Before queueing, translate each mechanically checkable precondition (an issue open or in a milestone, a pull request merged, a release published, a base branch present, file content on a ref) into a `checks` entry, and choose `done` or `merged` for each dependency edge. Keep the free-text precondition only for judgment the worker must make.
+
 For coordinating an entire work group through PR integration, combined E2E and additional
 fix rounds, use this plugin's [Long Horizon skill](../long-horizon/SKILL.md). Its goal
 records and short coordination jobs use the same queue and capacity controls.

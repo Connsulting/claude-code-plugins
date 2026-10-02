@@ -359,6 +359,9 @@ class ScoutActiveAccountSelectionTests(unittest.TestCase):
         self.assertEqual(self.queue.attempts(task_id="alpha-two"), [])
         self.assertFalse(any(claim.provider_id == "alpha" for claim in self.queue.claims()))
         self.assertEqual(self.queue.activation_leases(provider_id="alpha"), [])
+        # Contention is not a proven account failure: it never creates an account backoff.
+        self.assertEqual(self.queue.account_backoffs(now_epoch=NOW), [])
+        self.assertEqual(report.account_holds, ())
 
     def test_dry_run_attributes_active_account_without_activation(self) -> None:
         self.queue.add_task(_task("alpha-next", "alpha"))

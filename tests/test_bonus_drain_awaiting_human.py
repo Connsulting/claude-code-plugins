@@ -1,4 +1,4 @@
-"""awaiting_human is a terminal status that parks work for Brian without automatic recovery."""
+"""awaiting_human is retired for new records; historic rows stay readable and continuable."""
 
 from __future__ import annotations
 
@@ -30,83 +30,100 @@ def awaiting(detail: str = DETAIL, code: str = "authority_required") -> dict[str
     return {"reason": {"code": code, "detail": detail, "signature": f"{code}:approval"}}
 
 
+def seed_historic_awaiting_human(
+    queue: db.QueueDB,
+    task_id: str,
+    *,
+    outcome: dict[str, object] | None = None,
+    now: int = NOW,
+):
+    """Write the rows a pre-retirement awaiting_human terminal left behind.
+
+    ``record`` refuses awaiting_human now, so history is reproduced in SQL exactly as the
+    retired terminal path stored it: a dispatched run, then the terminal run, the attempt
+    transition, and the released claim, all in one transaction.
+    """
+
+    attempt = queue.claim(task_id, KEY, "alpha", "alpha-account", now_epoch=now)
+    assert attempt is not None
+    queue.record(
+        task_id, KEY, attempt_id=attempt.id, status="dispatched",
+        provider_id="alpha", account_id="alpha-account", router_job_id=f"job-{task_id}",
+        timestamp=iso(now), now_epoch=now,
+    )
+    value = db.validate_outcome("awaiting_human", outcome or awaiting())
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    stamp = iso(now + 1)
+    with sqlite3.connect(queue.path) as connection:
+        connection.execute(
+            """INSERT INTO runs(
+                 task,kind,cycle,eligibility_key,status,ts,received_at,summary,
+                 provider_id,account_id,attempt_id,outcome_json
+               ) VALUES(?,'oneoff',?,?,'awaiting_human',?,?,?,'alpha','alpha-account',?,?)""",
+            (
+                task_id, db.cycle_from_key(KEY), KEY, stamp, stamp,
+                f"{task_id} awaiting_human", attempt.id, encoded,
+            ),
+        )
+        connection.execute(
+            """UPDATE task_attempts
+                 SET state='awaiting_human',reason_code=?,reason_signature=?,
+                     outcome_json=?,terminal_at=?
+                 WHERE id=?""",
+            (
+                value["reason"]["code"], value["reason"]["signature"], encoded, stamp, attempt.id,
+            ),
+        )
+        connection.execute(
+            "DELETE FROM dispatch_claims WHERE task_id=? AND attempt_id=?", (task_id, attempt.id),
+        )
+    return attempt
+
+
 class AwaitingHumanCase(RecoveryCase):
     def park(self, task_id: str, *, outcome: dict[str, object] | None = None, now: int = NOW):
-        attempt = self.claim(task_id, now=now)
-        self.queue.record(
-            task_id, KEY, attempt_id=attempt.id, status="dispatched",
-            provider_id="alpha", account_id="alpha-account", router_job_id=f"job-{task_id}",
-            timestamp=iso(now), now_epoch=now,
-        )
-        self.terminal(task_id, attempt, "awaiting_human", outcome or awaiting(), now=now + 1)
-        return attempt
+        return seed_historic_awaiting_human(self.queue, task_id, outcome=outcome, now=now)
 
 
 class RecordTests(AwaitingHumanCase):
-    def test_record_accepts_awaiting_human_and_runs_json_shows_it(self) -> None:
-        self.add("parked")
-        attempt = self.park("parked")
+    def _dispatched(self, task_id: str):
+        self.add(task_id)
+        attempt = self.claim(task_id)
+        self.queue.record(
+            task_id, KEY, attempt_id=attempt.id, status="dispatched",
+            provider_id="alpha", account_id="alpha-account", router_job_id=f"job-{task_id}",
+            timestamp=iso(NOW), now_epoch=NOW,
+        )
+        return attempt
 
-        self.assertEqual(self.queue.attempts(task_id="parked")[0].state, "awaiting_human")
-        self.assertEqual(self.queue.claims(), [])
-        with captured_json() as payloads:
-            code = cli.main([
-                "runs", "--database", str(self.queue.path), "--task", "parked", "--json",
-            ])
-        self.assertEqual(code, 0)
-        statuses = [run["status"] for run in payloads[0]["runs"]]
-        self.assertIn("awaiting_human", statuses)
-        stored = rows(self.queue, "SELECT status FROM runs WHERE task='parked' ORDER BY rowid_pk")
-        self.assertEqual(stored[-1]["status"], "awaiting_human")
-        self.assertEqual(self.queue.attempts(task_id="parked")[0].id, attempt.id)
+    def test_record_refuses_awaiting_human_for_new_attempts(self) -> None:
+        attempt = self._dispatched("parked")
 
-    def test_identical_repeat_is_idempotent_and_a_different_terminal_is_rejected(self) -> None:
-        self.add("parked")
-        attempt = self.park("parked")
-        before = len(rows(self.queue, "SELECT * FROM runs WHERE task='parked'"))
+        with self.assertRaisesRegex(db.QueueError, "awaiting_human is retired"):
+            self.terminal("parked", attempt, "awaiting_human", awaiting(), now=NOW + 1)
 
-        replay = self.terminal("parked", attempt, "awaiting_human", awaiting(), now=NOW + 1)
-        self.assertEqual(replay.attempt_id, attempt.id)
-        self.assertEqual(len(rows(self.queue, "SELECT * FROM runs WHERE task='parked'")), before)
+        self.assertNotIn("awaiting_human", db.RECORDABLE_STATUSES)
+        self.assertEqual(db.RECORDABLE_STATUSES, db.VALID_STATUSES - {"awaiting_human"})
+        # Liveness: the documented replacements are still recorded normally.
+        self.terminal("parked", attempt, "failed", awaiting(), now=NOW + 2)
+        self.assertEqual(self.queue.attempts(task_id="parked")[0].state, "failed")
 
-        with self.assertRaisesRegex(db.QueueError, "conflict|already recorded"):
-            self.terminal("parked", attempt, "failed", awaiting(code="retryable"), now=NOW + 2)
-        self.assertEqual(self.queue.attempts(task_id="parked")[0].state, "awaiting_human")
+    def test_refused_record_keeps_claim_and_writes_no_run(self) -> None:
+        attempt = self._dispatched("parked")
+        before = rows(self.queue, "SELECT * FROM runs WHERE task='parked'")
 
+        with self.assertRaises(db.QueueError):
+            self.terminal("parked", attempt, "awaiting_human", awaiting(), now=NOW + 1)
 
-class ValidationTests(AwaitingHumanCase):
-    def _reject(self, outcome: dict[str, object] | None, pattern: str) -> None:
-        self.add("bad")
-        attempt = self.claim("bad")
-        with self.assertRaisesRegex(db.QueueError, pattern):
-            self.queue.record(
-                "bad", KEY, attempt_id=attempt.id, status="awaiting_human", outcome=outcome,
-                provider_id="alpha", account_id="alpha-account", timestamp=iso(NOW),
-                now_epoch=NOW, summary="needs Brian",
-            )
-        # The claim survives a rejected terminal.
-        self.assertEqual(self.queue.claim_for("bad").attempt_id, attempt.id)
+        self.assertEqual(self.queue.claim_for("parked").attempt_id, attempt.id)
+        self.assertEqual(self.queue.attempts(task_id="parked")[0].state, "dispatched")
+        self.assertEqual(rows(self.queue, "SELECT * FROM runs WHERE task='parked'"), before)
         self.assertNotIn(
             "awaiting_human", [row["status"] for row in rows(self.queue, "SELECT status FROM runs")],
         )
 
-    def test_missing_outcome_is_rejected(self) -> None:
-        self._reject(None, "requires|outcome|reason")
 
-    def test_empty_detail_is_rejected(self) -> None:
-        self._reject(awaiting(detail="   "), "detail")
-
-    def test_missing_detail_is_rejected(self) -> None:
-        self._reject({"reason": {"code": "authority_required"}}, "detail")
-
-    def test_verified_completion_is_rejected(self) -> None:
-        outcome = awaiting()
-        outcome["completion"] = {"verified": True, "mechanism": "artifact", "evidence": [PR_URL]}
-        self._reject(outcome, "verified")
-
-    def test_done_when_verified_code_is_rejected(self) -> None:
-        self._reject(awaiting(code="done_when_verified"), "done_when_verified|reason|code")
-
+class ValidationTests(AwaitingHumanCase):
     def test_validate_outcome_accepts_awaiting_human_directly(self) -> None:
         value = db.validate_outcome("awaiting_human", awaiting())
         self.assertEqual(value["reason"]["detail"], DETAIL)
@@ -298,45 +315,65 @@ class MigrationTests(RecoveryCase):
 
 
 class PromptTests(RecoveryCase):
-    def _prompt(self, task_id: str) -> str:
-        config = runtime(self.queue.path)
+    def _prompt(self, task_id: str, config=None) -> str:
+        # Dispatch always renders with the claimed attempt and its private outcome path,
+        # which is where the outcome schema and CHECK_TYPES lines appear.
+        config = config or runtime(self.queue.path)
+        attempt = self.claim(task_id)
         return dispatcher.render_prompt(
-            config, self.queue.task(task_id), "manual/awaiting-human", "alpha", "alpha-account",
+            config, self.queue.task(task_id), KEY, "alpha", "alpha-account",
+            attempt=attempt, outcome_path=self.root / f"{task_id}-outcome.json",
         )
 
     def _assert_contract(self, prompt: str) -> None:
-        self.assertIn("done|skipped|failed|awaiting_human", prompt)
+        record_line = next(line for line in prompt.splitlines() if "--status" in line)
+        self.assertIn("done|skipped|failed", record_line)
+        self.assertNotIn("awaiting_human", record_line)
+        self.assertNotIn("done|skipped|failed|awaiting_human", prompt)
+        self.assertIn("There is no awaiting_human status", prompt)
+        self.assertIn("the pull request is the review gate", prompt)
+        self.assertIn("waits only on human review or merge is done", prompt)
+        self.assertIn("Pending human review or merge alone does not block normal PR completion", prompt)
+        self.assertIn("reason.code=authority_required", prompt)
+        self.assertIn("resume_when", prompt)
+        self.assertIn("CHECK_TYPES=", prompt)
+        check_types = next(
+            line for line in prompt.splitlines() if line.startswith("CHECK_TYPES=")
+        )
+        self.assertIn("base_ref_exists", check_types)
+        self.assertIn("pr_merged", check_types)
         self.assertIn("Opening or updating a pull request is not done", prompt)
         self.assertIn("all PR checks pass for the current head", prompt)
         self.assertIn("confirmed merged into the exact authorized epic branch", prompt)
         self.assertIn("must never be recorded as done", prompt)
         self.assertNotIn("even while that PR awaits", prompt)
         self.assertIn("completion.mechanism=artifact", prompt)
-        self.assertIn("Record awaiting_human only when", prompt)
-        self.assertIn("name exactly what Brian must do", prompt)
+        self.assertNotIn("Record awaiting_human only when", prompt)
+        self.assertNotIn("name exactly what Brian must do", prompt)
         self.assertIn(
             "If the work itself cannot be completed, record failed with the blocker before exiting",
             prompt,
         )
         self.assertNotIn("If safe progress requires new input or authority", prompt)
-        self.assertIn("Failed, skipped, or awaiting_human results require the structured reason", prompt)
+        self.assertNotIn("Failed, skipped, or awaiting_human results", prompt)
+        self.assertIn("Failed or skipped results require the structured reason", prompt)
 
     def test_oneoff_prompt_carries_awaiting_human_contract(self) -> None:
         self.add("oneoff")
-        self._assert_contract(self._prompt("oneoff"))
+        prompt = self._prompt("oneoff")
+        self._assert_contract(prompt)
+        self.assertIn("attempt recorded failed or skipped, keep this task", prompt)
 
     def test_recurring_prompt_carries_awaiting_human_contract(self) -> None:
         self.add("weekly", kind="recurring", cadence="weekly")
         self._assert_contract(self._prompt("weekly"))
 
     def test_configured_pr_permission_preserves_explicit_epic_merge_authority(self) -> None:
-        item = self.add("epic", constraints="Merge only into epic/example. Done means merged.")
+        self.add("epic", constraints="Merge only into epic/example. Done means merged.")
         config = replace(runtime(self.queue.path), pr_exceptions=(
             {"path": str(self.root), "allow_push": True, "allow_pr": True},
         ))
-        prompt = dispatcher.render_prompt(
-            config, item, "manual/epic", "alpha", "alpha-account",
-        )
+        prompt = self._prompt("epic", config)
         self.assertIn("explicitly grants merge authority into a named epic/* branch", prompt)
         self.assertIn("Otherwise, do not merge", prompt)
         self.assertNotIn("never merge it", prompt)

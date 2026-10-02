@@ -1379,5 +1379,45 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertNotIn(" open", dialog(closed))
 
 
+class RootBlockerViewerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.viewer = _load_server()
+
+    @staticmethod
+    def _waiting(root_blocker: object) -> dict[str, object]:
+        return {
+            "id": "C", "title": "Publish report", "work_group": None, "source_ref": None,
+            "readiness": {
+                "state": "waiting",
+                "reason": "Waiting for B",
+                "hold_reason": None,
+                "dependencies": [{
+                    "id": "B", "title": "Build report", "status": "queued",
+                    "satisfied": False, "satisfy": "done", "detail": None,
+                }],
+                "checks": [],
+                "root_blocker": root_blocker,
+            },
+        }
+
+    def test_work_meta_renders_root_blocker(self) -> None:
+        html = self.viewer._work_meta(self._waiting({
+            "task_id": "A", "title": "Fetch <actor>", "status": "held",
+            "reason": "Missing GitHub test actor",
+        }))
+        self.assertIn("Root blocker:", html)
+        self.assertIn("<code>A</code>", html)
+        self.assertIn("Fetch &lt;actor&gt;", html)
+        self.assertNotIn("Fetch <actor>", html)
+        self.assertIn("held", html)
+        self.assertIn("Missing GitHub test actor", html)
+        self.assertLess(html.index("Root blocker:"), html.index("prerequisites complete"))
+
+        # Liveness: a task with no root blocker renders exactly as before.
+        plain = self.viewer._work_meta(self._waiting(None))
+        self.assertNotIn("Root blocker:", plain)
+        self.assertIn("0/1 prerequisites complete", plain)
+
+
 if __name__ == "__main__":
     unittest.main()

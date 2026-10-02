@@ -9,13 +9,14 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from . import db, goals, notifications
+from . import checks, db, goals, notifications
 from .config import HostLoadGateConfig, RuntimeConfig
 from .db import QueueDB, hour_round, task_requires_legacy_exclusive
 from .dispatcher import (
     ActivationUnavailable,
     AmbiguousDispatch,
     DispatchResult,
+    ProviderLaunchUnavailable,
     dispatch,
 )
 from .kick import resolve_active_accounts
@@ -180,6 +181,8 @@ class ScoutReport:
     goal_updates: tuple[dict[str, Any], ...] = ()
     recoveries: tuple[dict[str, Any], ...] = ()
     skipped: dict[str, Any] | None = None
+    preflight: dict[str, Any] | None = None
+    account_holds: tuple[dict[str, Any], ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -195,6 +198,8 @@ class ScoutReport:
             "goal_updates": list(self.goal_updates),
             "recoveries": list(self.recoveries),
             "skipped": self.skipped,
+            "preflight": self.preflight,
+            "account_holds": list(self.account_holds),
         }
 
 
@@ -206,6 +211,8 @@ class TickPlan:
     allocations: Mapping[tuple[str, str], tuple[Any, ...]]
     dependency_holds: tuple[dict[str, Any], ...] = ()
     host_pressure: dict[str, Any] | None = None
+    # Goal tasks sharing a collision key with ordinary work allocated earlier in the tick.
+    dispatch_last: frozenset[str] = frozenset()
 
 
 class _InitializedQueueReader(QueueDB):
@@ -370,6 +377,38 @@ def _apply_inflight_caps(
     return PlanResult(tuple(kept), closed, gates, plan.generated_at)
 
 
+def _apply_account_backoff(
+    plan: PlanResult, backoffs: list[dict[str, Any]],
+) -> PlanResult:
+    """Close each batch whose account (or whole provider launcher) is in backoff.
+
+    A proved account or launcher failure holds the account, not the task, so the
+    planner can still pick an open sibling account of the same provider.
+    """
+
+    held: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in backoffs:
+        held.setdefault((str(row["provider_id"]), str(row["account_id"])), row)
+    if not held:
+        return plan
+    closed = dict(plan.closed)
+    gates_by_key = {(gate.provider_id, gate.account_id): gate for gate in plan.gates}
+    kept = []
+    for batch in plan.batches:
+        key = (batch.provider_id, batch.account_id)
+        row = held.get(key) or held.get((batch.provider_id, "*"))
+        if row is None:
+            kept.append(batch)
+            continue
+        reason = f"account backoff until {row['not_before']}: {row['cause']}"
+        closed[key] = reason
+        gates_by_key[key] = replace(
+            gates_by_key[key], open=False, reason=reason, batch_size=0,
+        )
+    gates = tuple(gates_by_key[(gate.provider_id, gate.account_id)] for gate in plan.gates)
+    return PlanResult(tuple(kept), closed, gates, plan.generated_at)
+
+
 def _apply_global_cap(
     plan: PlanResult,
     queue: QueueDB,
@@ -463,6 +502,7 @@ def plan_tick(
                     "task_id": task.id,
                     "reason": readiness["reason"],
                     "hold_reason": readiness["hold_reason"],
+                    "root_blocker": readiness.get("root_blocker"),
                 }
         return dependency_checks[task.id]
 
@@ -479,6 +519,7 @@ def plan_tick(
     plan = build_plan(config, snapshots, eligible_count=availability, now_epoch=now)
     active_account_ids, identity_failures = resolve_active_accounts(config, reader)
     plan = close_providers(plan, identity_failures)
+    plan = _apply_account_backoff(plan, reader.account_backoffs(now_epoch=now))
     if provider_holds is None:
         provider_holds = db.doctor(queue).provider_holds
     plan = _apply_inflight_caps(
@@ -561,8 +602,28 @@ def plan_tick(
     # queue's normal priority order within each class, but exhaust exclusive work first so
     # portable tasks cannot consume every compatible slot across a multi-provider tick.
     task_order.sort(key=lambda task_id: not task_requires_legacy_exclusive(task_by_id[task_id]))
+    # Collision keys (work group, source issue) are reserved only by tasks that actually win a
+    # slot, so a same-group task that can run elsewhere is still considered. Augmenting paths
+    # move matched incumbents between slots but never unmatch them, so reserved keys stay exact.
+    # Goal-owned work never waits on keys but reserves them once allocated, so later ordinary
+    # work sharing a key waits.  A goal task allocated after an earlier ordinary task with a
+    # shared key dispatches last, so the ordinary claim lands before the goal claim.
+    waiting_keys = reader.collision_keys(task_order)
+    reserved_keys = reader.reserved_collision_keys(task_order)
+    held_keys: set[str] = set()
+    ordinary_keys: set[str] = set()
+    dispatch_last: set[str] = set()
     for task_id in task_order:
-        augment(task_id, set(), set())
+        waits = waiting_keys.get(task_id, frozenset())
+        if waits & held_keys:
+            continue
+        if augment(task_id, set(), set()):
+            reserved = reserved_keys.get(task_id, frozenset())
+            held_keys |= reserved
+            if waits:
+                ordinary_keys |= reserved
+            elif reserved & ordinary_keys:
+                dispatch_last.add(task_id)
 
     for batch_index, batch in enumerate(plan.batches):
         allocations[(batch.provider_id, batch.account_id)] = tuple(
@@ -604,7 +665,7 @@ def plan_tick(
     )
     return TickPlan(
         anchor, snapshots, adjusted_plan, allocations,
-        tuple(dependency_holds.values()), blocker,
+        tuple(dependency_holds.values()), blocker, frozenset(dispatch_last),
     )
 
 
@@ -618,6 +679,7 @@ def run_once(
     router_call: Callable[..., Any] | None = None,
     activation_call: Callable[[str, str], Any] | None = None,
     host_load_reader: Callable[[], HostLoad] | None = None,
+    check_runner: checks.CheckRunner | None = None,
 ) -> ScoutReport:
     """Plan and dispatch one tick using cache only.
 
@@ -646,7 +708,7 @@ def run_once(
             report = _run_locked(
                 config, queue, cache_root, now=now, dry_run=dry_run,
                 router_call=router_call, activation_call=activation_call,
-                host_load_reader=host_load_reader,
+                host_load_reader=host_load_reader, check_runner=check_runner,
             )
         except Exception:
             notifications.scout_health(
@@ -676,11 +738,13 @@ def _run_locked(
     router_call: Callable[..., Any] | None,
     activation_call: Callable[[str, str], Any] | None,
     host_load_reader: Callable[[], HostLoad] | None,
+    check_runner: checks.CheckRunner | None = None,
 ) -> ScoutReport:
     queue.initialize()
     dispatched: list[DispatchResult] = []
     previews: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
+    account_holds: list[dict[str, Any]] = []
 
     lifecycle_report = db.doctor(queue)
     lifecycle_blockers: tuple[dict[str, Any], ...] = ()
@@ -706,6 +770,20 @@ def _run_locked(
         decision.to_dict()
         for decision in queue.reconcile_recoveries(now_epoch=now, dry_run=dry_run)
     )
+    # Only the tick (never a view load or dry run) evaluates checks over the network.
+    preflight: dict[str, Any] | None = None
+    if not dry_run:
+        try:
+            refreshed = checks.refresh(
+                queue, runner=check_runner or checks.subprocess_runner, now_epoch=now,
+            )
+            resumed = queue.resume_satisfied_holds(now_epoch=now)
+            notified = notifications.blocker_notice(config, queue, now_epoch=now)
+            preflight = {"checks": refreshed, "resumed": resumed, "notified": notified}
+        except Exception as exc:
+            # A broken refresher must surface as a scout failure rather than silently
+            # leaving gated work pending; ungated work keeps dispatching.
+            errors.append({"task_id": "*", "kind": "preflight_failed", "message": str(exc)[:500]})
     tick = plan_tick(
         config, queue, cache_root, now_epoch=now,
         provider_holds=lifecycle_report.provider_holds,
@@ -724,46 +802,65 @@ def _run_locked(
             "executable": item["executable"],
             "message": "resolved agent-router executable is missing or not executable",
         } for item in unavailable)
-        router_errors = lifecycle_errors + tuple({
+        router_errors = lifecycle_errors + tuple(errors) + tuple({
             "task_id": "*", "kind": "router_unavailable",
             "message": f"router preflight failed: {item['executable']}",
         } for item in unavailable)
         return ScoutReport(
             now, dry_run, plan, (), (), router_errors, blockers, router_preflight,
-            reconciliation, goal_updates, recoveries,
+            reconciliation, goal_updates, recoveries, preflight=preflight,
         )
 
-    for batch in plan.batches:  # already nearest-reset-first
-        tasks = tick.allocations[(batch.provider_id, batch.account_id)]
-        if dry_run:
+    # Goal tasks marked dispatch_last launch after every other allocation, so an ordinary task
+    # allocated ahead of them claims its collision key first.  A batch that stopped stays stopped.
+    stopped: set[tuple[str, str]] = set()
+    for last in (False, True):
+        for batch in plan.batches:  # already nearest-reset-first
+            if (batch.provider_id, batch.account_id) in stopped:
+                continue
+            tasks = tuple(
+                task for task in tick.allocations[(batch.provider_id, batch.account_id)]
+                if (task.id in tick.dispatch_last) == last
+            )
+            if dry_run:
+                for task in tasks:
+                    previews.append({
+                        "task_id": task.id,
+                        "provider_id": batch.provider_id,
+                        "account_id": batch.account_id,
+                        "eligibility_key": batch.eligibility_key,
+                    })
+                continue
             for task in tasks:
-                previews.append({
-                    "task_id": task.id,
-                    "provider_id": batch.provider_id,
-                    "account_id": batch.account_id,
-                    "eligibility_key": batch.eligibility_key,
-                })
-            continue
-        for task in tasks:
-            try:
-                dispatched.append(dispatch(
-                    config, queue, task_id=task.id,
-                    eligibility_key=batch.eligibility_key,
-                    requested_provider=batch.provider_id,
-                    trigger="bonus",
-                    now_epoch=now,
-                    router_call=router_call, activation_call=activation_call,
-                ))
-            except ActivationUnavailable as exc:
-                errors.append({"task_id": task.id, "kind": "failed", "message": str(exc)})
-                break
-            except AmbiguousDispatch as exc:
-                errors.append({"task_id": task.id, "kind": "ambiguous", "message": str(exc)})
-                # The claim and durable activation lease remain fail-closed because the job may
-                # exist. Continue with compatible work on the same account only; doctor requires
-                # explicit reconciliation before an account switch.
-            except Exception as exc:
-                errors.append({"task_id": task.id, "kind": "failed", "message": str(exc)})
+                try:
+                    dispatched.append(dispatch(
+                        config, queue, task_id=task.id,
+                        eligibility_key=batch.eligibility_key,
+                        requested_provider=batch.provider_id,
+                        trigger="bonus",
+                        now_epoch=now,
+                        router_call=router_call, activation_call=activation_call,
+                    ))
+                except (ActivationUnavailable, ProviderLaunchUnavailable) as exc:
+                    hold = exc.account_hold
+                    if hold is not None:
+                        # A managed account hold is not a scout failure: reporting it as an
+                        # error would cycle stuck/recovered notices for the whole backoff.
+                        account_holds.append({
+                            "task_id": task.id, "provider_id": hold.provider_id,
+                            "account_id": hold.account_id, "cause": hold.cause,
+                        })
+                    else:
+                        errors.append({"task_id": task.id, "kind": "failed", "message": str(exc)})
+                    stopped.add((batch.provider_id, batch.account_id))
+                    break
+                except AmbiguousDispatch as exc:
+                    errors.append({"task_id": task.id, "kind": "ambiguous", "message": str(exc)})
+                    # The claim and durable activation lease remain fail-closed because the job may
+                    # exist. Continue with compatible work on the same account only; doctor requires
+                    # explicit reconciliation before an account switch.
+                except Exception as exc:
+                    errors.append({"task_id": task.id, "kind": "failed", "message": str(exc)})
 
     return ScoutReport(
         now, dry_run, plan, tuple(dispatched), tuple(previews),
@@ -771,4 +868,5 @@ def _run_locked(
         lifecycle_blockers + tick.dependency_holds + host_blockers,
         router_preflight,
         reconciliation, goal_updates, recoveries,
+        preflight=preflight, account_holds=tuple(account_holds),
     )

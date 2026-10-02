@@ -27,7 +27,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   source_ref            TEXT,
   start_ref             TEXT,
   work_group            TEXT,
-  depends_on_json       TEXT
+  depends_on_json       TEXT,
+  checks_json           TEXT,
+  merged_depends_on_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS runs (
@@ -80,6 +82,42 @@ CREATE TABLE IF NOT EXISTS activation_leases (
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version    INTEGER PRIMARY KEY,
   applied_at TEXT NOT NULL
+);
+
+-- Account holds: a proved activation or launcher failure backs off the account, not the task.
+CREATE TABLE IF NOT EXISTS account_backoff (
+  provider_id TEXT NOT NULL,
+  account_id  TEXT NOT NULL,
+  cause       TEXT NOT NULL CHECK (cause IN ('activation_unswitched','codex_daemon_start')),
+  failures    INTEGER NOT NULL CHECK (failures >= 1),
+  not_before  TEXT NOT NULL,
+  detail      TEXT,
+  updated_at  TEXT NOT NULL,
+  PRIMARY KEY (provider_id, account_id)
+);
+
+-- Stored preflight results. Only the scout refresher and explicit manual dispatch write
+-- them; readers never evaluate. generation is the evaluation CAS token.
+CREATE TABLE IF NOT EXISTS check_results (
+  task_id       TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  check_id      TEXT NOT NULL,
+  spec_json     TEXT NOT NULL,
+  context_json  TEXT NOT NULL DEFAULT '{}',
+  generation    INTEGER NOT NULL DEFAULT 1 CHECK (generation >= 1),
+  status        TEXT CHECK (status IS NULL OR status IN ('pass','fail','unknown')),
+  detail        TEXT,
+  checked_at    TEXT,
+  unknown_since TEXT,
+  CHECK ((status IS NULL) = (checked_at IS NULL)),
+  PRIMARY KEY (task_id, check_id)
+);
+
+-- One notification per external blocker attempt; rows seeded by migration v3 never notify.
+CREATE TABLE IF NOT EXISTS blocker_notices (
+  attempt_id  TEXT PRIMARY KEY REFERENCES task_attempts(id),
+  task_id     TEXT NOT NULL,
+  notified_at TEXT NOT NULL,
+  seeded      INTEGER NOT NULL DEFAULT 0 CHECK (seeded IN (0,1))
 );
 
 CREATE TABLE IF NOT EXISTS scout_notification_state (

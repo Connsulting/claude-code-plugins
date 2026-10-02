@@ -6,6 +6,6 @@ entrypoints under ``skills/bonus-drain`` are compatibility wrappers around :mod:
 
 from __future__ import annotations
 
-__version__ = "0.3.11"
+__version__ = "0.3.12"
 
 __all__ = ["__version__"]

@@ -346,10 +346,7 @@ done-when. Normal PR work is done only after all checks pass for the current hea
 work also requires a confirmed merge into the exact authorized epic branch. Opening a PR,
 pending or failing checks, and an unmerged epic PR are not completion. Use `artifact` completion
 with evidence of the PR, passing checks, and any required merge. Pending human review alone does
-not block normal completion once checks pass. `awaiting_human` parks a run whose remaining step
-needs Brian personally; it requires a reason detail naming that step, is never requeued or
-recovered automatically, and leaves dependents waiting until operator recovery (requeue or
-recover-complete) continues it.
+not block normal completion once checks pass. `awaiting_human` is retired for new records; historical rows stay readable. An external blocker records `failed` with `authority_required` and a `resume_when` check list.
 Attempts remain visible after failure, skip, ambiguity, or a proved-not-launched abort, so a late
 worker cannot close or release a newer attempt.
 

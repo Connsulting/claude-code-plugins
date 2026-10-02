@@ -1118,9 +1118,17 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
                 )),
             )
         router.assert_not_called()
+        # A proven-unswitched account holds the account, not the task: no attempt remains.
         self.assertEqual(rows(
             self.queue, "SELECT state FROM task_attempts WHERE task_id='activation-failed'",
-        ), [{"state": "aborted"}])
+        ), [])
+        self.assertEqual(
+            [
+                (row["provider_id"], row["account_id"], row["cause"], row["failures"])
+                for row in rows(self.queue, "SELECT * FROM account_backoff")
+            ],
+            [("alpha", "alpha-account", "activation_unswitched", 1)],
+        )
         self.assertTrue(self.queue.readiness("activation-failed", now_epoch=NOW)["ready"])
 
         self._dispatch(

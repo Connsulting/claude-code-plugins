@@ -4,7 +4,8 @@ set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 skill_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
-target_home=${HOME:?HOME is required}
+: "${HOME:?HOME is required}"
+target_home=
 
 if [ "${1:-}" = "--home" ]; then
     [ "$#" -eq 2 ] || { echo "usage: install.sh [--home DIR]" >&2; exit 2; }
@@ -20,7 +21,8 @@ import sys
 sys.path.insert(0, sys.argv[1])
 from bonus_drain import lifecycle
 
-installed = lifecycle.install(sys.argv[1], sys.argv[2])
+# No --home is the caller's live install, which keeps its own XDG and config overrides.
+installed = lifecycle.install(sys.argv[1], sys.argv[2] or None)
 print(json.dumps({
     "version": installed.version,
     "version_dir": str(installed.version_dir),

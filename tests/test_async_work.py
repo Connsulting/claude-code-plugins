@@ -139,6 +139,9 @@ class AsyncWorkTests(unittest.TestCase):
         self.assertIsNone(value.pop('start_ref'))
         for field in ('priority', 'size', 'active'):
             value.pop(field)
+        for field in ('checks', 'merged_depends_on'):
+            if not value[field]:
+                value.pop(field)
         legacy_hash = hashlib.sha256(json.dumps(value, sort_keys=True,
             separators=(',', ':')).encode()).hexdigest()
         self.assertEqual(db._contract_hash(original), legacy_hash)

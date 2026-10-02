@@ -20,6 +20,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any, Iterator
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -202,7 +203,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             self.assertIsInstance(manifest.get("description"), str, manifest_path)
             self.assertTrue(manifest["description"].strip(), manifest_path)
             versions.append(manifest["version"])
-        self.assertEqual(versions, ["0.3.11", "0.3.11"])
+        self.assertEqual(versions, ["0.3.12", "0.3.12"])
 
         sys.path.insert(0, str(SKILL_ROOT))
         try:
@@ -210,8 +211,8 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             from bonus_drain import lifecycle
         finally:
             sys.path.pop(0)
-        self.assertEqual(__version__, "0.3.11")
-        self.assertEqual(lifecycle._DEFAULT_VERSION, "0.3.11")
+        self.assertEqual(__version__, "0.3.12")
+        self.assertEqual(lifecycle._DEFAULT_VERSION, "0.3.12")
 
     def test_packaged_viewer_supports_secretless_tailnet_controls(self) -> None:
         example = self.load_json(SKILL_ROOT / "config.example.json")
@@ -1254,6 +1255,276 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                 any(all(term in heading for term in terms) for heading in headings),
                 f"README needs a {section} section",
             )
+
+
+class PreflightDocsTests(unittest.TestCase):
+    def test_skill_docs_teach_structured_checks(self) -> None:
+        skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        async_work = (PLUGIN_ROOT / "skills" / "async-work" / "SKILL.md").read_text(encoding="utf-8")
+        guide = (SKILL_ROOT / "ASYNC_WORK.md").read_text(encoding="utf-8")
+        self.assertIn("Translate every precondition a machine can check into `checks`", skill)
+        self.assertIn("into a `checks` entry", async_work)
+        self.assertIn("--depends-on parent-id:merged,other-id:done", guide)
+        self.assertIn("bonus-drain held-report --json", guide)
+        self.assertIn("`record` refuses `awaiting_human`", skill)
+
+
+_UPGRADE_NOW = 2_000_000_000
+_UPGRADE_KEY = "account-a/weekly/2000001000"
+
+
+def _runtime_modules():
+    sys.path.insert(0, str(SKILL_ROOT))
+    try:
+        from bonus_drain import db, lifecycle
+    finally:
+        sys.path.pop(0)
+    return db, lifecycle
+
+
+def _drop_v3(path: Path) -> None:
+    """Reduce a freshly initialized queue to the v2 shape the base release wrote."""
+
+    import sqlite3
+
+    with sqlite3.connect(path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(tasks)")}
+        for column in ("checks_json", "merged_depends_on_json"):
+            if column in columns:
+                connection.execute(f"ALTER TABLE tasks DROP COLUMN {column}")
+        for table in ("account_backoff", "check_results", "blocker_notices"):
+            connection.execute(f"DROP TABLE IF EXISTS {table}")
+        connection.execute("DELETE FROM schema_migrations WHERE version=3")
+
+
+def _table_counts(path: Path) -> dict[str, int]:
+    import sqlite3
+
+    with sqlite3.connect(path) as connection:
+        names = [
+            row[0] for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        ]
+        return {
+            name: connection.execute(f'SELECT COUNT(*) FROM "{name}"').fetchone()[0]
+            for name in names
+        }
+
+
+class UpgradeOrderingTests(unittest.TestCase):
+    """Install migrates the live queue before the new release becomes current."""
+
+    maxDiff = None
+
+    def setUp(self) -> None:
+        self.db, self.lifecycle = _runtime_modules()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.home = self.root / "home"
+        self.config_path = self.home / ".config" / "bonus-drain" / "config.json"
+        self.database = self.home / ".local" / "state" / "bonus-drain" / "queue.db"
+        # Resolution must stay inside the temporary HOME; never reach a real queue.
+        environment = mock.patch.dict(os.environ, {
+            "HOME": str(self.home),
+            "XDG_CONFIG_HOME": str(self.home / ".config"),
+            "XDG_STATE_HOME": str(self.home / ".local" / "state"),
+            "XDG_CACHE_HOME": str(self.home / ".cache"),
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("BONUS_DRAIN_CONFIG", None)
+
+    def write_config(self) -> None:
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        BonusDrainPackageContractTests.installed_config(self, self.home, self.config_path)
+        self.assertEqual(
+            json.loads(self.config_path.read_text(encoding="utf-8"))["database"], str(self.database),
+        )
+
+    def v2_database(self) -> str:
+        self.write_config()
+        queue = self.db.QueueDB(self.database)
+        queue.initialize()
+        queue.add_task({
+            "id": "legacy", "title": "legacy", "kind": "oneoff", "cwd": str(self.root),
+            "goal": "keep working after upgrade", "size": "small",
+        })
+        attempt = queue.claim(
+            "legacy", _UPGRADE_KEY, "provider-a", "account-a", now_epoch=_UPGRADE_NOW,
+        )
+        assert attempt is not None
+        queue.record(
+            "legacy", _UPGRADE_KEY, attempt_id=attempt.id, status="failed",
+            outcome={"reason": {
+                "code": "authority_required", "detail": "Missing GitHub test actor",
+                "signature": "authority_required:test-actor",
+            }},
+            provider_id="provider-a", account_id="account-a", now_epoch=_UPGRADE_NOW,
+        )
+        _drop_v3(self.database)
+        return attempt.id
+
+    def schema(self) -> tuple[set[int], set[str], set[str]]:
+        import sqlite3
+
+        with sqlite3.connect(self.database) as connection:
+            versions = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(tasks)")}
+            tables = {
+                row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+        return versions, columns, tables
+
+    def assertV3(self) -> None:
+        versions, columns, tables = self.schema()
+        self.assertIn(3, versions)
+        self.assertTrue({"checks_json", "merged_depends_on_json"} <= columns, columns)
+        self.assertTrue({"account_backoff", "check_results", "blocker_notices"} <= tables, tables)
+
+    def current_target(self) -> str:
+        return os.readlink(self.home / ".local" / "lib" / "bonus-drain" / "current")
+
+    def test_install_migrates_v2_database_before_publishing(self) -> None:
+        attempt_id = self.v2_database()
+        self.assertNotIn(3, self.schema()[0])
+
+        installed = self.lifecycle.install(SKILL_ROOT, self.home, version="0.3.12+migrate-test")
+
+        self.assertV3()
+        import sqlite3
+
+        with sqlite3.connect(self.database) as connection:
+            notices = connection.execute(
+                "SELECT attempt_id,task_id,seeded FROM blocker_notices",
+            ).fetchall()
+        self.assertEqual(notices, [(attempt_id, "legacy", 1)])
+        self.assertEqual(self.current_target(), "0.3.12+migrate-test")
+        self.assertEqual(installed.current.resolve(), installed.version_dir)
+
+    def test_local_reader_works_immediately_after_install(self) -> None:
+        self.v2_database()
+        self.lifecycle.install(SKILL_ROOT, self.home, version="0.3.12+reader-test")
+
+        snapshot = self.db.LocalQueueReader(self.database).snapshot(now_epoch=_UPGRADE_NOW + 10)
+        self.assertIn("legacy", snapshot["readiness"])
+        environment = dict(os.environ)
+        environment.pop("PYTHONDONTWRITEBYTECODE", None)
+        environment["BONUS_DRAIN_CONFIG"] = str(self.config_path)
+        completed = subprocess.run(
+            [str(self.home / ".local" / "bin" / "bonus-drain"), "queue", "0", "--json", "--local"],
+            check=False, env=environment, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        payload = json.loads(completed.stdout)
+        self.assertEqual([item["id"] for item in payload["tasks"]], ["legacy"])
+        self.assertEqual(payload["tasks"][0].get("checks"), [])
+
+    def test_install_migrates_target_home_despite_caller_environment(self) -> None:
+        # Review r1 P1: the caller's exported XDG and config paths must not redirect the
+        # migration away from the installation home being published.
+        self.v2_database()
+        caller = self.root / "caller"
+        caller_config = caller / ".config" / "bonus-drain" / "config.json"
+        caller_config.parent.mkdir(parents=True)
+        BonusDrainPackageContractTests.installed_config(self, caller, caller_config)
+        caller_database = caller / ".local" / "state" / "bonus-drain" / "queue.db"
+        self.db.QueueDB(caller_database).initialize()
+        _drop_v3(caller_database)
+
+        def caller_state() -> tuple[object, ...]:
+            # Compare logical content, not raw bytes: WAL checkpoints from the fixture's own
+            # connections may rewrite the file without any schema or data change.
+            import sqlite3
+
+            with sqlite3.connect(caller_database) as connection:
+                return (
+                    sorted(row[0] for row in connection.execute("SELECT version FROM schema_migrations")),
+                    [row[1] for row in connection.execute("PRAGMA table_info(tasks)")],
+                    sorted(row[0] for row in connection.execute(
+                        "SELECT name FROM sqlite_master WHERE type IN ('table','index','trigger')"
+                    )),
+                    connection.execute("SELECT * FROM tasks ORDER BY id").fetchall(),
+                )
+
+        caller_before = caller_state()
+        os.environ.update({
+            "XDG_STATE_HOME": str(caller / ".local" / "state"),
+            "XDG_CONFIG_HOME": str(caller / ".config"),
+            "BONUS_DRAIN_CONFIG": str(caller_config),
+        })
+
+        self.lifecycle.install(SKILL_ROOT, self.home, version="0.3.12+caller-env-test")
+
+        self.assertV3()
+        self.assertEqual(caller_state(), caller_before)
+        import sqlite3
+
+        with sqlite3.connect(caller_database) as connection:
+            versions = {row[0] for row in connection.execute("SELECT version FROM schema_migrations")}
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(tasks)")}
+        self.assertNotIn(3, versions)
+        self.assertNotIn("checks_json", columns)
+
+    def test_failed_migration_keeps_previous_release_current(self) -> None:
+        import sqlite3
+
+        self.v2_database()
+        self.lifecycle.install(SKILL_ROOT, self.home, version="0.3.12+release-one")
+        self.assertEqual(self.current_target(), "0.3.12+release-one")
+
+        with (
+            mock.patch.object(
+                self.db.QueueDB, "initialize",
+                side_effect=sqlite3.OperationalError("database is locked"),
+            ),
+            self.assertRaisesRegex(self.lifecycle.LifecycleError, "queue migration failed"),
+        ):
+            self.lifecycle.install(SKILL_ROOT, self.home, version="0.3.12+release-two")
+
+        self.assertEqual(self.current_target(), "0.3.12+release-one")
+
+    def test_install_without_database_creates_none(self) -> None:
+        self.lifecycle.install(SKILL_ROOT, self.home, version="0.3.12+fresh-test")
+        self.assertFalse(self.database.exists())
+        self.write_config()
+        self.lifecycle.install(SKILL_ROOT, self.home, version="0.3.12+fresh-config-test")
+        self.assertFalse(self.database.exists())
+        self.assertEqual(self.current_target(), "0.3.12+fresh-config-test")
+
+    def test_reinstall_against_v3_is_noop(self) -> None:
+        self.v2_database()
+        self.lifecycle.install(SKILL_ROOT, self.home, version="0.3.12+reinstall-test")
+        self.assertV3()
+        before = _table_counts(self.database)
+
+        self.lifecycle.install(SKILL_ROOT, self.home, version="0.3.12+reinstall-test")
+
+        self.assertEqual(_table_counts(self.database), before)
+        self.assertEqual(self.current_target(), "0.3.12+reinstall-test")
+
+    def test_migrated_database_stays_compatible_with_base_sql(self) -> None:
+        import sqlite3
+
+        self.v2_database()
+        self.lifecycle.install(SKILL_ROOT, self.home, version="0.3.12+compat-test")
+        self.assertV3()
+
+        # The previous release names its columns explicitly; every v3 change is additive.
+        with sqlite3.connect(self.database) as connection:
+            connection.execute(
+                "INSERT INTO tasks(id,title,kind,priority,cwd,goal,created_at,active,depends_on_json) "
+                "VALUES('base-row','base row','oneoff',2,?,'written by the base release',"
+                "'2033-05-18T03:33:20Z',1,'[]')",
+                (str(self.root),),
+            )
+            selected = connection.execute("SELECT * FROM tasks WHERE id='base-row'").fetchone()
+        self.assertIsNotNone(selected)
+        stored = self.db.QueueDB(self.database).task("base-row")
+        self.assertEqual((stored.checks, stored.merged_depends_on), ((), ()))
+        self.assertEqual(stored.depends_on, ())
 
 
 if __name__ == "__main__":
