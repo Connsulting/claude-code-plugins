@@ -358,7 +358,7 @@ work. It allows at most two recovery attempts, after 5-minute and 30-minute back
 early when the normalized failure reason repeats. Unknown launch state, missing authority, and
 unavailable or malformed repository identity stay held. Divergent parent refs require an explicit
 child start_ref. Ordinary requeue schedules an operator
-recovery without deleting history. Goal-managed public requeue remains rejected; the goal runtime
+recovery without deleting history and leaves retained holds held. `requeue <task> --override-hold --reason <text>` is the one explicit escape: it converts a held authority-required, permanent, or no-progress operator recovery to scheduled now, and records "operator hold override" plus the reason in the recovery detail. It still refuses unknown-launch sources, tasks with dispatch claims, goal-managed tasks or any recovery admission rejection, verified done work, non-one-off tasks, changed contracts, and recoveries that are not held (exit 1). Automatic scout recovery never overrides a hold. Goal-managed public requeue remains rejected; the goal runtime
 may admit implementation or integration recovery under its existing guards, while coordinator and
 frozen acceptance failures require fresh follow-up jobs.
 

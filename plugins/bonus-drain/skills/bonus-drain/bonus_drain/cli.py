@@ -432,14 +432,26 @@ def _command(args: argparse.Namespace) -> int:
         _json(queue.readiness(args.task, now_epoch=_now(args)))
         return 0
     if command == "requeue":
+        if args.reason is not None and not args.override_hold:
+            raise CLIError("--reason is only valid with --override-hold")
+        if args.override_hold and not (args.reason or "").strip():
+            raise CLIError("--override-hold requires a non-empty --reason")
         _cfg, queue = _queue(args)
-        decision = queue.requeue(
-            args.task,
-            args.eligibility_key,
-            attempt_id=args.attempt_id,
-            mode=args.mode,
-            now_epoch=_now(args),
-        )
+        try:
+            decision = queue.requeue(
+                args.task,
+                args.eligibility_key,
+                attempt_id=args.attempt_id,
+                mode=args.mode,
+                now_epoch=_now(args),
+                override_reason=args.reason if args.override_hold else None,
+            )
+        except db.QueueError as exc:
+            if not args.override_hold:
+                raise
+            refusal = {"ok": False, "changed": False, "message": str(exc), "task": args.task}
+            _json(refusal) if args.json else print(str(exc), file=sys.stderr)
+            return 1
         accepted = decision.state in {"scheduled", "backoff"}
         message = (
             f"recovery {decision.state}: {args.task}"
@@ -849,7 +861,7 @@ def build_parser() -> argparse.ArgumentParser:
         item = sub.add_parser(name); _add_common(item); _add_json(item); item.add_argument("cycle", type=int, nargs="?"); item.add_argument("--run-limit", type=int, default=50); item.add_argument("--now", type=int)
         item.add_argument("--local", action="store_true")
     runs = sub.add_parser("runs"); _add_common(runs); _add_json(runs); runs.add_argument("--limit", type=int, default=50); runs.add_argument("--task")
-    requeue = sub.add_parser("requeue"); _add_common(requeue); _add_json(requeue); requeue.add_argument("task"); requeue.add_argument("--eligibility-key"); requeue.add_argument("--attempt-id"); requeue.add_argument("--mode", choices=("retry", "verification")); requeue.add_argument("--now", type=int)
+    requeue = sub.add_parser("requeue"); _add_common(requeue); _add_json(requeue); requeue.add_argument("task"); requeue.add_argument("--eligibility-key"); requeue.add_argument("--attempt-id"); requeue.add_argument("--mode", choices=("retry", "verification")); requeue.add_argument("--override-hold", action="store_true"); requeue.add_argument("--reason"); requeue.add_argument("--now", type=int)
     priority = sub.add_parser("set-priority"); _add_common(priority); priority.add_argument("task"); priority.add_argument("priority", type=int)
     size = sub.add_parser("set-size"); _add_common(size); _add_json(size); size.add_argument("task"); size.add_argument("size", choices=db.TASK_SIZES); size.add_argument("--cycle", type=int, required=True)
     model = sub.add_parser("set-model"); _add_common(model); model.add_argument("task"); model.add_argument("model", nargs="?")
