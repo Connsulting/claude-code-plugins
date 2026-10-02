@@ -328,7 +328,10 @@ When a failed or skipped one-off blocks active dependent work, the scout may mak
 automatic recovery attempts after 5-minute and 30-minute backoffs. Repeating the same failure
 reason stops recovery early. Missing authority, unknown launch ownership, and unavailable
 repository identity remain held. Divergent parent refs need an explicit child start_ref. An
-ordinary operator requeue preserves prior attempts.
+ordinary operator requeue preserves prior attempts and leaves those holds held; `requeue <task>
+--override-hold --reason <text>` explicitly reschedules an authority-required, permanent, or
+no-progress hold, and still refuses unknown launches, claimed, goal-managed, done, non-one-off,
+and changed-contract work.
 Public requeue remains unavailable for goal-managed work; admitted implementation and integration
 recovery stays under the goal contract, while coordinators and frozen acceptance use fresh
 follow-up jobs.

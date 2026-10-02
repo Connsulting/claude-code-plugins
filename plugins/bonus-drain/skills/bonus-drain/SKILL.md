@@ -306,7 +306,8 @@ the task ID and all attempts, allows at most two automatic recovery attempts aft
 failure is verification-first. Missing authority, unknown launch ownership, and unavailable
 repository identity remain held. Divergent parent refs require an explicit child start_ref.
 
-Ordinary public `requeue` schedules an operator recovery without deleting history. Public requeue
+Ordinary public `requeue` schedules an operator recovery without deleting history and never
+reinterprets a retained hold. `requeue <task> --override-hold --reason <text>` is the one explicit escape: it converts a held authority-required, permanent, or no-progress operator recovery to scheduled now, and records "operator hold override" plus the reason in the recovery detail. It still refuses unknown-launch sources, tasks with dispatch claims, goal-managed tasks or any recovery admission rejection, verified done work, non-one-off tasks, changed contracts, and recoveries that are not held (exit 1). Automatic scout recovery never overrides a hold. Public requeue
 for goal-managed tasks remains rejected. GoalStore may internally admit implementation or
 integration recovery under its existing gates; a failed coordinator or frozen acceptance job
 uses its documented fresh follow-up path.

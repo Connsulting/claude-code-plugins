@@ -2829,8 +2829,11 @@ class QueueDB:
         backoff_seconds: tuple[int, ...] = (300, 1800),
         dry_run: bool = False,
         blocked_descendants: int = 0,
+        override_reason: str | None = None,
     ) -> RecoveryDecision:
         from .goals import recovery_admission
+        if override_reason is not None and source != "operator":
+            raise QueueError("only operator requeue can override a retained hold")
         task_row = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
         if task_row is None:
             raise QueueError(f"no such task: {task_id}")
@@ -2868,6 +2871,13 @@ class QueueDB:
                    AND mode IN ('retry','verification') AND state!='aborted'""",
             (task_id,),
         ).fetchone()[0])
+        if override_reason is not None:
+            if not admitted:
+                raise QueueError(f"hold override refused: {admission_reason}")
+            if reason_code == "unknown_launch":
+                raise QueueError(
+                    "hold override refused: unknown_launch ownership must be reconciled, not overridden"
+                )
         if not admitted:
             state, decision_code, decision_detail = "held", admission_reason, admission_reason
             persist = admission_reason != "fresh_goal_followup_required"
@@ -2888,6 +2898,13 @@ class QueueDB:
             ):
                 state, decision_code = "held", "no_progress"
                 decision_detail = "recovery repeated the same normalized failure"
+        if override_reason is not None:
+            if state != "held":
+                raise QueueError(
+                    "hold override refused: recovery is not held; requeue without --override-hold"
+                )
+            state = "scheduled"
+            decision_detail = f"operator hold override ({decision_code}): {override_reason}"[:1000]
         if (
             source == "automatic"
             and state not in {"held", "exhausted"}
@@ -2928,6 +2945,16 @@ class QueueDB:
             existing["after_legacy_run_rowid"] == after_legacy and
             existing["contract_hash"] == contract_hash
         )
+        if override_reason is not None:
+            # Legacy sources carry no contract hash, so the retained row is the only witness.
+            if (
+                existing is not None
+                and existing["after_attempt_id"] == after_attempt
+                and existing["after_legacy_run_rowid"] == after_legacy
+                and existing["contract_hash"] != contract_hash
+            ):
+                raise QueueError("recovery source contract changed")
+            same_source_contract = False
         if (
             same_source_contract
             and source == "automatic"
@@ -3576,9 +3603,14 @@ class QueueDB:
         attempt_id: str | None = None,
         mode: Literal["retry", "verification"] | None = None,
         now_epoch: float | None = None,
+        override_reason: str | None = None,
     ) -> RecoveryDecision:
         from .goals import guard_history
         _require_task_id(task_id)
+        if override_reason is not None:
+            override_reason = override_reason.strip()
+            if not override_reason:
+                raise QueueError("hold override requires a non-empty reason")
         now = float(time.time() if now_epoch is None else now_epoch)
         self.initialize()
         with self._transaction() as connection:
@@ -3609,7 +3641,7 @@ class QueueDB:
                 expected_attempt_id=inferred_attempt,
                 expected_legacy_run_rowid=inferred_legacy,
                 mode=mode, source="operator", now_epoch=now,
-                blocked_descendants=count,
+                blocked_descendants=count, override_reason=override_reason,
             )
 
     def contract_tasks(self, task_id: str, title: str) -> list[Task]:
