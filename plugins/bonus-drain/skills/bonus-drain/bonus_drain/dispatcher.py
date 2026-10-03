@@ -479,7 +479,8 @@ def _pr_policy(config: RuntimeConfig, task: Task) -> str:
 
 # Checkout cleanliness, default ports, and local dependencies are setup the worker
 # performs. They are not skip gates. Genuine authority, prerequisite, provider,
-# contract, ownership, and validation failures still skip immediately.
+# contract, and validation failures still skip immediately. Another task editing the same
+# files in its own worktree is ordinary parallel work, not a skip gate.
 PRECONDITION_EXECUTION_RULE = (
     "Run the precondition first. "
     "A dirty or wrong-branch shared checkout, untracked worktree directories, "
@@ -490,8 +491,10 @@ PRECONDITION_EXECUTION_RULE = (
     "Record skipped immediately only when the work is already complete, or when a "
     "genuine precondition is false: missing authority, a missing prerequisite you "
     "cannot create, an unavailable provider or required service, a frozen contract, "
-    "another owner already editing the same paths, or a validation gate that rejects "
-    "the change for a reason setup cannot remove."
+    "or a validation gate that rejects the change for a reason setup cannot remove. "
+    "Another active task changing the same files in its own worktree is not a reason "
+    "to skip: do the work on your branch, and rebase onto the base and resolve conflicts "
+    "if that task lands first."
 )
 
 

@@ -47,8 +47,8 @@ fact the worker cannot create. Leave it empty rather than requiring a clean chec
 branch, free ports, or installed dependencies. Those are setup. The task's textual precondition
 still describes external checks performed by the runner. Record skipped when that check is a genuine external
 failure: missing authority, a prerequisite the runner cannot create, an unavailable provider
-or required service, a frozen contract, another owner of the same paths, or a validation gate
-setup cannot remove. A dirty or wrong-branch shared checkout, untracked worktree directories,
+or required service, a frozen contract, or a validation gate setup cannot remove. Another task
+changing the same files in its own worktree is not that failure; the runner rebases if it lands first. A dirty or wrong-branch shared checkout, untracked worktree directories,
 occupied default ports, a shared baseline lock, or a missing local dependency is not that
 failure. The runner creates its own clean worktree from the selected starting branch, binds
 private ports, and installs dependencies, and it leaves every other checkout alone. Set

@@ -92,8 +92,10 @@ Keep merge target, authority, and test requirements in constraints or done-when.
 creates its own worktree from the selected starting branch, binds private ports, and installs
 dependencies, and it does not clean another owner's checkout. Write a precondition only for a
 fact outside that setup: missing authority, a prerequisite or release fact the worker cannot
-create, an unavailable provider or required service, a frozen contract, another owner already
-editing the same paths, or a validation gate the worker must not weaken. If none of those applies,
+create, an unavailable provider or required service, a frozen contract, or a validation gate
+the worker must not weaken. Another task editing the same files is not a precondition: each
+worker has its own worktree and rebases if the other lands first; use a dependency edge or a
+work group when the order genuinely matters. If none of those applies,
 leave the precondition empty. Do not invent a checkout check so the task looks guarded. When
 `start_ref` is unset, repository dependencies choose the branch from their recorded metadata.
 Translate every precondition a machine can check into `checks` at queue time, and keep the free-text precondition only for judgment the worker must make. Check types: `base_ref_exists` (`ref`), `issue_open` (`repo`, `number`), `issue_in_milestone` (`repo`, `number`, `milestone`), `pr_merged` (`repo` and `pr` or `head`, optional `base`), `release_exists` (`repo`, `tag`), and `file_matches` (`repo`, `ref`, `path`, `pattern`, optional `present`). Add each with a repeatable `--check '{"type":"issue_open","repo":"owner/repo","number":123}'`, or edit `checks`. The queue also checks automatically that a set `start_ref` exists on origin and that an issue named by `source_ref` (an issue URL or `owner/repo#N`) is still open. The scout evaluates checks before any claim: a failing check leaves the task waiting with its reason and spends no attempt; a check that cannot be evaluated because of a network or tool error waits at most one hour, then the launch proceeds and the worker is told to verify it. Write `start_ref` as a branch name such as `main`, never `origin/main`. When a prerequisite's pull request must land first, use a `merged` dependency edge instead of a precondition.
@@ -256,8 +258,9 @@ error. Prior attempts stay immutable.
   one of `command`, `artifact`, `operator_receipt`, or `goal_acceptance`, and nonempty evidence.
 - `skipped`: the work is already complete, or a genuine precondition is false. That means
   missing authority, a prerequisite the worker cannot create, an unavailable provider or
-  required service, a frozen contract, another owner already editing the same paths, or a
-  validation gate that setup cannot remove. A dirty or wrong-branch shared checkout,
+  required service, a frozen contract, or a validation gate that setup cannot remove.
+  Another active task changing the same files is not a reason to skip; the worker does the
+  work on its own branch and rebases if that task lands first. A dirty or wrong-branch shared checkout,
   untracked worktree directories, occupied default ports, a shared baseline lock, or a
   missing local dependency is setup: create an isolated worktree from the named remote
   base, bind private ports, and install dependencies without cleaning another owner's
