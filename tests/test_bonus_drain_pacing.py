@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from tests.readiness_fixture import reviewed
 
 
 
@@ -329,7 +330,7 @@ class RecurringCycleEligibilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             queue = bonus_db.QueueDB(Path(temporary) / "queue.db")
             queue.initialize()
-            queue.add_task({
+            queue.add_task(reviewed({
                 "id": "weekly-job",
                 "title": "Weekly job",
                 "kind": "recurring",
@@ -338,7 +339,7 @@ class RecurringCycleEligibilityTests(unittest.TestCase):
                 "cwd": "/tmp",
                 "goal": "run weekly",
                 "active": True,
-            })
+            }))
             queue.record(
                 "weekly-job", f"alpha/weekly/{reset}",
                 status="done", provider_id="alpha", account_id="alpha-account",

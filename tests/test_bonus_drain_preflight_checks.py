@@ -21,6 +21,7 @@ from tests.test_bonus_dependency_recovery import (
     KEY, NOW, RecoveryCase, iso, reason, rows, task, verified,
 )
 from bonus_drain import checks, db, goals
+from tests.readiness_fixture import rereviewed, reviewed
 
 HOUR = 3_600
 REPO = "curie-eng/curie"
@@ -192,7 +193,10 @@ def authority(
     signature: str = "authority_required:test-actor",
 ) -> dict[str, object]:
     value: dict[str, object] = {
-        "reason": {"code": "authority_required", "detail": detail, "signature": signature},
+        "reason": {
+            "code": "authority_required", "detail": detail, "signature": signature,
+            "queue_time_knowable": False,
+        },
     }
     if resume_when is not None:
         value["resume_when"] = resume_when
@@ -235,6 +239,9 @@ def legacy_contract_hash(item: db.Task) -> str:
         value.pop("start_ref")
     value.pop("checks", None)
     value.pop("merged_depends_on", None)
+    value.pop("readiness_review", None)
+    if not value.get("grants"):
+        value.pop("grants", None)
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -264,7 +271,7 @@ class PreflightCase(RecoveryCase):
 
     def add(self, task_id: str, **changes: object):
         cwd = changes.pop("cwd", self.root)
-        return self.queue.add_task(task(task_id, cwd, **changes))
+        return self.queue.add_task(reviewed(task(task_id, cwd, **changes)))
 
     def runner(self, responses: Mapping[tuple[str, ...], Any] | None = None) -> FakeRunner:
         fake = FakeRunner(responses)
@@ -331,6 +338,7 @@ class CheckSpecTests(PreflightCase):
         self.assertEqual(set(checks.CHECK_FIELDS), {
             "base_ref_exists", "issue_open", "issue_in_milestone",
             "pr_merged", "release_exists", "file_matches",
+            "mcp_authenticated", "k8s_resource_exists", "openrouter_credit",
         })
 
     def test_normalize_rejects_invalid_specs(self) -> None:
@@ -692,7 +700,7 @@ class CheckGatingTests(PreflightCase):
         _repo_a, repo_b, _fake = self._two_repositories()
         self.assertTrue(self.ready("t1")["ready"])
 
-        self.queue.edit_task("t1", {"cwd": str(repo_b)})
+        self.queue.edit_task("t1", rereviewed(self.queue.task("t1"), {"cwd": str(repo_b)}))
 
         status = self.ready("t1")
         self.assertEqual(status["hold_reason"], "check_unchecked")
@@ -1053,7 +1061,9 @@ class QueueValidationTests(PreflightCase):
         self.assertEqual(edited.start_ref, "refs/heads/origin/main")
         with self.assertRaisesRegex(db.QueueError, "remote-tracking"):
             self.queue.edit_task("legacy", {"start_ref": "origin/main"})
-        self.assertEqual(self.queue.edit_task("legacy", {"start_ref": "main"}).start_ref, "refs/heads/main")
+        self.assertEqual(
+            self.queue.edit_task("legacy", rereviewed(edited, {"start_ref": "main"})).start_ref, "refs/heads/main",
+        )
 
     def test_invalid_checks_rejected(self) -> None:
         with self.assertRaisesRegex(db.QueueError, "checks"):
@@ -1062,7 +1072,7 @@ class QueueValidationTests(PreflightCase):
         self.add("good", checks=[ISSUE_OPEN_3815])
         with self.assertRaisesRegex(db.QueueError, "checks"):
             self.queue.edit_task("good", {"checks": [{"type": "nope"}]})
-        edited = self.queue.edit_task("good", {"checks": [RELEASE_V0_11_1]})
+        edited = self.queue.edit_task("good", rereviewed(self.queue.task("good"), {"checks": [RELEASE_V0_11_1]}))
         self.assertEqual(edited.to_dict()["checks"], [RELEASE_V0_11_1])
 
     def test_merged_depends_on_must_be_subset(self) -> None:
@@ -1076,7 +1086,7 @@ class QueueValidationTests(PreflightCase):
         self.assertEqual(child.to_dict()["merged_depends_on"], ["parent"])
         # Dropping a merged edge from depends_on also drops its mode.
         self.assertEqual(
-            self.queue.edit_task("child", {"depends_on": ["other"]}).merged_depends_on, (),
+            self.queue.edit_task("child", rereviewed(child, {"depends_on": ["other"]})).merged_depends_on, (),
         )
 
     def test_unknown_dependency_rejected(self) -> None:
@@ -1815,6 +1825,7 @@ class RootBlockerTests(PreflightCase):
         self.assertEqual(set(item), {
             "source", "task_id", "title", "held_since", "detail",
             "blocked_descendants", "descendants", "source_attempt_id", "resume_when",
+            "reason_code", "queue_time_knowable",
         })
 
     def test_held_report_includes_standalone_failed_blocker(self) -> None:

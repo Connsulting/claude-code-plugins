@@ -168,7 +168,9 @@ def _task_values(args: argparse.Namespace) -> dict[str, Any]:
         "start_ref": args.start_ref,
         "work_group": args.work_group,
         "depends_on": [x.strip() for x in (args.depends_on or "").split(",") if x.strip()],
-        "checks": [_json_check(item) for item in (getattr(args, "check", None) or [])],
+        "checks": [_json_argument(item, "--check") for item in (getattr(args, "check", None) or [])],
+        "grants": [_json_argument(item, "--grant") for item in (args.grant or [])],
+        "readiness_review": _readiness_review(args.readiness_review),
         "id": args.id,
         "title": args.title,
         "kind": args.kind,
@@ -190,11 +192,68 @@ def _task_values(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def _json_check(raw: str) -> Any:
+def _json_argument(raw: str, flag: str) -> Any:
     try:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise CLIError(f"--check must be a JSON object: {exc}") from exc
+        raise CLIError(f"{flag} must be a JSON object: {exc}") from exc
+
+
+def _readiness_review(raw: str | None) -> Any:
+    """``--readiness-review`` JSON text, or ``@<path>`` naming a file that holds it."""
+
+    if raw is None:
+        return None
+    if raw.startswith("@"):
+        path = Path(raw[1:]).expanduser()
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise CLIError(f"cannot read --readiness-review file {path}: {exc}") from exc
+    return _json_argument(raw, "--readiness-review")
+
+
+def _readiness_backfill(queue: db.QueueDB, now: int) -> dict[str, Any]:
+    """Review state and live launch-check results of every launchable task; stores nothing."""
+
+    from . import review
+    candidates = queue.backfill_candidates()
+    observed = checks.observe(
+        queue.check_work(now_epoch=now, task_ids=[task.id for task in candidates], due_only=False),
+        runner=checks.subprocess_runner,
+    ) if candidates else []
+    checks_by_task: dict[str, list[dict[str, Any]]] = {}
+    for entry in observed:
+        checks_by_task.setdefault(entry["task_id"], []).append(entry)
+    tasks: list[dict[str, Any]] = []
+    for task in candidates:
+        problems = review.review_problems(task)
+        if task.readiness_review is None:
+            state = "missing"
+        elif not problems:
+            state = "valid"
+        elif problems == [review.STALE]:
+            state = "stale"
+        else:
+            state = "invalid"
+        task_checks = checks_by_task.get(task.id, [])
+        tasks.append({
+            "task_id": task.id, "title": task.title, "kind": task.kind,
+            "review": state, "review_problems": problems, "checks": task_checks,
+            "ready_for_launch": state == "valid" and all(entry["status"] == "pass" for entry in task_checks),
+        })
+    return {
+        "tasks": tasks,
+        "summary": {
+            "candidates": len(tasks),
+            "missing_review": sum(item["review"] == "missing" for item in tasks),
+            "invalid_review": sum(item["review"] == "invalid" for item in tasks),
+            "stale_review": sum(item["review"] == "stale" for item in tasks),
+            "failing_checks": sum(
+                any(entry["status"] != "pass" for entry in item["checks"]) for item in tasks
+            ),
+        },
+    }
 
 
 _EDGE_MODES = frozenset({"done", "merged"})
@@ -748,13 +807,50 @@ def _command(args: argparse.Namespace) -> int:
     if command == "held-report":
         _cfg, queue = _queue(args)
         report = queue.held_authority_report()
+        measurement = queue.blocker_measurement()
         if args.json:
-            _json({"held": report})
+            _json({"held": report, "measurement": measurement})
         else:
+            knowable_label = {True: "yes", False: "no", None: ""}
             for item in report:
-                print("\t".join(str(item.get(key) if item.get(key) is not None else "") for key in (
-                    "task_id", "held_since", "blocked_descendants", "detail",
+                print("\t".join([
+                    *(str(item.get(key) if item.get(key) is not None else "") for key in (
+                        "task_id", "held_since", "blocked_descendants", "reason_code",
+                    )),
+                    knowable_label[item["queue_time_knowable"]],
+                    str(item["detail"] if item["detail"] is not None else ""),
+                ]))
+            totals = {code: sum(counts.values()) for code, counts in measurement.items()}
+            print(
+                "queue-time knowable: "
+                + ", ".join(
+                    f"{code} {counts['knowable']}/{totals[code]}" for code, counts in measurement.items()
+                )
+                + f" ({sum(counts['unreported'] for counts in measurement.values())} unreported)"
+            )
+        return 0
+    if command == "readiness-backfill":
+        _cfg, queue = _queue(args)
+        result = _readiness_backfill(queue, _now(args))
+        if args.json:
+            _json(result)
+        else:
+            for item in result["tasks"]:
+                print("\t".join((
+                    item["task_id"], item["kind"], f"review {item['review']}",
+                    "ready" if item["ready_for_launch"] else "not ready", item["title"],
                 )))
+                for problem in item["review_problems"]:
+                    print(f"  review: {problem}")
+                for entry in item["checks"]:
+                    if entry["status"] != "pass":
+                        print(f"  check {entry['status']}: {entry['check']}: {entry['detail']}")
+            summary = result["summary"]
+            print(
+                f"candidates {summary['candidates']}, missing review {summary['missing_review']}, "
+                f"invalid review {summary['invalid_review']}, stale review {summary['stale_review']}, "
+                f"failing checks {summary['failing_checks']}"
+            )
         return 0
     if command == "doctor":
         from . import lifecycle
@@ -941,6 +1037,7 @@ def build_parser() -> argparse.ArgumentParser:
     edit = sub.add_parser("edit"); _add_common(edit); _add_json(edit); edit.add_argument("task"); edit.add_argument("--changes", required=True)
     ready = sub.add_parser("readiness"); _add_common(ready); _add_json(ready); ready.add_argument("task"); ready.add_argument("--now", type=int)
     add.add_argument("--providers"); add.add_argument("--capabilities"); add.add_argument("--check", action="append")
+    add.add_argument("--grant", action="append"); add.add_argument("--readiness-review", dest="readiness_review")
 
     for name in ("eligible", "count-eligible"):
         item = sub.add_parser(name); _add_common(item); item.add_argument("cycle", type=int); _add_filters(item)
@@ -1011,6 +1108,7 @@ def build_parser() -> argparse.ArgumentParser:
     accounts = sub.add_parser("accounts"); _add_common(accounts); accounts.add_argument("accounts_command", choices=("labels", "count", "multi", "cycle", "canonical-cycle", "usage", "select")); accounts.add_argument("account", nargs="?"); accounts.add_argument("epoch", type=int, nargs="?"); accounts.add_argument("--now", type=int)
     doctor = sub.add_parser("doctor"); _add_common(doctor); _add_json(doctor)
     held = sub.add_parser("held-report"); _add_common(held); _add_json(held)
+    backfill = sub.add_parser("readiness-backfill"); _add_common(backfill); _add_json(backfill); backfill.add_argument("--now", type=int)
 
     install = sub.add_parser("install"); install.add_argument("--source", type=Path, required=True); install.add_argument("--home", type=Path); install.add_argument("--version", dest="install_version"); _add_json(install)
     uninstall = sub.add_parser("uninstall"); uninstall.add_argument("--home", type=Path); _add_json(uninstall)

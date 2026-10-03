@@ -12,6 +12,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
+from tests.readiness_fixture import reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
@@ -223,7 +224,7 @@ class QueueBranchChoiceContract(unittest.TestCase):
         self.queue.initialize()
 
     def add(self, task_id: str, **changes: object) -> db.Task:
-        return self.queue.add_task(task(task_id, self.root, **changes))
+        return self.queue.add_task(reviewed(task(task_id, self.root, **changes)))
 
     def complete(self, task_id: str, repo: dict[str, object] | None = None) -> None:
         attempt = self.queue.claim(

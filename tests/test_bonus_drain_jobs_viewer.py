@@ -17,6 +17,7 @@ import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
+from tests.readiness_fixture import reviewed
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -515,10 +516,10 @@ class JobsViewerContractTests(unittest.TestCase):
         db_path = Path(temporary.name) / "queue.db"
         queue = self.viewer.QueueDB(db_path)
         queue.initialize()
-        queue.add_task({
+        queue.add_task(reviewed({
             "id": "runaway-job", "title": "Runaway", "kind": "oneoff",
             "priority": 2, "cwd": "/tmp", "goal": "run", "active": True,
-        })
+        }))
         key = "alpha-account/manual/2000000000"
         queue.record(
             "runaway-job", key, status="dispatched", provider_id="claude",
@@ -547,15 +548,15 @@ class JobsViewerContractTests(unittest.TestCase):
                 queue.initialize()
                 parent_id = f"operator-parent-{status}"
                 child_id = f"operator-child-{status}"
-                queue.add_task({
+                queue.add_task(reviewed({
                     "id": parent_id, "title": "Operator parent", "kind": "oneoff",
                     "priority": 2, "cwd": "/tmp", "goal": "run", "active": True,
-                })
-                queue.add_task({
+                }))
+                queue.add_task(reviewed({
                     "id": child_id, "title": "Operator child", "kind": "oneoff",
                     "priority": 2, "cwd": "/tmp", "goal": "run", "active": True,
                     "depends_on": [parent_id],
-                })
+                }))
                 key = "claude-personal/manual/2000000000"
                 attempt = queue.claim(
                     parent_id, key, "claude", "claude-personal",
@@ -1433,7 +1434,7 @@ class CheckReadinessViewerTests(unittest.TestCase):
         queue = db.QueueDB(self.root / "queue.db")
         queue.initialize()
         spec = {"type": "issue_open", "repo": "owner/repo", "number": 12}
-        added = queue.add_task(task("fresh", self.root, checks=[spec]))
+        added = queue.add_task(reviewed(task("fresh", self.root, checks=[spec])))
         readiness = queue.readiness("fresh", now_epoch=NOW + 10)
 
         html = self.viewer._work_meta({**added.to_dict(), "readiness": readiness})

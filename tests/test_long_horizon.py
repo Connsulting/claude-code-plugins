@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest import mock
 from dataclasses import replace
+from tests.readiness_fixture import rereviewed, reviewed
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'plugins/bonus-drain/skills/bonus-drain'))
@@ -85,17 +86,18 @@ class GoalTests(unittest.TestCase):
         return {'task': value, 'role': 'implementation'}
 
     def test_optional_start_ref_preserves_old_goal_hash_until_set(self):
-        queued = self.queue.add_task(self.job('standalone')['task'])
+        queued = self.queue.add_task(reviewed(self.job('standalone')['task']))
         value = queued.to_dict()
         self.assertIsNone(value.pop('start_ref'))
         for field in ('priority', 'size', 'active'):
             value.pop(field)
-        for field in ('checks', 'merged_depends_on'):
-            if not value[field]:
-                value.pop(field)
+        value.pop('readiness_review', None)
+        for field in ('checks', 'merged_depends_on', 'grants'):
+            if not value.get(field):
+                value.pop(field, None)
         old_hash = hashlib.sha256(goals._json(value).encode()).hexdigest()
         self.assertEqual(goals._contract_hash(queued), old_hash)
-        selected = self.queue.edit_task('standalone', {'start_ref': 'epic/next'})
+        selected = self.queue.edit_task('standalone', rereviewed(queued, {'start_ref': 'epic/next'}))
         self.assertNotEqual(goals._contract_hash(selected), old_hash)
 
     def advance(self, turn, revision, **changes):
@@ -105,7 +107,7 @@ class GoalTests(unittest.TestCase):
         return self.store.advance('release', turn, value, now=NOW)
 
     def test_create_is_queue_only_and_does_not_adopt_group_by_title(self):
-        self.queue.add_task(dict(id='unrelated', title='release', work_group='Example', cwd=self.tmp.name))
+        self.queue.add_task(reviewed(dict(id='unrelated', title='release', work_group='Example', cwd=self.tmp.name)))
         self.create()
         self.assertEqual(self.queue.runs(), [])
         self.assertEqual(self.store.show('release')['members'], [])
@@ -204,7 +206,7 @@ class GoalTests(unittest.TestCase):
         turn, revision = self.start_turn()
         self.advance(turn, revision, tasks=[self.job('a')], wait_for=['a'])
         self.finish(turn)
-        self.queue.add_task(dict(id='other', title='Other', cwd=self.tmp.name))
+        self.queue.add_task(reviewed(dict(id='other', title='Other', cwd=self.tmp.name)))
         self.store.tick(now=NOW + 3601)
         self.assertFalse(self.queue.claim('a', 'account/manual/2000000000', 'alpha', 'account'))
         self.assertTrue(self.queue.claim('other', 'account/manual/2000000000', 'alpha', 'account'))
@@ -220,8 +222,8 @@ class GoalTests(unittest.TestCase):
         self.assertEqual(sum(result is not None for result in results), 1)
 
     def test_explicit_membership_does_not_rewrite_existing_contract(self):
-        self.queue.add_task(dict(id='existing', title='Existing', cwd=self.tmp.name,
-                                 constraints='Do not merge', use_implement=False))
+        self.queue.add_task(reviewed(dict(id='existing', title='Existing', cwd=self.tmp.name,
+                                 constraints='Do not merge', use_implement=False)))
         before = self.queue.task('existing')
         self.create(task_ids=['existing'])
         self.assertEqual(self.queue.task('existing'), before)
@@ -303,7 +305,7 @@ class GoalTests(unittest.TestCase):
     def test_cannot_rearm_already_settled_join_and_burn_turns(self):
         self.create()
         turn, revision = self.start_turn()
-        self.queue.add_task(dict(id='old', title='Old', cwd=self.tmp.name))
+        self.queue.add_task(reviewed(dict(id='old', title='Old', cwd=self.tmp.name)))
         self.finish('old')
         with self.assertRaises(db.QueueError):
             self.advance(turn, revision, task_ids=['old'], wait_for=['old'])

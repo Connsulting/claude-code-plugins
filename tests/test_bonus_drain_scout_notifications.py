@@ -16,6 +16,7 @@ from tests.test_bonus_drain_scout_host_gate import SKILL_ROOT, _raw_config
 from tests.test_bonus_drain_review_repairs import ELIGIBILITY_KEY, NOW, runtime, task
 from bonus_drain import cli, config, db, notifications, scout
 from bonus_drain.planner import PlanResult
+from tests.readiness_fixture import reviewed
 
 
 class ScoutNotificationTests(unittest.TestCase):
@@ -174,7 +175,7 @@ class ScoutNotificationTests(unittest.TestCase):
         path = self.root / "config.json"
         path.write_text(json.dumps(raw))
         queue = db.QueueDB(Path(raw["database"]))
-        queue.add_task(task("frozen-task"))
+        queue.add_task(reviewed(task("frozen-task")))
         attempt = queue.claim("frozen-task", ELIGIBILITY_KEY, "alpha", "alpha-account", now_epoch=NOW)
         queue.mark_ambiguous("frozen-task", ELIGIBILITY_KEY, detail="unknown launch secret")
 
@@ -196,7 +197,7 @@ class ScoutNotificationTests(unittest.TestCase):
         queue.record(
             "frozen-task", ELIGIBILITY_KEY, attempt_id=attempt.id, status="failed",
             summary="Local reconciliation proved no launch", now_epoch=NOW + 2,
-            outcome={"reason": {"code": "verification_needed", "detail": "Local test reconciliation", "signature": "test:reconciliation"}},
+            outcome={"reason": {"code": "verification_needed", "detail": "Local test reconciliation", "signature": "test:reconciliation", "queue_time_knowable": False}},
         )
         for now in (NOW + 3, NOW + 4):
             code, report = run_tick(now)

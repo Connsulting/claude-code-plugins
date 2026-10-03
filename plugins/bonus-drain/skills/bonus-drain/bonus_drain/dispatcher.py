@@ -369,6 +369,7 @@ def _outcome_contract_line() -> str:
             "code": {"allowed": sorted(REASON_CODES)},
             "detail": "<non-empty bounded detail>",
             "signature": "<stable non-secret signature>",
+            "queue_time_knowable": "<boolean; required when code is authority_required or verification_needed>",
         },
         "completion": {
             "verified": True,
@@ -496,6 +497,39 @@ PRECONDITION_EXECUTION_RULE = (
     "to skip: do the work on your branch, and rebase onto the base and resolve conflicts "
     "if that task lands first."
 )
+DEFAULT_WORKER_GRANT = (
+    "Default authority on every task: when a file your change touches has pre-existing lint, "
+    "format, or type errors (for example an inherited Ruff F401), fix them in the same change "
+    "instead of stopping or recording a failure for them. This does not extend to files your "
+    "change does not otherwise touch."
+)
+# Appended to the publication policy only when the task carries queue-time grants, so the
+# policy of an ungranted task stays byte-identical.
+GRANT_POLICY_OVERRIDE = (
+    "Queue-time grants listed in this prompt are explicit exceptions to this default: within each "
+    "grant's stated scope, perform the granted action (including a merge, push, release, or "
+    "infrastructure change it names) and do not stop or record authority_required for it."
+)
+QUEUE_TIME_KNOWABLE_RULE = (
+    "When reason.code is authority_required or verification_needed, set reason.queue_time_knowable "
+    "to true if the blocker already existed and could have been found before launch from the task "
+    "contract, its source issue, the ADRs it cites, the governing AGENTS.md or CLAUDE.md files, or a "
+    "probe of an external dependency (credentials, provider credit, MCP auth, cluster resources, "
+    "vendor capabilities); false if it only emerged from the work itself."
+)
+
+
+def _grants_section(task: Task) -> list[str]:
+    if not task.grants:
+        return []
+    lines = []
+    for raw in task.grants:
+        grant = json.loads(raw)
+        lines.append(f"- {grant['scope']} ({grant['kind']}, grant {grant['id']})")
+    return [
+        "Authority Brian granted at queue time. These are explicit grants: act within them and do not "
+        "stop, skip, or record authority_required for anything they cover:\n" + "\n".join(lines)
+    ]
 
 
 def render_prompt(
@@ -595,18 +629,23 @@ def render_prompt(
         sections.append('Use these exact runtime/config/database bindings for this goal; '
                         'replace only the file placeholder when needed.\n' + '\n'.join(commands))
     if task.kind == "oneoff":
+        policy = _pr_policy(config, task)
         contract = [
             "--- ASYNC TASK EXECUTION CONTRACT ---",
             "Execute this authorized asynchronous task within its stated contract.",
-            _pr_policy(config, task),
+            f"{policy} {GRANT_POLICY_OVERRIDE}" if task.grants else policy,
+            *_grants_section(task),
             PRECONDITION_EXECUTION_RULE,
+            DEFAULT_WORKER_GRANT,
             "On bounded ambiguity, choose the reasonable default, note it, and continue without asking for input.",
         ]
     else:
         contract = [
             "--- RECURRING ASYNC JOB EXECUTION CONTRACT ---",
             "Run this vetted recurring operation with its configured mandate unchanged.",
+            *_grants_section(task),
             PRECONDITION_EXECUTION_RULE,
+            DEFAULT_WORKER_GRANT,
             "On bounded ambiguity, choose the reasonable default, note it, and continue without asking for input.",
         ]
     contract.extend(
@@ -644,6 +683,7 @@ def render_prompt(
                 "completion.verified=true, one supported completion.mechanism, and at least one "
                 "non-empty completion.evidence reference."
             ),
+            QUEUE_TIME_KNOWABLE_RULE,
             (
                 "If this task produces a branch or commit that a dependent task must use, include "
                 "repository with remote, target_ref, branch_ref, and integration_state from "

@@ -84,9 +84,21 @@ def main():
             queue.add_task(dict(id=task_id, title=title, kind='oneoff', priority=0, size='small',
                                 cwd=str(ROOT), goal='Preview example only. Inspect readiness and dependency states.',
                                 constraints='Demo fixture. Do not execute.', done_when='Preview reviewed.',
-                                work_group='Preview examples', source_ref='Preview fixture',
-                                depends_on=dependencies))
-        queue.record('preview-01-plan', 'preview/manual/2000000000', status='done', provider_id='preview',
+                                work_group='Preview', source_ref='Preview fixture',
+                                depends_on=dependencies,
+                                readiness_review={
+                                    'issue': None, 'adrs': [], 'instructions': ['AGENTS.md'],
+                                    'acceptance_criteria': [{'criterion': 'Preview reviewed.',
+                                                             'basis': 'Demo fixture goal.'}],
+                                    'findings': [], 'reviewer': 'preview'}))
+        attempt = queue.claim('preview-01-plan', 'preview/manual/2000000000', 'preview', 'preview-account',
+                              now_epoch=2000000000)
+        queue.record('preview-01-plan', 'preview/manual/2000000000', attempt_id=attempt.id, status='done',
+                     outcome={'reason': {'code': 'done_when_verified', 'detail': 'Demo fixture.',
+                                         'signature': 'done_when_verified:preview'},
+                              'completion': {'verified': True, 'mechanism': 'command',
+                                             'evidence': ['preview://fixture']}},
+                     provider_id='preview', account_id='preview-account', now_epoch=2000000000,
                      summary='Demo fixture: prerequisite marked done to illustrate readiness.', trigger='manual')
     print(json.dumps({'config': str(config_path), 'database': str(database), 'url': 'https://' + args.host,
                       'server': str(SKILL / 'services/jobs-viewer/server.py'), 'execution_enabled': False}))

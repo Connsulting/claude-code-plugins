@@ -34,6 +34,7 @@ from tests.test_bonus_drain_scout_inflight import (
 )
 from bonus_drain import checks, cli, db, dispatcher, notifications, scout, usage
 from bonus_drain import config as config_module
+from tests.readiness_fixture import rereviewed, review_args, reviewed
 
 UNSWITCHED = "requested account did not become active"
 # The exact agent-router diagnostic for a Codex daemon that never started (no thread launched).
@@ -268,7 +269,7 @@ class AccountHoldScoutTests(PreflightCase):
         )
 
     def test_scout_uses_sibling_account_during_backoff(self) -> None:
-        self.queue.add_task(provider_task("alpha-one", "alpha"))
+        self.queue.add_task(reviewed(provider_task("alpha-one", "alpha")))
 
         first = self.tick(NOW)
         self.assertEqual(first.dispatched, ())
@@ -288,7 +289,7 @@ class AccountHoldScoutTests(PreflightCase):
         self.assertNotIn(("activate", "alpha-personal"), self.events[1:])
 
     def test_no_consecutive_infra_aborts_across_ticks(self) -> None:
-        self.queue.add_task(provider_task("alpha-one", "alpha"))
+        self.queue.add_task(reviewed(provider_task("alpha-one", "alpha")))
         reports = [
             self.tick(moment, business_used=80)
             for moment in (NOW, NOW + 600, NOW + 1_801)
@@ -310,7 +311,7 @@ class AccountHoldScoutTests(PreflightCase):
     def test_provider_launch_unavailable_breaks_only_its_batch(self) -> None:
         config = _two_provider_config(self.queue, self.root / "cache")
         for task_id, provider in (("alpha-one", "alpha"), ("alpha-two", "alpha"), ("beta-one", "beta")):
-            self.queue.add_task(provider_task(task_id, provider))
+            self.queue.add_task(reviewed(provider_task(task_id, provider)))
         routed: list[str] = []
 
         def route(argv: list[str], **_kwargs: object):
@@ -340,7 +341,7 @@ class AccountHoldScoutTests(PreflightCase):
 
     def test_account_hold_never_cycles_health_notices(self) -> None:
         config = replace(self.config, scout_ntfy_url="https://ntfy.example.test/bonus-drain")
-        self.queue.add_task(provider_task("alpha-one", "alpha"))
+        self.queue.add_task(reviewed(provider_task("alpha-one", "alpha")))
 
         def stuck_rows(queue: db.QueueDB) -> list[int]:
             return [row["stuck"] for row in rows(queue, "SELECT stuck FROM scout_notification_state")]
@@ -352,7 +353,7 @@ class AccountHoldScoutTests(PreflightCase):
             self.assertNotIn(1, stuck_rows(self.queue))
             self.assertEqual([item.task_id for item in second.dispatched], ["alpha-one"])
             self.finish("alpha-one", NOW + 900)
-            self.queue.add_task(provider_task("alpha-two", "alpha"))
+            self.queue.add_task(reviewed(provider_task("alpha-two", "alpha")))
             third = self.tick(NOW + 1_801, config=config)
             self.assertNotIn(1, stuck_rows(self.queue))
 
@@ -369,7 +370,7 @@ class AccountHoldScoutTests(PreflightCase):
         contention_root = self.mkdir("contention")
         queue = db.QueueDB(contention_root / "queue.db")
         queue.initialize()
-        queue.add_task(provider_task("alpha-busy", "alpha"))
+        queue.add_task(reviewed(provider_task("alpha-busy", "alpha")))
         contention = replace(config, database=queue.path)
         self.personal_refusal = "active work refused rotation"
         with mock.patch.object(notifications, "urlopen") as urlopen:
@@ -411,7 +412,7 @@ class DependencyEdgeCliTests(PreflightCase):
         return self.run_cli(
             "add", "--database", str(self.queue.path), "--id", task_id, "--title", task_id,
             "--kind", "oneoff", "--size", "small", "--cwd", str(self.root),
-            "--goal", f"complete {task_id}", "--json", *extra,
+            "--goal", f"complete {task_id}", "--json", *review_args(extra), *extra,
         )
 
     def test_add_defaults_merged_for_pr_repository_parent(self) -> None:
@@ -445,7 +446,9 @@ class DependencyEdgeCliTests(PreflightCase):
 
         code, payloads = self.run_cli(
             "edit", "--database", str(self.queue.path), "child",
-            "--changes", json.dumps({"depends_on": ["pr-parent", "pr-parent-2", "plain-parent"]}),
+            "--changes", json.dumps(rereviewed(
+                self.queue.task("child"), {"depends_on": ["pr-parent", "pr-parent-2", "plain-parent"]},
+            )),
         )
 
         self.assertEqual(code, 0, payloads)
@@ -511,7 +514,7 @@ class EnqueueValidationCliTests(HermeticEnvironment, PreflightCase):
         return self.run_cli(
             "add", "--database", str(self.queue.path), "--id", task_id, "--title", task_id,
             "--kind", "oneoff", "--size", "small", "--cwd", str(cwd or self.project),
-            "--goal", f"complete {task_id}", "--json", *extra, fake=fake,
+            "--goal", f"complete {task_id}", "--json", *review_args(extra), *extra, fake=fake,
         )
 
     def assertRefused(self, task_id: str, *extra: str, contains: str | None = None) -> None:
@@ -607,7 +610,7 @@ class QueueTimeCheckCliTests(HermeticEnvironment, PreflightCase):
         return self.run_cli(
             fake, "add", "--database", str(self.queue.path), "--id", task_id, "--title", task_id,
             "--kind", "oneoff", "--size", "small", "--cwd", str(self.root),
-            "--goal", f"complete {task_id}", *extra,
+            "--goal", f"complete {task_id}", *review_args(extra), *extra,
         )
 
     def passing_runner(self) -> FakeRunner:
@@ -710,7 +713,7 @@ class QueueTimeCheckCliTests(HermeticEnvironment, PreflightCase):
         failing = self.runner({gh_issue(2855): ok(ISSUE_2855_CLOSED)})
         code, payloads, _out, err = self.run_cli(
             failing, "edit", "--database", str(self.queue.path), "edited",
-            "--changes", json.dumps({"checks": [ISSUE_OPEN_2855]}),
+            "--changes", json.dumps(rereviewed(self.queue.task("edited"), {"checks": [ISSUE_OPEN_2855]})),
         )
 
         self.assertEqual(code, 0, (payloads, err))
@@ -727,7 +730,7 @@ class QueueTimeCheckCliTests(HermeticEnvironment, PreflightCase):
         passing = self.runner({gh_issue(3815): ok(ISSUE_3815_OPEN)})
         code, payloads, _out, err = self.run_cli(
             passing, "edit", "--database", str(self.queue.path), "edited",
-            "--changes", json.dumps({"checks": [ISSUE_OPEN_3815]}),
+            "--changes", json.dumps(rereviewed(self.queue.task("edited"), {"checks": [ISSUE_OPEN_3815]})),
         )
 
         self.assertEqual(code, 0, (payloads, err))
@@ -866,7 +869,7 @@ class QueueTimeCheckCliTests(HermeticEnvironment, PreflightCase):
 
         code, payloads, _out, err = self.run_cli(
             failing, "edit", "--database", str(self.queue.path), "paused-a",
-            "--changes", json.dumps({"checks": [ISSUE_OPEN_2855]}),
+            "--changes", json.dumps(rereviewed(self.queue.task("paused-a"), {"checks": [ISSUE_OPEN_2855]})),
         )
 
         self.assertEqual(code, 0, (payloads, err))
@@ -1144,7 +1147,7 @@ class CollisionAllocationTests(PreflightCase):
         value["cwd"] = str(self.root)
         if group:
             value["work_group"] = group
-        self.queue.add_task(value)
+        self.queue.add_task(reviewed(value))
 
     def test_plan_tick_allocates_one_task_per_group(self) -> None:
         self.add("g1", work_group="Report work", priority=1)
@@ -1190,7 +1193,7 @@ class GoalCollisionReservationTests(PreflightCase):
     def member(self, task_id: str, priority: int) -> None:
         value = provider_task(task_id, "alpha", "beta")
         value.update(priority=priority, cwd=str(self.root), work_group="Group G")
-        self.queue.add_task(value)
+        self.queue.add_task(reviewed(value))
 
     def run_tick(self) -> tuple[scout.TickPlan, scout.ScoutReport]:
         with mock.patch.object(scout, "read_all", return_value=_open_snapshots()):
@@ -1232,7 +1235,7 @@ class GoalCollisionReservationTests(PreflightCase):
         value.update(priority=priority, cwd=str(self.root))
         if group:
             value["work_group"] = group
-        self.queue.add_task(value)
+        self.queue.add_task(reviewed(value))
 
     def one_slot_each(self) -> dict[tuple[str, str], usage.UsageSnapshot]:
         # Used 74 leaves exactly one launch slot on each provider.

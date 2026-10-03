@@ -18,6 +18,7 @@ from tests.test_bonus_drain_review_repairs import (
     ELIGIBILITY_KEY, NOW, RESET, runtime, snapshots, task,
 )
 from tests.test_bonus_drain_scout_inflight import _open_snapshots, _two_provider_config
+from tests.readiness_fixture import reviewed
 
 
 def verified_outcome():
@@ -40,7 +41,7 @@ class ScoutReconciliationTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.queue = db.QueueDB(self.root / "queue.db")
         self.config = runtime(self.queue.path)
-        self.queue.add_task(task("abandoned"))
+        self.queue.add_task(reviewed(task("abandoned")))
         self.attempt = self.queue.claim(
             "abandoned", ELIGIBILITY_KEY, "alpha", "alpha-account",
         )
@@ -73,7 +74,7 @@ class ScoutReconciliationTests(unittest.TestCase):
         return report, dispatch
 
     def test_terminal_worker_releases_ownership_and_unblocks_dispatch_once(self):
-        self.queue.add_task(task("next-job"))
+        self.queue.add_task(reviewed(task("next-job")))
         release = mock.Mock()
         report, dispatch = self.run_scout(self.response(), release=release)
         self.assertEqual(report.blockers, ())
@@ -91,7 +92,7 @@ class ScoutReconciliationTests(unittest.TestCase):
         self.assertEqual(len(self.queue.runs()), 2)
 
     def test_live_unknown_absent_wrong_provider_and_duplicate_jobs_stay_blocked(self):
-        self.queue.add_task(task("healthy-beta") | {"allowed_providers": ["beta"]})
+        self.queue.add_task(reviewed(task("healthy-beta") | {"allowed_providers": ["beta"]}))
         two_provider = _two_provider_config(self.queue, self.root / "cache")
         responses = [
             self.response("running"), self.response("unknown", persisted="completed"),
@@ -151,6 +152,7 @@ class ScoutReconciliationTests(unittest.TestCase):
                 outcome={"reason": {
                     "code": "verification_needed", "detail": "fixture race",
                     "signature": "verification_needed:fixture-race",
+                    "queue_time_knowable": False,
                 }},
                 release_activation=lambda: None,
             )

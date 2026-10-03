@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from tests.readiness_fixture import reviewed
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -47,13 +48,13 @@ class FableModelCanonicalizationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             queue = db.QueueDB(Path(temporary) / "queue.db")
             queue.initialize()
-            added = queue.add_task(_task("from-add", model="fable"))
+            added = queue.add_task(reviewed(_task("from-add", model="fable")))
             self.assertEqual(added.model, "claude-fable-5-1")
             stored = queue.task("from-add")
             assert stored is not None
             self.assertEqual(stored.model, "claude-fable-5-1")
 
-            queue.add_task(_task("from-set", model="opus"))
+            queue.add_task(reviewed(_task("from-set", model="opus")))
             queue.set_model("from-set", "claude-fable-5")
             updated = queue.task("from-set")
             assert updated is not None
@@ -100,7 +101,7 @@ class FableModelCanonicalizationTests(unittest.TestCase):
             )
             queue = db.QueueDB(config.database)
             queue.initialize()
-            queue.add_task(_task("legacy-fable", model="opus"))
+            queue.add_task(reviewed(_task("legacy-fable", model="opus")))
             with sqlite3.connect(queue.path) as connection:
                 connection.execute(
                     "UPDATE tasks SET model=? WHERE id=?",

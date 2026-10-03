@@ -8,6 +8,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from unittest import mock
+from tests.readiness_fixture import reviewed
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -176,7 +177,7 @@ class ScoutActiveAccountSelectionTests(unittest.TestCase):
         personal_reset: int | None = None,
         business_reset: int | None = None,
     ) -> scout.TickPlan:
-        self.queue.add_task(_task("alpha-next", "alpha"))
+        self.queue.add_task(reviewed(_task("alpha-next", "alpha")))
         snapshots = _multi_snapshots(
             personal_used,
             business_used,
@@ -238,8 +239,8 @@ class ScoutActiveAccountSelectionTests(unittest.TestCase):
         self.assertEqual([batch.account_id for batch in tick.plan.batches], ["alpha-personal"])
 
     def test_inflight_on_business_closes_personal_then_business_survives(self) -> None:
-        self.queue.add_task(_task("already-running", "alpha"))
-        self.queue.add_task(_task("alpha-next", "alpha"))
+        self.queue.add_task(reviewed(_task("already-running", "alpha")))
+        self.queue.add_task(reviewed(_task("alpha-next", "alpha")))
         self.queue.record(
             "already-running", f"alpha-business/alpha-business-plan-weekly/{NOW + 40 * HOUR}",
             status="dispatched", provider_id="alpha", account_id="alpha-business",
@@ -259,8 +260,8 @@ class ScoutActiveAccountSelectionTests(unittest.TestCase):
 
     def test_tight_global_cap_charges_multi_account_provider_once(self) -> None:
         for index in range(6):
-            self.queue.add_task(_task(f"alpha-{index}", "alpha"))
-            self.queue.add_task(_task(f"beta-{index}", "beta"))
+            self.queue.add_task(reviewed(_task(f"alpha-{index}", "alpha")))
+            self.queue.add_task(reviewed(_task(f"beta-{index}", "beta")))
         config = replace(self.config, max_jobs=8)
         with mock.patch.object(
             scout, "read_all", return_value=_multi_snapshots(69, 69, beta_used=69),
@@ -276,8 +277,8 @@ class ScoutActiveAccountSelectionTests(unittest.TestCase):
         )
 
     def test_unknown_marker_closes_only_its_provider(self) -> None:
-        self.queue.add_task(_task("alpha-next", "alpha"))
-        self.queue.add_task(_task("beta-next", "beta"))
+        self.queue.add_task(reviewed(_task("alpha-next", "alpha")))
+        self.queue.add_task(reviewed(_task("beta-next", "beta")))
         self.active.write_text("Unknown\n", encoding="utf-8")
         with mock.patch.object(
             scout, "read_all", return_value=_multi_snapshots(70, 70, beta_used=70),
@@ -295,7 +296,7 @@ class ScoutActiveAccountSelectionTests(unittest.TestCase):
         )))
 
     def test_inactive_switch_success_retains_concrete_account_attribution(self) -> None:
-        self.queue.add_task(_task("alpha-next", "alpha"))
+        self.queue.add_task(reviewed(_task("alpha-next", "alpha")))
         activation_events: list[tuple[str, str]] = []
 
         def activate(action: str, account_id: str) -> None:
@@ -320,9 +321,9 @@ class ScoutActiveAccountSelectionTests(unittest.TestCase):
         self.assertEqual(self.queue.claims()[0].account_id, "alpha-personal")
 
     def test_first_proven_refusal_stops_provider_and_other_provider_continues(self) -> None:
-        self.queue.add_task(_task("alpha-one", "alpha"))
-        self.queue.add_task(_task("alpha-two", "alpha"))
-        self.queue.add_task(_task("beta-one", "beta"))
+        self.queue.add_task(reviewed(_task("alpha-one", "alpha")))
+        self.queue.add_task(reviewed(_task("alpha-two", "alpha")))
+        self.queue.add_task(reviewed(_task("beta-one", "beta")))
         activation_events: list[tuple[str, str]] = []
         router_providers: list[str] = []
 
@@ -364,7 +365,7 @@ class ScoutActiveAccountSelectionTests(unittest.TestCase):
         self.assertEqual(report.account_holds, ())
 
     def test_dry_run_attributes_active_account_without_activation(self) -> None:
-        self.queue.add_task(_task("alpha-next", "alpha"))
+        self.queue.add_task(reviewed(_task("alpha-next", "alpha")))
         with mock.patch.object(scout, "read_all", return_value=_multi_snapshots(50, 70)):
             report = scout.run_once(
                 self.config,
@@ -387,10 +388,10 @@ class ScoutInflightCapTests(unittest.TestCase):
             root = Path(temporary)
             queue = db.QueueDB(root / "queue.db")
             queue.initialize()
-            queue.add_task(_task("already-running", "alpha"))
-            queue.add_task(_task("alpha-one", "alpha"))
-            queue.add_task(_task("alpha-two", "alpha"))
-            queue.add_task(_task("beta-one", "beta"))
+            queue.add_task(reviewed(_task("already-running", "alpha")))
+            queue.add_task(reviewed(_task("alpha-one", "alpha")))
+            queue.add_task(reviewed(_task("alpha-two", "alpha")))
+            queue.add_task(reviewed(_task("beta-one", "beta")))
             queue.record(
                 "already-running", "alpha-account/alpha-plan-weekly/2000014400",
                 status="dispatched", provider_id="alpha", account_id="alpha-account",
@@ -419,11 +420,11 @@ class ScoutInflightCapTests(unittest.TestCase):
             root = Path(temporary)
             queue = db.QueueDB(root / "queue.db")
             queue.initialize()
-            queue.add_task(_task("run-a", "alpha"))
-            queue.add_task(_task("run-b", "alpha"))
-            queue.add_task(_task("next-1", "alpha"))
-            queue.add_task(_task("next-2", "alpha"))
-            queue.add_task(_task("next-3", "alpha"))
+            queue.add_task(reviewed(_task("run-a", "alpha")))
+            queue.add_task(reviewed(_task("run-b", "alpha")))
+            queue.add_task(reviewed(_task("next-1", "alpha")))
+            queue.add_task(reviewed(_task("next-2", "alpha")))
+            queue.add_task(reviewed(_task("next-3", "alpha")))
             for task_id in ("run-a", "run-b"):
                 queue.record(
                     task_id, "alpha-account/alpha-plan-weekly/2000014400",
@@ -464,7 +465,7 @@ class ScoutMatchingAndGlobalCapTests(unittest.TestCase):
             queue = db.QueueDB(root / "queue.db")
             queue.initialize()
             for index in range(6):
-                queue.add_task(_task(f"portable-{index}"))
+                queue.add_task(reviewed(_task(f"portable-{index}")))
             config = _two_provider_config(queue, root / "cache")
             snapshots = {
                 ("alpha", "alpha-account"): usage.UsageSnapshot(
@@ -491,8 +492,8 @@ class ScoutMatchingAndGlobalCapTests(unittest.TestCase):
             queue = db.QueueDB(root / "queue.db")
             queue.initialize()
             for index in range(6):
-                queue.add_task(_task(f"alpha-{index}", "alpha"))
-                queue.add_task(_task(f"beta-{index}", "beta"))
+                queue.add_task(reviewed(_task(f"alpha-{index}", "alpha")))
+                queue.add_task(reviewed(_task(f"beta-{index}", "beta")))
             config = replace(_two_provider_config(queue, root / "cache"), max_jobs=8)
             snapshots = {
                 ("alpha", "alpha-account"): usage.UsageSnapshot(
@@ -525,8 +526,8 @@ class ScoutMatchingAndGlobalCapTests(unittest.TestCase):
             queue = db.QueueDB(root / "queue.db")
             queue.initialize()
             for index in range(6):
-                queue.add_task(_task(f"alpha-{index}", "alpha"))
-                queue.add_task(_task(f"beta-{index}", "beta"))
+                queue.add_task(reviewed(_task(f"alpha-{index}", "alpha")))
+                queue.add_task(reviewed(_task(f"beta-{index}", "beta")))
             config = _two_provider_config(queue, root / "cache")
             snapshots = {
                 ("alpha", "alpha-account"): usage.UsageSnapshot(

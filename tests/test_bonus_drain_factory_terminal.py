@@ -14,6 +14,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 from unittest import mock
+from tests.readiness_fixture import reviewed
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -368,10 +369,10 @@ class TerminalUpsertTests(unittest.TestCase):
         ))
 
     def test_cli_record_closes_the_row_the_dispatch_wrote(self) -> None:
-        self.queue.add_task({
+        self.queue.add_task(reviewed({
             "id": "via-cli", "title": "via-cli", "kind": "oneoff", "priority": 2,
             "cwd": str(self.root), "goal": "run via-cli", "active": True, "use_implement": True,
-        })
+        }))
         config = _config(self.root, self.queue.path)
         result = dispatcher.dispatch(
             config, self.queue, task_id="via-cli", eligibility_key="manual/via-cli",
@@ -400,11 +401,11 @@ class TerminalUpsertTests(unittest.TestCase):
         self.assertIsNone(row["pr_url"])
 
     def test_dispatch_replays_terminal_event_that_precedes_placeholder(self) -> None:
-        self.queue.add_task({
+        self.queue.add_task(reviewed({
             "id": "fast-skip", "title": "fast-skip", "kind": "oneoff", "priority": 2,
             "cwd": str(self.root), "goal": "run fast-skip", "active": True,
             "use_implement": True,
-        })
+        }))
         config = _config(self.root, self.queue.path)
 
         def telemetry_call(argv: list[str], payload: dict[str, Any]) -> None:

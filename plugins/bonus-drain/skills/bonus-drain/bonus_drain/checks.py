@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -27,7 +28,17 @@ CHECK_FIELDS: Mapping[str, tuple[frozenset[str], frozenset[str]]] = {
     "pr_merged": (frozenset({"repo"}), frozenset({"pr", "head", "base"})),
     "release_exists": (frozenset({"repo", "tag"}), frozenset()),
     "file_matches": (frozenset({"repo", "ref", "path", "pattern"}), frozenset({"present"})),
+    "mcp_authenticated": (frozenset({"provider", "server"}), frozenset()),
+    "k8s_resource_exists": (frozenset({"context", "kind", "name"}), frozenset({"namespace"})),
+    "openrouter_credit": (
+        frozenset({"min_usd"}),
+        frozenset({"key_env", "key_file", "balance_key_env", "balance_key_file"}),
+    ),
 }
+# Launch-blocker probes: an unknown result keeps holding past UNKNOWN_GRACE_SECONDS instead
+# of degrading to unverified, because the worker cannot verify these itself.
+HOLDING_TYPES = frozenset({"mcp_authenticated", "k8s_resource_exists", "openrouter_credit"})
+MCP_PROVIDERS = frozenset({"claude", "codex"})
 MAX_CHECKS_PER_TASK = 16
 # A stored result older than this reads as pending for gating, claim, prompt, and resume.
 RESULT_TTL_SECONDS = 3600
@@ -40,6 +51,8 @@ UNKNOWN_GRACE_SECONDS = 3600
 TICK_MAX_CALLS = 60
 TICK_BUDGET_SECONDS = 120.0
 CALL_TIMEOUT_SECONDS = 20.0
+# ``claude mcp get`` connects to the server to report its status, which can be slow.
+CLAUDE_MCP_TIMEOUT_SECONDS = 60.0
 _STDOUT_CAP = 1 << 20
 
 _SLUG = r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*"
@@ -49,6 +62,20 @@ _ISSUE_REF_RE = re.compile(
     rf"|(?P<short_repo>{_SLUG})#(?P<short_number>[0-9]+))(?=$|[\s,;])"
 )
 _REMOTE_TRACKING_PREFIXES = ("refs/heads/origin/", "refs/heads/upstream/", "refs/heads/remotes/")
+# Contexts allow ``:`` and ``@`` for EKS ARNs and user@cluster names; no value may start with -.
+_K8S_CONTEXT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,252}$")
+_K8S_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,252}$")
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
+OPENROUTER_CREDITS_URL = "https://openrouter.ai/api/v1/credits"
+# curl reads a key file into these variables; a key itself never enters argv.
+_OPENROUTER_FILE_VARIABLE = "BONUS_DRAIN_OPENROUTER_KEY"
+_OPENROUTER_BALANCE_FILE_VARIABLE = "BONUS_DRAIN_OPENROUTER_BALANCE_KEY"
+# (env field, file field, curl variable for the file form) per key role.
+_OPENROUTER_KEY_FIELDS = {
+    "key": ("key_env", "key_file", _OPENROUTER_FILE_VARIABLE),
+    "balance": ("balance_key_env", "balance_key_file", _OPENROUTER_BALANCE_FILE_VARIABLE),
+}
 
 
 class CheckError(ValueError):
@@ -138,11 +165,39 @@ def _positive_int(value: Any, name: str) -> int:
     return value
 
 
+def _k8s_value(value: Any, name: str, pattern: re.Pattern[str]) -> str:
+    if not isinstance(value, str) or not pattern.fullmatch(value):
+        raise CheckError(f"{name} must start with a letter or digit and contain no spaces or options")
+    return value
+
+
+def _min_usd(value: Any) -> int | float:
+    if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+        raise CheckError("min_usd must be a positive number")
+    return value
+
+
+def _key_source(raw: Mapping[str, Any], env_field: str, file_field: str, spec: dict[str, Any]) -> None:
+    """Copy the one present key source field into ``spec``; the caller enforces how many."""
+
+    if env_field in raw:
+        value = raw[env_field]
+        if not isinstance(value, str) or not _ENV_NAME_RE.fullmatch(value):
+            raise CheckError(f"{env_field} must be an environment variable name")
+        spec[env_field] = value
+    elif file_field in raw:
+        value = _text(raw[file_field], file_field, 500)
+        if not value.startswith("/") or ".." in value.split("/"):
+            raise CheckError(f"{file_field} must be an absolute path without ..")
+        spec[file_field] = value
+
+
 def normalize_check(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         raise CheckError("a check must be a JSON object")
     kind = raw.get("type")
-    if kind not in CHECK_FIELDS:
+    # Enum fields are type-checked first: an unhashable value would raise TypeError.
+    if not isinstance(kind, str) or kind not in CHECK_FIELDS:
         raise CheckError(f"unsupported check type: {kind!r}; use one of {', '.join(sorted(CHECK_FIELDS))}")
     required, optional = CHECK_FIELDS[kind]
     fields = set(raw) - {"type"}
@@ -173,6 +228,28 @@ def normalize_check(raw: Any) -> dict[str, Any]:
             spec["base"] = _short(normalize_queue_ref(raw["base"], "base"))
     elif kind == "release_exists":
         spec["tag"] = _text(raw["tag"], "tag", 200)
+    elif kind == "mcp_authenticated":
+        if not isinstance(raw["provider"], str) or raw["provider"] not in MCP_PROVIDERS:
+            raise CheckError(f"provider must be one of {', '.join(sorted(MCP_PROVIDERS))}")
+        spec["provider"] = raw["provider"]
+        server = _text(raw["server"], "server", 200)
+        if server.startswith("-"):
+            raise CheckError("server must not start with -")
+        spec["server"] = server
+    elif kind == "k8s_resource_exists":
+        spec["context"] = _k8s_value(raw["context"], "context", _K8S_CONTEXT_RE)
+        if "namespace" in raw:
+            spec["namespace"] = _k8s_value(raw["namespace"], "namespace", _K8S_NAME_RE)
+        spec["kind"] = _k8s_value(raw["kind"], "kind", _K8S_NAME_RE)
+        spec["name"] = _k8s_value(raw["name"], "name", _K8S_NAME_RE)
+    elif kind == "openrouter_credit":
+        spec["min_usd"] = _min_usd(raw["min_usd"])
+        if ("key_env" in raw) == ("key_file" in raw):
+            raise CheckError("openrouter_credit requires exactly one of key_env or key_file")
+        if "balance_key_env" in raw and "balance_key_file" in raw:
+            raise CheckError("openrouter_credit accepts at most one of balance_key_env or balance_key_file")
+        _key_source(raw, "key_env", "key_file", spec)
+        _key_source(raw, "balance_key_env", "balance_key_file", spec)
     else:
         spec["ref"] = normalize_queue_ref(raw["ref"], "ref")
         path = _text(raw["path"], "path", 500)
@@ -207,9 +284,14 @@ def normalize_checks(raw: Any) -> tuple[str, ...]:
 
 
 def check_context(spec: Mapping[str, Any], *, cwd: str) -> dict[str, Any]:
-    """Repository context that changes the answer; only base_ref_exists reads the checkout."""
+    """Context that changes the answer: the checkout for base_ref_exists and claude MCP.
 
-    if spec.get("type") == "base_ref_exists":
+    Claude resolves project-scoped MCP servers from the checkout, so the same server name
+    can differ between tasks.
+    """
+
+    kind = spec.get("type")
+    if kind == "base_ref_exists" or (kind == "mcp_authenticated" and spec.get("provider") == "claude"):
         return {"cwd": os.path.realpath(cwd)}
     return {}
 
@@ -256,24 +338,71 @@ def _file_argv(spec: Mapping[str, Any]) -> tuple[str, ...]:
     )
 
 
-def planned_calls(spec: Mapping[str, Any], cwd: str) -> tuple[tuple[str, ...], ...]:
-    """Every argv that evaluating ``spec`` (plus its observed context) will run.
+def _mcp_argv(spec: Mapping[str, Any]) -> tuple[str, ...]:
+    # One codex list answers every codex MCP check that shares a checkout.
+    if spec["provider"] == "claude":
+        return ("claude", "mcp", "get", spec["server"])
+    return ("codex", "mcp", "list", "--json")
 
-    Built from the same helpers the evaluators use, so planning cannot drift from evaluation.
+
+def _k8s_argv(spec: Mapping[str, Any]) -> tuple[str, ...]:
+    scope = ("-n", spec["namespace"]) if spec.get("namespace") else ()
+    return ("kubectl", "--context", spec["context"], *scope, "get", spec["kind"], spec["name"], "-o", "name")
+
+
+def _openrouter_argv(spec: Mapping[str, Any], url: str, role: str = "key") -> tuple[str, ...]:
+    """curl reads the key itself (environment or file) through --variable; argv names only its source.
+
+    ``role`` is ``key`` (the checked key) or ``balance`` (the management key for /credits).
+    """
+
+    env_field, file_field, file_variable = _OPENROUTER_KEY_FIELDS[role]
+    if env_field in spec:
+        variable, name = f"%{spec[env_field]}", spec[env_field]
+    else:
+        variable, name = f"{file_variable}@{spec[file_field]}", file_variable
+    return (
+        "curl", "-sS", "--max-time", "15", "--variable", variable,
+        "--expand-header", "Authorization: Bearer {{" + name + ":trim}}",
+        "-w", "\n%{http_code}", url,
+    )
+
+
+PlannedCall = tuple[tuple[str, ...], "str | None"]
+
+
+def planned_calls(spec: Mapping[str, Any], cwd: str) -> tuple[PlannedCall, ...]:
+    """Every (argv, runner cwd) call that evaluating ``spec`` (plus its observed context) may run.
+
+    The pair is ``_MemoRunner``'s key: the runner cwd is the task cwd for claude and codex
+    MCP checks and None for everything else, so one claude server in two checkouts is two
+    calls.  Built from the same helpers the evaluators use, so planning cannot drift from
+    evaluation.
     """
 
     kind = spec.get("type")
+    argvs: tuple[tuple[str, ...], ...] = ()
     if kind == "base_ref_exists":
-        return (_ref_argv(spec, cwd), _origin_argv(cwd))
-    if kind in {"issue_open", "issue_in_milestone"}:
-        return (_issue_argv(spec),)
-    if kind == "pr_merged":
-        return (_pr_argv(spec),)
-    if kind == "release_exists":
-        return (_release_argv(spec),)
-    if kind == "file_matches":
-        return (_file_argv(spec),)
-    return ()
+        argvs = (_ref_argv(spec, cwd), _origin_argv(cwd))
+    elif kind in {"issue_open", "issue_in_milestone"}:
+        argvs = (_issue_argv(spec),)
+    elif kind == "pr_merged":
+        argvs = (_pr_argv(spec),)
+    elif kind == "release_exists":
+        argvs = (_release_argv(spec),)
+    elif kind == "file_matches":
+        argvs = (_file_argv(spec),)
+    elif kind == "mcp_authenticated":
+        return ((_mcp_argv(spec), cwd),)
+    elif kind == "k8s_resource_exists":
+        argvs = (_k8s_argv(spec),)
+    elif kind == "openrouter_credit":
+        # Which /credits call runs depends on the /key answer; planning counts every
+        # candidate so the cap is never exceeded.
+        argvs = (_openrouter_argv(spec, OPENROUTER_KEY_URL), _openrouter_argv(spec, OPENROUTER_CREDITS_URL))
+        if "balance_key_env" in spec or "balance_key_file" in spec:
+            argvs += (_openrouter_argv(spec, OPENROUTER_CREDITS_URL, "balance"),)
+    return tuple((argv, None) for argv in argvs)
 
 
 def origin_url(cwd: str, runner: CheckRunner) -> str | None:
@@ -332,7 +461,21 @@ def describe(spec: Mapping[str, Any]) -> str:
             f"file_matches {spec.get('repo')}:{spec.get('path')}@{_short(str(spec.get('ref')))} "
             f"/{spec.get('pattern')}/{absent}"
         )
+    if kind == "mcp_authenticated":
+        return f"mcp_authenticated {spec.get('provider')}:{spec.get('server')}"
+    if kind == "k8s_resource_exists":
+        scope = f"{spec['namespace']}/" if spec.get("namespace") else ""
+        return f"k8s_resource_exists {spec.get('context')}:{scope}{spec.get('kind')}/{spec.get('name')}"
+    if kind == "openrouter_credit":
+        source = f"env {spec['key_env']}" if "key_env" in spec else f"file {spec.get('key_file')}"
+        return f"openrouter_credit >= ${_usd(spec.get('min_usd'))} ({source})"
     return canonical(spec)
+
+
+def _usd(value: Any) -> str:
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
 
 
 def check_type_reference() -> dict[str, dict[str, list[str]]]:
@@ -472,6 +615,148 @@ def _evaluate_file(spec: Mapping[str, Any], runner: CheckRunner) -> CheckResult:
     return CheckResult("fail", f"{where} {'matches' if matched else 'does not match'} the pattern")
 
 
+def _evaluate_claude_mcp(spec: Mapping[str, Any], cwd: str, runner: CheckRunner) -> CheckResult:
+    server = spec["server"]
+    result = runner(_mcp_argv(spec), cwd, CLAUDE_MCP_TIMEOUT_SECONDS)
+    output = result.stdout + result.stderr
+    if "No MCP server named" in output:
+        return CheckResult("fail", f"{server} is not configured for claude in {cwd}")
+    statuses = [
+        line.strip().removeprefix("Status:").strip()
+        for line in output.splitlines() if line.strip().startswith("Status:")
+    ]
+    if result.returncode != 0 or not statuses:
+        return _unknown(_last_line(result))
+    status = statuses[0]
+    if "Needs authentication" in status:
+        return CheckResult("fail", f"{server} needs authentication (run /mcp in Claude to re-authenticate)")
+    if "Connected" in status and "Failed" not in status:
+        return CheckResult("pass", f"{server} is connected")
+    return _unknown(f"{server} status: {status}")
+
+
+def _evaluate_codex_mcp(spec: Mapping[str, Any], cwd: str, runner: CheckRunner) -> CheckResult:
+    server = spec["server"]
+    result = runner(_mcp_argv(spec), cwd, CALL_TIMEOUT_SECONDS)
+    if result.returncode != 0:
+        return _unknown(_last_line(result))
+    try:
+        listed = json.loads(result.stdout)
+    except ValueError:
+        listed = None
+    if not isinstance(listed, list):
+        return _unknown("codex mcp list returned unparseable output")
+    entry = next(
+        (item for item in listed if isinstance(item, dict) and item.get("name") == server), None,
+    )
+    if entry is None:
+        return CheckResult("fail", f"{server} is not configured for codex")
+    if entry.get("enabled") is False:
+        reason = entry.get("disabled_reason")
+        return CheckResult("fail", f"{server} is disabled for codex" + (f": {reason}" if reason else ""))
+    auth = entry.get("auth_status")
+    if auth == "not_logged_in":
+        return CheckResult("fail", f"{server} needs login (codex mcp login {server})")
+    return CheckResult("pass", f"{server} auth_status {auth}")
+
+
+def _evaluate_k8s(spec: Mapping[str, Any], runner: CheckRunner) -> CheckResult:
+    result = runner(_k8s_argv(spec), None, CALL_TIMEOUT_SECONDS)
+    where = spec["context"] + (f"/{spec['namespace']}" if spec.get("namespace") else "")
+    resource = f"{spec['kind']}/{spec['name']}"
+    if result.returncode == 0:
+        return CheckResult("pass", f"{resource} exists in {where}")
+    output = result.stdout + result.stderr
+    if "(NotFound)" in output:
+        return CheckResult("fail", f"{resource} not found in {where}")
+    if "context was not found" in output:
+        return CheckResult("fail", f"kube context {spec['context']} is not configured")
+    return _unknown(_last_line(result))
+
+
+def _openrouter_call(
+    spec: Mapping[str, Any], url: str, runner: CheckRunner, role: str = "key",
+) -> tuple[int, dict[str, Any] | None] | CheckResult:
+    """(HTTP status, parsed body object or None), or unknown when curl itself failed."""
+
+    result = runner(_openrouter_argv(spec, url, role), None, CALL_TIMEOUT_SECONDS)
+    if result.returncode == 2 and "variable expansion failure" in result.stderr:
+        # curl could not read the key source; its own message names neither.
+        env_field, file_field, _variable = _OPENROUTER_KEY_FIELDS[role]
+        label = "OpenRouter key" if role == "key" else "OpenRouter balance key"
+        if env_field in spec:
+            return _unknown(f"{label} is not available: environment variable {spec[env_field]} is not set")
+        return _unknown(f"{label} is not available: key file {spec[file_field]} is unreadable")
+    if result.returncode != 0:
+        return _unknown(_last_line(result))
+    body, _sep, code = result.stdout.rpartition("\n")
+    if not code.strip().isdigit():
+        return _unknown("curl returned no HTTP status")
+    try:
+        value = json.loads(body)
+    except ValueError:
+        value = None
+    return int(code.strip()), value if isinstance(value, dict) else None
+
+
+def _number(value: Any) -> float | None:
+    return float(value) if type(value) in (int, float) and math.isfinite(value) else None
+
+
+def _evaluate_openrouter(spec: Mapping[str, Any], runner: CheckRunner) -> CheckResult:
+    """Both the key's spend allowance (when it has a limit) and the account balance must cover min_usd.
+
+    The balance needs a management key: the checked key itself when /key says it is one,
+    else the configured balance key.  Details carry only numbers and fixed text: keys are
+    read by curl and never echoed.
+    """
+
+    minimum = spec["min_usd"]
+    key = _openrouter_call(spec, OPENROUTER_KEY_URL, runner)
+    if isinstance(key, CheckResult):
+        return key
+    status, body = key
+    if status == 401:
+        return CheckResult("fail", "OpenRouter rejected the key")
+    if status != 200 or body is None:
+        return _unknown(f"OpenRouter /key returned HTTP {status}")
+    data = body.get("data")
+    data = data if isinstance(data, dict) else {}
+    allowance = _number(data.get("limit_remaining"))
+    if allowance is not None and allowance < minimum:
+        return CheckResult(
+            "fail", f"OpenRouter key allowance ${allowance:.2f} is below ${_usd(minimum)}",
+        )
+    if data.get("is_management_key") is True:
+        role = "key"
+    elif "balance_key_env" in spec or "balance_key_file" in spec:
+        role = "balance"
+    else:
+        return _unknown("account balance needs a management key (set balance_key_env or balance_key_file)")
+    credits = _openrouter_call(spec, OPENROUTER_CREDITS_URL, runner, role)
+    if isinstance(credits, CheckResult):
+        return credits
+    status, body = credits
+    if status == 401:
+        return CheckResult(
+            "fail", "OpenRouter rejected the balance key" if role == "balance" else "OpenRouter rejected the key",
+        )
+    if status == 403:
+        return _unknown("OpenRouter /credits refused the key: it is not a management key")
+    data = body.get("data") if status == 200 and body is not None else None
+    total = _number(data.get("total_credits")) if isinstance(data, dict) else None
+    usage = _number(data.get("total_usage")) if isinstance(data, dict) else None
+    if total is None or usage is None:
+        return _unknown(f"OpenRouter /credits returned HTTP {status}")
+    remaining = total - usage
+    suffix = f" (key allowance ${allowance:.2f})" if allowance is not None else ""
+    if remaining < minimum:
+        return CheckResult(
+            "fail", f"OpenRouter remaining credit ${remaining:.2f} is below ${_usd(minimum)}{suffix}",
+        )
+    return CheckResult("pass", f"OpenRouter remaining credit ${remaining:.2f}{suffix}")
+
+
 def evaluate(spec: Mapping[str, Any], *, cwd: str, runner: CheckRunner) -> CheckResult:
     """Run one check; tool failures and unparseable output are unknown, never raised."""
 
@@ -487,6 +772,14 @@ def evaluate(spec: Mapping[str, Any], *, cwd: str, runner: CheckRunner) -> Check
             return _evaluate_release(spec, runner)
         if kind == "file_matches":
             return _evaluate_file(spec, runner)
+        if kind == "mcp_authenticated":
+            if spec["provider"] == "claude":
+                return _evaluate_claude_mcp(spec, cwd, runner)
+            return _evaluate_codex_mcp(spec, cwd, runner)
+        if kind == "k8s_resource_exists":
+            return _evaluate_k8s(spec, runner)
+        if kind == "openrouter_credit":
+            return _evaluate_openrouter(spec, runner)
     except CheckToolError as exc:
         return _unknown(str(exc) or "check tool error")
     return _unknown(f"unsupported check type: {kind}")
@@ -517,9 +810,13 @@ class _MemoRunner:
 
 
 def _components(
-    items: Sequence[tuple[CheckWork, tuple[tuple[str, ...], ...]]],
+    items: Sequence[tuple[CheckWork, tuple[PlannedCall, ...]]],
 ) -> list[list[CheckWork]]:
-    """Group (item, planned calls) pairs connected by shared calls, in first-item order."""
+    """Group (item, planned calls) pairs connected by shared calls, in first-item order.
+
+    Calls are (argv, runner cwd) pairs, so items share a call only when ``_MemoRunner``
+    would answer both from one run.
+    """
 
     parent = list(range(len(items)))
 
@@ -529,18 +826,36 @@ def _components(
             index = parent[index]
         return index
 
-    owner: dict[tuple[str, ...], int] = {}
+    owner: dict[PlannedCall, int] = {}
     for index, (_item, calls) in enumerate(items):
-        for argv in calls:
-            if argv in owner:
-                first, second = find(owner[argv]), find(index)
+        for call in calls:
+            if call in owner:
+                first, second = find(owner[call]), find(index)
                 parent[max(first, second)] = min(first, second)
             else:
-                owner[argv] = index
+                owner[call] = index
     groups: dict[int, list[CheckWork]] = {}
     for index, (item, _calls) in enumerate(items):
         groups.setdefault(find(index), []).append(item)
     return [groups[root] for root in sorted(groups)]
+
+
+def observe(items: Iterable[CheckWork], *, runner: CheckRunner) -> list[dict[str, Any]]:
+    """Evaluate ``items`` through one shared memo and store nothing.
+
+    Entries match ``refresh``'s evaluated list, so a read-only report (the readiness
+    backfill) can show what a refresh would record without changing any stored result.
+    """
+
+    memo = _MemoRunner(runner)
+    observed: list[dict[str, Any]] = []
+    for item in items:
+        result = evaluate(item.spec, cwd=item.cwd, runner=memo)
+        observed.append({
+            "task_id": item.task_id, "type": item.spec.get("type"), "status": result.status,
+            "check": describe(item.spec), "origin": item.origin, "detail": result.detail,
+        })
+    return observed
 
 
 def refresh(
@@ -557,9 +872,9 @@ def refresh(
     """Evaluate checks within a tool-call cap and time budget; ``None`` means unlimited.
 
     ``due_only=False`` evaluates every launch check of ``task_ids`` (a queue mutation);
-    the default evaluates only due checks.  Identical tool calls within one refresh are
-    made once, and every item that needs one reads that shared observation.  The cap
-    counts tool calls, not checks: an item is admitted only if its new calls fit, and an
+    the default evaluates only due checks.  A tool call is an (argv, runner cwd) pair, the
+    memo's key; identical calls within one refresh are made once, and every item that
+    needs one reads that shared observation.  The cap counts tool calls, not checks: an item is admitted only if its new calls fit, and an
     item fully covered by calls already admitted still runs.  Admitted items are grouped
     into components connected by shared calls.  Each component reserves a generation for
     every item before its first call, then evaluates and stores all of them, so a refresh
@@ -570,8 +885,8 @@ def refresh(
 
     work = queue.check_work(now_epoch=now_epoch, task_ids=task_ids, due_only=due_only)
     started = monotonic()
-    planned: set[tuple[str, ...]] = set()
-    selected: list[tuple[CheckWork, tuple[tuple[str, ...], ...]]] = []
+    planned: set[PlannedCall] = set()
+    selected: list[tuple[CheckWork, tuple[PlannedCall, ...]]] = []
     for item in work:
         calls = planned_calls(item.spec, item.cwd)
         new = set(calls) - planned

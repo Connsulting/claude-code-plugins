@@ -13,6 +13,7 @@ from tests.test_bonus_dependency_recovery import (
     NOW, KEY, RecoveryCase, as_dict, captured_json, iso, reason, rows, verified,
 )
 from bonus_drain import cli, db, goals
+from tests.readiness_fixture import rereviewed
 
 
 class OverrideHoldCase(RecoveryCase):
@@ -86,7 +87,9 @@ class OverrideSucceeds(OverrideHoldCase):
         self.assertIn("second look", self.recovery("repeat")["detail"])
         self.assertEqual(self.recovery("repeat")["not_before"], iso(NOW + 50))
 
-        edited = self.queue.edit_task("repeat", {"goal": "corrected contract after override"})
+        edited = self.queue.edit_task(
+            "repeat", rereviewed(self.queue.task("repeat"), {"goal": "corrected contract after override"}),
+        )
         self.assertEqual(edited.goal, "corrected contract after override")
 
     def test_edit_still_refused_while_held_without_override(self) -> None:

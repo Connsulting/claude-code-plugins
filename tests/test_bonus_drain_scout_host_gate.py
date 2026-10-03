@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 from unittest import mock
+from tests.readiness_fixture import reviewed
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -295,7 +296,7 @@ class ScoutTickCase(unittest.TestCase):
     def add_stale_inflight(self) -> None:
         """An abandoned dispatched attempt the router reports as completed."""
 
-        self.queue.add_task(task("stale"))
+        self.queue.add_task(reviewed(task("stale")))
         attempt = self.queue.claim(
             "stale", ELIGIBILITY_KEY, "alpha", "alpha-account", now_epoch=NOW,
         )
@@ -324,7 +325,7 @@ class ScoutTickCase(unittest.TestCase):
 
 class GatedTickTests(ScoutTickCase):
     def test_unpressured_tick_dispatches_ready_work(self) -> None:
-        self.queue.add_task(task("ready"))
+        self.queue.add_task(reviewed(task("ready")))
 
         report, _ = self.run_tick(_calm)
 
@@ -335,7 +336,7 @@ class GatedTickTests(ScoutTickCase):
         self.assertIsNone(report.to_dict()["skipped"])
 
     def test_no_reader_means_no_host_verdict(self) -> None:
-        self.queue.add_task(task("ready"))
+        self.queue.add_task(reviewed(task("ready")))
 
         report, _ = self.run_tick(None)
 
@@ -343,7 +344,7 @@ class GatedTickTests(ScoutTickCase):
 
     def test_pressured_tick_launches_nothing_but_still_reconciles(self) -> None:
         self.add_stale_inflight()
-        self.queue.add_task(task("ready"))
+        self.queue.add_task(reviewed(task("ready")))
 
         report, spy = self.run_tick(_pressured)
 
@@ -373,7 +374,7 @@ class GatedTickTests(ScoutTickCase):
         self.config = replace(
             self.config, host_load_gate=config_module.HostLoadGateConfig(enabled=False),
         )
-        self.queue.add_task(task("ready"))
+        self.queue.add_task(reviewed(task("ready")))
 
         report, _ = self.run_tick(_pressured)
 
@@ -381,7 +382,7 @@ class GatedTickTests(ScoutTickCase):
         self.assertNotIn("host_pressure", [b.get("kind") for b in report.blockers])
 
     def test_plan_tick_closes_every_gate_under_pressure(self) -> None:
-        self.queue.add_task(task("ready"))
+        self.queue.add_task(reviewed(task("ready")))
         with mock.patch.object(scout, "read_all", return_value=snapshots()):
             calm = scout.plan_tick(
                 self.config, self.queue, now_epoch=NOW, host_load_reader=_calm,
@@ -421,7 +422,7 @@ class TickLockTests(ScoutTickCase):
 
     def test_concurrent_tick_is_skipped_without_dispatching(self) -> None:
         self.add_stale_inflight()
-        self.queue.add_task(task("ready"))
+        self.queue.add_task(reviewed(task("ready")))
 
         with self.held_lock():
             report, spy = self.run_tick(_calm)
@@ -442,7 +443,7 @@ class TickLockTests(ScoutTickCase):
         )
 
     def test_lock_is_released_after_a_normal_tick(self) -> None:
-        self.queue.add_task(task("ready"))
+        self.queue.add_task(reviewed(task("ready")))
 
         with self.held_lock():
             skipped, _ = self.run_tick(_calm)
@@ -495,7 +496,7 @@ class SlotFreedMarkerTests(unittest.TestCase):
         self.marker = self.queue.path.parent / "slot-freed"
 
     def claim(self, task_id: str):
-        self.queue.add_task(task(task_id))
+        self.queue.add_task(reviewed(task(task_id)))
         attempt = self.queue.claim(
             task_id, ELIGIBILITY_KEY, "alpha", "alpha-account", now_epoch=NOW,
         )

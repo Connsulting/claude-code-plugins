@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from tests.readiness_fixture import reviewed
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -109,7 +110,7 @@ class FactoryRunRowTests(unittest.TestCase):
         return result, seen
 
     def test_implement_task_writes_run_row_with_drain_and_router_ids(self) -> None:
-        self.queue.add_task(_task("impl-task", use_implement=True, cwd=str(self.root)))
+        self.queue.add_task(reviewed(_task("impl-task", use_implement=True, cwd=str(self.root))))
         calls: list[tuple[list[str], dict[str, Any]]] = []
 
         def telemetry_call(argv: list[str], payload: dict[str, Any]) -> None:
@@ -141,7 +142,7 @@ class FactoryRunRowTests(unittest.TestCase):
         self.assertEqual(result.to_dict()["factory_run_id"], run_id)
 
     def test_plain_task_writes_no_row_and_no_prompt_line(self) -> None:
-        self.queue.add_task(_task("plain-task"))
+        self.queue.add_task(reviewed(_task("plain-task")))
         calls: list[Any] = []
         result, seen = self._dispatch("plain-task", telemetry_call=lambda a, p: calls.append(a))
         self.assertEqual(calls, [])
@@ -150,7 +151,7 @@ class FactoryRunRowTests(unittest.TestCase):
         self.assertNotIn("FACTORY_RUN_ID", launch[-1])
 
     def test_router_without_log_id_omits_decision_id(self) -> None:
-        self.queue.add_task(_task("no-log", use_implement=True, cwd=str(self.root)))
+        self.queue.add_task(reviewed(_task("no-log", use_implement=True, cwd=str(self.root))))
         calls: list[tuple[list[str], dict[str, Any]]] = []
 
         def router_call(argv: list[str], **_kwargs: object) -> dict[str, object]:
@@ -166,7 +167,7 @@ class FactoryRunRowTests(unittest.TestCase):
         self.assertEqual(calls[0][1]["drain_task_id"], "no-log")
 
     def test_telemetry_failure_never_fails_the_dispatch(self) -> None:
-        self.queue.add_task(_task("boom", use_implement=True, cwd=str(self.root)))
+        self.queue.add_task(reviewed(_task("boom", use_implement=True, cwd=str(self.root))))
 
         def telemetry_call(argv: list[str], payload: dict[str, Any]) -> None:
             raise RuntimeError("telemetry down")
@@ -181,14 +182,14 @@ class FactoryRunRowTests(unittest.TestCase):
         script = self.root / "telemetry.py"
         script.write_text("import sys; sys.stderr.write('nope\\n'); sys.exit(1)\n", encoding="utf-8")
         os.environ[dispatcher.FACTORY_TELEMETRY_ENV] = str(script)
-        self.queue.add_task(_task("script-fail", use_implement=True, cwd=str(self.root)))
+        self.queue.add_task(reviewed(_task("script-fail", use_implement=True, cwd=str(self.root))))
         result, _seen = self._dispatch("script-fail")
         self.assertEqual(result.job_id, "job-1")
         self.assertIsNotNone(result.factory_run_id)
 
     def test_missing_script_is_skipped(self) -> None:
         os.environ[dispatcher.FACTORY_TELEMETRY_ENV] = str(self.root / "absent.py")
-        self.queue.add_task(_task("no-script", use_implement=True, cwd=str(self.root)))
+        self.queue.add_task(reviewed(_task("no-script", use_implement=True, cwd=str(self.root))))
         result, _seen = self._dispatch("no-script")
         self.assertEqual(result.job_id, "job-1")
 
@@ -209,7 +210,7 @@ class FactoryRunRowTests(unittest.TestCase):
         os.environ["CLAUDE_CODE_SESSION_ID"] = "dispatcher-session"
         os.environ["CODEX_THREAD_ID"] = "dispatcher-thread"
         try:
-            self.queue.add_task(_task("captured", use_implement=True, cwd=str(self.root)))
+            self.queue.add_task(reviewed(_task("captured", use_implement=True, cwd=str(self.root))))
             result, _seen = self._dispatch("captured")
         finally:
             os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
@@ -252,7 +253,7 @@ class FactoryRunRowTests(unittest.TestCase):
             self.assertEqual(step.returncode, 0, step.stderr or step.stdout)
         os.environ["IMPLEMENT_FACTORY_DB"] = str(factory_db)
         os.environ[dispatcher.FACTORY_TELEMETRY_ENV] = str(REAL_TELEMETRY)
-        self.queue.add_task(_task("real-writer", use_implement=True, cwd=str(self.root)))
+        self.queue.add_task(reviewed(_task("real-writer", use_implement=True, cwd=str(self.root))))
         result, _seen = self._dispatch("real-writer")
         run_id = result.factory_run_id
         assert run_id is not None

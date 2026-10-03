@@ -18,6 +18,7 @@ def authority(detail: str = "the controlling decision is still draft") -> dict[s
             "code": "authority_required",
             "detail": detail,
             "signature": "authority_required:draft-decision",
+            "queue_time_knowable": False,
         }
     }
 
@@ -243,6 +244,7 @@ class ContinuationTests(RecoveryCase):
                     "code": code,
                     "detail": f"fixture {code} blocks continuation",
                     "signature": f"{code}:fixture",
+                    **({"queue_time_knowable": False} if code == "authority_required" else {}),
                 },
             })
             before = self.source_row(source.id)

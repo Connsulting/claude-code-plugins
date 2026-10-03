@@ -29,7 +29,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   work_group            TEXT,
   depends_on_json       TEXT,
   checks_json           TEXT,
-  merged_depends_on_json TEXT
+  merged_depends_on_json TEXT,
+  grants_json           TEXT,
+  readiness_review_json TEXT
 );
 
 CREATE TABLE IF NOT EXISTS runs (

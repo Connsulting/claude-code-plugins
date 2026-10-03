@@ -358,7 +358,9 @@ def import_legacy(backlog: str | Path, runs: str | Path, queue: Any) -> ImportRe
         payload = _task_payload(task)
         if payload["id"] in existing:
             continue
-        queue.add_task(payload)
+        # Migrated rows predate queue-time readiness reviews; readiness-backfill reports them.
+        with queue._transaction() as connection:
+            queue._insert_task(connection, payload)
         existing.add(payload["id"])
         task_count += 1
 

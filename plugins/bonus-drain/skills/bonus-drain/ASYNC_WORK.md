@@ -18,7 +18,7 @@ compatibility, atomic claims, or activation leases. Paused tasks cannot run.
 ## Dependencies
 
 Use `--depends-on parent-id,other-parent-id` on add, or update the prerequisite list from a planning thread with the CLI.
-Use repeatable `--check JSON` for structured preflight checks (see SKILL.md); waiting on a failing check consumes no attempt. `add` and `edit` evaluate all of the task's checks immediately, even while it waits on a prerequisite, and print each result and the resulting readiness; a failing or unverifiable check is reported on stderr, the task stays queued, and the scout retries it every 10 minutes, once the task can launch, until it passes and the task becomes ready. `bonus-drain held-report --json` lists held authority-required work and its blocked dependents. Tasks that share a work group or the same `source_ref` issue run one at a time; goal-managed tasks use the goal's own concurrency bound.
+Use repeatable `--check JSON` for structured preflight checks (see SKILL.md); waiting on a failing check consumes no attempt. Besides the repository checks, `mcp_authenticated`, `k8s_resource_exists`, and `openrouter_credit` probe launch blockers; they hold the task, spend no attempt, and unlike the others never proceed as unverified when they cannot be evaluated. `add` and `edit` evaluate all of the task's checks immediately, even while it waits on a prerequisite, and print each result and the resulting readiness; a failing or unverifiable check is reported on stderr, the task stays queued, and the scout retries it every 10 minutes, once the task can launch, until it passes and the task becomes ready. `bonus-drain held-report --json` lists held authority-required and verification-needed work, its blocked dependents, and how many blockers were knowable at queue time. Tasks that share a work group or the same `source_ref` issue run one at a time; goal-managed tasks use the goal's own concurrency bound.
 The graph can branch and join. Each edge is `done` or `merged`; write `--depends-on parent-id:merged,other-id:done`. An edge without a suffix defaults to `merged` when the parent runs in a repository configured to open pull requests, and to `done` otherwise. A `done` edge needs the parent's verified completion. A `merged` edge also needs the parent's recorded branch merged into the child's base (the child's `start_ref`, or the parent's target branch); the scout verifies that on GitHub, and the child waits with the reason until it lands. A child becomes ready only when **every edge is satisfied**.
 Failed and skipped prerequisites leave it waiting; they do not launch a child or mark it failed.
 A waiting child creates no run, consumes no claim, and does not call the router.
@@ -103,15 +103,30 @@ is missing, setup stops with reason code `verification_needed` and does not fall
 target branch. Dependency selection adds no merge, push, PR, deployment, or other external
 authority.
 
+## Queue-time readiness review
+
+Before `add`, the queuer reviews the task with Brian present: the source issue, every ADR it
+cites, and the governing AGENTS.md and CLAUDE.md files; done-when against granted authority
+(merge, release, external infrastructure, sacred paths, contract freezes); the feasibility of
+each acceptance criterion, including vendor capabilities; and external dependencies
+(credentials, provider credit, MCP auth, cluster resources). Each finding is resolved to one of a
+grant from Brian, a prerequisite task with its dependency edge, a rewritten done-when, or a
+structured check. The review is stored with `--readiness-review`, and `add` refuses without it.
+SKILL.md has the procedure, the review and grant JSON, and the three probe checks. Every worker
+also gets a default grant to fix pre-existing lint, format, or type errors in files its change
+touches, so those never need a grant or a blocker. `readiness-backfill` lists tasks queued before
+this existed that still need a review.
+
 ## Thread handoff and editing
 
 ```sh
 bonus-drain add --id build-report --title 'Build Report' --kind oneoff \
   --size small --cwd /absolute/project --goal 'Produce the agreed report' \
   --source-ref 'THREAD_OR_PLAN_REFERENCE' \
-  --work-group 'Report work' --depends-on gather-evidence --start-ref task/base --json
+  --work-group 'Report work' --depends-on gather-evidence --start-ref task/base \
+  --readiness-review @/absolute/project/review.json --json
 bonus-drain readiness build-report --json
-bonus-drain edit build-report --changes '{"goal":"Produce the revised report","start_ref":"task/base"}' --json
+bonus-drain edit build-report --changes '{"goal":"Produce the revised report","start_ref":"task/base","readiness_review":{...}}' --json
 bonus-drain run-now build-report auto --json
 ```
 
@@ -120,7 +135,12 @@ thread contents. The stored task contract must remain self-contained. Only HTTP(
 references become links in the viewer; other references are displayed as text.
 
 Editing allows title, priority, size, cwd, goal, context, constraints, precondition, done_when,
-source_ref, start_ref, work_group, and depends_on. Active claims and already-run one-off
+source_ref, start_ref, work_group, depends_on, checks, grants, and readiness_review. Editing a
+reviewed field (id, kind, cadence, cwd, goal, context, constraints, precondition, done_when,
+source_ref, start_ref, depends_on, merged_depends_on, checks, grants) must include a fresh
+`readiness_review` in the same edit; a review written against an earlier contract is stale and
+refused. Routing and display controls (title, priority, size, work_group, model, mcp, providers,
+capabilities, use_implement, and set-model, set-mcp, set-providers) need no review. Active claims and already-run one-off
 contracts cannot be edited. For ordinary tasks outside managed goals, a failed/skipped
 task must first be explicitly requeued; that schedules an operator recovery and preserves every
 prior attempt. Its contract can then be edited only before that exact recovery is claimed.

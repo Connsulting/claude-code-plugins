@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 from unittest import mock
+from tests.readiness_fixture import review_args, reviewed
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +56,7 @@ def _cli_add(database: Path, task_id: str, size: object = _MISSING) -> list[str]
     ]
     if size is not _MISSING:
         argv.extend(("--size", str(size)))
+    argv.extend(review_args(argv))
     argv.append("--json")
     return argv
 
@@ -116,7 +118,7 @@ class TaskSizeContractTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_queue_json_exposes_graph_backed_provider_eligibility(self) -> None:
-        self.queue.add_task(_task_values("provider-filtered", size="small"))
+        self.queue.add_task(reviewed(_task_values("provider-filtered", size="small")))
         args = type("Args", (), {
             "command": "queue", "cycle": NOW, "run_limit": 10, "json": True,
         })()
@@ -135,10 +137,10 @@ class TaskSizeContractTests(unittest.TestCase):
         )
 
     def test_queue_json_keeps_compatible_providers_for_waiting_tasks(self) -> None:
-        self.queue.add_task(_task_values("parent", size="small"))
+        self.queue.add_task(reviewed(_task_values("parent", size="small")))
         child = _task_values("child", size="small")
         child["depends_on"] = ["parent"]
-        self.queue.add_task(child)
+        self.queue.add_task(reviewed(child))
         args = type("Args", (), {
             "command": "queue", "cycle": NOW, "run_limit": 10, "json": True,
         })()
@@ -279,11 +281,11 @@ class TaskSizeContractTests(unittest.TestCase):
                 columns_after_first_init,
             )
             # Initialization records v1, may record v2 (status CHECK relaxation), and records
-            # v3 (preflight schema); a second initialize adds nothing.
+            # v3 (preflight schema) and v4 (readiness review); a second initialize adds nothing.
             versions = {
                 row[0] for row in connection.execute("SELECT version FROM schema_migrations")
             }
-            self.assertTrue({1, 3} <= versions <= {1, 2, 3}, versions)
+            self.assertTrue({1, 3, 4} <= versions <= {1, 2, 3, 4}, versions)
             self.assertEqual(
                 connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0],
                 len(versions),
@@ -295,7 +297,7 @@ class TaskSizeContractTests(unittest.TestCase):
 
         for size in SIZES:
             with self.subTest(surface="lower-level", size=size):
-                task = self.queue.add_task(_task_values(f"lower-{size}", size=size))
+                task = self.queue.add_task(reviewed(_task_values(f"lower-{size}", size=size)))
                 self.assertEqual(task.size, size)
                 self.assertEqual(self.queue.task(task.id).size, size)
 
@@ -308,7 +310,7 @@ class TaskSizeContractTests(unittest.TestCase):
                 self.assertEqual(payloads[0]["checks"], [])
                 self.assertEqual(payloads[0]["task"]["size"], size)
 
-        legacy = self.queue.add_task(_task_values("legacy-missing-size"))
+        legacy = self.queue.add_task(reviewed(_task_values("legacy-missing-size")))
         self.assertIsNone(legacy.size)
         self.assertIsNone(self.queue.task(legacy.id).size)
         with sqlite3.connect(self.database) as connection:
@@ -322,8 +324,8 @@ class TaskSizeContractTests(unittest.TestCase):
         for index, invalid in enumerate(("", "unknown", "MEDIUM", "extra-large")):
             with self.subTest(surface="lower-level-invalid", size=invalid):
                 with self.assertRaises(db.QueueError):
-                    self.queue.add_task(
-                        _task_values(f"bad-lower-{index}", size=invalid),
+                    self.queue.add_task(reviewed(
+                        _task_values(f"bad-lower-{index}", size=invalid)),
                     )
                 self.assertIsNone(self.queue.task(f"bad-lower-{index}"))
 
@@ -342,17 +344,17 @@ class TaskSizeContractTests(unittest.TestCase):
 
     def test_set_size_requires_an_authoritative_cycle_and_only_sizes_that_cycles_upcoming_tasks(self) -> None:
         cycle = NOW
-        self.queue.add_task(_task_values("target"))
-        self.queue.add_task(_task_values("untouched", size="small"))
-        self.queue.add_task(_task_values("spent"))
-        self.queue.add_task(_task_values("weekly-current") | {
+        self.queue.add_task(reviewed(_task_values("target")))
+        self.queue.add_task(reviewed(_task_values("untouched", size="small")))
+        self.queue.add_task(reviewed(_task_values("spent")))
+        self.queue.add_task(reviewed(_task_values("weekly-current") | {
             "kind": "recurring", "cadence": "weekly",
-        })
-        self.queue.add_task(_task_values("weekly-prior") | {
+        }))
+        self.queue.add_task(reviewed(_task_values("weekly-prior") | {
             "kind": "recurring", "cadence": "weekly",
-        })
-        self.queue.add_task(_task_values("inactive") | {"active": False})
-        self.queue.add_task(_task_values("claimed"))
+        }))
+        self.queue.add_task(reviewed(_task_values("inactive") | {"active": False}))
+        self.queue.add_task(reviewed(_task_values("claimed")))
         spent_attempt = self.queue.claim(
             "spent", f"alpha-account/alpha-weekly/{cycle}", "alpha", "alpha-account",
             provider_capabilities=("cpu",), now_epoch=cycle,
@@ -466,7 +468,7 @@ class TaskSizeContractTests(unittest.TestCase):
         self.assertEqual(self.queue.task("untouched").size, "small")
 
     def test_monthly_cooldown_uses_the_last_run_time_not_the_dispatch_cycle(self) -> None:
-        self.queue.add_task(_task_values("monthly") | {"kind": "recurring", "cadence": "monthly"})
+        self.queue.add_task(reviewed(_task_values("monthly") | {"kind": "recurring", "cadence": "monthly"}))
         now = NOW
 
         def timestamp(seconds_ago: int) -> str:
@@ -494,8 +496,8 @@ class TaskSizeContractTests(unittest.TestCase):
 
     def test_task_json_surfaces_carry_size_and_null_and_render_json_accepts_both(self) -> None:
         unscoped = {"allowed_providers": (), "required_capabilities": ()}
-        sized = self.queue.add_task(_task_values("sized", size="medium") | unscoped)
-        legacy = self.queue.add_task(_task_values("legacy") | unscoped)
+        sized = self.queue.add_task(reviewed(_task_values("sized", size="medium") | unscoped))
+        legacy = self.queue.add_task(reviewed(_task_values("legacy") | unscoped))
         expected = {"sized": "medium", "legacy": None}
 
         self.assertEqual(sized.to_dict()["size"], "medium")
@@ -571,8 +573,8 @@ class TaskSizeContractTests(unittest.TestCase):
         sized_queue = db.QueueDB(self.root / "sized.db")
         assignments = {"alpha": "huge", "beta": "tiny", "gamma": "medium"}
         for task_id in assignments:
-            legacy_queue.add_task(_task_values(task_id))
-            sized_queue.add_task(_task_values(task_id, size=assignments[task_id]))
+            legacy_queue.add_task(reviewed(_task_values(task_id)))
+            sized_queue.add_task(reviewed(_task_values(task_id, size=assignments[task_id])))
 
         legacy_eligible = legacy_queue.eligible_tasks(
             NOW, provider_id="alpha", capabilities=("cpu",),

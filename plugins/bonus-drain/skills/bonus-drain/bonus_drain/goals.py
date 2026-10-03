@@ -8,7 +8,7 @@ import sqlite3
 import time
 from typing import Any, Mapping
 
-from .db import QueueDB, QueueError, Task, TERMINAL_STATUSES, is_safe_task_id, utc_now
+from .db import QueueDB, QueueError, Task, TERMINAL_STATUSES, _contract_hash, is_safe_task_id, utc_now
 
 
 def _json(value: Any) -> str:
@@ -79,21 +79,6 @@ def _settled(connection: sqlite3.Connection, task_id: str, cache: dict[str, bool
             return True
     cache[task_id] = False
     return False
-
-
-def _contract_hash(task: Task) -> str:
-    value = task.to_dict()
-    # Scheduling/display controls do not change what the worker is authorized to do.
-    for field in ('priority', 'size', 'active'):
-        value.pop(field)
-    if value['start_ref'] is None:
-        value.pop('start_ref')
-    # Omitted when empty so contracts written before checks and edge modes keep their hash.
-    if not value['checks']:
-        value.pop('checks')
-    if not value['merged_depends_on']:
-        value.pop('merged_depends_on')
-    return hashlib.sha256(_json(value).encode()).hexdigest()
 
 
 def guard_contract_edit(connection: sqlite3.Connection, task_id: str, fields: set[str]) -> None:

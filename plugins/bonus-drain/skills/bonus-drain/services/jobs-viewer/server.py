@@ -962,6 +962,8 @@ def finish_inflight_task(task_id: str, status: str) -> tuple[bool, str]:
                     "Completion still needs verification."
                 ),
                 "signature": "verification_needed:jobs_viewer_operator_failure",
+                # An operator failure is a runtime outcome, not a blocker knowable at queue time.
+                "queue_time_knowable": False,
             },
         }
     try:

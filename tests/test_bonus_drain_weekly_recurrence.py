@@ -8,6 +8,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
+from tests.readiness_fixture import reviewed
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -33,7 +34,7 @@ class WeeklyRecurrenceTests(unittest.TestCase):
             recurrence_timezone="America/New_York",
         )
         self.queue.initialize()
-        self.queue.add_task({
+        self.queue.add_task(reviewed({
             "id": "weekly-job",
             "title": "Weekly job",
             "kind": "recurring",
@@ -42,7 +43,7 @@ class WeeklyRecurrenceTests(unittest.TestCase):
             "cwd": "/tmp",
             "goal": "run weekly",
             "active": True,
-        })
+        }))
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -168,7 +169,7 @@ class WeeklyRecurrenceTests(unittest.TestCase):
                     recurrence_timezone="America/New_York",
                 )
                 queue.initialize()
-                queue.add_task({
+                queue.add_task(reviewed({
                     "id": "weekly-job",
                     "title": "Weekly job",
                     "kind": "recurring",
@@ -177,7 +178,7 @@ class WeeklyRecurrenceTests(unittest.TestCase):
                     "cwd": "/tmp",
                     "goal": "run weekly",
                     "active": True,
-                })
+                }))
                 queue.record(
                     "weekly-job",
                     f"alpha/manual/{status}",

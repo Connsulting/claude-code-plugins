@@ -55,6 +55,8 @@ REASON_CODES = frozenset({
     "retryable", "verification_needed", "authority_required", "permanent",
     "unknown_launch", "done_when_verified",
 })
+# Blocker codes whose new failed/skipped outcomes report reason.queue_time_knowable.
+QUEUE_TIME_BLOCKER_CODES = ("authority_required", "verification_needed")
 COMPLETION_MECHANISMS = frozenset({
     "command", "artifact", "operator_receipt", "goal_acceptance",
 })
@@ -130,6 +132,20 @@ def validate_outcome(
             normalized = re.sub(r"[^a-z0-9]+", ":", str(detail).lower()).strip(":")[:500]
             signature = f"{code}:{normalized}"
         value["reason"] = {"code": code, "detail": detail, "signature": signature}
+        # Measures whether a blocker could have been found by the queue-time readiness review.
+        if "queue_time_knowable" in reason:
+            if code not in QUEUE_TIME_BLOCKER_CODES:
+                raise QueueError(
+                    "queue_time_knowable is only valid on authority_required or verification_needed reasons"
+                )
+            # An explicit null records "unreported" (see record()'s salvage).
+            if reason["queue_time_knowable"] is not None and not isinstance(reason["queue_time_knowable"], bool):
+                raise QueueError("reason.queue_time_knowable must be a boolean or null")
+            value["reason"]["queue_time_knowable"] = reason["queue_time_knowable"]
+        elif status in {"failed", "skipped"} and code in QUEUE_TIME_BLOCKER_CODES:
+            raise QueueError(
+                "reason.queue_time_knowable is required for authority_required and verification_needed outcomes"
+            )
     if status == "awaiting_human" and require_structured_reason:
         if value["reason"]["code"] == "done_when_verified":
             raise QueueError("awaiting_human cannot use the done_when_verified reason code")
@@ -177,15 +193,15 @@ def validate_outcome(
 
 def _contract_hash(task: "Task") -> str:
     value = task.to_dict()
-    for field in ("priority", "size", "active"):
+    # The readiness review is evidence about the contract, not part of it.
+    for field in ("priority", "size", "active", "readiness_review"):
         value.pop(field)
     if value["start_ref"] is None:
         value.pop("start_ref")
-    # Omitted when empty so retained recoveries written before v3 keep their contract CAS.
-    if not value["checks"]:
-        value.pop("checks")
-    if not value["merged_depends_on"]:
-        value.pop("merged_depends_on")
+    # Omitted when empty so retained recoveries written before v3/v4 keep their contract CAS.
+    for field in ("checks", "merged_depends_on", "grants"):
+        if not value[field]:
+            value.pop(field)
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -314,6 +330,9 @@ class Task:
     # Canonical JSON per declared check spec, and the depends_on subset that must be merged.
     checks: tuple[str, ...] = ()
     merged_depends_on: tuple[str, ...] = ()
+    # Canonical JSON per queue-time grant (ordered as given) and of the stamped readiness review.
+    grants: tuple[str, ...] = ()
+    readiness_review: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -324,6 +343,10 @@ class Task:
         value["required_capabilities"] = list(self.required_capabilities)
         value["checks"] = [json.loads(item) for item in self.checks]
         value["merged_depends_on"] = list(self.merged_depends_on)
+        value["grants"] = [json.loads(item) for item in self.grants]
+        value["readiness_review"] = (
+            json.loads(self.readiness_review) if self.readiness_review is not None else None
+        )
         return value
 
     def legacy_pick_dict(self) -> dict[str, Any]:
@@ -629,6 +652,12 @@ class QueueDB:
             )
             self._relax_status_checks(connection)
             self._seed_blocker_notices(connection)
+            # Migration v4: grants_json and readiness_review_json exist (additive). Existing
+            # rows keep NULL; readiness-backfill reports them rather than inventing a review.
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(4, ?)",
+                (utc_now(),),
+            )
 
     def reserve_scout_notice(
         self, *, stuck: bool, kinds: list[str], tasks: list[str], now_epoch: int,
@@ -753,6 +782,8 @@ class QueueDB:
             "depends_on_json": "TEXT",
             "checks_json": "TEXT",
             "merged_depends_on_json": "TEXT",
+            "grants_json": "TEXT",
+            "readiness_review_json": "TEXT",
         }
         run_columns = {
             "engine": "TEXT",
@@ -903,6 +934,13 @@ class QueueDB:
                 checks.canonical(item) for item in json.loads(row["checks_json"])
             ) if row["checks_json"] else (),
             merged_depends_on=_json_tuple(row["merged_depends_on_json"]),
+            grants=tuple(
+                checks.canonical(item) for item in json.loads(row["grants_json"])
+            ) if row["grants_json"] else (),
+            readiness_review=(
+                checks.canonical(json.loads(row["readiness_review_json"]))
+                if row["readiness_review_json"] else None
+            ),
         )
 
     @staticmethod
@@ -949,15 +987,35 @@ class QueueDB:
         )
 
     def add_task(self, values: Mapping[str, Any]) -> Task:
+        """Queue a task; refused, inserting nothing, without a valid readiness review."""
+
+        from . import review
         self.initialize()
         try:
             with self._transaction() as connection:
-                return self._insert_task(connection, values)
+                task = self._insert_task(connection, values)
+                problems = review.review_problems(task)
+                if problems:
+                    raise QueueError("readiness review required: " + "; ".join(problems))
+                return task
         except sqlite3.IntegrityError as exc:
             raise QueueError(f"task insert rejected for {values.get('id')}: {exc}") from exc
 
+    def review_problems(self, task_id: str) -> list[str]:
+        """Problems with a task's stored readiness review; an empty list means valid."""
+
+        from . import review
+        task = self.task(task_id)
+        if task is None:
+            raise QueueError(f"unknown task: {task_id}")
+        return review.review_problems(task)
+
     def _insert_task(self, connection: sqlite3.Connection, values: Mapping[str, Any]) -> Task:
-        """Validate and insert within the caller's transaction (including goal decisions)."""
+        """Validate and insert within the caller's transaction (including goal decisions).
+
+        No readiness review is required here: goal acceptance governs goal-owned turn tasks,
+        and legacy import migrates rows that predate reviews.  ``add_task`` requires one.
+        """
         item_id = str(values.get("id") or "")
         _require_task_id(item_id)
         kind = str(values.get("kind", "oneoff"))
@@ -1001,24 +1059,39 @@ class QueueDB:
               id,title,kind,priority,cadence,cwd,goal,context,constraints,
               precondition,done_when,created_at,active,claude_only,model,mcp,
               use_implement,allowed_providers_json,required_capabilities_json,size,
-              source_ref,start_ref,work_group,depends_on_json,checks_json,merged_depends_on_json
+              source_ref,start_ref,work_group,depends_on_json,checks_json,merged_depends_on_json,
+              grants_json,readiness_review_json
             ) VALUES(
               :id,:title,:kind,:priority,:cadence,:cwd,:goal,:context,:constraints,
               :precondition,:done_when,:created_at,:active,:claude_only,:model,:mcp,
               :use_implement,:allowed,:required,:size,
-              :source_ref,:start_ref,:work_group,:depends_on_json,:checks_json,:merged_depends_on_json
+              :source_ref,:start_ref,:work_group,:depends_on_json,:checks_json,:merged_depends_on_json,
+              :grants_json,:readiness_review_json
             )
             """, parameters,
         )
-        row = connection.execute("SELECT * FROM tasks WHERE id=?", (item_id,)).fetchone()
-        return self._task_from_row(row)
+        return self._stamp_review_digest(connection, item_id)
+
+    def _stamp_review_digest(self, connection: sqlite3.Connection, task_id: str) -> Task:
+        """Bind a just-written review to the contract it was written against (R1)."""
+
+        from . import checks, review
+        row = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        task = self._task_from_row(row)
+        if task.readiness_review is None:
+            return task
+        stamped = checks.canonical({
+            **json.loads(task.readiness_review), "review_digest": review.contract_digest(task),
+        })
+        connection.execute("UPDATE tasks SET readiness_review_json=? WHERE id=?", (stamped, task_id))
+        return replace(task, readiness_review=stamped)
 
     @staticmethod
     def _work_fields(
         values: Mapping[str, Any], *, validate_work_group: bool = True,
         validate_start_ref: bool = True,
     ) -> dict[str, Any]:
-        from . import checks
+        from . import checks, review
         dependencies = values.get("depends_on", ())
         if not isinstance(dependencies, (list, tuple)) or any(not isinstance(x, str) for x in dependencies):
             raise QueueError("depends_on must be a list of task IDs")
@@ -1035,6 +1108,17 @@ class QueueDB:
             specs = checks.normalize_checks(values.get("checks"))
         except checks.CheckError as exc:
             raise QueueError(f"checks: {exc}") from exc
+        try:
+            grants = review.normalize_grants(values.get("grants"))
+        except review.ReviewError as exc:
+            raise QueueError(f"grants: {exc}") from exc
+        readiness_review = values.get("readiness_review")
+        if readiness_review is not None:
+            try:
+                # reviewed_at is the queue's; review_digest is stamped once the row is written.
+                readiness_review = {**review.normalize_review(readiness_review), "reviewed_at": utc_now()}
+            except review.ReviewError as exc:
+                raise QueueError(f"readiness_review: {exc}") from exc
         for field in ("source_ref", "work_group"):
             if values.get(field) is not None and not isinstance(values[field], str):
                 raise QueueError(f"{field} must be text")
@@ -1061,7 +1145,11 @@ class QueueDB:
                 "work_group": work_group,
                 "depends_on_json": json.dumps(sorted(set(dependencies))),
                 "checks_json": json.dumps([json.loads(item) for item in specs]) if specs else None,
-                "merged_depends_on_json": json.dumps(sorted(set(merged))) if merged else None}
+                "merged_depends_on_json": json.dumps(sorted(set(merged))) if merged else None,
+                "grants_json": json.dumps([json.loads(item) for item in grants]) if grants else None,
+                "readiness_review_json": (
+                    checks.canonical(readiness_review) if readiness_review is not None else None
+                )}
 
     @staticmethod
     def _validate_dependencies(connection: sqlite3.Connection, task_id: str, raw: str) -> None:
@@ -1647,12 +1735,20 @@ class QueueDB:
             }
 
     def edit_task(self, task_id: str, changes: Mapping[str, Any]) -> Task:
+        """Edit a queued task; a contract change must carry a review of the new contract.
+
+        Title, priority, size, and work_group are scheduling and display fields: editing them
+        never needs a review and does not stale the stored one.
+        """
+
+        from . import review
         from .goals import guard_contract_edit
         allowed = {"title", "priority", "size", "cwd", "goal", "context", "constraints",
                    "precondition", "done_when", "source_ref", "start_ref", "work_group", "depends_on",
-                   "checks", "merged_depends_on"}
+                   "checks", "merged_depends_on", "grants", "readiness_review"}
         if not changes or set(changes) - allowed:
             raise QueueError("edit requires supported task contract fields")
+        contract_fields = set(changes) & review.REVIEWED_FIELDS
         self.initialize()
         with self._transaction() as connection:
             guard_contract_edit(connection, task_id, set(changes))
@@ -1694,6 +1790,9 @@ class QueueDB:
             elif last and last[0] == "dispatched":
                 raise QueueError("only queued tasks can be edited")
             merged = {**task.to_dict(), **changes}
+            if "readiness_review" not in changes:
+                # The stored review (and its stamps) stays as written.
+                merged["readiness_review"] = None
             if "depends_on" in changes and "merged_depends_on" not in changes:
                 # Dropping a prerequisite also drops its edge mode; kept edges keep theirs.
                 kept = changes["depends_on"] if isinstance(changes["depends_on"], (list, tuple)) else ()
@@ -1704,9 +1803,14 @@ class QueueDB:
                 merged, validate_work_group="work_group" in changes,
                 validate_start_ref="start_ref" in changes,
             )
+            if "readiness_review" not in changes:
+                fields.pop("readiness_review_json")
             self._validate_dependencies(connection, task_id, fields["depends_on_json"])
             for key, value in changes.items():
-                if key in {"source_ref", "start_ref", "work_group", "depends_on", "checks", "merged_depends_on"}:
+                if key in {
+                    "source_ref", "start_ref", "work_group", "depends_on", "checks", "merged_depends_on",
+                    "grants", "readiness_review",
+                }:
                     continue
                 if key == "priority":
                     if type(value) is not int or value not in range(5):
@@ -1718,7 +1822,17 @@ class QueueDB:
                 if key in {"title", "cwd", "goal"} and not (value or "").strip():
                     raise QueueError(f"{key} cannot be empty")
                 fields[key] = value
+            # After input validation, so a malformed edit reports its own error first.
+            if contract_fields and "readiness_review" not in changes:
+                raise QueueError(
+                    "readiness review required: editing " + ", ".join(sorted(contract_fields))
+                    + " changes the task contract; supply readiness_review for the edited contract"
+                )
             connection.execute("UPDATE tasks SET " + ",".join(f"{key}=?" for key in fields) + " WHERE id=?", (*fields.values(), task_id))
+            if "readiness_review" in changes:
+                problems = review.review_problems(self._stamp_review_digest(connection, task_id))
+                if problems:
+                    raise QueueError("readiness review required: " + "; ".join(problems))
             if recovery is not None:
                 changed = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
                 assert changed is not None
@@ -2527,6 +2641,19 @@ class QueueDB:
             except QueueError:
                 if status not in {"failed", "skipped"} or not require_reason:
                     raise
+                reason = outcome.get("reason") if isinstance(outcome, Mapping) else None
+                if (
+                    isinstance(reason, Mapping) and reason.get("code") in QUEUE_TIME_BLOCKER_CODES
+                    and "queue_time_knowable" not in reason
+                ):
+                    # Keep a blocker (and its resume_when) that only lacks the measurement,
+                    # recorded as unreported, rather than degrading it to verification_needed.
+                    try:
+                        return validate_outcome(status, {
+                            **outcome, "reason": {**reason, "queue_time_knowable": None},
+                        })
+                    except QueueError:
+                        pass
                 detail = (summary or f"{status} completion remains unverified")[:2000]
                 return validate_outcome(status, {
                     "reason": {
@@ -2535,6 +2662,8 @@ class QueueDB:
                         "signature": "verification_needed:" + re.sub(
                             r"[^a-z0-9]+", ":", detail.lower(),
                         ).strip(":")[:500],
+                        # A malformed terminal record is a runtime failure, not a queue-time blocker.
+                        "queue_time_knowable": False,
                     },
                 })
 
@@ -4143,7 +4272,10 @@ class QueueDB:
                 status, checked_at = "pending", row["checked_at"]
                 if result.fresh(spec, now):
                     status, detail = row["status"], row["detail"]
+                    # Launch-blocker probes never degrade: an unknown one keeps holding.
                     if status == "unknown" and row["unknown_since"] is not None and (
+                        spec.get("type") not in checks.HOLDING_TYPES
+                    ) and (
                         now - _timestamp_epoch(row["unknown_since"]) >= checks.UNKNOWN_GRACE_SECONDS
                     ):
                         status = "unverified"
@@ -4572,8 +4704,63 @@ class QueueDB:
                 reserved.append({"task_id": task_id, "attempt_id": latest["id"]})
         return reserved
 
+    @staticmethod
+    def _outcome_reason(attempt: sqlite3.Row | None) -> dict[str, Any] | None:
+        outcome = json.loads(attempt["outcome_json"]) if attempt is not None and attempt["outcome_json"] else None
+        reason = outcome.get("reason") if isinstance(outcome, dict) else None
+        return reason if isinstance(reason, dict) else None
+
+    @classmethod
+    def _queue_time_knowable(cls, attempt: sqlite3.Row | None) -> bool | None:
+        """The attempt's reported reason.queue_time_knowable; None when unreported."""
+
+        knowable = (cls._outcome_reason(attempt) or {}).get("queue_time_knowable")
+        return knowable if isinstance(knowable, bool) else None
+
+    def blocker_measurement(self) -> dict[str, dict[str, int]]:
+        """Count failed/skipped blocker attempts by whether the blocker was knowable at queue time."""
+
+        self.initialize()
+        measurement = {
+            code: {"knowable": 0, "not_knowable": 0, "unreported": 0} for code in QUEUE_TIME_BLOCKER_CODES
+        }
+        with self._connect() as connection:
+            for attempt in connection.execute(
+                f"""SELECT reason_code,outcome_json FROM task_attempts
+                     WHERE state IN ('failed','skipped')
+                       AND reason_code IN ({",".join("?" for _ in QUEUE_TIME_BLOCKER_CODES)})""",
+                QUEUE_TIME_BLOCKER_CODES,
+            ):
+                knowable = self._queue_time_knowable(attempt)
+                bucket = "unreported" if knowable is None else "knowable" if knowable else "not_knowable"
+                measurement[attempt["reason_code"]][bucket] += 1
+        return measurement
+
+    def backfill_candidates(self) -> list[Task]:
+        """Tasks a launch could still start: what the readiness backfill reviews (read-only).
+
+        Active, unclaimed, and not verified done; one-offs only before any attempt or legacy run.
+        """
+
+        self.initialize()
+        candidates: list[Task] = []
+        with self._connect() as connection:
+            for row in connection.execute(
+                """SELECT * FROM tasks t WHERE active=1
+                     AND NOT EXISTS (SELECT 1 FROM dispatch_claims c WHERE c.task_id=t.id)
+                     AND (kind<>'oneoff' OR NOT EXISTS (SELECT 1 FROM task_attempts a WHERE a.task_id=t.id))
+                   ORDER BY priority, (kind='recurring'), created_at, id""",
+            ).fetchall():
+                if row["kind"] == "oneoff" and (
+                    self._verified_done_row(connection, row["id"]) is not None
+                    or self._latest_legacy_run(connection, row["id"]) is not None
+                ):
+                    continue
+                candidates.append(self._task_from_row(row))
+        return candidates
+
     def held_authority_report(self) -> list[dict[str, Any]]:
-        """List held and standalone authority blockers with their dependents (read-only)."""
+        """List held and standalone authority and verification blockers with their dependents (read-only)."""
 
         self.initialize()
         with self._connect() as connection:
@@ -4595,11 +4782,12 @@ class QueueDB:
                 return sorted(found)
 
             def item(source: str, task_row: sqlite3.Row, held_since: str, detail: str | None,
-                     attempt: sqlite3.Row | None) -> dict[str, Any]:
+                     attempt: sqlite3.Row | None, reason_code: str) -> dict[str, Any]:
                 resume = self._authority_resume(attempt) if attempt is not None else None
                 return {
                     "source": source, "task_id": task_row["id"], "title": task_row["title"],
-                    "held_since": held_since, "detail": detail,
+                    "held_since": held_since, "detail": detail, "reason_code": reason_code,
+                    "queue_time_knowable": self._queue_time_knowable(attempt),
                     "blocked_descendants": counts.get(task_row["id"], 0),
                     "descendants": descendants(task_row["id"]),
                     "source_attempt_id": attempt["id"] if attempt is not None else None,
@@ -4620,6 +4808,7 @@ class QueueDB:
                 ).fetchone() if recovery["after_attempt_id"] is not None else None
                 report.append(item(
                     "held_recovery", task_row, recovery["updated_at"], recovery["detail"], attempt,
+                    recovery["reason_code"],
                 ))
                 listed.add(recovery["task_id"])
             for task_row in connection.execute(
@@ -4629,14 +4818,22 @@ class QueueDB:
                 if task_id in listed or self._verified_done_row(connection, task_id) is not None:
                     continue
                 latest = self._latest_effective_attempt(connection, task_id)
-                if self._authority_resume(latest) is None:
+                if self._authority_resume(latest) is not None:
+                    if self._pending_recovery(connection, task_id) is not None:
+                        continue
+                    source = "failed_attempt"
+                elif (
+                    latest is not None and latest["state"] in {"failed", "skipped"}
+                    and latest["reason_code"] == "verification_needed"
+                ):
+                    # Listed even while an automatic retry is pending, so its measurement shows.
+                    source = "verification_attempt"
+                else:
                     continue
-                if self._pending_recovery(connection, task_id) is not None:
-                    continue
-                outcome = json.loads(latest["outcome_json"]) if latest["outcome_json"] else {}
-                reason = outcome.get("reason") if isinstance(outcome, dict) else None
-                detail = reason.get("detail") if isinstance(reason, dict) else None
-                report.append(item("failed_attempt", task_row, latest["terminal_at"], detail, latest))
+                detail = (self._outcome_reason(latest) or {}).get("detail")
+                report.append(item(
+                    source, task_row, latest["terminal_at"], detail, latest, latest["reason_code"],
+                ))
         report.sort(key=lambda entry: (str(entry["held_since"] or ""), entry["task_id"]))
         return report
 

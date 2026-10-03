@@ -15,6 +15,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
+from tests.readiness_fixture import rereviewed, reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
@@ -52,13 +53,15 @@ def task(task_id: str, cwd: Path | str, **changes: object) -> dict[str, object]:
 
 
 def reason(code: str = "retryable", signature: str = "retryable:fixture") -> dict[str, object]:
-    return {
-        "reason": {
-            "code": code,
-            "detail": f"fixture {code} outcome",
-            "signature": signature,
-        }
+    value: dict[str, object] = {
+        "code": code,
+        "detail": f"fixture {code} outcome",
+        "signature": signature,
     }
+    if code in {"authority_required", "verification_needed"}:
+        # Blocker outcomes must say whether the blocker was knowable at queue time.
+        value["queue_time_knowable"] = False
+    return {"reason": value}
 
 
 def verified(repository: dict[str, object] | None = None, evidence: str = "fixture://proof") -> dict[str, object]:
@@ -185,7 +188,7 @@ class RecoveryCase(unittest.TestCase):
         self.queue.initialize()
 
     def add(self, task_id: str, **changes: object):
-        return self.queue.add_task(task(task_id, self.root, **changes))
+        return self.queue.add_task(reviewed(task(task_id, self.root, **changes)))
 
     def claim(
         self,
@@ -628,7 +631,9 @@ class AutomaticRecoveryContracts(RecoveryCase):
         self.assertEqual(as_dict(exhausted)["state"], "exhausted")
 
         self.queue.requeue("operator-owned", attempt_id=second.id, now_epoch=NOW + 2_101)
-        self.queue.edit_task("operator-owned", {"goal": "operator-approved corrected contract"})
+        self.queue.edit_task("operator-owned", rereviewed(
+            self.queue.task("operator-owned"), {"goal": "operator-approved corrected contract"},
+        ))
         before = as_dict(self.queue.recovery_for("operator-owned"))
         self.assertEqual((before["origin"], before["state"]), ("operator", "scheduled"))
         snapshots = {
@@ -887,7 +892,7 @@ class RecoverCompleteContracts(RecoveryCase):
         source = self.fail_task("failed")
         self.queue.requeue("failed", attempt_id=source.id, mode="retry", now_epoch=NOW)
         old_hash = rows(self.queue, "SELECT contract_hash FROM task_recovery WHERE task_id='failed'")[0]["contract_hash"]
-        updated = self.queue.edit_task("failed", {"goal": "new exact contract"})
+        updated = self.queue.edit_task("failed", rereviewed(self.queue.task("failed"), {"goal": "new exact contract"}))
         recovery = rows(self.queue, "SELECT * FROM task_recovery WHERE task_id='failed'")[0]
         self.assertEqual(updated.goal, "new exact contract")
         self.assertNotEqual(recovery["contract_hash"], old_hash)
@@ -947,7 +952,7 @@ class DependencyPreflightTransactionContracts(RecoveryCase):
                 independent.rollback()
             concurrent_queue = db.QueueDB(self.queue.path)
             concurrent_queue.edit_task(
-                "claim-child", {"start_ref": "next"},
+                "claim-child", rereviewed(concurrent_queue.task("claim-child"), {"start_ref": "next"}),
             )
             return dependency_base
 
@@ -1212,15 +1217,15 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
             with self.subTest(lease_state=lease_state):
                 queue = db.QueueDB(self.root / f"lease-{lease_state}.db")
                 queue.initialize()
-                queue.add_task(task(
+                queue.add_task(reviewed(task(
                     "lease-owner", self.root, allowed_providers=["alpha"],
-                ))
-                queue.add_task(task(
+                )))
+                queue.add_task(reviewed(task(
                     "alpha-ready", self.root, allowed_providers=["alpha"],
-                ))
-                queue.add_task(task(
+                )))
+                queue.add_task(reviewed(task(
                     "beta-ready", self.root, allowed_providers=["beta"],
-                ))
+                )))
                 key = f"alpha-account/manual/{lease_state}"
                 attempt_id = None
                 stored_state = "active" if lease_state == "orphan" else lease_state

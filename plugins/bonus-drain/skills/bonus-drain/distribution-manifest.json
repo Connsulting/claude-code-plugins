@@ -30,6 +30,7 @@
     "bonus_drain/planner.py",
     "bonus_drain/scout.py",
     "bonus_drain/reconcile.py",
+    "bonus_drain/review.py",
     "bonus_drain/usage.py",
     "bonusdb.sh",
     "cadence-check.prompt",

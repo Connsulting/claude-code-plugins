@@ -27,7 +27,10 @@ PR_URL = "https://github.com/example/repo/pull/42"
 
 
 def awaiting(detail: str = DETAIL, code: str = "authority_required") -> dict[str, object]:
-    return {"reason": {"code": code, "detail": detail, "signature": f"{code}:approval"}}
+    value: dict[str, object] = {"code": code, "detail": detail, "signature": f"{code}:approval"}
+    if code in {"authority_required", "verification_needed"}:
+        value["queue_time_knowable"] = False
+    return {"reason": value}
 
 
 def seed_historic_awaiting_human(

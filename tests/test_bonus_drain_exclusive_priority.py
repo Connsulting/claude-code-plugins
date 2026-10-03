@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from tests.readiness_fixture import reviewed
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -38,9 +39,9 @@ class ExclusivePriorityTests(unittest.TestCase):
             root = Path(temporary)
             queue = db.QueueDB(root / "queue.db")
             queue.initialize()
-            queue.add_task(_task("portable-p1", 1))
-            queue.add_task(_task("portable-p2", 2))
-            queue.add_task(_task("claude-only-p3", 3, claude_only=True))
+            queue.add_task(reviewed(_task("portable-p1", 1)))
+            queue.add_task(reviewed(_task("portable-p2", 2)))
+            queue.add_task(reviewed(_task("claude-only-p3", 3, claude_only=True)))
             router = config_module.AdapterConfig("router", "agent-router", ("/bin/true",))
             config = config_module.RuntimeConfig(
                 schema_version=1,

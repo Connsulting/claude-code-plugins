@@ -14,7 +14,7 @@ const fs = require('node:fs');
  await page.goto(url,{waitUntil:'domcontentloaded'});
  assert(await page.locator('.preview-banner').isVisible());
  assert((await page.locator('#qlist .qrow').count())>3);
- await page.locator('.fchip[data-group="workgroup"][data-value="Preview examples"]').click();
+ await page.locator('.fchip[data-group="workgroup"][data-value="Preview"]').click();
  assert.equal(await page.locator('#qlist .qrow:visible').count(),3);
  const row=id=>page.locator('#qlist .qrow').filter({has:page.locator('.task-toggle[data-task-id="'+id+'"]')});
  assert.equal(await page.locator('.task-edit, #work-editor').count(),0);

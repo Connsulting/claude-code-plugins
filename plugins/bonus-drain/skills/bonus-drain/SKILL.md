@@ -43,7 +43,7 @@ source private helper functions or invent a second DB path.
    `BONUS_DB` is deprecated queue-only compatibility and cannot retarget the configured graph.
 8. No publish, merge, credential change, production mutation, contract/schema/ADR change, or
    other externally consequential action is implied by being bonus work. The task contract
-   must grant it explicitly.
+   or a queue-time grant Brian gave during the readiness review must grant it explicitly.
 9. Only explicit done-when verification satisfies a dependency. A PR, branch, router status,
    failed attempt, or skipped attempt is not completion evidence. A `merged` dependency edge
    additionally requires the parent's recorded branch to be merged into the child's base.
@@ -77,6 +77,87 @@ unclear publishing authority, and work that requires a person's response during 
 Every queued task must be safe to leave queued until capacity permits or Brian explicitly
 accelerates it.
 
+### Queue-time readiness review (mandatory)
+
+`add` refuses a task without a stored readiness review, and an `edit` that changes the contract
+must carry a fresh one. The point is to find, with Brian present, every blocker that is already
+knowable before launch, so a worker does not discover it hours later and record
+`authority_required` or `verification_needed`. Run this before `bonus-drain add`:
+
+1. Read the source issue, every ADR it cites, and the AGENTS.md and CLAUDE.md files governing
+   the paths the work will likely touch.
+2. Check done-when against the authority the task will have for contradictions: merge,
+   release, external infrastructure, sacred paths, contract freezes.
+3. Check that each acceptance criterion is feasible, including what a vendor or provider can
+   actually do.
+4. Enumerate external dependencies: credentials, provider credit, MCP auth, cluster resources.
+5. Resolve each finding to exactly one of: a **grant** obtained from Brian now, a **prerequisite**
+   task plus dependency edge, a rewritten **done_when**, or a structured **check**. Ask Brian
+   for any grant in this thread; never assume one.
+6. Store the review with `--readiness-review` (JSON text, or `@/path/to/review.json`).
+
+Review shape. Unknown keys are rejected; the queue stamps `reviewed_at` and `review_digest`, and
+you do not supply them:
+
+```json
+{
+  "issue": "Connsulting/curie#3833",
+  "adrs": ["docs/adr/0160-worker-boundaries.md"],
+  "instructions": ["AGENTS.md", "apps/worker/CLAUDE.md"],
+  "acceptance_criteria": [
+    {"criterion": "Fix the retry path in kernel.py", "basis": "Single function; the unit tests cover it"}
+  ],
+  "findings": [
+    {"category": "authority", "detail": "apps/worker/CLAUDE.md marks kernel.py sacred; the fix edits it",
+     "resolution": {"grant": "kernel-edit"}},
+    {"category": "external_dependency", "dependency": "provider_credit",
+     "detail": "Embeddings run through OpenRouter, which returned HTTP 402 last week",
+     "resolution": {"check": {"type": "openrouter_credit", "min_usd": 5, "key_env": "OPENROUTER_API_KEY",
+                              "balance_key_env": "OPENROUTER_MGMT_KEY"}}},
+    {"category": "external_dependency", "dependency": "cluster_resource",
+     "detail": "The e2e needs the k8scratch service curie-email-e2e",
+     "resolution": {"check": {"type": "k8s_resource_exists", "context": "k8", "namespace": "k8scratch",
+                              "kind": "service", "name": "curie-email-e2e"}}},
+    {"category": "external_dependency", "dependency": "mcp_auth",
+     "detail": "The issue update goes through the Linear MCP server",
+     "resolution": {"check": {"type": "mcp_authenticated", "provider": "claude", "server": "linear"}}}
+  ]
+}
+```
+
+`issue` is the source issue as `owner/repo#N` (null when there is none) and must equal the
+`source_ref` issue when that parses as one. `instructions` and `acceptance_criteria` must be
+non-empty; `adrs` and `findings` may be empty. `category` is `authority`, `contradiction`,
+`feasibility`, or `external_dependency`; an `external_dependency` finding also carries
+`dependency` (`credential`, `provider_credit`, `mcp_auth`, `cluster_resource`,
+`vendor_capability`, `other`) and no other category may. Each resolution has exactly one key:
+`grant` (a grant id on this task), `prerequisite` (a task in `depends_on`), `done_when` (text
+identical to the task's done-when), or `check` (a spec identical to one of the task's `checks`).
+A resolution that points at nothing on the task is refused.
+
+A grant is explicit authority Brian gave now, passed with a repeatable `--grant`. It names an
+`id` (lowercase letters, digits, `.`, `_`, `-`), a `kind` (`merge`, `release`, `sacred_path`,
+`contract_change`, `external_infra`, `credential`, `scope`, `other`), and a `scope` stating
+exactly what is allowed:
+
+```sh
+--grant '{"id":"kernel-edit","kind":"sacred_path","scope":"Edit apps/worker/kernel.py as apps/worker/CLAUDE.md otherwise forbids; Brian approved 2026-10-03"}'
+```
+
+Grants render into the worker prompt as explicit authority and override the default
+no-merge/no-publish policy within their stated scope, so keep each scope narrow. At most 16
+per task. Every task, with or without grants, also carries the default worker grant: a file the
+change touches with pre-existing lint, format, or type errors (an inherited Ruff F401) is fixed
+in the same change rather than reported as a blocker; files the change does not otherwise touch
+are excluded. Do not write a grant for that.
+
+A contract edit (`edit` changing any reviewed field: `id`, `kind`, `cadence`, `cwd`, `goal`, `context`,
+`constraints`, `precondition`, `done_when`, `source_ref`, `start_ref`, `depends_on`,
+`merged_depends_on`, `checks`, `grants`) is refused unless the same `--changes` carries `readiness_review` for the edited contract. A
+stored review whose digest no longer matches the contract reads as stale and is refused.
+
+### Task contract
+
 Capture at least: stable ID, title, kind (`oneoff` or `recurring`), priority, size, cwd, goal,
 context, constraints, precondition, done-when, and compatible provider/task routing. Also capture
 source thread/plan reference when available, a work group when useful, and explicit prerequisite
@@ -98,7 +179,7 @@ worker has its own worktree and rebases if the other lands first; use a dependen
 work group when the order genuinely matters. If none of those applies,
 leave the precondition empty. Do not invent a checkout check so the task looks guarded. When
 `start_ref` is unset, repository dependencies choose the branch from their recorded metadata.
-Translate every precondition a machine can check into `checks` at queue time, and keep the free-text precondition only for judgment the worker must make. Check types: `base_ref_exists` (`ref`), `issue_open` (`repo`, `number`), `issue_in_milestone` (`repo`, `number`, `milestone`), `pr_merged` (`repo` and `pr` or `head`, optional `base`), `release_exists` (`repo`, `tag`), and `file_matches` (`repo`, `ref`, `path`, `pattern`, optional `present`). Add each with a repeatable `--check '{"type":"issue_open","repo":"owner/repo","number":123}'`, or edit `checks`. The queue also checks automatically that a set `start_ref` exists on origin and that an issue named by `source_ref` (an issue URL or `owner/repo#N`) is still open. `add` and `edit` evaluate every one of the task's checks synchronously, even while it still waits on a prerequisite, print each result, then print the task's readiness; `--json` output carries them as `checks` and `readiness`. A failing or unverifiable check is also printed prominently on stderr (`CHECK FAILED` or `CHECK UNVERIFIED`), but the command succeeds and the task stays queued. Nothing else is needed from the operator: the scout re-evaluates failing and unverifiable checks every 10 minutes, and the task becomes ready on its own once they pass. The scout retries them only for tasks that can launch: while a task waits on a prerequisite or is paused, its stored result is kept, and the tick that unblocks the task re-evaluates it before planning any launch. A failing check leaves the task waiting with its reason and spends no attempt; a check that cannot be evaluated because of a network or tool error waits at most one hour, then the launch proceeds and the worker is told to verify it. Readiness reads "Not checked yet" for a check never evaluated, "Check failed" for a failing one, "Check could not be verified yet" for a tool or network error, and "Waiting for preflight check re-evaluation" for a result that has lapsed. Write `start_ref` as a branch name such as `main`, never `origin/main`. When a prerequisite's pull request must land first, use a `merged` dependency edge instead of a precondition.
+Translate every precondition a machine can check into `checks` at queue time, and keep the free-text precondition only for judgment the worker must make. Check types: `base_ref_exists` (`ref`), `issue_open` (`repo`, `number`), `issue_in_milestone` (`repo`, `number`, `milestone`), `pr_merged` (`repo` and `pr` or `head`, optional `base`), `release_exists` (`repo`, `tag`), `file_matches` (`repo`, `ref`, `path`, `pattern`, optional `present`), and three launch-blocker probes: `mcp_authenticated` (`provider` `claude` or `codex`, `server`; the claude probe runs `claude mcp get` in the task's cwd, the codex probe reads `codex mcp list --json`), `k8s_resource_exists` (`context`, `kind`, `name`, optional `namespace`; `context` is always required, there is no current-context form), and `openrouter_credit` (`min_usd`, plus exactly one of `key_env`, an environment variable name, or `key_file`, an absolute path; optional `balance_key_env` or `balance_key_file` (at most one) names a management key; curl reads every key itself, so none appears in a command, a stored spec, or a result detail). It passes only when the funded account balance is at least `min_usd` and, if the key has its own spend limit, that remaining allowance is too. The balance is read through the key when it is a management key, otherwise through the balance key; a regular key with no balance key stays held as unknown. Add each with a repeatable `--check '{"type":"issue_open","repo":"owner/repo","number":123}'`, or edit `checks`. The queue also checks automatically that a set `start_ref` exists on origin and that an issue named by `source_ref` (an issue URL or `owner/repo#N`) is still open. `add` and `edit` evaluate every one of the task's checks synchronously, even while it still waits on a prerequisite, print each result, then print the task's readiness; `--json` output carries them as `checks` and `readiness`. A failing or unverifiable check is also printed prominently on stderr (`CHECK FAILED` or `CHECK UNVERIFIED`), but the command succeeds and the task stays queued. Nothing else is needed from the operator: the scout re-evaluates failing and unverifiable checks every 10 minutes, and the task becomes ready on its own once they pass. The scout retries them only for tasks that can launch: while a task waits on a prerequisite or is paused, its stored result is kept, and the tick that unblocks the task re-evaluates it before planning any launch. A failing check leaves the task waiting with its reason and spends no attempt; a check that cannot be evaluated because of a network or tool error waits at most one hour, then the launch proceeds and the worker is told to verify it, except the three probes above: the worker cannot verify those itself, so an unevaluable probe keeps the task held, still without consuming an attempt, and never auto-proceeds as unverified. Readiness reads "Not checked yet" for a check never evaluated, "Check failed" for a failing one, "Check could not be verified yet" for a tool or network error, and "Waiting for preflight check re-evaluation" for a result that has lapsed. Write `start_ref` as a branch name such as `main`, never `origin/main`. When a prerequisite's pull request must land first, use a `merged` dependency edge instead of a precondition.
 Work groups are optional navigation labels, not task titles: use them only for a meaningful
 cross-task cluster and keep each at 15 characters or fewer. Use title case; the soak-observation
 group is `Soak Obs`.
@@ -124,14 +205,20 @@ Any task that requires live Kubernetes proof, multiple external components, or i
 E2E is at least `medium`. Choose `large` when the required proof crosses two or more component
 boundaries, even if the source edit itself looks small.
 
-Preview the validated task, then add it with the CLI and its required estimate:
+Preview the validated task, then add it with the CLI, its required estimate, and the readiness
+review (plus a `--grant` for each grant the review obtained):
 
 ```sh
 bonus-drain add --id TASK_ID --title "TASK TITLE" --kind oneoff --priority 2 \
   --size medium --cwd /absolute/project/path --goal "CONCRETE GOAL" \
   --source-ref "THREAD_OR_PLAN_REFERENCE" \
-  --work-group "WORK GROUP" --depends-on PREREQUISITE_ID --start-ref refs/heads/task/base --json
+  --work-group "WORK GROUP" --depends-on PREREQUISITE_ID --start-ref refs/heads/task/base \
+  --grant '{"id":"GRANT_ID","kind":"sacred_path","scope":"WHAT IS ALLOWED"}' \
+  --readiness-review @/absolute/path/review.json --json
 ```
+
+Without `--readiness-review`, or with a review that does not match the task, `add` exits 2 with
+`readiness review required: ...` and stores nothing.
 
 After adding, read the canonical JSON task back by ID:
 
@@ -179,13 +266,15 @@ is satisfied only by a verified successful (`done`) one-off prerequisite; failed
 running, and missing prerequisites keep the child waiting. A blocked active child may make its
 failed/skipped parent eligible for the bounded recovery policy described below. Self-dependencies,
 cycles, missing IDs, and recurring prerequisites are rejected. Both automatic and explicit
-launches enforce dependencies. Each edge is `done` or `merged` (`--depends-on parent-id:merged,other-id:done`); an unsuffixed edge defaults to `merged` when the parent runs in a repository configured to open pull requests, and to `done` otherwise. A `merged` edge is satisfied only when the parent is verified done and its recorded branch is merged into the child's base, so a pull request that is open or green does not count as dependency completion. Readiness names the root blocker of a waiting chain, and `bonus-drain held-report --json` lists held authority-required work with its blocked dependents, read-only.
+launches enforce dependencies. Each edge is `done` or `merged` (`--depends-on parent-id:merged,other-id:done`); an unsuffixed edge defaults to `merged` when the parent runs in a repository configured to open pull requests, and to `done` otherwise. A `merged` edge is satisfied only when the parent is verified done and its recorded branch is merged into the child's base, so a pull request that is open or green does not count as dependency completion. Readiness names the root blocker of a waiting chain, and `bonus-drain held-report --json` lists held authority-required and verification-needed work with its blocked dependents and a `queue_time_knowable` measurement, read-only (see Terminal contract).
 
 Provider and account failures hold the account, not the task. A proved account-activation failure or a Codex launcher startup failure deletes the never-launched attempt, spends nothing on the task, and backs off that provider account for 30 minutes, doubling to a 4 hour cap, while the scout uses a sibling account. Tasks that share a work group or the same `source_ref` issue run one at a time; goal-managed tasks use the goal's own concurrency bound. Installing a release migrates an existing queue database before the new release becomes current.
 
 Use `bonus-drain readiness TASK_ID --json` to explain readiness and
-`bonus-drain edit TASK_ID --changes '{"depends_on":["PARENT_ID"]}' --json`
-to update a queued contract. Read back with `contract-task`. A live claimed task cannot be
+`bonus-drain edit TASK_ID --changes '{"depends_on":["PARENT_ID"],"readiness_review":{...}}' --json`
+to update a queued contract; any change to a reviewed field must carry a
+`readiness_review` re-run against the edited contract (grants are edited the same way, under `grants`).
+Read back with `contract-task`. A live claimed task cannot be
 edited; finish or reconcile it before revising it. Successful prerequisites do not auto-start
 a child; it becomes eligible for either normal capacity dispatch or an explicit acceleration.
 
@@ -243,7 +332,7 @@ protected path for structured outcome evidence. Use that command exactly.
 A background task must not exit blocked or waiting for input while its claim and activation
 lease remain live. Keep working or waiting while checks and authorized merges are in progress;
 neither opening a PR nor a running check watcher permits recording `done`.
-A green pull request that waits only on human review or merge is `done`. Automation and CI diffs are committed into the pull request, which is the review gate, and a bounded decision takes the recommended option and documents it there. A genuinely external blocker records `failed` with reason `authority_required` and a `resume_when` list of checks; the scout resumes the task when those checks pass, and a blocker with no checkable condition notifies Brian once. `record` refuses `awaiting_human`; historical rows stay readable.
+A green pull request that waits only on human review or merge is `done`. Automation and CI diffs are committed into the pull request, which is the review gate, and a bounded decision takes the recommended option and documents it there. A genuinely external blocker that the queue-time review could not have caught records `failed` with reason `authority_required` and a `resume_when` list of checks; the scout resumes the task when those checks pass, and a blocker with no checkable condition notifies Brian once. `record` refuses `awaiting_human`; historical rows stay readable.
 
 Replaying the same terminal status and evidence for the same attempt is idempotent. A missing or
 different attempt ID cannot release its claim, and a conflicting replay is a reconciliation
@@ -290,6 +379,17 @@ Optional audit fields may include `target_base_oid`, `head_oid`, and `merge_rece
 `retryable`, `verification_needed`, `authority_required`, `permanent`, or `unknown_launch`, with
 nonempty detail and a stable non-secret signature. Accepted completion mechanisms are `command`,
 `artifact`, `operator_receipt`, and `goal_acceptance`. A `failed` outcome with reason `authority_required` may add `resume_when`, a list of check objects using the check types above.
+
+`authority_required` and `verification_needed` reasons also carry boolean `reason.queue_time_knowable`:
+`true` when the blocker already existed and could have been found before launch from the task
+contract, its source issue, the ADRs it cites, the governing AGENTS.md or CLAUDE.md files, or a
+probe of an external dependency; `false` when it only emerged from the work. It measures how well
+the readiness review works. A worker that omits it keeps its blocker outcome (and `resume_when`),
+recorded with the field null as unreported, rather than being rewritten. `bonus-drain held-report`
+shows the value per held item (`yes`, `no`, or empty) and ends with
+`queue-time knowable: authority_required K/N, verification_needed K/N (U unreported)`;
+`--json` returns `{"held": [...], "measurement": {code: {"knowable", "not_knowable", "unreported"}}}`.
+A high knowable count means reviews are missing findings.
 
 For repository work, the required handoff identity is `remote`, `target_ref`, `branch_ref`, and
 `integration_state`. `target_base_oid`, `head_oid`, and `merge_receipt` may be retained as audit
@@ -357,6 +457,12 @@ to resolve the child start branch; historical commit OIDs and receipts are optio
   protect browser mutations; see `SECURITY.md` before remote use.
 - The read only `--local` queue and gates view shows the selected start branch and uses the
   same readiness result as dispatch. It has no pending verification state.
+- Tasks queued before readiness reviews existed keep a null review and stay launchable, but any
+  contract edit to them needs a review. `bonus-drain readiness-backfill [--json]` is read-only:
+  for each task a launch could still start (active, unclaimed, not done; one-offs with no attempt)
+  it reports `review` as `valid`, `missing`, `stale`, or `invalid`, the problems, and live results
+  of every launch check, plus `ready_for_launch` and a summary count. It stores nothing, so use it
+  to decide which legacy tasks to review, then add the review through `edit`.
 - Install/status/doctor/removal: see `README.md`.
 - DB/unit cutover and rollback: dry-run report plus the manual procedure in `MIGRATION.md`.
 - Legacy markdown/jsonl: separate `bonus-drain import-legacy` only.

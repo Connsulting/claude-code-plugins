@@ -1347,9 +1347,18 @@ class UpgradeOrderingTests(unittest.TestCase):
         self.write_config()
         queue = self.db.QueueDB(self.database)
         queue.initialize()
+        # This module also runs as a standalone script, so the minimal readiness review
+        # is written inline rather than imported from tests.readiness_fixture.
         queue.add_task({
             "id": "legacy", "title": "legacy", "kind": "oneoff", "cwd": str(self.root),
             "goal": "keep working after upgrade", "size": "small",
+            "readiness_review": {
+                "issue": None, "adrs": [], "instructions": ["AGENTS.md"],
+                "acceptance_criteria": [
+                    {"criterion": "keep working after upgrade", "basis": "test fixture"},
+                ],
+                "findings": [],
+            },
         })
         attempt = queue.claim(
             "legacy", _UPGRADE_KEY, "provider-a", "account-a", now_epoch=_UPGRADE_NOW,
@@ -1359,7 +1368,7 @@ class UpgradeOrderingTests(unittest.TestCase):
             "legacy", _UPGRADE_KEY, attempt_id=attempt.id, status="failed",
             outcome={"reason": {
                 "code": "authority_required", "detail": "Missing GitHub test actor",
-                "signature": "authority_required:test-actor",
+                "signature": "authority_required:test-actor", "queue_time_knowable": False,
             }},
             provider_id="provider-a", account_id="account-a", now_epoch=_UPGRADE_NOW,
         )

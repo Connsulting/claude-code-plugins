@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from tests.readiness_fixture import reviewed
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -145,7 +146,7 @@ class LaunchSurfaceDispatchTests(unittest.TestCase):
 
     def run_task(self, cfg: config_module.RuntimeConfig, task_id: str, *, provider: str = "claude",
                  **task: object) -> dispatcher.DispatchResult:
-        self.queue.add_task(_task(task_id, **task))
+        self.queue.add_task(reviewed(_task(task_id, **task)))
         return dispatcher.dispatch(
             cfg, self.queue, task_id=task_id, eligibility_key=f"manual/{task_id}",
             requested_provider=provider, router_call=self.router,

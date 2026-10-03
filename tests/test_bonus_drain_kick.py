@@ -17,6 +17,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Iterator
 from unittest import mock
+from tests.readiness_fixture import reviewed
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -100,7 +101,7 @@ class KickContractTests(unittest.TestCase):
         )
         self.queue = db.QueueDB(self.config.database)
         self.queue.initialize()
-        self.queue.add_task(_task("portable"))
+        self.queue.add_task(reviewed(_task("portable")))
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
@@ -636,7 +637,7 @@ class KickContractTests(unittest.TestCase):
         active = self.root / "active"
         active.write_text("Business\n", encoding="utf-8")
         cfg = self._active_multi_config(active)
-        self.queue.add_task(_task("already-running"))
+        self.queue.add_task(reviewed(_task("already-running")))
         held_key = f"alpha-business/alpha-weekly/{NOW + 604800}"
         self.assertTrue(self.queue.claim(
             "already-running", held_key, "alpha", "alpha-business",
@@ -744,7 +745,7 @@ class KickContractTests(unittest.TestCase):
         active = self.root / "active"
         active.write_text("Personal\n", encoding="utf-8")
         cfg = self._active_multi_config(active)
-        self.queue.add_task(_task("business-owner"))
+        self.queue.add_task(reviewed(_task("business-owner")))
         key = f"alpha-business/alpha-weekly/{NOW + 604800}"
         self.assertTrue(self.queue.claim(
             "business-owner", key, "alpha", "alpha-business",
@@ -778,7 +779,7 @@ class KickContractTests(unittest.TestCase):
         active.write_text("Business\n", encoding="utf-8")
         cfg = self._active_multi_config(active)
         for task_id in ("owner-one", "owner-two"):
-            self.queue.add_task(_task(task_id))
+            self.queue.add_task(reviewed(_task(task_id)))
             key = f"alpha-business/alpha-weekly/{NOW + 604800}/{task_id}"
             self.assertTrue(self.queue.claim(
                 task_id, key, "alpha", "alpha-business",
@@ -806,7 +807,7 @@ class KickContractTests(unittest.TestCase):
         active.write_text("Business\n", encoding="utf-8")
         cfg = self._active_multi_config(active)
         for task_id in ("owner-one", "owner-two"):
-            self.queue.add_task(_task(task_id))
+            self.queue.add_task(reviewed(_task(task_id)))
             key = f"alpha-business/alpha-weekly/{NOW + 604800}/{task_id}"
             self.assertTrue(self.queue.claim(
                 task_id, key, "alpha", "alpha-business",
@@ -932,7 +933,7 @@ class KickContractTests(unittest.TestCase):
             ("custom-key", "alpha", "manual/custom-key"),
         ):
             if task_id != "portable":
-                self.queue.add_task(_task(task_id))
+                self.queue.add_task(reviewed(_task(task_id)))
             with self.subTest(requested_provider=requested_provider):
                 result = kick.kick_task(
                     cfg,
@@ -952,7 +953,7 @@ class KickContractTests(unittest.TestCase):
         active = self.root / "active"
         active.write_text("Personal\n", encoding="utf-8")
         cfg = self._active_multi_config(active)
-        self.queue.add_task(_task("business-owner"))
+        self.queue.add_task(reviewed(_task("business-owner")))
         owner_key = f"alpha-business/alpha-weekly/{NOW + 604800}"
         self.assertTrue(self.queue.claim(
             "business-owner", owner_key, "alpha", "alpha-business",
@@ -988,7 +989,7 @@ class KickContractTests(unittest.TestCase):
         active = self.root / "active"
         active.write_text("Personal\n", encoding="utf-8")
         cfg = self._active_multi_config(active)
-        self.queue.add_task(_task("business-owner"))
+        self.queue.add_task(reviewed(_task("business-owner")))
         owner_key = f"alpha-business/alpha-weekly/{NOW + 604800}"
         self.assertTrue(self.queue.claim(
             "business-owner", owner_key, "alpha", "alpha-business",
@@ -1066,7 +1067,7 @@ class KickContractTests(unittest.TestCase):
         active = self.root / "active"
         active.write_text("Business\n", encoding="utf-8")
         cfg = self._active_multi_config(active)
-        self.queue.add_task(_task("retired-owner"))
+        self.queue.add_task(reviewed(_task("retired-owner")))
         key = f"alpha-retired/alpha-weekly/{NOW + 604800}"
         self.assertTrue(self.queue.claim(
             "retired-owner", key, "alpha", "alpha-retired",
@@ -1200,7 +1201,7 @@ class KickContractTests(unittest.TestCase):
         )
         for index, outcome in enumerate(cases):
             task_id = f"classify-{index}"
-            self.queue.add_task(_task(task_id))
+            self.queue.add_task(reviewed(_task(task_id)))
             calls: list[list[str]] = []
 
             def uncertain(argv: list[str], **_kwargs: object) -> object:
@@ -1232,7 +1233,7 @@ class KickContractTests(unittest.TestCase):
         for name, outcome in cases.items():
             task_id = f"launch-{name}"
             key = f"manual/{name}"
-            self.queue.add_task(_task(task_id))
+            self.queue.add_task(reviewed(_task(task_id)))
             side_effect = outcome if isinstance(outcome, BaseException) else None
             return_value = None if side_effect is not None else outcome
             with mock.patch(
@@ -1257,7 +1258,7 @@ class KickContractTests(unittest.TestCase):
 
         task_id = "launch-bookkeeping"
         key = "manual/bookkeeping"
-        self.queue.add_task(_task(task_id))
+        self.queue.add_task(reviewed(_task(task_id)))
         launched = subprocess.CompletedProcess(
             [], 0, b'{"dispatch":{"job_id":"job-bookkeeping","launched":true}}', b"",
         )
@@ -1311,7 +1312,7 @@ class KickContractTests(unittest.TestCase):
     def test_explicit_router_launched_false_is_known_not_launched_and_retry_safe(self) -> None:
         task_id = "known-negative"
         key = "manual/known-negative"
-        self.queue.add_task(_task(task_id))
+        self.queue.add_task(reviewed(_task(task_id)))
         negative = subprocess.CompletedProcess(
             [], 9, b'{"launched":false,"error":"admission refused"}', b"router refused",
         )
@@ -1331,7 +1332,7 @@ class KickContractTests(unittest.TestCase):
         cfg = replace(self.config, providers=(codex,), plans=(), accounts=(), limits=())
         task_id = "missing-codex"
         key = "manual/missing-codex"
-        self.queue.add_task(_task(task_id))
+        self.queue.add_task(reviewed(_task(task_id)))
         rejected = subprocess.CompletedProcess(
             [], 1, b"", (
                 b"could not run `codex app-server daemon start`: No such file or directory"
@@ -1354,7 +1355,7 @@ class KickContractTests(unittest.TestCase):
         cfg = replace(self.config, providers=(codex,), plans=(), accounts=(), limits=())
         task_id = "daemon-timeout"
         key = "manual/daemon-timeout"
-        self.queue.add_task(_task(task_id))
+        self.queue.add_task(reviewed(_task(task_id)))
         rejected = subprocess.CompletedProcess(
             [], 1, b"", (
                 b"agent-router: `/home/user/.local/bin/codex app-server daemon start` "
@@ -1383,7 +1384,7 @@ class KickContractTests(unittest.TestCase):
         )
         for task_id, task_mcp, requested_provider in cases:
             with self.subTest(task_id=task_id, requested_provider=requested_provider):
-                self.queue.add_task(_task(task_id, mcp=task_mcp))
+                self.queue.add_task(reviewed(_task(task_id, mcp=task_mcp)))
                 seen: list[list[str]] = []
 
                 def router(argv: list[str], **_kwargs: object) -> dict[str, object]:
@@ -1411,7 +1412,7 @@ class KickContractTests(unittest.TestCase):
             json.dumps({"mcpServers": {"project": {"command": "project-mcp"}}}),
             encoding="utf-8",
         )
-        self.queue.add_task(_task("claude-mcp", mcp=str(source_mcp)))
+        self.queue.add_task(reviewed(_task("claude-mcp", mcp=str(source_mcp))))
         seen: list[list[str]] = []
 
         def router(argv: list[str], **_kwargs: object) -> dict[str, object]:
@@ -1447,7 +1448,7 @@ class KickContractTests(unittest.TestCase):
                 },
             },
         }), encoding="utf-8")
-        self.queue.add_task(_task("named-mcp", cwd=str(project), mcp="wiki"))
+        self.queue.add_task(reviewed(_task("named-mcp", cwd=str(project), mcp="wiki")))
         seen: list[list[str]] = []
 
         def router(argv: list[str], **_kwargs: object) -> dict[str, object]:
@@ -1499,7 +1500,7 @@ class KickContractTests(unittest.TestCase):
             json.dumps({"mcpServers": {"project": {"command": "project-mcp"}}}),
             encoding="utf-8",
         )
-        self.queue.add_task(_task("mcp-parser-rejection", mcp=str(source_mcp)))
+        self.queue.add_task(reviewed(_task("mcp-parser-rejection", mcp=str(source_mcp))))
         rejected = subprocess.CompletedProcess(
             [], 2, b"", (
                 b"agent-router: --mcp-config is a claude only flag, but this task routed "
@@ -1584,7 +1585,7 @@ class KickContractTests(unittest.TestCase):
         compatibility_db = self.root / "other.db"
         compatibility_queue = db.QueueDB(compatibility_db)
         compatibility_queue.initialize()
-        compatibility_queue.add_task(_task("queue-compatibility"))
+        compatibility_queue.add_task(reviewed(_task("queue-compatibility")))
         with _capture_cli_json() as payloads:
             code = cli.main([
                 "queue", "--config", str(self.config.source_path),

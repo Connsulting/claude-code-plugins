@@ -9,6 +9,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
+from tests.readiness_fixture import reviewed
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -104,7 +105,7 @@ class BonusDrainReviewRepairTests(unittest.TestCase):
         self.temporary.cleanup()
 
     def test_terminal_record_is_idempotent_and_rejects_a_conflicting_outcome(self) -> None:
-        self.queue.add_task(task("terminal-once"))
+        self.queue.add_task(reviewed(task("terminal-once")))
         attempt = self.queue.claim(
             "terminal-once", ELIGIBILITY_KEY, "alpha", "alpha-account", now_epoch=NOW,
         )
@@ -131,12 +132,13 @@ class BonusDrainReviewRepairTests(unittest.TestCase):
                 outcome={"reason": {
                     "code": "verification_needed", "detail": "changed mind",
                     "signature": "verification_needed:changed-mind",
+                    "queue_time_knowable": False,
                 }},
                 summary="changed mind",
             )
 
     def test_keyed_terminal_replay_recognizes_legacy_cycle_history(self) -> None:
-        self.queue.add_task(task("legacy-terminal"))
+        self.queue.add_task(reviewed(task("legacy-terminal")))
         with sqlite3.connect(self.queue.path) as connection:
             cursor = connection.execute(
                 "INSERT INTO runs(task,kind,cycle,eligibility_key,status,ts,summary) "
@@ -155,12 +157,12 @@ class BonusDrainReviewRepairTests(unittest.TestCase):
         self.assertEqual(len(self.queue.runs(task_id="legacy-terminal")), 1)
 
     def test_same_priority_tasks_are_ordered_by_time_eligible_not_kind(self) -> None:
-        self.queue.add_task(task(
+        self.queue.add_task(reviewed(task(
             "newer-oneoff", created_at=iso(NOW - 12 * 60 * 60),
-        ))
-        self.queue.add_task(task(
+        )))
+        self.queue.add_task(reviewed(task(
             "older-recurring", kind="recurring", created_at=iso(NOW - 30 * 24 * 60 * 60),
-        ))
+        )))
         self.queue.record(
             "older-recurring", "alpha-account/alpha-weekly/old", status="done",
             timestamp=iso(NOW - 5 * 24 * 60 * 60),
@@ -172,7 +174,7 @@ class BonusDrainReviewRepairTests(unittest.TestCase):
         self.assertEqual([item.id for item in ordered], ["older-recurring", "newer-oneoff"])
 
     def test_inflight_details_include_a_deterministic_age(self) -> None:
-        self.queue.add_task(task("running"))
+        self.queue.add_task(reviewed(task("running")))
         self.queue.record(
             "running", ELIGIBILITY_KEY, status="dispatched", timestamp=iso(NOW - 125),
         )
@@ -184,7 +186,7 @@ class BonusDrainReviewRepairTests(unittest.TestCase):
         self.assertEqual(details[0]["age_seconds"], 125)
 
     def test_terminal_from_an_older_cycle_does_not_hide_a_new_dispatch(self) -> None:
-        self.queue.add_task(task("recurring-run", kind="recurring"))
+        self.queue.add_task(reviewed(task("recurring-run", kind="recurring")))
         old_key = f"alpha-account/alpha-weekly/{RESET - 604_800}"
         self.queue.record(
             "recurring-run", old_key, status="dispatched", timestamp=iso(NOW - 500),
@@ -203,7 +205,7 @@ class BonusDrainReviewRepairTests(unittest.TestCase):
         self.assertEqual(details[0]["age_seconds"], 125)
 
     def test_legacy_terminal_cycle_closes_the_matching_keyed_dispatch(self) -> None:
-        self.queue.add_task(task("legacy-finish"))
+        self.queue.add_task(reviewed(task("legacy-finish")))
         other_key = f"alpha-account/other-weekly/{RESET}"
         with sqlite3.connect(self.queue.path) as connection:
             connection.execute(
@@ -231,8 +233,8 @@ class BonusDrainReviewRepairTests(unittest.TestCase):
         self.assertEqual(self.queue.inflight_details(now_epoch=NOW), [])
 
     def test_scout_caps_the_inflight_provider_and_dispatches_healthy_provider_work(self) -> None:
-        self.queue.add_task(task("running") | {"allowed_providers": ["alpha"]})
-        self.queue.add_task(task("would-run") | {"allowed_providers": ["beta"]})
+        self.queue.add_task(reviewed(task("running") | {"allowed_providers": ["alpha"]}))
+        self.queue.add_task(reviewed(task("would-run") | {"allowed_providers": ["beta"]}))
         attempt = self.queue.claim(
             "running", ELIGIBILITY_KEY, "alpha", "alpha-account", now_epoch=NOW,
         )
@@ -273,7 +275,7 @@ class BonusDrainReviewRepairTests(unittest.TestCase):
         self.assertEqual(len(self.queue.runs(task_id="running")), 1)
 
     def test_scout_preflights_router_before_claiming_any_task(self) -> None:
-        self.queue.add_task(task("would-run"))
+        self.queue.add_task(reviewed(task("would-run")))
         missing = str(self.root / "missing-agent-router")
 
         with (
@@ -293,8 +295,8 @@ class BonusDrainReviewRepairTests(unittest.TestCase):
         dispatch_mock.assert_not_called()
 
     def test_scout_collapses_reconciliation_failure_to_one_tick_error(self) -> None:
-        self.queue.add_task(task("ambiguous"))
-        self.queue.add_task(task("would-run"))
+        self.queue.add_task(reviewed(task("ambiguous")))
+        self.queue.add_task(reviewed(task("would-run")))
         self.assertTrue(self.queue.claim(
             "ambiguous", ELIGIBILITY_KEY, "alpha", "alpha-account",
         ))
