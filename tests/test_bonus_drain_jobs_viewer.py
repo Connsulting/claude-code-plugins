@@ -1419,5 +1419,29 @@ class RootBlockerViewerTests(unittest.TestCase):
         self.assertIn("0/1 prerequisites complete", plain)
 
 
+class CheckReadinessViewerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.viewer = _load_server()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(os.path.realpath(temporary.name))
+
+    def test_never_evaluated_check_renders_not_checked_yet(self) -> None:
+        from bonus_drain import checks, db
+        from tests.test_bonus_dependency_recovery import NOW, task
+
+        queue = db.QueueDB(self.root / "queue.db")
+        queue.initialize()
+        spec = {"type": "issue_open", "repo": "owner/repo", "number": 12}
+        added = queue.add_task(task("fresh", self.root, checks=[spec]))
+        readiness = queue.readiness("fresh", now_epoch=NOW + 10)
+
+        html = self.viewer._work_meta({**added.to_dict(), "readiness": readiness})
+
+        self.assertIn(f"Not checked yet: {checks.describe(spec)}", html)
+        self.assertNotIn("Waiting for preflight check", html)
+        self.assertNotIn("Check failed", html)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / 'plugins/bonus-drain/skills/bonus-drain'))
 from bonus_drain import cli, db, dispatcher, scout, usage
 from dataclasses import replace
 from tests import test_bonus_drain_kick as kick_tests
+from tests.test_bonus_drain_preflight_checks import FakeRunner, exited, git_ls_remote
 
 
 def verified_outcome():
@@ -121,6 +122,16 @@ class AsyncWorkTests(unittest.TestCase):
                      'refs/heads/main/', 'a.lock', 'a b', '-bad', 'a@{b}'):
             with self.subTest(name=name), self.assertRaises(db.QueueError):
                 self.queue.edit_task('a', {'start_ref': name})
+        # add and edit evaluate the start_ref check; answer ls-remote with the recorded
+        # missing-ref exit so no real git call runs.
+        from bonus_drain import checks
+        fake = FakeRunner({
+            git_ls_remote('/tmp', 'refs/heads/epic/next'): exited(2),
+            git_ls_remote('/tmp', 'refs/heads/next'): exited(2),
+        })
+        runner_patch = mock.patch.object(checks, 'subprocess_runner', fake)
+        runner_patch.start()
+        self.addCleanup(runner_patch.stop)
         with mock.patch.object(cli, '_json') as output:
             self.assertEqual(cli.main(['add', '--database', str(self.queue.path), '--id', 'cli-start',
                 '--title', 'CLI start', '--kind', 'oneoff', '--size', 'small', '--cwd', '/tmp',
@@ -131,6 +142,7 @@ class AsyncWorkTests(unittest.TestCase):
             self.assertEqual(cli.main(['edit', '--database', str(self.queue.path), 'cli-start',
                 '--changes', json.dumps({'start_ref': 'next'}), '--json']), 0)
         self.assertEqual(self.queue.task('cli-start').start_ref, 'refs/heads/next')
+        self.assertEqual(fake.unexpected, [])
 
     def test_null_start_ref_preserves_old_hash_and_explicit_edit_fences_stale_claim(self):
         original = self.queue.task('a')

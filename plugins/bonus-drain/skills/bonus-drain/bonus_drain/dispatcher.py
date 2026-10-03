@@ -1456,7 +1456,7 @@ def dispatch(
         checks.refresh(
             queue, runner=check_runner or checks.subprocess_runner,
             now_epoch=int(time.time() if now_epoch is None else now_epoch),
-            task_ids=(task_id,), max_checks=checks.MAX_CHECKS_PER_TASK + 4,
+            task_ids=(task_id,), max_calls=None, budget_seconds=None,
         )
     readiness = queue.readiness(task_id, now_epoch=now_epoch)
     # The weekend window gates only automatic launches; an explicit start may run a due

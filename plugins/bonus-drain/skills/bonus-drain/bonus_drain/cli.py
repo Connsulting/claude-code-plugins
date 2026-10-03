@@ -14,7 +14,7 @@ from typing import Any, Mapping, Sequence
 
 from . import __version__
 from . import config as config_module
-from . import db, dispatcher, factory_terminal, planner, scout, usage
+from . import checks, db, dispatcher, factory_terminal, planner, scout, usage
 from .kick import kick_task, resolve_active_accounts
 
 
@@ -58,6 +58,29 @@ def _now(args: argparse.Namespace) -> int:
         if value and value.lstrip("-").isdigit():
             return int(value)
     return int(time.time())
+
+
+def _evaluate_task_checks(
+    queue: db.QueueDB, task_id: str, args: argparse.Namespace,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Evaluate every launch check of one task now, uncapped, and read its resulting readiness.
+
+    A failing or unverifiable check is reported on stderr; the task stays queued and the
+    scout re-evaluates it on its retry interval.
+    """
+
+    now = _now(args)
+    # Looked up at call time so tests can patch the module's runner.
+    result = checks.refresh(
+        queue, runner=checks.subprocess_runner, now_epoch=now, task_ids=(task_id,),
+        due_only=False, max_calls=None, budget_seconds=None,
+    )
+    evaluated = result["evaluated"]
+    for entry in evaluated:
+        label = {"fail": "CHECK FAILED", "unknown": "CHECK UNVERIFIED"}.get(entry["status"])
+        if label:
+            print(f"{label}: {entry['check']}: {entry['detail']}", file=sys.stderr)
+    return evaluated, queue.readiness(task_id, now_epoch=now)
 
 
 def _config_path(args: argparse.Namespace) -> Path | None:
@@ -310,7 +333,14 @@ def _command(args: argparse.Namespace) -> int:
         )
         _validate_mcp(cfg, values["mcp"], values["cwd"], values["allowed_providers"])
         task = queue.add_task(values)
-        _json({"task": task.to_dict()}) if args.json else print(f"added: {task.id}")
+        evaluated, readiness = _evaluate_task_checks(queue, task.id, args)
+        if args.json:
+            _json({"task": task.to_dict(), "checks": evaluated, "readiness": readiness})
+        else:
+            print(f"added: {task.id}")
+            for entry in evaluated:
+                print(f"  {entry['status']}  {entry['check']}: {entry['detail']}")
+            print(f"readiness: {readiness['state']}: {readiness['reason']}")
         return 0
     if command in {"eligible", "count-eligible", "pick"}:
         _cfg, queue = _queue(args)
@@ -497,7 +527,9 @@ def _command(args: argparse.Namespace) -> int:
             changes["depends_on"], changes["merged_depends_on"] = _dependency_edges(
                 changes["depends_on"], queue, cfg, queue.task(args.task),
             )
-        _json({"task": queue.edit_task(args.task, changes).to_dict()})
+        task = queue.edit_task(args.task, changes)
+        evaluated, readiness = _evaluate_task_checks(queue, task.id, args)
+        _json({"task": task.to_dict(), "checks": evaluated, "readiness": readiness})
         return 0
     if command == "readiness":
         _cfg, queue = _queue(args)

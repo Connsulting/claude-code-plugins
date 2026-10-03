@@ -162,6 +162,21 @@ def handoff(state: str = "unmerged", remote: str = "git@github.com:owner/repo.gi
     }
 
 
+# Issue 2855's recorded shape re-keyed to OPEN: open and in milestone v0.10.0, the answer
+# both issue_open and issue_in_milestone read from one ``gh issue view`` call.
+ISSUE_OPEN_IN_V0_10_0 = with_fields(ISSUE_2855_CLOSED, state="OPEN")
+# The recorded ls-remote shape for a second branch on the same origin.
+LS_REMOTE_NEXT = LS_REMOTE_MAIN.replace("refs/heads/main", "refs/heads/next")
+
+
+def in_milestone(number: int, repo: str = "owner/repo", milestone: str = "v0.10.0") -> dict[str, object]:
+    return {"type": "issue_in_milestone", "repo": repo, "number": number, "milestone": milestone}
+
+
+def git_get_url(cwd: object) -> tuple[str, ...]:
+    return ("git", "-C", str(cwd), "remote", "get-url", "origin")
+
+
 TASK_X_PR_OPEN = with_fields(
     PR_3795_OPEN, baseRefName="main", headRefName="task/x", number=41,
 )
@@ -520,11 +535,11 @@ class CheckGatingTests(PreflightCase):
     def test_pending_and_recent_unknown_wait(self) -> None:
         self.add("pending", checks=[ISSUE_OPEN_2855])
         status = self.ready("pending")
-        self.assertEqual((status["state"], status["hold_reason"]), ("waiting", "check_pending"))
-        self.assertIn("Waiting for preflight check evaluation", status["reason"])
+        self.assertEqual((status["state"], status["hold_reason"]), ("waiting", "check_unchecked"))
+        self.assertTrue(status["reason"].startswith("Not checked yet: "), status["reason"])
         self.assertEqual(
             [(item["status"], item["checked_at"]) for item in status["checks"]],
-            [("pending", None)],
+            [("unchecked", None)],
         )
         self.assertIsNone(self.try_claim("pending"))
 
@@ -636,7 +651,7 @@ class CheckGatingTests(PreflightCase):
             [("builtin", "issue_open"), ("declared", "release_exists")],
         )
         for item in listed:
-            self.assertEqual(item["status"], "pending")
+            self.assertEqual(item["status"], "unchecked")
             self.assertIsNone(item["detail"])
             self.assertIsNone(item["checked_at"])
             self.assertEqual(
@@ -673,28 +688,38 @@ class CheckGatingTests(PreflightCase):
             checks.check_id(spec, checks.check_context(spec, cwd=str(repo_b))),
         )
 
-    def test_cwd_edit_makes_builtin_pending(self) -> None:
+    def test_cwd_edit_makes_builtin_unchecked(self) -> None:
         _repo_a, repo_b, _fake = self._two_repositories()
         self.assertTrue(self.ready("t1")["ready"])
 
         self.queue.edit_task("t1", {"cwd": str(repo_b)})
 
         status = self.ready("t1")
-        self.assertEqual(status["hold_reason"], "check_pending")
-        self.assertEqual([item["status"] for item in status["checks"]], ["pending"])
+        self.assertEqual(status["hold_reason"], "check_unchecked")
+        self.assertEqual([item["status"] for item in status["checks"]], ["unchecked"])
         again = self.runner({git_ls_remote(repo_b): exited(2)})
         self.refresh(again, now=NOW + 20)
         self.assertEqual(again.tool_calls("ls-remote"), [git_ls_remote(repo_b)])
         self.assertEqual(self.ready("t1", now=NOW + 30)["hold_reason"], "check_failed")
 
-    def test_same_issue_in_two_tasks_costs_two_calls(self) -> None:
+    def test_same_issue_in_two_tasks_shares_one_call_per_refresh(self) -> None:
         self.add("first", checks=[ISSUE_OPEN_3815])
         self.add("second", checks=[ISSUE_OPEN_3815])
         fake = self.runner({gh_issue(3815): ok(ISSUE_3815_OPEN)})
 
-        self.refresh(fake)
+        result = self.refresh(fake)
 
-        self.assertEqual(fake.tool_calls("issue"), [gh_issue(3815), gh_issue(3815)])
+        self.assertEqual(fake.tool_calls("issue"), [gh_issue(3815)])
+        self.assertEqual(result["tool_calls"], 1)
+        self.assertEqual(
+            sorted((item["task_id"], item["status"]) for item in result["evaluated"]),
+            [("first", "pass"), ("second", "pass")],
+        )
+        stored = rows(self.queue, "SELECT task_id,status FROM check_results ORDER BY task_id")
+        self.assertEqual(
+            [(row["task_id"], row["status"]) for row in stored],
+            [("first", "pass"), ("second", "pass")],
+        )
         self.assertTrue(self.ready("first")["ready"])
         self.assertTrue(self.ready("second")["ready"])
 
@@ -743,23 +768,27 @@ class CheckGatingTests(PreflightCase):
         self.add("a", checks=[spec], created_at=iso(NOW - 120))
         self.add("b", checks=[spec], created_at=iso(NOW - 60))
         manual = self.runner({argv: ok(ISSUE_2855_CLOSED)})
-        answers = iter([ISSUE_3815_OPEN, ISSUE_2855_CLOSED])
         manual_store: list[str] = []
 
         def scout_answer(_argv: tuple[str, ...]):
-            shape = next(answers)
+            # The scout reserved both generations before this single shared call; a manual
+            # refresh of b that begins while the call is in flight must still win for b.
             if not manual_store:
                 checks.refresh(self.queue, runner=manual, now_epoch=NOW, task_ids=("b",))
                 manual_store.append(rows(
                     self.queue, "SELECT checked_at FROM check_results WHERE task_id='b'",
                 )[0]["checked_at"])
-            return ok(shape)
+            return ok(ISSUE_3815_OPEN)
 
         scout = self.runner({argv: scout_answer})
-        self.refresh(scout, now=NOW)
+        outer = self.refresh(scout, now=NOW)
 
-        self.assertEqual(len(scout.calls), 2)
+        self.assertEqual(len(scout.calls), 1)
         self.assertEqual(len(manual.calls), 1)
+        self.assertEqual(outer["discarded"], 1)
+        self.assertEqual(
+            [(item["task_id"], item["status"]) for item in outer["evaluated"]], [("a", "pass")],
+        )
         stored = {
             row["task_id"]: row for row in rows(
                 self.queue, "SELECT task_id,status,checked_at FROM check_results",
@@ -784,9 +813,9 @@ class CheckGatingTests(PreflightCase):
                 checks=[{"type": "issue_open", "repo": "owner/repo", "number": number}],
             )
             responses[gh_issue(number, "owner/repo")] = ok(ISSUE_3815_OPEN)
-        self.refresh(self.runner(responses), now=NOW - 4_000, max_checks=100)
+        self.refresh(self.runner(responses), now=NOW - 4_000, max_calls=100)
 
-        result = self.refresh(self.runner(responses), now=NOW, max_checks=25)
+        result = self.refresh(self.runner(responses), now=NOW, max_calls=25)
 
         self.assertEqual(len(result["evaluated"]), 25)
         self.assertEqual(result["deferred"], 5)
@@ -1073,8 +1102,8 @@ class NoNetworkTests(PreflightCase):
             snapshot = db.LocalQueueReader(self.queue.path).snapshot(now_epoch=NOW + 10)
 
         readiness = snapshot["readiness"]
-        self.assertEqual(readiness["declared"]["hold_reason"], "check_pending")
-        self.assertEqual(readiness["builtin"]["hold_reason"], "check_pending")
+        self.assertEqual(readiness["declared"]["hold_reason"], "check_unchecked")
+        self.assertEqual(readiness["builtin"]["hold_reason"], "check_unchecked")
         child_edge = next(item for item in readiness["child"]["dependencies"] if item["id"] == "parent")
         self.assertEqual(child_edge["status"], "merge_check_pending")
         self.assertEqual(rows(self.queue, "SELECT * FROM check_results"), [])
@@ -1091,16 +1120,16 @@ class RefreshBudgetTests(PreflightCase):
             ids.append(task_id)
         return ids, self.runner(responses)
 
-    def test_refresh_respects_max_checks_and_defers(self) -> None:
+    def test_refresh_respects_max_calls_and_defers(self) -> None:
         ids, fake = self._forty()
 
-        first = self.refresh(fake, now=NOW, max_checks=25)
+        first = self.refresh(fake, now=NOW, max_calls=25)
 
         self.assertEqual(len(fake.tool_calls("issue")), 25)
         self.assertEqual(first["due"], 40)
         self.assertEqual(len(first["evaluated"]), 25)
         self.assertEqual(first["deferred"], 15)
-        second = self.refresh(fake, now=NOW + 10, max_checks=25)
+        second = self.refresh(fake, now=NOW + 10, max_calls=25)
         self.assertEqual(len(second["evaluated"]), 15)
         self.assertEqual(second["deferred"], 0)
         self.assertEqual(len(fake.tool_calls("issue")), 40)
@@ -1111,13 +1140,303 @@ class RefreshBudgetTests(PreflightCase):
         clock = iter([0.0, 0.0, 0.0] + [1_000.0] * 200)
 
         result = self.refresh(
-            fake, now=NOW, max_checks=100, budget_seconds=45.0, monotonic=lambda: next(clock),
+            fake, now=NOW, max_calls=100, budget_seconds=45.0, monotonic=lambda: next(clock),
         )
 
         evaluated = len(result["evaluated"])
         self.assertLess(evaluated, 40)
         self.assertEqual(result["deferred"], 40 - evaluated)
         self.assertEqual(len(fake.tool_calls("issue")), evaluated)
+
+
+class RefreshSharingTests(PreflightCase):
+    """One refresh makes each identical tool call once; nothing carries across refreshes."""
+
+    def test_thirty_five_tasks_share_calls_in_one_tick(self) -> None:
+        ids, responses = [], {
+            git_ls_remote(self.root, "refs/heads/main"): ok(LS_REMOTE_MAIN),
+            git_ls_remote(self.root, "refs/heads/next"): ok(LS_REMOTE_NEXT),
+        }
+        for index in range(35):
+            task_id = f"share-{index:02d}"
+            number = 3001 + index
+            self.add(
+                task_id, created_at=iso(NOW - 1_000 + index),
+                start_ref="main" if index % 2 == 0 else "next",
+                source_ref=f"owner/repo#{number}",
+                checks=[in_milestone(number)],
+            )
+            responses[gh_issue(number, "owner/repo")] = ok(ISSUE_OPEN_IN_V0_10_0)
+            ids.append(task_id)
+        fake = self.runner(responses)
+
+        result = checks.refresh(self.queue, runner=fake, now_epoch=NOW)
+
+        self.assertEqual(len(fake.calls), 38, fake.calls)
+        self.assertEqual(result["tool_calls"], 38)
+        self.assertCountEqual(fake.tool_calls("ls-remote"), [
+            git_ls_remote(self.root, "refs/heads/main"),
+            git_ls_remote(self.root, "refs/heads/next"),
+        ])
+        self.assertEqual(fake.tool_calls("get-url"), [git_get_url(self.root)])
+        self.assertEqual(len(fake.tool_calls("issue")), 35)
+        self.assertEqual(len(set(fake.tool_calls("issue"))), 35)
+        self.assertEqual(result["due"], 105)
+        self.assertEqual(len(result["evaluated"]), 105)
+        self.assertEqual(result["deferred"], 0)
+        self.assertEqual(result["discarded"], 0)
+        stored = rows(self.queue, "SELECT task_id,check_id,status,generation FROM check_results")
+        per_task: dict[str, list[dict[str, Any]]] = {}
+        for row in stored:
+            per_task.setdefault(row["task_id"], []).append(row)
+        self.assertEqual(sorted(per_task), ids)
+        for task_id in ids:
+            with self.subTest(task_id=task_id):
+                own = per_task[task_id]
+                self.assertEqual(len(own), 3)
+                self.assertEqual(len({row["check_id"] for row in own}), 3)
+                self.assertEqual({row["status"] for row in own}, {"pass"})
+                self.assertEqual({row["generation"] for row in own}, {1})
+                status = self.ready(task_id)
+                self.assertTrue(status["ready"], status)
+                self.assertEqual(
+                    sorted(item["type"] for item in status["checks"]),
+                    ["base_ref_exists", "issue_in_milestone", "issue_open"],
+                )
+
+    def test_cap_counts_tool_calls_and_covered_items_still_run(self) -> None:
+        open_one = {"type": "issue_open", "repo": "owner/repo", "number": 1}
+        self.add("t1", created_at=iso(NOW - 400), checks=[open_one])
+        self.add("t2", created_at=iso(NOW - 300), checks=[{**open_one, "number": 2}])
+        self.add("t3", created_at=iso(NOW - 200), checks=[{**open_one, "number": 3}])
+        # Covered by t1's call, so it runs even though the cap is reached before it.
+        self.add("t4", created_at=iso(NOW - 100), checks=[in_milestone(1)])
+        fake = self.runner({
+            gh_issue(1, "owner/repo"): ok(ISSUE_OPEN_IN_V0_10_0),
+            gh_issue(2, "owner/repo"): ok(ISSUE_3815_OPEN),
+            gh_issue(3, "owner/repo"): ok(ISSUE_3815_OPEN),
+        })
+
+        result = self.refresh(fake, max_calls=2)
+
+        self.assertLessEqual(len(fake.calls), 2)
+        self.assertCountEqual(fake.calls, [gh_issue(1, "owner/repo"), gh_issue(2, "owner/repo")])
+        self.assertEqual(result["tool_calls"], 2)
+        self.assertEqual(
+            sorted(item["task_id"] for item in result["evaluated"]), ["t1", "t2", "t4"],
+        )
+        self.assertEqual(result["deferred"], 1)
+        for task_id in ("t1", "t2", "t4"):
+            self.assertTrue(self.ready(task_id)["ready"], task_id)
+        deferred = self.ready("t3")
+        self.assertEqual(deferred["hold_reason"], "check_unchecked")
+        self.assertEqual(rows(self.queue, "SELECT status FROM check_results WHERE task_id='t3' AND status IS NOT NULL"), [])
+
+        # The deferred item runs on the next refresh, which makes its own call.
+        later = self.refresh(fake, now=NOW + 5, max_calls=2)
+        self.assertEqual(later["tool_calls"], 1)
+        self.assertEqual(fake.calls[-1], gh_issue(3, "owner/repo"))
+        self.assertTrue(self.ready("t3", now=NOW + 15)["ready"])
+
+    def test_none_caps_are_unlimited(self) -> None:
+        responses = {}
+        for index in range(70):
+            number = 4001 + index
+            self.add(f"many-{index:02d}", checks=[{"type": "issue_open", "repo": "owner/repo", "number": number}])
+            responses[gh_issue(number, "owner/repo")] = ok(ISSUE_3815_OPEN)
+        fake = self.runner(responses)
+        # A clock that leaps an hour per reading would exhaust any finite budget at once.
+        ticks = iter(float(step * 3_600) for step in range(10_000))
+
+        result = self.refresh(
+            fake, max_calls=None, budget_seconds=None, monotonic=lambda: next(ticks),
+        )
+
+        self.assertEqual(len(fake.calls), 70)
+        self.assertEqual(result["tool_calls"], 70)
+        self.assertEqual(len(result["evaluated"]), 70)
+        self.assertEqual(result["deferred"], 0)
+
+    def test_default_cap_counts_calls(self) -> None:
+        self.assertFalse(hasattr(checks, "TICK_MAX_CHECKS"))
+        self.assertGreaterEqual(checks.TICK_MAX_CALLS, 38)
+
+    def test_nothing_is_reused_across_refreshes(self) -> None:
+        self.add("a", checks=[ISSUE_OPEN_3815])
+        fake = self.runner({gh_issue(3815): ok(ISSUE_3815_OPEN)})
+        first = self.refresh(fake, now=NOW)
+        self.assertEqual(first["tool_calls"], 1)
+
+        self.add("b", checks=[ISSUE_OPEN_3815])
+        second = self.refresh(fake, now=NOW + 5)
+
+        self.assertEqual(fake.tool_calls("issue"), [gh_issue(3815), gh_issue(3815)])
+        self.assertEqual(second["tool_calls"], 1)
+        self.assertEqual([item["task_id"] for item in second["evaluated"]], ["b"])
+        self.assertTrue(self.ready("a", now=NOW + 15)["ready"])
+        self.assertTrue(self.ready("b", now=NOW + 15)["ready"])
+
+    def test_evaluated_entries_describe_each_check(self) -> None:
+        self.add("described", checks=[ISSUE_OPEN_2855])
+        fake = self.runner({gh_issue(2855): ok(ISSUE_2855_CLOSED)})
+
+        result = self.refresh(fake, task_ids=("described",), max_calls=None, budget_seconds=None)
+
+        self.assertEqual(len(result["evaluated"]), 1)
+        entry = result["evaluated"][0]
+        self.assertEqual(entry["status"], "fail")
+        self.assertEqual(entry["check"], checks.describe(ISSUE_OPEN_2855))
+        self.assertEqual(entry["origin"], "declared")
+        self.assertIn("issue is CLOSED", entry["detail"])
+
+
+class RefreshBudgetConcurrencyTests(PreflightCase):
+    """A budget cutoff never reserves a generation it will not store under."""
+
+    def test_exhausted_budget_does_not_discard_a_concurrent_manual_result(self) -> None:
+        self.add("b", checks=[ISSUE_OPEN_3815])
+        scout = self.runner()
+        scout_results: list[dict[str, Any]] = []
+
+        def manual_answer(_argv: tuple[str, ...]):
+            # While the manual call is in flight, a scout tick whose budget is already
+            # spent runs: it must make no call and reserve nothing for b.
+            clock = iter([0.0] + [1_000.0] * 50)
+            scout_results.append(checks.refresh(
+                self.queue, runner=scout, now_epoch=NOW, budget_seconds=45.0,
+                monotonic=lambda: next(clock),
+            ))
+            return ok(ISSUE_3815_OPEN)
+
+        manual = self.runner({gh_issue(3815): manual_answer})
+        result = self.refresh(
+            manual, task_ids=("b",), max_calls=None, budget_seconds=None,
+        )
+
+        self.assertEqual(scout.calls, [])
+        self.assertEqual(scout_results[0]["tool_calls"], 0)
+        self.assertEqual(scout_results[0]["evaluated"], [])
+        self.assertEqual(len(manual.calls), 1)
+        self.assertEqual(result["discarded"], 0)
+        self.assertEqual([(item["task_id"], item["status"]) for item in result["evaluated"]], [("b", "pass")])
+        stored = rows(self.queue, "SELECT status,generation FROM check_results WHERE task_id='b'")
+        self.assertEqual([(row["status"], row["generation"]) for row in stored], [("pass", 1)])
+        status = self.ready("b")
+        self.assertTrue(status["ready"], status)
+
+    def test_budget_cutoff_finishes_shared_calls_and_defers_the_rest_untouched(self) -> None:
+        open_one = {"type": "issue_open", "repo": "owner/repo", "number": 1}
+        open_three = {"type": "issue_open", "repo": "owner/repo", "number": 3}
+        self.add("t1", created_at=iso(NOW - 400), checks=[open_one])
+        self.add("t3", created_at=iso(NOW - 300), checks=[open_three])
+        # Ordered after the unrelated t3, but covered by t1's call.
+        self.add("t2", created_at=iso(NOW - 200), checks=[in_milestone(1)])
+        seeded_at = NOW - checks.RETRY_TTL_SECONDS - 10
+        self.refresh(
+            self.runner({gh_issue(3, "owner/repo"): ok(ISSUE_2855_CLOSED)}),
+            now=seeded_at, task_ids=("t3",),
+        )
+        before = rows(self.queue, "SELECT status,generation,checked_at FROM check_results WHERE task_id='t3'")
+        self.assertEqual(len(before), 1)
+        fake = self.runner({
+            gh_issue(1, "owner/repo"): ok(ISSUE_OPEN_IN_V0_10_0),
+            gh_issue(3, "owner/repo"): ok(ISSUE_3815_OPEN),
+        })
+        # The budget is spent once the first item has run.
+        clock = iter([0.0, 0.0] + [1_000.0] * 50)
+
+        result = self.refresh(fake, budget_seconds=45.0, monotonic=lambda: next(clock))
+
+        self.assertEqual(fake.calls, [gh_issue(1, "owner/repo")])
+        self.assertEqual(result["tool_calls"], 1)
+        self.assertEqual(
+            sorted((item["task_id"], item["status"]) for item in result["evaluated"]),
+            [("t1", "pass"), ("t2", "pass")],
+        )
+        self.assertEqual(result["deferred"], 1)
+        self.assertEqual(result["discarded"], 0)
+        self.assertTrue(self.ready("t1")["ready"])
+        self.assertTrue(self.ready("t2")["ready"])
+        after = rows(self.queue, "SELECT status,generation,checked_at FROM check_results WHERE task_id='t3'")
+        self.assertEqual(after, before)
+
+
+class QueueReadinessTests(PreflightCase):
+    def test_fail_then_pass_flips_ready_after_retry_ttl(self) -> None:
+        self.add("retry", checks=[ISSUE_OPEN_3815])
+        fake = self.runner({gh_issue(3815): [ok(ISSUE_2855_CLOSED), ok(ISSUE_3815_OPEN)]})
+        # The add-time evaluation: scoped to the task, uncapped.
+        self.refresh(fake, now=NOW, task_ids=("retry",), max_calls=None, budget_seconds=None)
+        failed = self.ready("retry")
+        self.assertEqual((failed["state"], failed["hold_reason"]), ("waiting", "check_failed"))
+
+        # A scout tick before the retry window makes no call and changes nothing.
+        early = checks.refresh(
+            self.queue, runner=fake, now_epoch=NOW + checks.RETRY_TTL_SECONDS - 1,
+        )
+        self.assertEqual(early["tool_calls"], 0)
+        self.assertEqual(len(fake.tool_calls("issue")), 1)
+        self.assertEqual(
+            self.ready("retry", now=NOW + checks.RETRY_TTL_SECONDS - 1)["hold_reason"], "check_failed",
+        )
+
+        later = NOW + checks.RETRY_TTL_SECONDS
+        tick = checks.refresh(self.queue, runner=fake, now_epoch=later)
+
+        self.assertEqual(tick["tool_calls"], 1)
+        self.assertEqual(len(fake.tool_calls("issue")), 2)
+        status = self.ready("retry", now=later + 10)
+        self.assertTrue(status["ready"], status)
+        self.assertEqual((status["state"], status["hold_reason"]), ("ready", None))
+
+    def test_never_evaluated_reads_not_checked_yet(self) -> None:
+        self.add("fresh", checks=[ISSUE_OPEN_3815])
+
+        status = self.ready("fresh")
+
+        self.assertEqual((status["state"], status["hold_reason"]), ("waiting", "check_unchecked"))
+        self.assertEqual(
+            status["reason"], f"Not checked yet: {checks.describe(ISSUE_OPEN_3815)}",
+        )
+        self.assertEqual([item["status"] for item in status["checks"]], ["unchecked"])
+        for other in ("Check failed:", "Check could not be verified yet:", "Waiting for preflight"):
+            self.assertFalse(status["reason"].startswith(other), status["reason"])
+        self.assertIsNone(self.try_claim("fresh"))
+
+    def test_lapsed_result_reads_waiting_for_re_evaluation(self) -> None:
+        self.add("lapsed", checks=[ISSUE_OPEN_3815])
+        self.refresh(
+            self.runner({gh_issue(3815): ok(ISSUE_3815_OPEN)}),
+            now=NOW - checks.RESULT_TTL_SECONDS - 100,
+        )
+
+        status = self.ready("lapsed", now=NOW)
+
+        self.assertEqual((status["state"], status["hold_reason"]), ("waiting", "check_pending"))
+        self.assertEqual(
+            status["reason"],
+            f"Waiting for preflight check re-evaluation: {checks.describe(ISSUE_OPEN_3815)}",
+        )
+        self.assertEqual([item["status"] for item in status["checks"]], ["pending"])
+        for other in ("Check failed:", "Check could not be verified yet:", "Not checked yet:"):
+            self.assertFalse(status["reason"].startswith(other), status["reason"])
+
+    def test_passing_checks_waiting_only_on_capacity_read_ready(self) -> None:
+        # Readiness reads no capacity or pacing state: with every check passing the task is
+        # ready even though no usage snapshot exists and nothing is dispatching.
+        self.add("passing", source_ref="owner/repo#12", start_ref="main", checks=[in_milestone(12)])
+        fake = self.runner({
+            git_ls_remote(self.root): ok(LS_REMOTE_MAIN),
+            gh_issue(12, "owner/repo"): ok(ISSUE_OPEN_IN_V0_10_0),
+        })
+        self.refresh(fake)
+
+        status = self.ready("passing")
+
+        self.assertTrue(status["ready"], status)
+        self.assertEqual((status["state"], status["hold_reason"]), ("ready", None))
+        self.assertEqual({item["status"] for item in status["checks"]}, {"pass"})
+        self.assertIn("passing", self.eligible_ids())
 
 
 class CollisionTests(PreflightCase):

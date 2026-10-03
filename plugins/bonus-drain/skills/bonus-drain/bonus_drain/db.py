@@ -4126,7 +4126,11 @@ class QueueDB:
         specs: Iterable[tuple[str, Mapping[str, Any]]],
         now: float,
     ) -> list[dict[str, Any]]:
-        """Read stored results as pass, fail, pending, unknown, or unverified (no evaluation)."""
+        """Read stored results as pass, fail, unknown, unverified, pending, or unchecked.
+
+        ``unchecked`` means no completed result exists; ``pending`` means the stored result
+        has lapsed.  Neither is a pass.  No evaluation happens here.
+        """
 
         from . import checks
         stored = QueueDB._stored_results(connection, task)
@@ -4134,9 +4138,9 @@ class QueueDB:
         for origin, spec in specs:
             result = QueueDB._stored_result(connection, task, spec, stored)
             row = result.row
-            status, detail, checked_at = "pending", None, None
+            status, detail, checked_at = "unchecked", None, None
             if row is not None:
-                checked_at = row["checked_at"]
+                status, checked_at = "pending", row["checked_at"]
                 if result.fresh(spec, now):
                     status, detail = row["status"], row["detail"]
                     if status == "unknown" and row["unknown_since"] is not None and (
@@ -4196,15 +4200,13 @@ class QueueDB:
         for status, hold_reason, label in (
             ("fail", "check_failed", "Check failed"),
             ("unknown", "check_unknown", "Check could not be verified yet"),
+            ("unchecked", "check_unchecked", "Not checked yet"),
+            ("pending", "check_pending", "Waiting for preflight check re-evaluation"),
         ):
             for item in verdicts:
                 if item["status"] == status:
-                    return hold_reason, f"{label}: {checks.describe(item['spec'])}: {item['detail']}"
-        for item in verdicts:
-            if item["status"] == "pending":
-                return "check_pending", (
-                    f"Waiting for preflight check evaluation: {checks.describe(item['spec'])}"
-                )
+                    detail = f": {item['detail']}" if status in {"fail", "unknown"} else ""
+                    return hold_reason, f"{label}: {checks.describe(item['spec'])}{detail}"
         return None
 
     @staticmethod
@@ -4309,22 +4311,35 @@ class QueueDB:
         )
 
     def check_work(
-        self, *, now_epoch: float, task_ids: Iterable[str] | None = None,
+        self, *, now_epoch: float, task_ids: Iterable[str] | None = None, due_only: bool = True,
     ) -> list[checks.CheckWork]:
-        """List due evaluations, never-evaluated and currently gating results first."""
+        """List due evaluations, never-evaluated and currently gating results first.
+
+        ``due_only=False`` (a queue mutation, which must name ``task_ids``) lists every
+        launch check of those tasks, paused ones included, regardless of the launchable and
+        dependency gate and of freshness.  Claimed tasks and verified-done one-offs are
+        still skipped.  The default lists active tasks only.
+        """
 
         from . import checks
         now = float(now_epoch)
+        if not due_only and task_ids is None:
+            raise ValueError("due_only=False requires task_ids")
         wanted = None if task_ids is None else set(task_ids)
+        if wanted == set():
+            return []
         self.initialize()
         ordered: list[tuple[tuple[Any, ...], checks.CheckWork]] = []
+        scope, scope_args = "", ()
+        if wanted is not None:
+            scope = f" AND id IN ({','.join('?' * len(wanted))})"
+            scope_args = tuple(sorted(wanted))
         with self._connect() as connection:
             for row in connection.execute(
-                "SELECT * FROM tasks WHERE active=1 ORDER BY priority,created_at,id",
+                f"SELECT * FROM tasks WHERE (active=1 OR ?){scope} ORDER BY priority,created_at,id",
+                (not due_only, *scope_args),
             ).fetchall():
                 task = self._task_from_row(row)
-                if wanted is not None and task.id not in wanted:
-                    continue
                 if connection.execute(
                     "SELECT 1 FROM dispatch_claims WHERE task_id=? LIMIT 1", (task.id,),
                 ).fetchone():
@@ -4342,7 +4357,9 @@ class QueueDB:
                     or (recovery is not None and recovery["state"] in {"scheduled", "backoff"})
                 )
                 dependencies = self._dependency_statuses(connection, task, now_epoch=now)
-                if launchable and all(item["verified_completion"] for item in dependencies):
+                if not due_only or (
+                    launchable and all(item["verified_completion"] for item in dependencies)
+                ):
                     items.extend(
                         (origin, spec, None)
                         for origin, spec in self._launch_check_specs(
@@ -4374,6 +4391,8 @@ class QueueDB:
                     seen.add(identity)
                     if result is None:
                         category = 0
+                    elif not due_only:
+                        category = 2 if stored_check.fresh(spec, now) else 1
                     else:
                         checked = _timestamp_epoch(result["checked_at"])
                         age = now - checked

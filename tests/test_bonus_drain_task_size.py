@@ -303,7 +303,9 @@ class TaskSizeContractTests(unittest.TestCase):
             with self.subTest(surface="cli", size=size), _capture_cli_json() as payloads:
                 code = cli.main(_cli_add(self.database, f"cli-{size}", size))
                 self.assertEqual(code, 0)
-                self.assertEqual(payloads, [{"task": self.queue.task(f"cli-{size}").to_dict()}])
+                self.assertEqual(len(payloads), 1)
+                self.assertEqual(payloads[0]["task"], self.queue.task(f"cli-{size}").to_dict())
+                self.assertEqual(payloads[0]["checks"], [])
                 self.assertEqual(payloads[0]["task"]["size"], size)
 
         legacy = self.queue.add_task(_task_values("legacy-missing-size"))

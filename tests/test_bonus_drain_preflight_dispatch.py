@@ -7,6 +7,8 @@ host, see plan Recorded tool output shapes).
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -21,8 +23,10 @@ from tests.test_bonus_dependency_recovery import (
 )
 from tests.test_bonus_drain_preflight_checks import (
     GH_OFFLINE_STDERR, ISSUE_2855_CLOSED, ISSUE_3815_OPEN, ISSUE_OPEN_2855, ISSUE_OPEN_3815,
-    PR_2994_INTO_EPIC, PR_2994_MERGED, FakeRunner, PreflightCase, authority, exited,
-    add_goal, gh_issue, gh_pr, handoff, ok, table_counts, with_fields,
+    ISSUE_OPEN_IN_V0_10_0, LS_REMOTE_MAIN, PR_2994_INTO_EPIC, PR_2994_MERGED, RELEASE_0_11_1,
+    FakeRunner, PreflightCase, authority, exited, add_goal, gh_issue, gh_pr, gh_release,
+    git_ls_remote, handoff,
+    in_milestone, ok, table_counts, with_fields,
 )
 from tests.test_bonus_drain_scout_inflight import (
     HOUR, _multi_account_config, _multi_snapshots, _open_snapshots, _task as provider_task,
@@ -388,9 +392,16 @@ class DependencyEdgeCliTests(PreflightCase):
         self.add("pr-parent-2", cwd=str(self.pr_repo))
         self.add("plain-parent", cwd=str(self.other))
 
-    def run_cli(self, *argv: str) -> tuple[int, list[object]]:
+    def default_runner(self) -> FakeRunner:
+        return self.runner()
+
+    def run_cli(self, *argv: str, fake: FakeRunner | None = None) -> tuple[int, list[object]]:
+        # add and edit evaluate checks; keep every tool call on a recorded-shape fake whose
+        # cleanup asserts no unexpected argv reached it.
+        fake = fake if fake is not None else self.default_runner()
         with (
             mock.patch.object(cli, "_queue", return_value=(self.cfg, self.queue)),
+            mock.patch.object(checks, "subprocess_runner", fake),
             captured_json() as payloads,
         ):
             code = cli.main(list(argv))
@@ -475,19 +486,32 @@ class EnqueueValidationCliTests(HermeticEnvironment, PreflightCase):
             ),
         ))
 
-    def run_cli(self, *argv: str) -> tuple[int, list[object]]:
+    def default_runner(self) -> FakeRunner:
+        return self.runner({
+            git_ls_remote(self.project): ok(LS_REMOTE_MAIN),
+            gh_issue(12, "owner/repo"): ok(ISSUE_3815_OPEN),
+            gh_release("v1.2.0", "owner/repo"): ok(with_fields(RELEASE_0_11_1, tagName="v1.2.0")),
+        })
+
+    def run_cli(self, *argv: str, fake: FakeRunner | None = None) -> tuple[int, list[object]]:
+        # add and edit evaluate checks; keep every tool call on a recorded-shape fake whose
+        # cleanup asserts no unexpected argv reached it.
+        fake = fake if fake is not None else self.default_runner()
         with (
             mock.patch.object(cli, "_queue", return_value=(self.cfg, self.queue)),
+            mock.patch.object(checks, "subprocess_runner", fake),
             captured_json() as payloads,
         ):
             code = cli.main(list(argv))
         return code, payloads
 
-    def add_cli(self, task_id: str, *extra: str, cwd: Path | None = None) -> tuple[int, list[object]]:
+    def add_cli(
+        self, task_id: str, *extra: str, cwd: Path | None = None, fake: FakeRunner | None = None,
+    ) -> tuple[int, list[object]]:
         return self.run_cli(
             "add", "--database", str(self.queue.path), "--id", task_id, "--title", task_id,
             "--kind", "oneoff", "--size", "small", "--cwd", str(cwd or self.project),
-            "--goal", f"complete {task_id}", "--json", *extra,
+            "--goal", f"complete {task_id}", "--json", *extra, fake=fake,
         )
 
     def assertRefused(self, task_id: str, *extra: str, contains: str | None = None) -> None:
@@ -518,12 +542,15 @@ class EnqueueValidationCliTests(HermeticEnvironment, PreflightCase):
         self.assertRefused("bad", "--mcp", "wiki", contains="wiki")
 
     def test_add_accepts_valid_task_with_mcp_checks_and_start_ref(self) -> None:
+        fake = self.default_runner()
         code, payloads = self.add_cli(
             "valid", "--mcp", "airtable", "--start-ref", "main",
             "--check", json.dumps({"type": "issue_open", "repo": "owner/repo", "number": 12}),
             "--check", json.dumps({"type": "release_exists", "repo": "owner/repo", "tag": "v1.2.0"}),
+            fake=fake,
         )
         self.assertEqual(code, 0, payloads)
+        self.assertEqual(fake.unexpected, [])
         stored = self.queue.task("valid")
         self.assertEqual((stored.mcp, stored.start_ref), ("airtable", "refs/heads/main"))
         self.assertEqual([item["type"] for item in stored.to_dict()["checks"]], ["issue_open", "release_exists"])
@@ -548,6 +575,343 @@ class EnqueueValidationCliTests(HermeticEnvironment, PreflightCase):
         code, payloads = self.run_cli("set-mcp", "--database", str(self.queue.path), "target", "none", "--json")
         self.assertEqual(code, 0, payloads)
         self.assertEqual(self.queue.task("target").mcp, "none")
+
+
+class QueueTimeCheckCliTests(HermeticEnvironment, PreflightCase):
+    """add and edit evaluate launch checks synchronously and print the results."""
+
+    OPEN_12 = {"type": "issue_open", "repo": "owner/repo", "number": 12}
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.hermetic(self.mkdir("home"))
+        self.cfg = runtime(self.queue.path)
+        now_patch = mock.patch.dict(os.environ, {"BONUS_DRAIN_NOW": str(NOW)})
+        now_patch.start()
+        self.addCleanup(now_patch.stop)
+
+    def run_cli(self, fake: FakeRunner, *argv: str) -> tuple[int, list[object], str, str]:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(cli, "_queue", return_value=(self.cfg, self.queue)),
+            # Looked up at call time by the CLI, so patching the module attribute is enough.
+            mock.patch.object(checks, "subprocess_runner", fake),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+            captured_json() as payloads,
+        ):
+            code = cli.main(list(argv))
+        return code, payloads, stdout.getvalue(), stderr.getvalue()
+
+    def add_cli(self, fake: FakeRunner, task_id: str, *extra: str):
+        return self.run_cli(
+            fake, "add", "--database", str(self.queue.path), "--id", task_id, "--title", task_id,
+            "--kind", "oneoff", "--size", "small", "--cwd", str(self.root),
+            "--goal", f"complete {task_id}", *extra,
+        )
+
+    def passing_runner(self) -> FakeRunner:
+        return self.runner({
+            git_ls_remote(self.root): ok(LS_REMOTE_MAIN),
+            gh_issue(12, "owner/repo"): ok(ISSUE_OPEN_IN_V0_10_0),
+        })
+
+    PASSING = ("--source-ref", "owner/repo#12", "--start-ref", "main",
+               "--check", json.dumps(in_milestone(12)))
+
+    def described(self) -> list[str]:
+        return [
+            checks.describe({"type": "base_ref_exists", "ref": "refs/heads/main"}),
+            checks.describe(self.OPEN_12),
+            checks.describe(in_milestone(12)),
+        ]
+
+    def test_add_passing_task_prints_results_and_is_ready_immediately(self) -> None:
+        fake = self.passing_runner()
+
+        code, payloads, out, err = self.add_cli(fake, "ready-task", *self.PASSING)
+
+        self.assertEqual(code, 0, (payloads, out, err))
+        self.assertIn("added: ready-task", out)
+        lines = out.splitlines()
+        for description in self.described():
+            with self.subTest(check=description):
+                matching = [line for line in lines if description in line]
+                self.assertEqual(len(matching), 1, out)
+                self.assertIn("pass", matching[0])
+        self.assertIn("readiness: ready", out)
+        self.assertNotIn("CHECK FAILED", err)
+        self.assertNotIn("CHECK UNVERIFIED", err)
+        # One shared issue view answers both issue checks.
+        self.assertEqual(fake.tool_calls("issue"), [gh_issue(12, "owner/repo")])
+        # No scout tick and no further refresh: the stored results already make it ready.
+        status = self.ready("ready-task")
+        self.assertTrue(status["ready"], status)
+        self.assertEqual((status["state"], status["hold_reason"]), ("ready", None))
+        self.assertEqual({item["status"] for item in status["checks"]}, {"pass"})
+
+    def test_add_json_includes_checks_and_readiness(self) -> None:
+        code, payloads, _out, err = self.add_cli(
+            self.passing_runner(), "json-task", "--json", *self.PASSING,
+        )
+
+        self.assertEqual(code, 0, (payloads, err))
+        self.assertEqual(len(payloads), 1, payloads)
+        payload = payloads[0]
+        self.assertEqual(payload["task"]["id"], "json-task")
+        self.assertEqual(len(payload["checks"]), 3, payload["checks"])
+        for entry in payload["checks"]:
+            self.assertTrue({"status", "check", "detail"} <= set(entry), entry)
+            self.assertEqual(entry["status"], "pass")
+        self.assertCountEqual([entry["check"] for entry in payload["checks"]], self.described())
+        self.assertEqual(payload["readiness"]["state"], "ready")
+        self.assertTrue(payload["readiness"]["ready"])
+
+    def test_add_failing_check_reports_on_stderr_and_stays_queued(self) -> None:
+        fake = self.runner({gh_issue(2855): ok(ISSUE_2855_CLOSED)})
+
+        code, payloads, out, err = self.add_cli(
+            fake, "closed-task", "--check", json.dumps(ISSUE_OPEN_2855),
+        )
+
+        self.assertEqual(code, 0, (payloads, out, err))
+        self.assertIn("CHECK FAILED", err)
+        self.assertIn(checks.describe(ISSUE_OPEN_2855), err)
+        self.assertIn("issue is CLOSED", err)
+        self.assertIn("added: closed-task", out)
+        self.assertIn("readiness: waiting", out)
+        stored = self.queue.task("closed-task")
+        self.assertIsNotNone(stored)
+        self.assertTrue(stored.active)
+        status = self.ready("closed-task")
+        self.assertEqual((status["state"], status["hold_reason"]), ("waiting", "check_failed"))
+        self.assertIn("issue is CLOSED", status["reason"])
+
+    def test_add_unverifiable_check_reports_on_stderr(self) -> None:
+        fake = self.runner({gh_issue(4000, "owner/repo"): exited(1, GH_OFFLINE_STDERR)})
+        offline = {"type": "issue_open", "repo": "owner/repo", "number": 4000}
+
+        code, payloads, out, err = self.add_cli(fake, "offline-task", "--check", json.dumps(offline))
+
+        self.assertEqual(code, 0, (payloads, out, err))
+        self.assertIn("CHECK UNVERIFIED", err)
+        self.assertIn(checks.describe(offline), err)
+        self.assertNotIn("CHECK FAILED", err)
+        self.assertTrue(self.queue.task("offline-task").active)
+        status = self.ready("offline-task")
+        self.assertEqual((status["state"], status["hold_reason"]), ("waiting", "check_unknown"))
+
+    def test_edit_changing_checks_re_evaluates_synchronously(self) -> None:
+        idle = self.runner()
+        self.assertEqual(self.add_cli(idle, "edited")[0], 0)
+        self.assertEqual(idle.calls, [])
+        self.assertTrue(self.ready("edited")["ready"])
+
+        failing = self.runner({gh_issue(2855): ok(ISSUE_2855_CLOSED)})
+        code, payloads, _out, err = self.run_cli(
+            failing, "edit", "--database", str(self.queue.path), "edited",
+            "--changes", json.dumps({"checks": [ISSUE_OPEN_2855]}),
+        )
+
+        self.assertEqual(code, 0, (payloads, err))
+        payload = payloads[0]
+        self.assertEqual(payload["task"]["checks"], [ISSUE_OPEN_2855])
+        self.assertEqual(
+            [(entry["status"], entry["check"]) for entry in payload["checks"]],
+            [("fail", checks.describe(ISSUE_OPEN_2855))],
+        )
+        self.assertEqual(payload["readiness"]["hold_reason"], "check_failed")
+        self.assertIn("CHECK FAILED", err)
+        self.assertEqual(self.ready("edited")["hold_reason"], "check_failed")
+
+        passing = self.runner({gh_issue(3815): ok(ISSUE_3815_OPEN)})
+        code, payloads, _out, err = self.run_cli(
+            passing, "edit", "--database", str(self.queue.path), "edited",
+            "--changes", json.dumps({"checks": [ISSUE_OPEN_3815]}),
+        )
+
+        self.assertEqual(code, 0, (payloads, err))
+        self.assertEqual(
+            [(entry["status"], entry["check"]) for entry in payloads[0]["checks"]],
+            [("pass", checks.describe(ISSUE_OPEN_3815))],
+        )
+        self.assertEqual(payloads[0]["readiness"]["state"], "ready")
+        self.assertNotIn("CHECK", err)
+        status = self.ready("edited")
+        self.assertTrue(status["ready"], status)
+
+    def test_add_evaluates_every_check_without_a_cap(self) -> None:
+        responses = {
+            git_ls_remote(self.root): ok(LS_REMOTE_MAIN),
+            gh_issue(12, "owner/repo"): ok(ISSUE_3815_OPEN),
+        }
+        extra: list[str] = ["--source-ref", "owner/repo#12", "--start-ref", "main"]
+        for number in range(5001, 5001 + checks.MAX_CHECKS_PER_TASK):
+            extra += ["--check", json.dumps({"type": "issue_open", "repo": "owner/repo", "number": number})]
+            responses[gh_issue(number, "owner/repo")] = ok(ISSUE_3815_OPEN)
+        fake = self.runner(responses)
+
+        with mock.patch.object(checks, "refresh", wraps=checks.refresh) as refresh:
+            code, payloads, _out, err = self.add_cli(fake, "many-checks", "--json", *extra)
+
+        self.assertEqual(code, 0, (payloads, err))
+        self.assertEqual(len(payloads[0]["checks"]), checks.MAX_CHECKS_PER_TASK + 2)
+        self.assertEqual({entry["status"] for entry in payloads[0]["checks"]}, {"pass"})
+        self.assertEqual(len(fake.tool_calls("issue")), checks.MAX_CHECKS_PER_TASK + 1)
+        self.assertEqual(refresh.call_count, 1)
+        kwargs = refresh.call_args.kwargs
+        self.assertEqual(tuple(kwargs["task_ids"]), ("many-checks",))
+        self.assertIsNone(kwargs["max_calls"])
+        self.assertIsNone(kwargs["budget_seconds"])
+        status = self.ready("many-checks")
+        self.assertTrue(status["ready"], status)
+        self.assertEqual(len(status["checks"]), checks.MAX_CHECKS_PER_TASK + 2)
+
+    def test_check_failing_at_add_flips_ready_after_one_scout_refresh(self) -> None:
+        fake = self.runner({gh_issue(3815): [ok(ISSUE_2855_CLOSED), ok(ISSUE_3815_OPEN)]})
+
+        code, _payloads, _out, err = self.add_cli(
+            fake, "flips", "--check", json.dumps(ISSUE_OPEN_3815),
+        )
+        self.assertEqual(code, 0, err)
+        self.assertIn("CHECK FAILED", err)
+        self.assertEqual(self.ready("flips")["hold_reason"], "check_failed")
+
+        later = NOW + checks.RETRY_TTL_SECONDS
+        checks.refresh(self.queue, runner=fake, now_epoch=later)
+
+        self.assertEqual(len(fake.tool_calls("issue")), 2)
+        status = self.ready("flips", now=later + 10)
+        self.assertTrue(status["ready"], status)
+        self.assertEqual(status["hold_reason"], None)
+
+
+    def test_add_child_of_unfinished_parent_still_evaluates_its_checks(self) -> None:
+        self.add("parent")
+        fake = self.runner({gh_issue(2855): ok(ISSUE_2855_CLOSED)})
+
+        code, payloads, _out, err = self.add_cli(
+            fake, "child", "--json", "--depends-on", "parent",
+            "--check", json.dumps(ISSUE_OPEN_2855),
+        )
+
+        self.assertEqual(code, 0, (payloads, err))
+        self.assertIn("CHECK FAILED", err)
+        self.assertIn(checks.describe(ISSUE_OPEN_2855), err)
+        self.assertEqual(
+            [(entry["status"], entry["check"]) for entry in payloads[0]["checks"]],
+            [("fail", checks.describe(ISSUE_OPEN_2855))],
+        )
+        self.assertEqual(fake.tool_calls("issue"), [gh_issue(2855)])
+        self.assertTrue(self.queue.task("child").active)
+        status = self.ready("child")
+        self.assertEqual(status["state"], "waiting")
+        edge = next(item for item in status["dependencies"] if item["id"] == "parent")
+        self.assertFalse(edge["satisfied"])
+
+    def _edit_title(self, fake: FakeRunner, task_id: str, title: str):
+        return self.run_cli(
+            fake, "edit", "--database", str(self.queue.path), task_id,
+            "--changes", json.dumps({"title": title}),
+        )
+
+    def test_edit_without_check_change_re_evaluates_a_fresh_fail(self) -> None:
+        fake = self.runner({gh_issue(3815): [ok(ISSUE_2855_CLOSED), ok(ISSUE_3815_OPEN)]})
+        code, _payloads, _out, err = self.add_cli(fake, "retitled", "--check", json.dumps(ISSUE_OPEN_3815))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.ready("retitled")["hold_reason"], "check_failed")
+
+        # Same clock: the fail is fresh, well inside RETRY_TTL_SECONDS.
+        code, payloads, _out, err = self._edit_title(fake, "retitled", "Retitled task")
+
+        self.assertEqual(code, 0, (payloads, err))
+        self.assertEqual(len(fake.tool_calls("issue")), 2)
+        self.assertEqual(
+            [(entry["status"], entry["check"]) for entry in payloads[0]["checks"]],
+            [("pass", checks.describe(ISSUE_OPEN_3815))],
+        )
+        self.assertEqual(payloads[0]["readiness"]["state"], "ready")
+        self.assertNotIn("CHECK", err)
+        status = self.ready("retitled")
+        self.assertTrue(status["ready"], status)
+
+    def test_edit_without_check_change_re_evaluates_a_fresh_pass(self) -> None:
+        fake = self.runner({gh_issue(3815): ok(ISSUE_3815_OPEN)})
+        code, _payloads, _out, err = self.add_cli(fake, "steady", "--check", json.dumps(ISSUE_OPEN_3815))
+        self.assertEqual(code, 0, err)
+
+        code, payloads, _out, err = self._edit_title(fake, "steady", "Steady task")
+
+        self.assertEqual(code, 0, (payloads, err))
+        self.assertEqual(len(fake.tool_calls("issue")), 2)
+        self.assertEqual(
+            [entry["status"] for entry in payloads[0]["checks"]], ["pass"],
+        )
+        self.assertEqual(payloads[0]["readiness"]["state"], "ready")
+        self.assertTrue(self.ready("steady")["ready"])
+
+
+    def _deactivate(self, task_id: str) -> None:
+        code, payloads, _out, err = self.run_cli(
+            self.runner(), "deactivate", "--database", str(self.queue.path), task_id,
+        )
+        self.assertEqual(code, 0, (payloads, err))
+        self.assertFalse(self.queue.task(task_id).active)
+
+    def test_edit_of_paused_task_evaluates_changed_checks(self) -> None:
+        idle = self.runner()
+        self.assertEqual(self.add_cli(idle, "paused-a")[0], 0)
+        self._deactivate("paused-a")
+        failing = self.runner({gh_issue(2855): ok(ISSUE_2855_CLOSED)})
+
+        code, payloads, _out, err = self.run_cli(
+            failing, "edit", "--database", str(self.queue.path), "paused-a",
+            "--changes", json.dumps({"checks": [ISSUE_OPEN_2855]}),
+        )
+
+        self.assertEqual(code, 0, (payloads, err))
+        self.assertEqual(
+            [(entry["status"], entry["check"]) for entry in payloads[0]["checks"]],
+            [("fail", checks.describe(ISSUE_OPEN_2855))],
+        )
+        self.assertIn("CHECK FAILED", err)
+        self.assertFalse(self.queue.task("paused-a").active)
+        self.assertEqual(self.ready("paused-a")["state"], "paused")
+
+    def test_edit_of_paused_task_re_evaluates_stored_unknown(self) -> None:
+        fake = self.runner({gh_issue(3815): [
+            checks.CheckToolError("gh timed out after 20s"), ok(ISSUE_3815_OPEN),
+        ]})
+        code, _payloads, _out, err = self.add_cli(fake, "paused-b", "--check", json.dumps(ISSUE_OPEN_3815))
+        self.assertEqual(code, 0, err)
+        self.assertIn("CHECK UNVERIFIED", err)
+        self._deactivate("paused-b")
+
+        code, payloads, _out, err = self.run_cli(
+            fake, "edit", "--database", str(self.queue.path), "paused-b",
+            "--changes", json.dumps({"title": "Paused task, retitled"}),
+        )
+
+        self.assertEqual(code, 0, (payloads, err))
+        self.assertEqual(len(fake.tool_calls("issue")), 2)
+        self.assertEqual(
+            [(entry["status"], entry["check"]) for entry in payloads[0]["checks"]],
+            [("pass", checks.describe(ISSUE_OPEN_3815))],
+        )
+        self.assertNotIn("CHECK", err)
+        self.assertFalse(self.queue.task("paused-b").active)
+        self.assertEqual(self.ready("paused-b")["state"], "paused")
+
+    def test_scout_refresh_skips_paused_tasks(self) -> None:
+        self.add("paused-c", checks=[ISSUE_OPEN_3815], active=False)
+        idle = self.runner()
+
+        result = checks.refresh(self.queue, runner=idle, now_epoch=NOW)
+
+        self.assertEqual(idle.calls, [])
+        self.assertEqual(result["evaluated"], [])
+        self.assertEqual(rows(self.queue, "SELECT * FROM check_results WHERE task_id='paused-c'"), [])
+        self.assertEqual(self.ready("paused-c")["state"], "paused")
 
 
 class ScoutPreflightTests(HermeticEnvironment, PreflightCase):
@@ -578,8 +942,8 @@ class ScoutPreflightTests(HermeticEnvironment, PreflightCase):
 
         self.assertEqual(code, 0, payloads)
         readiness = payloads[0]["readiness"]
-        self.assertEqual(readiness["declared"]["hold_reason"], "check_pending")
-        self.assertEqual(readiness["builtin"]["hold_reason"], "check_pending")
+        self.assertEqual(readiness["declared"]["hold_reason"], "check_unchecked")
+        self.assertEqual(readiness["builtin"]["hold_reason"], "check_unchecked")
         edge = next(item for item in readiness["child"]["dependencies"] if item["id"] == "parent")
         self.assertEqual(edge["status"], "merge_check_pending")
         self.assertEqual(rows(self.queue, "SELECT * FROM check_results"), [])

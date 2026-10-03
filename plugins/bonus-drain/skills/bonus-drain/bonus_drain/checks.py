@@ -36,8 +36,9 @@ PASS_REFRESH_SECONDS = 2700
 RETRY_TTL_SECONDS = 600
 # Unknown (tool or network error) blocks for this long, then the launch proceeds unverified.
 UNKNOWN_GRACE_SECONDS = 3600
-TICK_MAX_CHECKS = 25
-TICK_BUDGET_SECONDS = 45.0
+# The scout tick's cap counts tool calls, not checks: one call can answer several checks.
+TICK_MAX_CALLS = 60
+TICK_BUDGET_SECONDS = 120.0
 CALL_TIMEOUT_SECONDS = 20.0
 _STDOUT_CAP = 1 << 20
 
@@ -219,11 +220,67 @@ def check_id(spec: Mapping[str, Any], context: Mapping[str, Any]) -> str:
     ).hexdigest()[:16]
 
 
+def _origin_argv(cwd: str) -> tuple[str, ...]:
+    return ("git", "-C", cwd, "remote", "get-url", "origin")
+
+
+def _ref_argv(spec: Mapping[str, Any], cwd: str) -> tuple[str, ...]:
+    return ("git", "-C", cwd, "ls-remote", "--exit-code", "--heads", "origin", spec["ref"])
+
+
+def _issue_argv(spec: Mapping[str, Any]) -> tuple[str, ...]:
+    # issue_open and issue_in_milestone read the same fields, so one call answers both.
+    return ("gh", "issue", "view", str(spec["number"]), "-R", spec["repo"], "--json", "state,milestone")
+
+
+def _pr_selector(spec: Mapping[str, Any]) -> str:
+    return str(spec["pr"]) if "pr" in spec else str(spec["head"])
+
+
+def _pr_argv(spec: Mapping[str, Any]) -> tuple[str, ...]:
+    return (
+        "gh", "pr", "view", _pr_selector(spec), "-R", spec["repo"],
+        "--json", "number,state,mergedAt,baseRefName,headRefName",
+    )
+
+
+def _release_argv(spec: Mapping[str, Any]) -> tuple[str, ...]:
+    return ("gh", "release", "view", spec["tag"], "-R", spec["repo"], "--json", "tagName,isDraft,publishedAt")
+
+
+def _file_argv(spec: Mapping[str, Any]) -> tuple[str, ...]:
+    ref = _short(spec["ref"])
+    return (
+        "gh", "api", "-H", "Accept: application/vnd.github.raw",
+        f"repos/{spec['repo']}/contents/{quote(spec['path'])}?ref={quote(ref)}",
+    )
+
+
+def planned_calls(spec: Mapping[str, Any], cwd: str) -> tuple[tuple[str, ...], ...]:
+    """Every argv that evaluating ``spec`` (plus its observed context) will run.
+
+    Built from the same helpers the evaluators use, so planning cannot drift from evaluation.
+    """
+
+    kind = spec.get("type")
+    if kind == "base_ref_exists":
+        return (_ref_argv(spec, cwd), _origin_argv(cwd))
+    if kind in {"issue_open", "issue_in_milestone"}:
+        return (_issue_argv(spec),)
+    if kind == "pr_merged":
+        return (_pr_argv(spec),)
+    if kind == "release_exists":
+        return (_release_argv(spec),)
+    if kind == "file_matches":
+        return (_file_argv(spec),)
+    return ()
+
+
 def origin_url(cwd: str, runner: CheckRunner) -> str | None:
     """Read the checkout's origin URL locally (no network); None when unavailable."""
 
     try:
-        result = runner(["git", "-C", cwd, "remote", "get-url", "origin"], None, CALL_TIMEOUT_SECONDS)
+        result = runner(_origin_argv(cwd), None, CALL_TIMEOUT_SECONDS)
     except CheckToolError:
         return None
     url = result.stdout.strip()
@@ -307,10 +364,7 @@ def _unknown(detail: str) -> CheckResult:
 
 def _evaluate_ref(spec: Mapping[str, Any], cwd: str, runner: CheckRunner) -> CheckResult:
     ref = spec["ref"]
-    result = runner(
-        ["git", "-C", cwd, "ls-remote", "--exit-code", "--heads", "origin", ref],
-        None, CALL_TIMEOUT_SECONDS,
-    )
+    result = runner(_ref_argv(spec, cwd), None, CALL_TIMEOUT_SECONDS)
     if result.returncode == 0:
         listed = {line.split("\t", 1)[-1].strip() for line in result.stdout.splitlines()}
         if ref in listed:
@@ -343,7 +397,7 @@ def _gh_view(
 
 def _evaluate_issue(spec: Mapping[str, Any], runner: CheckRunner) -> CheckResult:
     value = _gh_view(
-        ["gh", "issue", "view", str(spec["number"]), "-R", spec["repo"], "--json", "state,milestone"],
+        _issue_argv(spec),
         ("Could not resolve to an issue",), "issue not found", "issue", runner,
     )
     if isinstance(value, CheckResult):
@@ -363,10 +417,9 @@ def _evaluate_issue(spec: Mapping[str, Any], runner: CheckRunner) -> CheckResult
 
 
 def _evaluate_pr(spec: Mapping[str, Any], runner: CheckRunner) -> CheckResult:
-    selector = str(spec["pr"]) if "pr" in spec else str(spec["head"])
+    selector = _pr_selector(spec)
     value = _gh_view(
-        ["gh", "pr", "view", selector, "-R", spec["repo"],
-         "--json", "number,state,mergedAt,baseRefName,headRefName"],
+        _pr_argv(spec),
         ("no pull requests found", "Could not resolve"), "no pull request found", "pr", runner,
     )
     if isinstance(value, CheckResult):
@@ -386,7 +439,7 @@ def _evaluate_pr(spec: Mapping[str, Any], runner: CheckRunner) -> CheckResult:
 
 def _evaluate_release(spec: Mapping[str, Any], runner: CheckRunner) -> CheckResult:
     value = _gh_view(
-        ["gh", "release", "view", spec["tag"], "-R", spec["repo"], "--json", "tagName,isDraft,publishedAt"],
+        _release_argv(spec),
         ("release not found",), "release not found", "release", runner,
     )
     if isinstance(value, CheckResult):
@@ -402,11 +455,7 @@ def _evaluate_release(spec: Mapping[str, Any], runner: CheckRunner) -> CheckResu
 
 def _evaluate_file(spec: Mapping[str, Any], runner: CheckRunner) -> CheckResult:
     ref = _short(spec["ref"])
-    result = runner(
-        ["gh", "api", "-H", "Accept: application/vnd.github.raw",
-         f"repos/{spec['repo']}/contents/{quote(spec['path'])}?ref={quote(ref)}"],
-        None, CALL_TIMEOUT_SECONDS,
-    )
+    result = runner(_file_argv(spec), None, CALL_TIMEOUT_SECONDS)
     if result.returncode == 0:
         found = True
         matched = re.search(spec["pattern"], result.stdout, re.MULTILINE) is not None
@@ -443,46 +492,122 @@ def evaluate(spec: Mapping[str, Any], *, cwd: str, runner: CheckRunner) -> Check
     return _unknown(f"unsupported check type: {kind}")
 
 
+class _MemoRunner:
+    """Run each (argv, cwd) key once per component; a CheckToolError is memoized too."""
+
+    def __init__(self, runner: CheckRunner):
+        self._runner = runner
+        self._memo: dict[tuple[tuple[str, ...], str | None], RunnerResult | CheckToolError] = {}
+
+    @property
+    def calls(self) -> int:
+        return len(self._memo)
+
+    def __call__(self, argv: Sequence[str], cwd: str | None, timeout: float) -> RunnerResult:
+        key = (tuple(argv), cwd)
+        if key not in self._memo:
+            try:
+                self._memo[key] = self._runner(key[0], cwd, timeout)
+            except CheckToolError as exc:
+                self._memo[key] = exc
+        outcome = self._memo[key]
+        if isinstance(outcome, CheckToolError):
+            raise outcome
+        return outcome
+
+
+def _components(
+    items: Sequence[tuple[CheckWork, tuple[tuple[str, ...], ...]]],
+) -> list[list[CheckWork]]:
+    """Group (item, planned calls) pairs connected by shared calls, in first-item order."""
+
+    parent = list(range(len(items)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    owner: dict[tuple[str, ...], int] = {}
+    for index, (_item, calls) in enumerate(items):
+        for argv in calls:
+            if argv in owner:
+                first, second = find(owner[argv]), find(index)
+                parent[max(first, second)] = min(first, second)
+            else:
+                owner[argv] = index
+    groups: dict[int, list[CheckWork]] = {}
+    for index, (item, _calls) in enumerate(items):
+        groups.setdefault(find(index), []).append(item)
+    return [groups[root] for root in sorted(groups)]
+
+
 def refresh(
     queue: Any,
     *,
     runner: CheckRunner,
     now_epoch: int,
     task_ids: Iterable[str] | None = None,
-    max_checks: int = TICK_MAX_CHECKS,
-    budget_seconds: float = TICK_BUDGET_SECONDS,
+    due_only: bool = True,
+    max_calls: int | None = TICK_MAX_CALLS,
+    budget_seconds: float | None = TICK_BUDGET_SECONDS,
     monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
-    """Evaluate due checks within a call and time budget, storing each under its generation.
+    """Evaluate checks within a tool-call cap and time budget; ``None`` means unlimited.
 
-    No observation is shared across work items: each item reserves its own generation
-    immediately before its own tool call, so a later-begun evaluation always wins.
+    ``due_only=False`` evaluates every launch check of ``task_ids`` (a queue mutation);
+    the default evaluates only due checks.  Identical tool calls within one refresh are
+    made once, and every item that needs one reads that shared observation.  The cap
+    counts tool calls, not checks: an item is admitted only if its new calls fit, and an
+    item fully covered by calls already admitted still runs.  Admitted items are grouped
+    into components connected by shared calls.  Each component reserves a generation for
+    every item before its first call, then evaluates and stores all of them, so a refresh
+    that begins later still wins.  The budget is checked only between components: a
+    started component runs to completion, and every later one is deferred without
+    reserving anything.  Nothing is reused across refresh calls.
     """
 
-    work = queue.check_work(now_epoch=now_epoch, task_ids=task_ids)
+    work = queue.check_work(now_epoch=now_epoch, task_ids=task_ids, due_only=due_only)
     started = monotonic()
-    evaluated: list[dict[str, Any]] = []
-    attempted = discarded = 0
+    planned: set[tuple[str, ...]] = set()
+    selected: list[tuple[CheckWork, tuple[tuple[str, ...], ...]]] = []
     for item in work:
-        if attempted >= max_checks or monotonic() - started >= budget_seconds:
+        calls = planned_calls(item.spec, item.cwd)
+        new = set(calls) - planned
+        if max_calls is not None and len(planned) + len(new) > max_calls:
+            continue
+        planned |= new
+        selected.append((item, calls))
+    evaluated: list[dict[str, Any]] = []
+    discarded = tool_calls = 0
+    for component in _components(selected):
+        if budget_seconds is not None and monotonic() - started >= budget_seconds:
             break
-        attempted += 1
-        generation = queue.begin_check(item, now_epoch=now_epoch)
-        result = evaluate(item.spec, cwd=item.cwd, runner=runner)
-        observed = None
-        if item.spec.get("type") == "base_ref_exists":
-            observed = {**item.context, "origin": origin_url(item.cwd, runner)}
-        stored = queue.store_check_result(
-            item, result.status, result.detail, generation=generation,
-            observed_context=observed, now_epoch=now_epoch,
-        )
-        if stored:
-            evaluated.append({"task_id": item.task_id, "type": item.spec.get("type"), "status": result.status})
-        else:
-            discarded += 1
+        # Shared calls never cross components, so each memo is dropped once its group is done.
+        memo = _MemoRunner(runner)
+        generations = [queue.begin_check(item, now_epoch=now_epoch) for item in component]
+        for item, generation in zip(component, generations):
+            result = evaluate(item.spec, cwd=item.cwd, runner=memo)
+            observed = None
+            if item.spec.get("type") == "base_ref_exists":
+                observed = {**item.context, "origin": origin_url(item.cwd, memo)}
+            stored = queue.store_check_result(
+                item, result.status, result.detail, generation=generation,
+                observed_context=observed, now_epoch=now_epoch,
+            )
+            if stored:
+                evaluated.append({
+                    "task_id": item.task_id, "type": item.spec.get("type"), "status": result.status,
+                    "check": describe(item.spec), "origin": item.origin, "detail": result.detail,
+                })
+            else:
+                discarded += 1
+        tool_calls += memo.calls
     return {
         "due": len(work),
         "evaluated": evaluated,
-        "deferred": len(work) - attempted,
+        "deferred": len(work) - len(evaluated) - discarded,
         "discarded": discarded,
+        "tool_calls": tool_calls,
     }
