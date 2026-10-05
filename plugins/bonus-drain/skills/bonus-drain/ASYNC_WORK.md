@@ -119,9 +119,10 @@ launch check before storing anything: a failing check refuses unless a queued pr
 `depends_on` is expected to make it pass, and a check that cannot be evaluated refuses with a
 request to retry the add. SKILL.md has the record and grant JSON and the three probe checks.
 Every worker also gets a default grant to fix pre-existing lint, format, or type errors in files
-its change touches, so those never need a grant or a blocker. Tasks queued under the earlier
-review shape are held as `review_stale` and never dispatch until edited with a new record;
-`held-report` and `readiness-backfill` list them.
+its change touches, so those never need a grant or a blocker. Launchable tasks with no review
+are held as `review_missing`, and tasks queued under the earlier review shape as
+`review_stale`; neither dispatches until edited with a new record, and `held-report` and
+`readiness-backfill` list them.
 
 ## Thread handoff and editing
 

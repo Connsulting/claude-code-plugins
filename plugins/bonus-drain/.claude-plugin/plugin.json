@@ -1,6 +1,6 @@
 {
   "name": "bonus-drain",
-  "version": "0.3.13",
+  "version": "0.3.14",
   "description": "Plan, queue, and run autonomous async work with dependencies and capacity-aware automatic dispatch.",
   "author": {
     "name": "Connsulting"

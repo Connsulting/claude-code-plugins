@@ -172,6 +172,12 @@ re-reviewed". `held-report` lists them with source `stale_review` and prints the
 `edit` the task with the new record as `readiness_review` to release the hold, or remove the
 task if it is not implementable.
 
+An active task with no readiness review at all is held the same way while it could still launch
+(a recurring task, a one-off with no attempt, or one with a scheduled recovery): hold reason
+`review_missing`, reason "Held: no readiness review", and `held-report` source `missing_review`.
+Verified done, failed, and skipped one-offs keep their terminal reading. Goal-owned work is
+exempt; goal acceptance governs it.
+
 ### Task contract
 
 Capture at least: stable ID, title, kind (`oneoff` or `recurring`), priority, size, cwd, goal,
@@ -475,9 +481,9 @@ to resolve the child start branch; historical commit OIDs and receipts are optio
   protect browser mutations; see `SECURITY.md` before remote use.
 - The read only `--local` queue and gates view shows the selected start branch and uses the
   same readiness result as dispatch. It has no pending verification state.
-- Tasks queued before readiness reviews existed keep a null review and stay launchable, but any
-  contract edit to them needs a review. Tasks whose review predates `implementable-ticket/v1`
-  are held as `review_stale` until re-reviewed. `bonus-drain readiness-backfill [--json]` is read-only:
+- Tasks queued before readiness reviews existed and still launchable are held as
+  `review_missing`, and tasks whose review predates `implementable-ticket/v1` as `review_stale`,
+  until reviewed. `bonus-drain readiness-backfill [--json]` is read-only:
   for each task a launch could still start (active, unclaimed, not done; one-offs with no attempt)
   it reports `review` as `valid`, `missing`, `stale`, or `invalid`, the problems, and live results
   of every launch check, plus `ready_for_launch` and a summary count. It stores nothing, so use it

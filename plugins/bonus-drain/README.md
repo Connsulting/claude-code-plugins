@@ -324,7 +324,8 @@ the readiness record of the global `implementable-ticket` skill (contract
 authority finding resolves only by a grant Brian already gave or a rewritten done-when. `add`
 evaluates every launch check before storing the task: a failing check refuses unless a queued
 prerequisite is expected to make it pass, and an unverifiable check refuses with a request to
-retry. Tasks queued under the earlier review shape are held as `review_stale` until re-reviewed.
+retry. Tasks queued under the earlier review shape (`review_stale`) or with no review
+(`review_missing`) are held until reviewed.
 
 Each launch has an immutable attempt identity. The dispatched prompt provides the exact
 terminal command and private outcome-evidence path for that attempt. A `done` result must

@@ -853,6 +853,9 @@ def _command(args: argparse.Namespace) -> int:
             stale = sum(item["source"] == "stale_review" for item in report)
             if stale:
                 print(f"held until re-reviewed (readiness review predates implementable-ticket/v1): {stale}")
+            missing = sum(item["source"] == "missing_review" for item in report)
+            if missing:
+                print(f"held: no readiness review: {missing}")
         return 0
     if command == "readiness-backfill":
         _cfg, queue = _queue(args)

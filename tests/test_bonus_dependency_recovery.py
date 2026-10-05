@@ -455,7 +455,11 @@ class AttemptAndLegacyContracts(RecoveryCase):
         historical = rows(migrated, "SELECT task,status,attempt_id FROM runs ORDER BY rowid_pk")
         self.assertEqual([(row["task"], row["status"]) for row in historical], list(parents))
         self.assertTrue(all(row["attempt_id"] is None for row in historical))
-        self.assertTrue(migrated.readiness("done-child", now_epoch=NOW)["ready"])
+        # The legacy done parent satisfies the edge; the migrated row has no readiness review,
+        # so it is held for one rather than launched.
+        done_child = migrated.readiness("done-child", now_epoch=NOW)
+        self.assertTrue(all(edge["satisfied"] for edge in done_child["dependencies"]), done_child)
+        self.assertEqual((done_child["state"], done_child["hold_reason"]), ("held", "review_missing"))
         decisions = migrated.reconcile_recoveries(now_epoch=NOW, dry_run=False)
         self.assertEqual({as_dict(item)["task_id"] for item in decisions}, {"failed", "skipped"})
         self.assertTrue(all(as_dict(item)["mode"] == "verification" for item in decisions))

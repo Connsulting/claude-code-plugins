@@ -21,7 +21,7 @@ A task is queueable only if it can start and can finish with no human in the loo
 4. Other findings resolve by a queued prerequisite task with its dependency edge, a rewritten done-when, or a structured check.
 5. `add` evaluates every launch check before storing anything. A failing check refuses the add unless `depends_on` names a queued prerequisite expected to make it pass; a check that cannot be evaluated now refuses and asks you to retry the add.
 
-Tasks queued before this contract are held as `review_stale` and never dispatch until they are re-reviewed and edited with a new record; `bonus-drain held-report` lists them.
+Tasks queued before this contract are held as `review_stale`, and launchable tasks with no review as `review_missing`; neither dispatches until edited with a new record, and `bonus-drain held-report` lists them.
 
 Translate each mechanically checkable precondition or dependency (an issue open or in a milestone, a pull request merged, a release published, a base branch present, file content on a ref, an MCP server authenticated, a Kubernetes resource present, OpenRouter credit) into a `checks` entry, and choose `done` or `merged` for each dependency edge. The MCP, Kubernetes, and OpenRouter checks hold the task without consuming an attempt and never proceed as unverified. Keep the free-text precondition only for judgment the worker must make. Workers always have default authority to fix pre-existing lint, format, or type errors in files their change touches; do not grant or precondition that. Use `bonus-drain readiness-backfill` to find older tasks that lack a review or carry a stale one.
 

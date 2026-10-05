@@ -213,6 +213,11 @@ def is_safe_task_id(value: Any) -> bool:
     return isinstance(value, str) and TASK_ID_RE.fullmatch(value) is not None
 
 
+# Plain reason shown by readiness, the viewer, and held-report for a task that has no review.
+REVIEW_MISSING_REASON = (
+    "Held: no readiness review. Run the implementable-ticket skill and edit the task with its "
+    "record as readiness_review"
+)
 # Plain reason shown by readiness, the viewer, and held-report for a pre-contract review.
 REVIEW_STALE_REASON = (
     "Held until re-reviewed: its readiness review predates the implementable-ticket/v1 contract "
@@ -1796,10 +1801,15 @@ class QueueDB:
                     gate = self._preflight_gate(connection, task, launch_verdicts, goal_owned)
                     if gate is not None:
                         state, (hold_reason, reason) = "waiting", gate
-            # A review written before the current contract holds the task whatever else it waits on:
-            # it never launches until it is re-reviewed.
-            if state not in {"paused", "running", "done"} and self._review_stale(task, goal_owned):
-                state, reason, hold_reason = "held", REVIEW_STALE_REASON, "review_stale"
+            # A missing review, or one written before the current contract, holds work that could
+            # otherwise launch, whatever else it waits on: it never launches until it is reviewed.
+            # Terminal and paused states keep their own reading.
+            review_hold = self._review_hold(task, goal_owned)
+            if (
+                review_hold is not None and state in {"ready", "waiting", "cooldown", "recovering"}
+                and self._could_launch(connection, task)
+            ):
+                state, (hold_reason, reason) = "held", review_hold
             requeue_allowed = bool(
                 task.kind == "oneoff" and claim is None and done is None
                 and not goal_owned
@@ -2026,7 +2036,7 @@ class QueueDB:
         if connection.execute("SELECT 1 FROM dispatch_claims WHERE task_id=? LIMIT 1", (task.id,)).fetchone():
             return False
         goal_owned = QueueDB._goal_owned(connection, task.id)
-        if QueueDB._review_stale(task, goal_owned):
+        if QueueDB._review_hold(task, goal_owned) is not None:
             return False
         if QueueDB._preflight_gate(
             connection, task, QueueDB._launch_verdicts(connection, task, now, goal_owned), goal_owned,
@@ -4353,11 +4363,40 @@ class QueueDB:
         )
 
     @staticmethod
-    def _review_stale(task: Task, goal_owned: bool) -> bool:
-        """True when the task's review predates the review contract; goal turns carry no review."""
+    def _review_hold(task: Task, goal_owned: bool) -> tuple[str, str] | None:
+        """(hold_reason, reason) when the task has no review or a pre-contract one.
+
+        Goal-owned work carries no review: goal acceptance governs it.
+        """
 
         from . import review
-        return not goal_owned and review.schema_stale(task)
+        if goal_owned:
+            return None
+        if task.readiness_review is None:
+            return "review_missing", REVIEW_MISSING_REASON
+        if review.schema_stale(task):
+            return "review_stale", REVIEW_STALE_REASON
+        return None
+
+    def _could_launch(self, connection: sqlite3.Connection, task: Task) -> bool:
+        """Unclaimed work that has not reached a terminal outcome: a recurring task, or a one-off
+        with no attempt or legacy run, one whose recovery is scheduled, or one whose failure the
+        scout resumes once its resume_when checks pass."""
+
+        if connection.execute("SELECT 1 FROM dispatch_claims WHERE task_id=?", (task.id,)).fetchone():
+            return False
+        if task.kind != "oneoff":
+            return True
+        if self._verified_done_row(connection, task.id) is not None:
+            return False
+        latest = self._latest_effective_attempt(connection, task.id)
+        if latest is None and self._latest_legacy_run(connection, task.id) is None:
+            return True
+        if self._authority_resume(latest):
+            return True
+        return connection.execute(
+            "SELECT 1 FROM task_recovery WHERE task_id=? AND state IN ('scheduled','backoff')", (task.id,),
+        ).fetchone() is not None
 
     @staticmethod
     def _preflight_gate(
@@ -4886,7 +4925,7 @@ class QueueDB:
         return candidates
 
     def held_authority_report(self) -> list[dict[str, Any]]:
-        """List held authority, verification, and stale-review blockers with their dependents (read-only)."""
+        """List held authority, verification, and missing or stale review blockers with their dependents (read-only)."""
 
         self.initialize()
         with self._connect() as connection:
@@ -4960,21 +4999,17 @@ class QueueDB:
                 report.append(item(
                     source, task_row, latest["terminal_at"], detail, latest, latest["reason_code"],
                 ))
-            # Launchable work whose review predates the review contract is held until re-reviewed.
+            # Work that could still launch but has no review, or a pre-contract one, is held.
             for task_row in connection.execute("SELECT * FROM tasks WHERE active=1").fetchall():
                 task = self._task_from_row(task_row)
-                if (
-                    not self._review_stale(task, self._goal_owned(connection, task.id))
-                    or connection.execute(
-                        "SELECT 1 FROM dispatch_claims WHERE task_id=?", (task.id,),
-                    ).fetchone() is not None
-                    or (task.kind == "oneoff" and self._verified_done_row(connection, task.id) is not None)
-                ):
+                hold = self._review_hold(task, self._goal_owned(connection, task.id))
+                if hold is None or not self._could_launch(connection, task):
                     continue
+                reason_code, detail = hold
                 reviewed_at = json.loads(task.readiness_review or "{}").get("reviewed_at")
                 report.append(item(
-                    "stale_review", task_row, reviewed_at or task.created_at, REVIEW_STALE_REASON, None,
-                    "review_stale",
+                    "stale_review" if reason_code == "review_stale" else "missing_review",
+                    task_row, reviewed_at or task.created_at, detail, None, reason_code,
                 ))
         report.sort(key=lambda entry: (str(entry["held_since"] or ""), entry["task_id"]))
         return report

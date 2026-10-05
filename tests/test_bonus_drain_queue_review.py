@@ -505,10 +505,45 @@ class StaleContractHoldTests(HermeticEnvironment, ReviewCase):
         set_review_json(self.queue, "child", V1_ERA_REVIEW)
         self.assertEqual(self.ready("child")["hold_reason"], "review_stale")
 
-    def test_missing_review_is_not_treated_as_stale(self) -> None:
+    def test_missing_review_holds_launchable_work(self) -> None:
         self.add("legacy")
         set_review_json(self.queue, "legacy", None)
+        status = self.ready("legacy")
+        self.assertEqual((status["state"], status["hold_reason"]), ("held", "review_missing"))
+        self.assertTrue(status["reason"].startswith("Held: no readiness review"))
+        self.assertNotIn("legacy", self.eligible_ids())
+        self.assertIsNone(self.try_claim("legacy"))
+        report = {item["task_id"]: item for item in self.queue.held_authority_report()}
+        self.assertEqual(
+            (report["legacy"]["source"], report["legacy"]["reason_code"]), ("missing_review", "review_missing"),
+        )
+        # Reviewing it releases the hold.
+        self.queue.edit_task("legacy", {"readiness_review": minimal_review(goal=self.queue.task("legacy").goal)})
         self.assertTrue(self.ready("legacy")["ready"])
+
+    def test_missing_review_is_not_held_once_terminal(self) -> None:
+        for task_id, finish in (("legacy-done", self.complete), ("legacy-failed", self.fail_task)):
+            self.add(task_id)
+            finish(task_id)
+            set_review_json(self.queue, task_id, None)
+            self.assertNotEqual(self.ready(task_id)["hold_reason"], "review_missing")
+        held = {item["task_id"] for item in self.queue.held_authority_report()}
+        self.assertNotIn("legacy-done", held)
+        self.assertFalse(any(
+            item["task_id"] == "legacy-failed" and item["source"] == "missing_review"
+            for item in self.queue.held_authority_report()
+        ))
+
+    def test_goal_owned_work_needs_no_review(self) -> None:
+        self.add("member")
+        set_review_json(self.queue, "member", None)
+        with sqlite3.connect(self.queue.path) as connection:
+            connection.execute("PRAGMA foreign_keys=OFF")
+            connection.execute(
+                "INSERT INTO goal_turns(goal_id,turn,task_id,contract_hash,reason,created_at) VALUES(?,?,?,?,?,?)",
+                ("goal-x", 1, "member", "0" * 64, "fixture", "2026-10-05T00:00:00Z"),
+            )
+        self.assertNotEqual(self.ready("member")["hold_reason"], "review_missing")
 
     def test_held_report_lists_stale_reviews(self) -> None:
         report = {item["task_id"]: item for item in self.queue.held_authority_report()}
