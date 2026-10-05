@@ -675,7 +675,7 @@ class ProbeCliTests(HermeticEnvironment, ProbeCase):
                 self.assertEqual(payloads[-1]["code"], "invalid_input")
                 self.assertIsNone(self.queue.task("bad-mcp"))
 
-    def test_add_with_failing_probe_reports_and_stays_queued(self) -> None:
+    def test_add_with_failing_probe_is_refused_and_inserts_nothing(self) -> None:
         fake = self.runner({
             kubectl("k8", "service", "nope-xyz", "default"): exited(1, KUBECTL_NOT_FOUND_STDERR),
         })
@@ -695,14 +695,13 @@ class ProbeCliTests(HermeticEnvironment, ProbeCase):
             ])
         out, err = stdout.getvalue(), stderr.getvalue()
 
-        self.assertEqual(code, 0, (payloads, out, err))
+        # The missing service is a precondition that does not exist now and no queued
+        # prerequisite will create it: the task cannot start, so it is not queued.
+        self.assertEqual(code, 2, (payloads, out, err))
+        self.assertEqual(payloads[-1]["code"], "invalid_input")
+        self.assertIn("add refused: launch check fails now", payloads[-1]["error"])
+        self.assertIn("service/nope-xyz not found in k8/default", payloads[-1]["error"])
         self.assertIn("CHECK FAILED", err)
         self.assertIn(checks.describe(K8S_SERVICE), err)
-        self.assertIn("service/nope-xyz not found in k8/default", err)
-        stored = self.queue.task("needs-svc")
-        self.assertIsNotNone(stored)
-        self.assertTrue(stored.active)
-        status = self.ready("needs-svc")
-        self.assertEqual((status["state"], status["hold_reason"]), ("waiting", "check_failed"))
-        self.assertEqual(self.queue.attempts(task_id="needs-svc"), [])
+        self.assertIsNone(self.queue.task("needs-svc"))
         self.assertEqual(self.attempt_rows(), [])

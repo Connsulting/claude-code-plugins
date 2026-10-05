@@ -840,6 +840,35 @@ def _components(
     return [groups[root] for root in sorted(groups)]
 
 
+def evaluate_items(
+    items: Iterable[CheckWork], *, runner: CheckRunner,
+) -> list[tuple[CheckWork, CheckResult, dict[str, Any] | None]]:
+    """Evaluate ``items`` through one shared memo, storing nothing.
+
+    Each result carries the observed context ``store_check_result`` needs (the origin URL
+    of a base_ref_exists checkout), so a caller can store the observation later.
+    """
+
+    memo = _MemoRunner(runner)
+    results: list[tuple[CheckWork, CheckResult, dict[str, Any] | None]] = []
+    for item in items:
+        result = evaluate(item.spec, cwd=item.cwd, runner=memo)
+        observed = None
+        if item.spec.get("type") == "base_ref_exists":
+            observed = {**item.context, "origin": origin_url(item.cwd, memo)}
+        results.append((item, result, observed))
+    return results
+
+
+def entry(item: CheckWork, result: CheckResult) -> dict[str, Any]:
+    """One evaluated check as ``refresh`` and ``observe`` report it."""
+
+    return {
+        "task_id": item.task_id, "type": item.spec.get("type"), "status": result.status,
+        "check": describe(item.spec), "origin": item.origin, "detail": result.detail,
+    }
+
+
 def observe(items: Iterable[CheckWork], *, runner: CheckRunner) -> list[dict[str, Any]]:
     """Evaluate ``items`` through one shared memo and store nothing.
 
@@ -848,14 +877,36 @@ def observe(items: Iterable[CheckWork], *, runner: CheckRunner) -> list[dict[str
     """
 
     memo = _MemoRunner(runner)
-    observed: list[dict[str, Any]] = []
-    for item in items:
-        result = evaluate(item.spec, cwd=item.cwd, runner=memo)
-        observed.append({
-            "task_id": item.task_id, "type": item.spec.get("type"), "status": result.status,
-            "check": describe(item.spec), "origin": item.origin, "detail": result.detail,
-        })
-    return observed
+    return [entry(item, evaluate(item.spec, cwd=item.cwd, runner=memo)) for item in items]
+
+
+def admission_refusal(
+    entries: Iterable[Mapping[str, Any]], *, has_prerequisite: bool, action: str,
+) -> str | None:
+    """Why queue admission refuses these evaluated checks, or None to admit.
+
+    An unknown result (rate limit, network) is never admitted: the caller retries. A failing
+    check is admitted only when the task waits on a queued prerequisite (depends_on) that is
+    expected to make it pass; otherwise the task cannot start and is not queued.
+    """
+
+    entries = list(entries)
+    unknown = [item for item in entries if item["status"] == "unknown"]
+    if unknown:
+        return (
+            f"{action} refused: launch check could not be verified now: "
+            + "; ".join(f"{item['check']}: {item['detail']}" for item in unknown)
+            + f". Nothing was changed; retry the {action}"
+        )
+    failed = [item for item in entries if item["status"] == "fail"]
+    if failed and not has_prerequisite:
+        return (
+            f"{action} refused: launch check fails now, so the task cannot start: "
+            + "; ".join(f"{item['check']}: {item['detail']}" for item in failed)
+            + ". A failing check is accepted only when depends_on names the queued task expected to "
+            "make it pass; fix the precondition, add that prerequisite, or do not queue the task"
+        )
+    return None
 
 
 def refresh(
@@ -912,10 +963,7 @@ def refresh(
                 observed_context=observed, now_epoch=now_epoch,
             )
             if stored:
-                evaluated.append({
-                    "task_id": item.task_id, "type": item.spec.get("type"), "status": result.status,
-                    "check": describe(item.spec), "origin": item.origin, "detail": result.detail,
-                })
+                evaluated.append(entry(item, result))
             else:
                 discarded += 1
         tool_calls += memo.calls

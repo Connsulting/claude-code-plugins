@@ -87,9 +87,14 @@ def main():
                                 work_group='Preview', source_ref='Preview fixture',
                                 depends_on=dependencies,
                                 readiness_review={
+                                    'contract': 'implementable-ticket/v1', 'executor': 'bonus-drain',
                                     'issue': None, 'adrs': [], 'instructions': ['AGENTS.md'],
+                                    'startable': {'verdict': 'yes', 'evidence': ['Demo fixture.']},
+                                    'finishable': {'verdict': 'yes', 'evidence': ['Demo fixture.']},
                                     'acceptance_criteria': [{'criterion': 'Preview reviewed.',
-                                                             'basis': 'Demo fixture goal.'}],
+                                                             'basis': 'Demo fixture goal.',
+                                                             'verified_by': 'Open the preview viewer.',
+                                                             'environment': 'worker'}],
                                     'findings': [], 'reviewer': 'preview'}))
         attempt = queue.claim('preview-01-plan', 'preview/manual/2000000000', 'preview', 'preview-account',
                               now_epoch=2000000000)

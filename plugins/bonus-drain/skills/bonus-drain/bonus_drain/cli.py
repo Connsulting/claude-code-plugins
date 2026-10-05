@@ -14,7 +14,7 @@ from typing import Any, Mapping, Sequence
 
 from . import __version__
 from . import config as config_module
-from . import checks, db, dispatcher, factory_terminal, planner, scout, usage
+from . import checks, db, dispatcher, factory_terminal, planner, review, scout, usage
 from .kick import kick_task, resolve_active_accounts
 
 
@@ -60,27 +60,46 @@ def _now(args: argparse.Namespace) -> int:
     return int(time.time())
 
 
-def _evaluate_task_checks(
-    queue: db.QueueDB, task_id: str, args: argparse.Namespace,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Evaluate every launch check of one task now, uncapped, and read its resulting readiness.
+def _admit(
+    queue: db.QueueDB, args: argparse.Namespace, action: str, preview: Any, commit: Any,
+    *, gate: bool = True,
+) -> tuple[Any, list[dict[str, Any]], dict[str, Any]]:
+    """Queue admission: evaluate every launch check now, then commit or refuse.
 
-    A failing or unverifiable check is reported on stderr; the task stays queued and the
-    scout re-evaluates it on its retry interval.
+    ``preview`` validates the mutation and lists the checks without storing anything; the
+    checks run outside any write transaction. An unknown result refuses (retry), and a failing
+    one refuses unless the task has a queued prerequisite expected to make it pass. Only an
+    admitted mutation is committed, and its evaluations are stored for the scout. An edit
+    that leaves the reviewed contract and its review alone (title, priority, size, work_group)
+    is not a re-admission: its checks are evaluated and reported but do not refuse it.
     """
 
     now = _now(args)
+    previewed, items = preview()
     # Looked up at call time so tests can patch the module's runner.
-    result = checks.refresh(
-        queue, runner=checks.subprocess_runner, now_epoch=now, task_ids=(task_id,),
-        due_only=False, max_calls=None, budget_seconds=None,
-    )
-    evaluated = result["evaluated"]
-    for entry in evaluated:
+    results = checks.evaluate_items(items, runner=checks.subprocess_runner)
+    entries = [checks.entry(item, result) for item, result, _observed in results]
+    prerequisites = tuple(previewed.depends_on)
+    for entry in entries:
         label = {"fail": "CHECK FAILED", "unknown": "CHECK UNVERIFIED"}.get(entry["status"])
         if label:
             print(f"{label}: {entry['check']}: {entry['detail']}", file=sys.stderr)
-    return evaluated, queue.readiness(task_id, now_epoch=now)
+    refusal = checks.admission_refusal(entries, has_prerequisite=bool(prerequisites), action=action)
+    if refusal is not None and gate:
+        # The same exit and code as a refused readiness review: the task was not admitted.
+        raise db.QueueError(refusal)
+    if gate and prerequisites and any(entry["status"] == "fail" for entry in entries):
+        print(
+            "accepted with a failing check: depends_on " + ", ".join(prerequisites)
+            + " is expected to make it pass; the task waits until it does",
+            file=sys.stderr,
+        )
+    task = commit()
+    queue.store_admission_results(
+        task.id, [(item, result.status, result.detail, observed) for item, result, observed in results],
+        now_epoch=now,
+    )
+    return task, entries, queue.readiness(task.id, now_epoch=now)
 
 
 def _config_path(args: argparse.Namespace) -> Path | None:
@@ -216,7 +235,6 @@ def _readiness_review(raw: str | None) -> Any:
 def _readiness_backfill(queue: db.QueueDB, now: int) -> dict[str, Any]:
     """Review state and live launch-check results of every launchable task; stores nothing."""
 
-    from . import review
     candidates = queue.backfill_candidates()
     observed = checks.observe(
         queue.check_work(now_epoch=now, task_ids=[task.id for task in candidates], due_only=False),
@@ -232,7 +250,7 @@ def _readiness_backfill(queue: db.QueueDB, now: int) -> dict[str, Any]:
             state = "missing"
         elif not problems:
             state = "valid"
-        elif problems == [review.STALE]:
+        elif problems in ([review.STALE], [review.SCHEMA_STALE]):
             state = "stale"
         else:
             state = "invalid"
@@ -391,8 +409,9 @@ def _command(args: argparse.Namespace) -> int:
             values["depends_on"], queue, cfg, None,
         )
         _validate_mcp(cfg, values["mcp"], values["cwd"], values["allowed_providers"])
-        task = queue.add_task(values)
-        evaluated, readiness = _evaluate_task_checks(queue, task.id, args)
+        task, evaluated, readiness = _admit(
+            queue, args, "add", lambda: queue.preview_add(values), lambda: queue.add_task(values),
+        )
         if args.json:
             _json({"task": task.to_dict(), "checks": evaluated, "readiness": readiness})
         else:
@@ -586,8 +605,11 @@ def _command(args: argparse.Namespace) -> int:
             changes["depends_on"], changes["merged_depends_on"] = _dependency_edges(
                 changes["depends_on"], queue, cfg, queue.task(args.task),
             )
-        task = queue.edit_task(args.task, changes)
-        evaluated, readiness = _evaluate_task_checks(queue, task.id, args)
+        task, evaluated, readiness = _admit(
+            queue, args, "edit",
+            lambda: queue.preview_edit(args.task, changes), lambda: queue.edit_task(args.task, changes),
+            gate=bool(set(changes) & (review.REVIEWED_FIELDS | {"readiness_review"})),
+        )
         _json({"task": task.to_dict(), "checks": evaluated, "readiness": readiness})
         return 0
     if command == "readiness":
@@ -828,6 +850,9 @@ def _command(args: argparse.Namespace) -> int:
                 )
                 + f" ({sum(counts['unreported'] for counts in measurement.values())} unreported)"
             )
+            stale = sum(item["source"] == "stale_review" for item in report)
+            if stale:
+                print(f"held until re-reviewed (readiness review predates implementable-ticket/v1): {stale}")
         return 0
     if command == "readiness-backfill":
         _cfg, queue = _queue(args)

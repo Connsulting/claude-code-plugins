@@ -317,6 +317,15 @@ Every ready task is eligible for Bonus capacity; `run-now` accelerates an indivi
 Tasks can carry source references, 15-character work groups, and one-off prerequisites.
 See [ASYNC_WORK.md](skills/bonus-drain/ASYNC_WORK.md) for the contract and commands.
 
+A task is queueable only if it can start and can finish with no human in the loop. `add` requires
+the readiness record of the global `implementable-ticket` skill (contract
+`implementable-ticket/v1`) as `--readiness-review` and refuses a task whose record answers no to
+"can it start?" or "can it finish?", or whose acceptance criteria lack a `verified_by`. An
+authority finding resolves only by a grant Brian already gave or a rewritten done-when. `add`
+evaluates every launch check before storing the task: a failing check refuses unless a queued
+prerequisite is expected to make it pass, and an unverifiable check refuses with a request to
+retry. Tasks queued under the earlier review shape are held as `review_stale` until re-reviewed.
+
 Each launch has an immutable attempt identity. The dispatched prompt provides the exact
 terminal command and private outcome-evidence path for that attempt. A `done` result must
 use reason code `done_when_verified` and demonstrate the stored done-when condition through

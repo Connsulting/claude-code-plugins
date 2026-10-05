@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Literal, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Literal, Mapping, Sequence
 from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
@@ -211,6 +211,35 @@ def is_safe_task_id(value: Any) -> bool:
     """Return whether a task id is safe for DB identity and positional CLI use."""
 
     return isinstance(value, str) and TASK_ID_RE.fullmatch(value) is not None
+
+
+# Plain reason shown by readiness, the viewer, and held-report for a pre-contract review.
+REVIEW_STALE_REASON = (
+    "Held until re-reviewed: its readiness review predates the implementable-ticket/v1 contract "
+    "(no can-start and can-finish verdicts, no verified_by per criterion). Re-run the "
+    "implementable-ticket skill and edit the task with its record as readiness_review"
+)
+
+
+class _PreviewRollback(Exception):
+    """Unwinds a previewed add or edit, rolling its transaction back, carrying what it would store."""
+
+    def __init__(self, task: Task, items: list[Any]) -> None:
+        super().__init__("preview")
+        self.task = task
+        self.items = items
+
+
+def _review_refusal(problems: Sequence[str]) -> str:
+    """One refusal message: a not-implementable verdict leads, then any structural problem."""
+
+    from . import review
+    verdicts = [item for item in problems if item.startswith(review.NOT_IMPLEMENTABLE)]
+    rest = [item for item in problems if item not in verdicts]
+    parts = [f"task refused, {item}" for item in verdicts]
+    if rest:
+        parts.append("readiness review required: " + "; ".join(rest))
+    return "; ".join(parts)
 
 
 def _require_task_id(value: Any) -> str:
@@ -996,10 +1025,93 @@ class QueueDB:
                 task = self._insert_task(connection, values)
                 problems = review.review_problems(task)
                 if problems:
-                    raise QueueError("readiness review required: " + "; ".join(problems))
+                    raise QueueError(_review_refusal(problems))
+                self._maybe_rollback_preview(connection, task.id)
                 return task
         except sqlite3.IntegrityError as exc:
             raise QueueError(f"task insert rejected for {values.get('id')}: {exc}") from exc
+
+    def preview_add(self, values: Mapping[str, Any]) -> tuple[Task, list[checks.CheckWork]]:
+        """Validate an add exactly as ``add_task`` would, store nothing, and list its launch checks.
+
+        Queue admission evaluates these checks before the task exists, so a refused add never
+        leaves a row behind and the network calls never run inside a write transaction.
+        """
+
+        return self._preview(lambda: self.add_task(values))
+
+    def preview_edit(self, task_id: str, changes: Mapping[str, Any]) -> tuple[Task, list[checks.CheckWork]]:
+        """Validate an edit exactly as ``edit_task`` would, store nothing, and list its launch checks."""
+
+        return self._preview(lambda: self.edit_task(task_id, changes))
+
+    def _preview(self, mutate: Callable[[], Task]) -> tuple[Task, list[checks.CheckWork]]:
+        self._preview_depth = getattr(self, "_preview_depth", 0) + 1
+        try:
+            mutate()
+        except _PreviewRollback as rollback:
+            return rollback.task, rollback.items
+        finally:
+            self._preview_depth -= 1
+        raise AssertionError("preview did not roll back")
+
+    def _maybe_rollback_preview(self, connection: sqlite3.Connection, task_id: str) -> None:
+        """Inside a previewed mutation: read the would-be task and roll the transaction back."""
+
+        if getattr(self, "_preview_depth", 0) <= 0:
+            return
+        row = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        assert row is not None
+        task = self._task_from_row(row)
+        raise _PreviewRollback(task, self._admission_items(connection, task))
+
+    def _admission_items(self, connection: sqlite3.Connection, task: Task) -> list[checks.CheckWork]:
+        """Every launch check of ``task`` as a mutation evaluates it: declared, built-in, merged edges."""
+
+        from . import checks
+        specs = list(self._launch_check_specs(task, self._goal_owned(connection, task.id)))
+        for dependency in task.merged_depends_on:
+            done = self._verified_done_row(connection, dependency)
+            if done is None:
+                continue
+            kind, spec = self._merged_edge_spec(connection, task, dependency, done)
+            if kind == "check" and spec is not None:
+                specs.append(("dependency", spec))
+        items: list[checks.CheckWork] = []
+        seen: set[str] = set()
+        for origin, spec in specs:
+            context = checks.check_context(spec, cwd=task.cwd)
+            identity = checks.check_id(spec, context)
+            if identity not in seen:
+                seen.add(identity)
+                items.append(checks.CheckWork(task.id, task.cwd, origin, spec, context, identity))
+        return items
+
+    def store_admission_results(
+        self, task_id: str, results: Iterable[tuple[checks.CheckWork, str, str, Mapping[str, Any] | None]],
+        *, now_epoch: float,
+    ) -> int:
+        """Store queue-time evaluations that still match a launch check of the committed task.
+
+        A check whose identity no longer matches (a concurrent edit) is dropped and stays
+        unchecked, which holds the task until the scout evaluates it.
+        """
+
+        task = self.task(task_id)
+        if task is None:
+            return 0
+        with self._connect() as connection:
+            current = {item.check_id: item for item in self._admission_items(connection, task)}
+        stored = 0
+        for work, status, detail, observed in results:
+            item = current.get(work.check_id)
+            if item is None:
+                continue
+            generation = self.begin_check(item, now_epoch=now_epoch)
+            stored += bool(self.store_check_result(
+                item, status, detail, generation=generation, observed_context=observed, now_epoch=now_epoch,
+            ))
+        return stored
 
     def review_problems(self, task_id: str) -> list[str]:
         """Problems with a task's stored readiness review; an empty list means valid."""
@@ -1684,6 +1796,10 @@ class QueueDB:
                     gate = self._preflight_gate(connection, task, launch_verdicts, goal_owned)
                     if gate is not None:
                         state, (hold_reason, reason) = "waiting", gate
+            # A review written before the current contract holds the task whatever else it waits on:
+            # it never launches until it is re-reviewed.
+            if state not in {"paused", "running", "done"} and self._review_stale(task, goal_owned):
+                state, reason, hold_reason = "held", REVIEW_STALE_REASON, "review_stale"
             requeue_allowed = bool(
                 task.kind == "oneoff" and claim is None and done is None
                 and not goal_owned
@@ -1832,7 +1948,7 @@ class QueueDB:
             if "readiness_review" in changes:
                 problems = review.review_problems(self._stamp_review_digest(connection, task_id))
                 if problems:
-                    raise QueueError("readiness review required: " + "; ".join(problems))
+                    raise QueueError(_review_refusal(problems))
             if recovery is not None:
                 changed = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
                 assert changed is not None
@@ -1849,6 +1965,7 @@ class QueueDB:
                 )
                 if cursor.rowcount != 1:
                     raise QueueError("recovery contract changed; edit CAS refused")
+            self._maybe_rollback_preview(connection, task_id)
         return self.task(task_id)
 
     def task(self, task_id: str) -> Task | None:
@@ -1909,6 +2026,8 @@ class QueueDB:
         if connection.execute("SELECT 1 FROM dispatch_claims WHERE task_id=? LIMIT 1", (task.id,)).fetchone():
             return False
         goal_owned = QueueDB._goal_owned(connection, task.id)
+        if QueueDB._review_stale(task, goal_owned):
+            return False
         if QueueDB._preflight_gate(
             connection, task, QueueDB._launch_verdicts(connection, task, now, goal_owned), goal_owned,
         ) is not None:
@@ -4234,6 +4353,13 @@ class QueueDB:
         )
 
     @staticmethod
+    def _review_stale(task: Task, goal_owned: bool) -> bool:
+        """True when the task's review predates the review contract; goal turns carry no review."""
+
+        from . import review
+        return not goal_owned and review.schema_stale(task)
+
+    @staticmethod
     def _preflight_gate(
         connection: sqlite3.Connection, task: Task, verdicts: Iterable[Mapping[str, Any]],
         goal_owned: bool,
@@ -4760,7 +4886,7 @@ class QueueDB:
         return candidates
 
     def held_authority_report(self) -> list[dict[str, Any]]:
-        """List held and standalone authority and verification blockers with their dependents (read-only)."""
+        """List held authority, verification, and stale-review blockers with their dependents (read-only)."""
 
         self.initialize()
         with self._connect() as connection:
@@ -4833,6 +4959,22 @@ class QueueDB:
                 detail = (self._outcome_reason(latest) or {}).get("detail")
                 report.append(item(
                     source, task_row, latest["terminal_at"], detail, latest, latest["reason_code"],
+                ))
+            # Launchable work whose review predates the review contract is held until re-reviewed.
+            for task_row in connection.execute("SELECT * FROM tasks WHERE active=1").fetchall():
+                task = self._task_from_row(task_row)
+                if (
+                    not self._review_stale(task, self._goal_owned(connection, task.id))
+                    or connection.execute(
+                        "SELECT 1 FROM dispatch_claims WHERE task_id=?", (task.id,),
+                    ).fetchone() is not None
+                    or (task.kind == "oneoff" and self._verified_done_row(connection, task.id) is not None)
+                ):
+                    continue
+                reviewed_at = json.loads(task.readiness_review or "{}").get("reviewed_at")
+                report.append(item(
+                    "stale_review", task_row, reviewed_at or task.created_at, REVIEW_STALE_REASON, None,
+                    "review_stale",
                 ))
         report.sort(key=lambda entry: (str(entry["held_since"] or ""), entry["task_id"]))
         return report

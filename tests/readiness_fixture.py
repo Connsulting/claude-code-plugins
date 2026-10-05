@@ -1,8 +1,9 @@
 """A minimal valid queue-time readiness review for test fixtures.
 
-Queue adds require a readiness review. Tests that are not about the review attach this
-minimal one: the issue read (derived from an issue source_ref, else none), no ADRs, the
-governing AGENTS.md, one acceptance criterion taken from the task, and no findings.
+Queue adds require an implementable-ticket/v1 readiness record. Tests that are not about the
+review attach this minimal one: the issue read (derived from an issue source_ref, else none),
+no ADRs, the governing AGENTS.md, yes verdicts on can-start and can-finish, one acceptance
+criterion taken from the task with its verification, and no findings.
 """
 
 from __future__ import annotations
@@ -29,11 +30,18 @@ def minimal_review(
     *, source_ref: Any = None, done_when: Any = None, goal: Any = None,
 ) -> dict[str, Any]:
     return {
+        "contract": "implementable-ticket/v1",
+        "executor": "bonus-drain",
         "issue": _issue(source_ref),
         "adrs": [],
         "instructions": ["AGENTS.md"],
+        "startable": {"verdict": "yes", "evidence": ["test fixture: every precondition exists"]},
+        "finishable": {"verdict": "yes", "evidence": ["test fixture: the criterion has a runnable check"]},
         "acceptance_criteria": [
-            {"criterion": done_when or goal or "fixture criterion", "basis": "test fixture"},
+            {
+                "criterion": done_when or goal or "fixture criterion", "basis": "test fixture",
+                "verified_by": "python3 -m unittest tests.fixture", "environment": "worker",
+            },
         ],
         "findings": [],
     }

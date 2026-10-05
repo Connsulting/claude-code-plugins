@@ -203,7 +203,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             self.assertIsInstance(manifest.get("description"), str, manifest_path)
             self.assertTrue(manifest["description"].strip(), manifest_path)
             versions.append(manifest["version"])
-        self.assertEqual(versions, ["0.3.12", "0.3.12"])
+        self.assertEqual(versions, ["0.3.13", "0.3.13"])
 
         sys.path.insert(0, str(SKILL_ROOT))
         try:
@@ -211,8 +211,8 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             from bonus_drain import lifecycle
         finally:
             sys.path.pop(0)
-        self.assertEqual(__version__, "0.3.12")
-        self.assertEqual(lifecycle._DEFAULT_VERSION, "0.3.12")
+        self.assertEqual(__version__, "0.3.13")
+        self.assertEqual(lifecycle._DEFAULT_VERSION, "0.3.13")
 
     def test_packaged_viewer_supports_secretless_tailnet_controls(self) -> None:
         example = self.load_json(SKILL_ROOT / "config.example.json")
@@ -1353,9 +1353,16 @@ class UpgradeOrderingTests(unittest.TestCase):
             "id": "legacy", "title": "legacy", "kind": "oneoff", "cwd": str(self.root),
             "goal": "keep working after upgrade", "size": "small",
             "readiness_review": {
+                "contract": "implementable-ticket/v1", "executor": "bonus-drain",
                 "issue": None, "adrs": [], "instructions": ["AGENTS.md"],
+                "startable": {"verdict": "yes", "evidence": ["test fixture"]},
+                "finishable": {"verdict": "yes", "evidence": ["test fixture"]},
                 "acceptance_criteria": [
-                    {"criterion": "keep working after upgrade", "basis": "test fixture"},
+                    {
+                        "criterion": "keep working after upgrade", "basis": "test fixture",
+                        "verified_by": "python3 -m unittest tests.test_bonus_drain_package",
+                        "environment": "worker",
+                    },
                 ],
                 "findings": [],
             },
@@ -1399,7 +1406,7 @@ class UpgradeOrderingTests(unittest.TestCase):
         attempt_id = self.v2_database()
         self.assertNotIn(3, self.schema()[0])
 
-        installed = self.lifecycle.install(SKILL_ROOT, self.home, version="0.3.12+migrate-test")
+        installed = self.lifecycle.install(SKILL_ROOT, self.home, version="0.3.13+migrate-test")
 
         self.assertV3()
         import sqlite3
@@ -1409,12 +1416,12 @@ class UpgradeOrderingTests(unittest.TestCase):
                 "SELECT attempt_id,task_id,seeded FROM blocker_notices",
             ).fetchall()
         self.assertEqual(notices, [(attempt_id, "legacy", 1)])
-        self.assertEqual(self.current_target(), "0.3.12+migrate-test")
+        self.assertEqual(self.current_target(), "0.3.13+migrate-test")
         self.assertEqual(installed.current.resolve(), installed.version_dir)
 
     def test_local_reader_works_immediately_after_install(self) -> None:
         self.v2_database()
-        self.lifecycle.install(SKILL_ROOT, self.home, version="0.3.12+reader-test")
+        self.lifecycle.install(SKILL_ROOT, self.home, version="0.3.13+reader-test")
 
         snapshot = self.db.LocalQueueReader(self.database).snapshot(now_epoch=_UPGRADE_NOW + 10)
         self.assertIn("legacy", snapshot["readiness"])

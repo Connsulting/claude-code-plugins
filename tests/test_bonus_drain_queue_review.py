@@ -30,6 +30,7 @@ from tests.test_bonus_drain_launch_probe_checks import K8S_SERVICE, KUBECTL_NOT_
 from tests import test_bonus_drain_package as package_tests
 from tests.readiness_fixture import minimal_review, rereviewed, reviewed
 from bonus_drain import checks, cli, db, dispatcher
+from bonus_drain import review as review_module
 
 SKILL_ROOT = package_tests.SKILL_ROOT
 REVIEW_REQUIRED = "readiness review required"
@@ -49,11 +50,22 @@ GRANT_3833 = {
 
 def review_3833(**changes: Any) -> dict[str, Any]:
     value: dict[str, Any] = {
+        "contract": "implementable-ticket/v1",
+        "executor": "bonus-drain",
         "issue": "curie-eng/curie#3833",
-        "adrs": ["docs/adr/0188-worker-kernel-retries.md"],
+        "adrs": ["docs/adr/0188-worker-kernel-retries.md (Accepted)"],
         "instructions": ["AGENTS.md", "apps/worker/CLAUDE.md"],
+        "startable": {"verdict": "yes", "evidence": [
+            "issue #3833 is open and no merged PR references it",
+            "the worker-kernel sacred_path grant is on the task",
+        ]},
+        "finishable": {"verdict": "yes", "evidence": ["the one AC is a unit test runnable in the worker"]},
         "acceptance_criteria": [
-            {"criterion": DONE_3833, "basis": "the retry loop lives in kernel.py and is unit-testable"},
+            {
+                "criterion": DONE_3833, "basis": "the retry loop lives in kernel.py and is unit-testable",
+                "verified_by": "uv run pytest apps/worker/tests/test_kernel.py -k retry_loop",
+                "environment": "worker",
+            },
         ],
         "findings": [
             {
@@ -307,6 +319,236 @@ class SourceIssueTests(ReviewCase):
         self.assertIsNotNone(self.add_3833("issue"))
         # A non-issue source_ref places no constraint on review.issue.
         self.assertIsNotNone(self.add("plan-sourced", source_ref="https://example.test/plan"))
+
+
+# --- 5b: the implementable-ticket/v1 contract: can it start, can it finish ---------------
+# The record the implementable-ticket skill writes before a task is queued. Its verdicts are
+# evidence-backed answers, and a no on either means the task is not queued.
+V1_ERA_REVIEW = {
+    # The pre-contract shape every task queued before implementable-ticket/v1 carries.
+    "issue": None, "adrs": [], "instructions": ["AGENTS.md"],
+    "acceptance_criteria": [{"criterion": "proof is retained", "basis": "test fixture"}],
+    "findings": [], "reviewed_at": "2026-10-04T12:00:00Z", "review_digest": "0" * 64,
+}
+
+
+def unstartable(review: dict[str, Any]) -> dict[str, Any]:
+    return {**review, "startable": {"verdict": "no", "evidence": [
+        "#3820 is closed on next but not merged into main (gh pr view 3826: baseRefName next)",
+    ]}}
+
+
+class ImplementableContractTests(ReviewCase):
+    def test_startable_no_is_refused_naming_the_question_and_evidence(self) -> None:
+        before = table_counts(self.queue.path)
+        with self.assertRaises(db.QueueError) as raised:
+            self.queue.add_task(task("blocked", self.root, readiness_review=unstartable(minimal_review())))
+        message = str(raised.exception)
+        self.assertIn("not implementable: can it start? no", message)
+        self.assertIn("#3820 is closed on next but not merged into main", message)
+        self.assertIsNone(self.queue.task("blocked"))
+        self.assertEqual(table_counts(self.queue.path), before)
+        # Liveness: the same task with a yes verdict is queued.
+        self.assertIsNotNone(self.add("blocked"))
+
+    def test_finishable_no_is_refused_naming_the_question_and_evidence(self) -> None:
+        review = {**minimal_review(), "finishable": {"verdict": "no", "evidence": [
+            "AC 2 needs a real Slack click to confirm the approval card",
+        ]}}
+        with self.assertRaises(db.QueueError) as raised:
+            self.queue.add_task(task("slack", self.root, readiness_review=review))
+        self.assertIn("not implementable: can it finish? no", str(raised.exception))
+        self.assertIn("AC 2 needs a real Slack click", str(raised.exception))
+        self.assertIsNone(self.queue.task("slack"))
+
+    def test_criterion_without_verified_by_is_not_finishable(self) -> None:
+        base = minimal_review()
+        criterion = dict(base["acceptance_criteria"][0])
+        for label, value in (
+            ("missing", {key: item for key, item in criterion.items() if key != "verified_by"}),
+            ("blank", {**criterion, "verified_by": "  "}),
+        ):
+            with self.subTest(label):
+                review = {**base, "acceptance_criteria": [criterion, value]}
+                with self.assertRaises(db.QueueError) as raised:
+                    self.queue.add_task(task("unverified", self.root, readiness_review=review))
+                message = str(raised.exception)
+                self.assertIn("can it finish? no", message)
+                self.assertIn("Acceptance criterion 2 has no verified_by", message)
+                self.assertIsNone(self.queue.task("unverified"))
+
+    def test_contract_shape_rejections(self) -> None:
+        base = minimal_review()
+        criterion = base["acceptance_criteria"][0]
+        cases = {
+            "unknown executor": {**base, "executor": "intern"},
+            "unknown environment": {**base, "acceptance_criteria": [{**criterion, "environment": "staging"}]},
+            "missing environment": {**base, "acceptance_criteria": [
+                {key: value for key, value in criterion.items() if key != "environment"}]},
+            "other contract": {**base, "contract": "implementable-ticket/v0"},
+            "verdict maybe": {**base, "startable": {"verdict": "maybe", "evidence": ["x"]}},
+            "verdict without evidence": {**base, "finishable": {"verdict": "yes", "evidence": []}},
+            "blank evidence": {**base, "finishable": {"verdict": "yes", "evidence": [" "]}},
+            "missing startable": {key: value for key, value in base.items() if key != "startable"},
+            "missing finishable": {key: value for key, value in base.items() if key != "finishable"},
+        }
+        for label, review in cases.items():
+            with self.subTest(label):
+                with self.assertRaises(db.QueueError):
+                    self.queue.add_task(task("shape", self.root, readiness_review=review))
+                self.assertIsNone(self.queue.task("shape"))
+        # Every environment and both executors are accepted.
+        for index, environment in enumerate(("worker", "kind", "k8_namespace", "pr_ci", "factory_runner")):
+            executor = "dark-factory" if environment == "factory_runner" else "bonus-drain"
+            review = {**base, "executor": executor,
+                      "acceptance_criteria": [{**criterion, "environment": environment}]}
+            self.assertIsNotNone(self.add(f"env-{index}", readiness_review=review))
+
+    def test_pre_contract_review_is_refused_at_add_with_a_rereview_instruction(self) -> None:
+        old = {key: value for key, value in V1_ERA_REVIEW.items() if key not in {"reviewed_at", "review_digest"}}
+        with self.assertRaises(db.QueueError) as raised:
+            self.queue.add_task(task("old-shape", self.root, readiness_review=old))
+        self.assertIn("predates the implementable-ticket/v1 contract", str(raised.exception))
+        self.assertIn("re-run the implementable-ticket skill", str(raised.exception))
+        self.assertIsNone(self.queue.task("old-shape"))
+
+    def test_edit_to_a_no_verdict_is_refused_and_keeps_the_task(self) -> None:
+        self.add("edited")
+        before = stored_review(self.queue, "edited")
+        changes = rereviewed(self.queue.task("edited"), {"goal": "a new goal"})
+        changes["readiness_review"] = unstartable(changes["readiness_review"])
+        with self.assertRaisesRegex(db.QueueError, "can it start\\? no"):
+            self.queue.edit_task("edited", changes)
+        self.assertEqual(stored_review(self.queue, "edited"), before)
+        self.assertNotEqual(self.queue.task("edited").goal, "a new goal")
+
+    def test_cli_add_with_no_verdict_exits_invalid_input(self) -> None:
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(cli, "_queue", return_value=(runtime(self.queue.path), self.queue)),
+            mock.patch.object(checks, "subprocess_runner", self.runner()),
+            contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr),
+            captured_json() as payloads,
+        ):
+            code = cli.main([
+                "add", "--database", str(self.queue.path), "--id", "cli-no", "--title", "cli-no",
+                "--kind", "oneoff", "--size", "small", "--cwd", str(self.root), "--goal", "complete cli-no",
+                "--readiness-review", json.dumps(unstartable(minimal_review(goal="complete cli-no"))), "--json",
+            ])
+        self.assertEqual(code, 2, (payloads, stdout.getvalue(), stderr.getvalue()))
+        self.assertEqual(payloads[-1]["code"], "invalid_input")
+        self.assertIn("can it start? no", payloads[-1]["error"])
+        self.assertIsNone(self.queue.task("cli-no"))
+
+
+# --- 5c: no human-wait resolutions -------------------------------------------------------
+class AuthorityResolutionTests(ReviewCase):
+    def test_authority_finding_cannot_wait_on_a_check_or_prerequisite(self) -> None:
+        self.add("brian-merges-3826")
+        merged = {"type": "pr_merged", "repo": "curie-eng/curie", "pr": 3826}
+        for label, resolution, extra in (
+            ("check", {"check": merged}, {"checks": [merged]}),
+            ("prerequisite", {"prerequisite": "brian-merges-3826"}, {"depends_on": ["brian-merges-3826"]}),
+        ):
+            with self.subTest(label):
+                review = minimal_review()
+                review["findings"] = [finding("authority", resolution)]
+                with self.assertRaises(db.QueueError) as raised:
+                    self.queue.add_task(task("waits", self.root, readiness_review=review, **extra))
+                self.assertIn(f"an authority finding cannot be resolved by a {label}", str(raised.exception))
+                self.assertIn("waits on a human", str(raised.exception))
+                self.assertIsNone(self.queue.task("waits"))
+
+    def test_authority_finding_resolves_by_grant_or_done_when(self) -> None:
+        # A grant Brian already gave, present on the task.
+        self.assertEqual(self.queue.review_problems(self.add_3833().id), [])
+        # A done_when that no longer needs the authority.
+        rewritten = "PR into main with green checks; merging is Brian's and out of scope"
+        review = minimal_review(done_when=rewritten)
+        review["findings"] = [finding("authority", {"done_when": rewritten})]
+        self.assertEqual(self.queue.review_problems(
+            self.add("rewritten", done_when=rewritten, readiness_review=review).id), [])
+
+    def test_other_findings_may_still_wait_on_a_machine_prerequisite(self) -> None:
+        self.add("build-images")
+        review = minimal_review()
+        review["findings"] = [finding("feasibility", {"prerequisite": "build-images"})]
+        self.assertIsNotNone(self.add("uses-images", depends_on=["build-images"], readiness_review=review))
+
+
+# --- 5d: queued tasks with a pre-contract review are held until re-reviewed --------------
+class StaleContractHoldTests(HermeticEnvironment, ReviewCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.hermetic(self.mkdir("home"))
+        self.add("old")
+        set_review_json(self.queue, "old", V1_ERA_REVIEW)
+        self.add("current")
+
+    def test_stale_review_holds_readiness_with_a_plain_reason(self) -> None:
+        status = self.ready("old")
+        self.assertEqual((status["state"], status["hold_reason"]), ("held", "review_stale"))
+        self.assertFalse(status["ready"])
+        self.assertIn("Held until re-reviewed", status["reason"])
+        self.assertIn("implementable-ticket/v1", status["reason"])
+        self.assertIn("re-run the implementable-ticket skill", status["reason"].lower())
+        self.assertTrue(self.ready("current")["ready"])
+        self.assertEqual(self.queue.review_problems("old"), [review_module.SCHEMA_STALE])
+
+    def test_stale_review_never_dispatches(self) -> None:
+        self.assertEqual(self.eligible_ids(), ["current"])
+        self.assertIsNone(self.try_claim("old"))
+        self.assertEqual(self.queue.attempts(task_id="old"), [])
+
+    def test_stale_hold_overrides_a_dependency_wait(self) -> None:
+        self.add("child", depends_on=["current"])
+        set_review_json(self.queue, "child", V1_ERA_REVIEW)
+        self.assertEqual(self.ready("child")["hold_reason"], "review_stale")
+
+    def test_missing_review_is_not_treated_as_stale(self) -> None:
+        self.add("legacy")
+        set_review_json(self.queue, "legacy", None)
+        self.assertTrue(self.ready("legacy")["ready"])
+
+    def test_held_report_lists_stale_reviews(self) -> None:
+        report = {item["task_id"]: item for item in self.queue.held_authority_report()}
+        self.assertEqual(set(report), {"old"})
+        self.assertEqual((report["old"]["source"], report["old"]["reason_code"]), ("stale_review", "review_stale"))
+        self.assertIn("Held until re-reviewed", report["old"]["detail"])
+        self.assertEqual(report["old"]["held_since"], V1_ERA_REVIEW["reviewed_at"])
+
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), captured_json():
+            code = cli.main(["held-report", "--database", str(self.queue.path)])
+        self.assertEqual(code, 0)
+        out = stdout.getvalue()
+        self.assertIn("old\t", out)
+        self.assertIn("review_stale", out)
+        self.assertIn("held until re-reviewed (readiness review predates implementable-ticket/v1): 1", out)
+
+    def test_backfill_reports_the_stale_contract(self) -> None:
+        with (
+            mock.patch.object(cli, "_queue", return_value=(runtime(self.queue.path), self.queue)),
+            mock.patch.object(checks, "subprocess_runner", self.runner()),
+            captured_json() as payloads,
+        ):
+            code = cli.main(["readiness-backfill", "--database", str(self.queue.path), "--json"])
+        self.assertEqual(code, 0, payloads)
+        tasks = {item["task_id"]: item for item in payloads[0]["tasks"]}
+        self.assertEqual(tasks["old"]["review"], "stale")
+        self.assertEqual(tasks["old"]["review_problems"], [review_module.SCHEMA_STALE])
+        self.assertFalse(tasks["old"]["ready_for_launch"])
+
+    def test_rereview_releases_the_hold(self) -> None:
+        with self.assertRaisesRegex(db.QueueError, "predates the implementable-ticket/v1 contract"):
+            self.queue.edit_task("old", {"readiness_review": V1_ERA_REVIEW})
+        self.assertEqual(self.ready("old")["hold_reason"], "review_stale")
+
+        self.queue.edit_task("old", {"readiness_review": minimal_review(goal=self.queue.task("old").goal)})
+
+        self.assertEqual(self.queue.review_problems("old"), [])
+        self.assertTrue(self.ready("old")["ready"])
+        self.assertIn("old", self.eligible_ids())
 
 
 # --- 6 + R1: edits re-review the contract -----------------------------------------------

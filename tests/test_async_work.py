@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT / 'plugins/bonus-drain/skills/bonus-drain'))
 from bonus_drain import cli, db, dispatcher, scout, usage
 from dataclasses import replace
 from tests import test_bonus_drain_kick as kick_tests
-from tests.test_bonus_drain_preflight_checks import FakeRunner, exited, git_ls_remote
+from tests.test_bonus_drain_preflight_checks import FakeRunner, git_ls_remote, ok
 
 
 def verified_outcome():
@@ -123,12 +123,12 @@ class AsyncWorkTests(unittest.TestCase):
                      'refs/heads/main/', 'a.lock', 'a b', '-bad', 'a@{b}'):
             with self.subTest(name=name), self.assertRaises(db.QueueError):
                 self.queue.edit_task('a', {'start_ref': name})
-        # add and edit evaluate the start_ref check; answer ls-remote with the recorded
-        # missing-ref exit so no real git call runs.
+        # add and edit evaluate the start_ref check and refuse a missing ref; answer ls-remote
+        # with each ref present so no real git call runs.
         from bonus_drain import checks
         fake = FakeRunner({
-            git_ls_remote('/tmp', 'refs/heads/epic/next'): exited(2),
-            git_ls_remote('/tmp', 'refs/heads/next'): exited(2),
+            git_ls_remote('/tmp', ref): ok(f"1619a0a4f220f2058591497d89b0304a962c9b4e\t{ref}\n")
+            for ref in ('refs/heads/epic/next', 'refs/heads/next')
         })
         runner_patch = mock.patch.object(checks, 'subprocess_runner', fake)
         runner_patch.start()

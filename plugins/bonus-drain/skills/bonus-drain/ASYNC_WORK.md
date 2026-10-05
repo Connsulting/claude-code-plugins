@@ -103,19 +103,25 @@ is missing, setup stops with reason code `verification_needed` and does not fall
 target branch. Dependency selection adds no merge, push, PR, deployment, or other external
 authority.
 
-## Queue-time readiness review
+## Queue-time readiness contract
 
-Before `add`, the queuer reviews the task with Brian present: the source issue, every ADR it
-cites, and the governing AGENTS.md and CLAUDE.md files; done-when against granted authority
-(merge, release, external infrastructure, sacred paths, contract freezes); the feasibility of
-each acceptance criterion, including vendor capabilities; and external dependencies
-(credentials, provider credit, MCP auth, cluster resources). Each finding is resolved to one of a
-grant from Brian, a prerequisite task with its dependency edge, a rewritten done-when, or a
-structured check. The review is stored with `--readiness-review`, and `add` refuses without it.
-SKILL.md has the procedure, the review and grant JSON, and the three probe checks. Every worker
-also gets a default grant to fix pre-existing lint, format, or type errors in files its change
-touches, so those never need a grant or a blocker. `readiness-backfill` lists tasks queued before
-this existed that still need a review.
+A task is queueable only if it can start and can finish with no human in the loop; a green PR
+waiting only on Brian's review or merge already counts as done, and nothing else waits on a
+person. Before `add`, run the global `implementable-ticket` skill on the task and pass its
+readiness record (contract `implementable-ticket/v1`) as `--readiness-review`. The record answers
+"can it start?" and "can it finish?" with evidence, names the command that verifies each
+acceptance criterion and where it runs, and lists each blocker found with its resolution: a
+grant Brian already gave (on the task), a queued prerequisite task with its dependency edge, a
+rewritten done-when, or a structured check. An authority finding resolves only by such a grant
+or a done-when rewrite. `add` refuses a missing record, a no on either question (naming the
+question and its evidence), and a criterion without `verified_by`. It then evaluates every
+launch check before storing anything: a failing check refuses unless a queued prerequisite in
+`depends_on` is expected to make it pass, and a check that cannot be evaluated refuses with a
+request to retry the add. SKILL.md has the record and grant JSON and the three probe checks.
+Every worker also gets a default grant to fix pre-existing lint, format, or type errors in files
+its change touches, so those never need a grant or a blocker. Tasks queued under the earlier
+review shape are held as `review_stale` and never dispatch until edited with a new record;
+`held-report` and `readiness-backfill` list them.
 
 ## Thread handoff and editing
 

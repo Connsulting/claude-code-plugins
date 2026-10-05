@@ -581,7 +581,11 @@ class EnqueueValidationCliTests(HermeticEnvironment, PreflightCase):
 
 
 class QueueTimeCheckCliTests(HermeticEnvironment, PreflightCase):
-    """add and edit evaluate launch checks synchronously and print the results."""
+    """add and edit evaluate launch checks synchronously, print the results, and gate admission.
+
+    A failing check refuses the add unless a queued prerequisite is expected to make it pass;
+    an unverifiable one always refuses, asking for a retry.
+    """
 
     OPEN_12 = {"type": "issue_open", "repo": "owner/repo", "number": 12}
 
@@ -670,39 +674,64 @@ class QueueTimeCheckCliTests(HermeticEnvironment, PreflightCase):
         self.assertEqual(payload["readiness"]["state"], "ready")
         self.assertTrue(payload["readiness"]["ready"])
 
-    def test_add_failing_check_reports_on_stderr_and_stays_queued(self) -> None:
+    def test_add_failing_check_without_prerequisite_is_refused(self) -> None:
+        fake = self.runner({gh_issue(2855): ok(ISSUE_2855_CLOSED)})
+        before = table_counts(self.queue.path)
+
+        code, payloads, out, err = self.add_cli(
+            fake, "closed-task", "--json", "--check", json.dumps(ISSUE_OPEN_2855),
+        )
+
+        self.assertEqual(code, 2, (payloads, out, err))
+        self.assertEqual(payloads[-1]["code"], "invalid_input")
+        error = payloads[-1]["error"]
+        self.assertIn("add refused: launch check fails now", error)
+        self.assertIn(checks.describe(ISSUE_OPEN_2855), error)
+        self.assertIn("issue is CLOSED", error)
+        self.assertIn("depends_on", error)
+        self.assertIn("CHECK FAILED", err)
+        self.assertIsNone(self.queue.task("closed-task"))
+        # Nothing is stored: no task row and no check result.
+        self.assertEqual(table_counts(self.queue.path), before)
+        self.assertEqual(fake.tool_calls("issue"), [gh_issue(2855)])
+
+    def test_add_failing_check_with_queued_prerequisite_is_accepted(self) -> None:
+        self.add("reopen-2855")
         fake = self.runner({gh_issue(2855): ok(ISSUE_2855_CLOSED)})
 
         code, payloads, out, err = self.add_cli(
-            fake, "closed-task", "--check", json.dumps(ISSUE_OPEN_2855),
+            fake, "after-reopen", "--depends-on", "reopen-2855", "--check", json.dumps(ISSUE_OPEN_2855),
         )
 
         self.assertEqual(code, 0, (payloads, out, err))
         self.assertIn("CHECK FAILED", err)
-        self.assertIn(checks.describe(ISSUE_OPEN_2855), err)
-        self.assertIn("issue is CLOSED", err)
-        self.assertIn("added: closed-task", out)
-        self.assertIn("readiness: waiting", out)
-        stored = self.queue.task("closed-task")
-        self.assertIsNotNone(stored)
-        self.assertTrue(stored.active)
-        status = self.ready("closed-task")
+        self.assertIn("accepted with a failing check: depends_on reopen-2855", err)
+        self.assertIn("added: after-reopen", out)
+        self.assertTrue(self.queue.task("after-reopen").active)
+        # The stored fail is reused by readiness once the prerequisite is done.
+        self.complete("reopen-2855")
+        status = self.ready("after-reopen")
         self.assertEqual((status["state"], status["hold_reason"]), ("waiting", "check_failed"))
-        self.assertIn("issue is CLOSED", status["reason"])
 
-    def test_add_unverifiable_check_reports_on_stderr(self) -> None:
-        fake = self.runner({gh_issue(4000, "owner/repo"): exited(1, GH_OFFLINE_STDERR)})
+    def test_add_unverifiable_check_is_refused_with_retry(self) -> None:
         offline = {"type": "issue_open", "repo": "owner/repo", "number": 4000}
+        for label, extra in (("no prerequisite", ()), ("with prerequisite", ("--depends-on", "parent"))):
+            with self.subTest(label):
+                if extra and self.queue.task("parent") is None:
+                    self.add("parent")
+                fake = self.runner({gh_issue(4000, "owner/repo"): exited(1, GH_OFFLINE_STDERR)})
 
-        code, payloads, out, err = self.add_cli(fake, "offline-task", "--check", json.dumps(offline))
+                code, payloads, out, err = self.add_cli(
+                    fake, "offline-task", "--json", "--check", json.dumps(offline), *extra,
+                )
 
-        self.assertEqual(code, 0, (payloads, out, err))
-        self.assertIn("CHECK UNVERIFIED", err)
-        self.assertIn(checks.describe(offline), err)
-        self.assertNotIn("CHECK FAILED", err)
-        self.assertTrue(self.queue.task("offline-task").active)
-        status = self.ready("offline-task")
-        self.assertEqual((status["state"], status["hold_reason"]), ("waiting", "check_unknown"))
+                self.assertEqual(code, 2, (payloads, out, err))
+                error = payloads[-1]["error"]
+                self.assertIn("could not be verified now", error)
+                self.assertIn("retry the add", error)
+                self.assertIn(checks.describe(offline), error)
+                self.assertIn("CHECK UNVERIFIED", err)
+                self.assertIsNone(self.queue.task("offline-task"))
 
     def test_edit_changing_checks_re_evaluates_synchronously(self) -> None:
         idle = self.runner()
@@ -716,16 +745,13 @@ class QueueTimeCheckCliTests(HermeticEnvironment, PreflightCase):
             "--changes", json.dumps(rereviewed(self.queue.task("edited"), {"checks": [ISSUE_OPEN_2855]})),
         )
 
-        self.assertEqual(code, 0, (payloads, err))
-        payload = payloads[0]
-        self.assertEqual(payload["task"]["checks"], [ISSUE_OPEN_2855])
-        self.assertEqual(
-            [(entry["status"], entry["check"]) for entry in payload["checks"]],
-            [("fail", checks.describe(ISSUE_OPEN_2855))],
-        )
-        self.assertEqual(payload["readiness"]["hold_reason"], "check_failed")
+        # A contract edit is a re-admission: the failing check refuses it and nothing changes.
+        self.assertEqual(code, 2, (payloads, err))
+        self.assertIn("edit refused: launch check fails now", payloads[-1]["error"])
         self.assertIn("CHECK FAILED", err)
-        self.assertEqual(self.ready("edited")["hold_reason"], "check_failed")
+        self.assertEqual(self.queue.task("edited").checks, ())
+        self.assertTrue(self.ready("edited")["ready"])
+        self.assertEqual(rows(self.queue, "SELECT * FROM check_results WHERE task_id='edited'"), [])
 
         passing = self.runner({gh_issue(3815): ok(ISSUE_3815_OPEN)})
         code, payloads, _out, err = self.run_cli(
@@ -754,30 +780,30 @@ class QueueTimeCheckCliTests(HermeticEnvironment, PreflightCase):
             responses[gh_issue(number, "owner/repo")] = ok(ISSUE_3815_OPEN)
         fake = self.runner(responses)
 
-        with mock.patch.object(checks, "refresh", wraps=checks.refresh) as refresh:
+        with mock.patch.object(checks, "evaluate_items", wraps=checks.evaluate_items) as evaluate:
             code, payloads, _out, err = self.add_cli(fake, "many-checks", "--json", *extra)
 
         self.assertEqual(code, 0, (payloads, err))
         self.assertEqual(len(payloads[0]["checks"]), checks.MAX_CHECKS_PER_TASK + 2)
         self.assertEqual({entry["status"] for entry in payloads[0]["checks"]}, {"pass"})
         self.assertEqual(len(fake.tool_calls("issue")), checks.MAX_CHECKS_PER_TASK + 1)
-        self.assertEqual(refresh.call_count, 1)
-        kwargs = refresh.call_args.kwargs
-        self.assertEqual(tuple(kwargs["task_ids"]), ("many-checks",))
-        self.assertIsNone(kwargs["max_calls"])
-        self.assertIsNone(kwargs["budget_seconds"])
+        # One uncapped pass over every launch check, before the task is stored.
+        self.assertEqual(evaluate.call_count, 1)
+        self.assertEqual(len(list(evaluate.call_args.args[0])), checks.MAX_CHECKS_PER_TASK + 2)
         status = self.ready("many-checks")
         self.assertTrue(status["ready"], status)
         self.assertEqual(len(status["checks"]), checks.MAX_CHECKS_PER_TASK + 2)
 
     def test_check_failing_at_add_flips_ready_after_one_scout_refresh(self) -> None:
+        self.add("reopen-3815")
         fake = self.runner({gh_issue(3815): [ok(ISSUE_2855_CLOSED), ok(ISSUE_3815_OPEN)]})
 
         code, _payloads, _out, err = self.add_cli(
-            fake, "flips", "--check", json.dumps(ISSUE_OPEN_3815),
+            fake, "flips", "--depends-on", "reopen-3815", "--check", json.dumps(ISSUE_OPEN_3815),
         )
         self.assertEqual(code, 0, err)
         self.assertIn("CHECK FAILED", err)
+        self.complete("reopen-3815")
         self.assertEqual(self.ready("flips")["hold_reason"], "check_failed")
 
         later = NOW + checks.RETRY_TTL_SECONDS
@@ -819,9 +845,13 @@ class QueueTimeCheckCliTests(HermeticEnvironment, PreflightCase):
         )
 
     def test_edit_without_check_change_re_evaluates_a_fresh_fail(self) -> None:
+        self.add("reopen-3815")
         fake = self.runner({gh_issue(3815): [ok(ISSUE_2855_CLOSED), ok(ISSUE_3815_OPEN)]})
-        code, _payloads, _out, err = self.add_cli(fake, "retitled", "--check", json.dumps(ISSUE_OPEN_3815))
+        code, _payloads, _out, err = self.add_cli(
+            fake, "retitled", "--depends-on", "reopen-3815", "--check", json.dumps(ISSUE_OPEN_3815),
+        )
         self.assertEqual(code, 0, err)
+        self.complete("reopen-3815")
         self.assertEqual(self.ready("retitled")["hold_reason"], "check_failed")
 
         # Same clock: the fail is fresh, well inside RETRY_TTL_SECONDS.
@@ -837,6 +867,19 @@ class QueueTimeCheckCliTests(HermeticEnvironment, PreflightCase):
         self.assertNotIn("CHECK", err)
         status = self.ready("retitled")
         self.assertTrue(status["ready"], status)
+
+    def test_display_edit_reports_a_failing_check_without_refusing(self) -> None:
+        # Title, priority, size, and work_group are not a re-admission: the check is
+        # evaluated and reported, and the edit still lands.
+        self.add("closed-later", checks=[ISSUE_OPEN_2855])
+        fake = self.runner({gh_issue(2855): ok(ISSUE_2855_CLOSED)})
+
+        code, payloads, _out, err = self._edit_title(fake, "closed-later", "Closed later")
+
+        self.assertEqual(code, 0, (payloads, err))
+        self.assertIn("CHECK FAILED", err)
+        self.assertEqual(self.queue.task("closed-later").title, "Closed later")
+        self.assertEqual(self.ready("closed-later")["hold_reason"], "check_failed")
 
     def test_edit_without_check_change_re_evaluates_a_fresh_pass(self) -> None:
         fake = self.runner({gh_issue(3815): ok(ISSUE_3815_OPEN)})
@@ -872,12 +915,12 @@ class QueueTimeCheckCliTests(HermeticEnvironment, PreflightCase):
             "--changes", json.dumps(rereviewed(self.queue.task("paused-a"), {"checks": [ISSUE_OPEN_2855]})),
         )
 
-        self.assertEqual(code, 0, (payloads, err))
-        self.assertEqual(
-            [(entry["status"], entry["check"]) for entry in payloads[0]["checks"]],
-            [("fail", checks.describe(ISSUE_OPEN_2855))],
-        )
+        # Paused or not, the changed check is evaluated now and its failure refuses the edit.
+        self.assertEqual(code, 2, (payloads, err))
+        self.assertIn("edit refused: launch check fails now", payloads[-1]["error"])
         self.assertIn("CHECK FAILED", err)
+        self.assertEqual(failing.tool_calls("issue"), [gh_issue(2855)])
+        self.assertEqual(self.queue.task("paused-a").checks, ())
         self.assertFalse(self.queue.task("paused-a").active)
         self.assertEqual(self.ready("paused-a")["state"], "paused")
 
@@ -885,9 +928,10 @@ class QueueTimeCheckCliTests(HermeticEnvironment, PreflightCase):
         fake = self.runner({gh_issue(3815): [
             checks.CheckToolError("gh timed out after 20s"), ok(ISSUE_3815_OPEN),
         ]})
-        code, _payloads, _out, err = self.add_cli(fake, "paused-b", "--check", json.dumps(ISSUE_OPEN_3815))
-        self.assertEqual(code, 0, err)
-        self.assertIn("CHECK UNVERIFIED", err)
+        # A scout refresh (not an add, which would refuse) stores the unknown.
+        self.add("paused-b", checks=[ISSUE_OPEN_3815])
+        self.refresh(fake)
+        self.assertEqual(self.ready("paused-b")["hold_reason"], "check_unknown")
         self._deactivate("paused-b")
 
         code, payloads, _out, err = self.run_cli(

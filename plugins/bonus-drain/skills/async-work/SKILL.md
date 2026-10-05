@@ -13,15 +13,17 @@ Queueing alone does not authorize an immediate launch. Every ready task is eligi
 capacity; use an explicit start only to accelerate it. Use the same stable `bonus-drain` CLI and
 queue; never create another queue for this skill name. Runtime installation remains a separate action.
 
-Before queueing, run the mandatory readiness review from `../bonus-drain/SKILL.md`, with Brian present, and store it with `--readiness-review`; `add` refuses without it, and any contract edit needs a fresh one:
+A task is queueable only if it can start and can finish with no human in the loop. "Awaiting human" is not a stage; a green PR waiting only on Brian's review or merge already counts as done. Before queueing, run the global `implementable-ticket` skill on the task and pass its readiness record (contract `implementable-ticket/v1`) to `add` as `--readiness-review`; `add` refuses without it, and any contract edit needs a fresh one. See the queue-time readiness contract in `../bonus-drain/SKILL.md` for the record shape.
 
-1. Read the source issue, every ADR it cites, and the AGENTS.md and CLAUDE.md files governing the paths the work will likely touch.
-2. Check done-when against the authority the task will have for contradictions: merge, release, external infrastructure, sacred paths, contract freezes.
-3. Check that each acceptance criterion is feasible, including vendor capabilities.
-4. Enumerate external dependencies: credentials, provider credit, MCP auth, cluster resources.
-5. Resolve each finding to exactly one of: a grant obtained from Brian now (`--grant`), a prerequisite task plus dependency edge, a rewritten done-when, or a structured check.
+1. A task whose record answers no to "can it start?" or "can it finish?" is not queued. `add` refuses it with the failed question and its evidence; fix the task, split it, or leave it out.
+2. Every acceptance criterion needs a `verified_by` the executor can run and an `environment`; without one the task is not finishable and is refused.
+3. An authority finding resolves only by a grant Brian already gave (on the task, `--grant`) or by rewriting done-when so it no longer needs that authority. Never queue a task that waits on a person's approval, decision, or click.
+4. Other findings resolve by a queued prerequisite task with its dependency edge, a rewritten done-when, or a structured check.
+5. `add` evaluates every launch check before storing anything. A failing check refuses the add unless `depends_on` names a queued prerequisite expected to make it pass; a check that cannot be evaluated now refuses and asks you to retry the add.
 
-Translate each mechanically checkable precondition or dependency (an issue open or in a milestone, a pull request merged, a release published, a base branch present, file content on a ref, an MCP server authenticated, a Kubernetes resource present, OpenRouter credit) into a `checks` entry, and choose `done` or `merged` for each dependency edge. The MCP, Kubernetes, and OpenRouter checks hold the task without consuming an attempt and never proceed as unverified. Keep the free-text precondition only for judgment the worker must make. Workers always have default authority to fix pre-existing lint, format, or type errors in files their change touches; do not grant or precondition that. Use `bonus-drain readiness-backfill` to find older tasks that lack a review.
+Tasks queued before this contract are held as `review_stale` and never dispatch until they are re-reviewed and edited with a new record; `bonus-drain held-report` lists them.
+
+Translate each mechanically checkable precondition or dependency (an issue open or in a milestone, a pull request merged, a release published, a base branch present, file content on a ref, an MCP server authenticated, a Kubernetes resource present, OpenRouter credit) into a `checks` entry, and choose `done` or `merged` for each dependency edge. The MCP, Kubernetes, and OpenRouter checks hold the task without consuming an attempt and never proceed as unverified. Keep the free-text precondition only for judgment the worker must make. Workers always have default authority to fix pre-existing lint, format, or type errors in files their change touches; do not grant or precondition that. Use `bonus-drain readiness-backfill` to find older tasks that lack a review or carry a stale one.
 
 For coordinating an entire work group through PR integration, combined E2E and additional
 fix rounds, use this plugin's [Long Horizon skill](../long-horizon/SKILL.md). Its goal
