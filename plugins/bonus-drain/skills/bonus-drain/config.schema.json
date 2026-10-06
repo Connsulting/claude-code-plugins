@@ -164,7 +164,10 @@
             "provider": {"type": "string", "minLength": 1}
           }
         },
-        "capabilities": {"type": "array", "items": {"$ref": "#/$defs/id"}},
+        "capabilities": {
+          "type": "array", "items": {"$ref": "#/$defs/id"},
+          "description": "Capabilities this provider offers. Reserved: legacy-exclusive runs migrated claude_only and legacy-exclusive model rows; implement means the provider can drive the implement skill, and a task that invokes it (use_implement, or a /implement, $implement, or implement skill reference in its prompt text) runs only on providers declaring it. Omit implement on providers that cannot drive the skill."
+        },
         "account_mode": {"type": "string", "enum": ["single", "multi"], "default": "multi"},
         "launch_surface": {
           "enum": ["background", "t3"],

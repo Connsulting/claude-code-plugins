@@ -13,7 +13,7 @@ import tempfile
 import time
 import uuid
 from hashlib import sha256
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
@@ -21,6 +21,7 @@ from . import checks
 from .config import AccountConfig, AdapterConfig, ConfigError, ProviderConfig, RuntimeConfig
 from .db import (
     COMPLETION_MECHANISMS,
+    IMPLEMENT_CAPABILITY,
     AccountHold,
     LEGACY_EXCLUSIVE_CAPABILITY,
     REASON_CODES,
@@ -29,6 +30,7 @@ from .db import (
     Task,
     canonical_model,
     cycle_from_key,
+    task_invokes_implement,
     task_requires_legacy_exclusive,
 )
 
@@ -329,7 +331,27 @@ def provider_compatible(task: Task, provider: ProviderConfig) -> bool:
     if task_requires_legacy_exclusive(task) and \
        LEGACY_EXCLUSIVE_CAPABILITY not in provider.capabilities:
         return False
+    if task_invokes_implement(task) and IMPLEMENT_CAPABILITY not in provider.capabilities:
+        return False
     return set(task.required_capabilities).issubset(provider.capabilities)
+
+
+def implement_provider_refusal(config: RuntimeConfig, task: Task) -> str | None:
+    """Name the first allowed configured provider that cannot run this implement-skill task.
+
+    Unknown provider ids are left to their existing handling; an empty allowlist (auto)
+    is never refused here because dispatch picks a compatible provider.
+    """
+
+    if not task.allowed_providers or not task_invokes_implement(task):
+        return None
+    for provider in config.providers:
+        if provider.id in task.allowed_providers and IMPLEMENT_CAPABILITY not in provider.capabilities:
+            return (
+                f"provider {provider.id} lacks the {IMPLEMENT_CAPABILITY} capability, so it cannot "
+                "run a task that invokes the implement skill; drop it from providers or use auto"
+            )
+    return None
 
 
 def _record_line(
@@ -730,10 +752,13 @@ def render_prompt(
 
 
 def classification_prompt(task: Task) -> str:
+    required = list(task.required_capabilities)
+    if task_invokes_implement(task) and IMPLEMENT_CAPABILITY not in required:
+        required.append(IMPLEMENT_CAPABILITY)
     fields = [
         f"Title: {task.title}", f"Goal: {task.goal}", f"Working directory: {task.cwd}",
         f"Allowed provider ids: {', '.join(task.allowed_providers) if task.allowed_providers else 'any configured provider'}",
-        f"Required capabilities: {', '.join(task.required_capabilities) if task.required_capabilities else 'none'}",
+        f"Required capabilities: {', '.join(required) if required else 'none'}",
     ]
     for label, value in (
         ("Context", task.context), ("Constraints", task.constraints),
@@ -1520,6 +1545,23 @@ def dispatch(
             router_call, classifier_argv, config, classifier_adapter, phase="classification",
         )
         provider = _classified_provider(config, classified)
+        if not provider_compatible(task, provider) and provider_compatible(
+            task, replace(provider, capabilities=provider.capabilities | {IMPLEMENT_CAPABILITY}),
+        ):
+            # The classifier picked a provider that only lacks the implement capability: fall
+            # through to the first compatible provider in configuration order. Any other
+            # mismatch keeps the incompatibility refusal below. Both are pre-claim.
+            provider = next(
+                (item for item in config.providers if provider_compatible(task, item)), None,
+            )
+            if provider is None:
+                needs = (
+                    f": it invokes the implement skill and needs capability {IMPLEMENT_CAPABILITY}"
+                    if task_invokes_implement(task) else ""
+                )
+                raise InvalidRoute(
+                    f"no configured provider is compatible with task {task.id}{needs}"
+                )
     else:
         provider = _provider(config, requested_provider)
     if provider.id == "auto" or not provider_compatible(task, provider):

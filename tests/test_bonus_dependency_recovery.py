@@ -147,7 +147,8 @@ def runtime(
         adapters=tuple(adapters),
         providers=(
             config_module.ProviderConfig(
-                "alpha", config_module.DispatchBinding("router", "alpha"), frozenset(), "single",
+                "alpha", config_module.DispatchBinding("router", "alpha"),
+                frozenset({db.IMPLEMENT_CAPABILITY}), "single",
             ),
         ),
         plans=(config_module.PlanConfig("alpha-plan", "alpha"),),
@@ -203,6 +204,7 @@ class RecoveryCase(unittest.TestCase):
             key or KEY,
             "alpha",
             "alpha-account",
+            provider_capabilities=(db.IMPLEMENT_CAPABILITY,),
             automatic=automatic,
             now_epoch=now,
         )

@@ -11,7 +11,10 @@ from typing import Any, Callable, Mapping
 
 from . import checks, db, goals, notifications
 from .config import HostLoadGateConfig, RuntimeConfig
-from .db import QueueDB, hour_round, task_requires_legacy_exclusive
+from .db import (
+    IMPLEMENT_CAPABILITY, QueueDB, hour_round, task_invokes_implement,
+    task_requires_legacy_exclusive,
+)
 from .dispatcher import (
     ActivationUnavailable,
     AmbiguousDispatch,
@@ -507,40 +510,64 @@ def plan_tick(
         return dependency_checks[task.id]
 
     availability: dict[tuple[str, str], int] = {}
+    # Per provider lacking the implement capability: dependency-ready implement-skill tasks
+    # that would be eligible there with that capability and are not eligible without it.
+    implement_only: dict[str, tuple[Any, ...]] = {}
     for account in config.accounts:
         provider = config.provider(account.provider_id)
-        availability[(account.provider_id, account.id)] = sum(
-            dependency_ready(task) for task in reader.eligible_tasks(
-                anchor,
-                provider_id=provider.id,
-                capabilities=provider.capabilities, automatic=True, now_epoch=now,
-            )
+        eligible = reader.eligible_tasks(
+            anchor,
+            provider_id=provider.id,
+            capabilities=provider.capabilities, automatic=True, now_epoch=now,
         )
-    plan = build_plan(config, snapshots, eligible_count=availability, now_epoch=now)
+        availability[(account.provider_id, account.id)] = sum(
+            dependency_ready(task) for task in eligible
+        )
+        if IMPLEMENT_CAPABILITY in provider.capabilities or provider.id in implement_only:
+            continue
+        eligible_ids = {task.id for task in eligible}
+        implement_only[provider.id] = tuple(
+            task for task in reader.eligible_tasks(
+                anchor, provider_id=provider.id,
+                capabilities={*provider.capabilities, IMPLEMENT_CAPABILITY},
+                automatic=True, now_epoch=now,
+            )
+            if task.id not in eligible_ids and task_invokes_implement(task)
+            and dependency_ready(task)
+        )
     active_account_ids, identity_failures = resolve_active_accounts(config, reader)
-    plan = close_providers(plan, identity_failures)
-    plan = _apply_account_backoff(plan, reader.account_backoffs(now_epoch=now))
+    account_backoffs = reader.account_backoffs(now_epoch=now)
     if provider_holds is None:
         provider_holds = db.doctor(queue).provider_holds
-    plan = _apply_inflight_caps(
-        plan, queue, now_epoch=now, provider_holds=provider_holds,
-    )
-    plan = _apply_global_cap(
-        plan, queue, config, active_account_ids, now_epoch=now,
-    )
-    plan = finalize_plan(
-        config,
-        plan,
-        active_account_ids=active_account_ids,
-        eligible_count=availability,
-    )
     blocker = (
         None if host_load_reader is None
         else host_pressure(config.host_load_gate, host_load_reader())
     )
-    if blocker is not None:
-        reason = f"host pressure: {blocker['message']}"
-        plan = close_providers(plan, {gate.provider_id: reason for gate in plan.gates})
+
+    def gated_plan(eligible_count: Mapping[tuple[str, str], int]) -> PlanResult:
+        """Apply every gate closure to one availability map; reads only."""
+
+        result = build_plan(config, snapshots, eligible_count=eligible_count, now_epoch=now)
+        result = close_providers(result, identity_failures)
+        result = _apply_account_backoff(result, account_backoffs)
+        result = _apply_inflight_caps(
+            result, queue, now_epoch=now, provider_holds=provider_holds,
+        )
+        result = _apply_global_cap(
+            result, queue, config, active_account_ids, now_epoch=now,
+        )
+        result = finalize_plan(
+            config,
+            result,
+            active_account_ids=active_account_ids,
+            eligible_count=eligible_count,
+        )
+        if blocker is not None:
+            reason = f"host pressure: {blocker['message']}"
+            result = close_providers(result, {gate.provider_id: reason for gate in result.gates})
+        return result
+
+    plan = gated_plan(availability)
     allocations: dict[tuple[str, str], tuple[Any, ...]] = {}
 
     # Build a capacity-expanded bipartite graph and find an augmenting-path matching. Processing
@@ -632,6 +659,40 @@ def plan_tick(
             if slot_batch[slot] == batch_index and slot in slot_task
         )
 
+    # Name unallocated implement-skill work that waits only because a provider lacks the
+    # implement capability, and only where that provider's gate would otherwise have opened:
+    # replan with those tasks counted, under the same closures. A gate closed for another
+    # reason (usage, backoff, host pressure) never claims the task waits on it.
+    allocated_ids = {task.id for tasks in allocations.values() for task in tasks}
+    capability_holds: dict[str, dict[str, Any]] = {}
+    if any(implement_only.values()):
+        probe = gated_plan({
+            key: count + len(implement_only.get(key[0], ()))
+            for key, count in availability.items()
+        })
+        # A task that would still wait on a collision key held by allocated work is not
+        # waiting on the capability, so it gets no capability blocker.
+        held_waits = reader.collision_keys(
+            [task.id for tasks in implement_only.values() for task in tasks],
+        )
+        for provider_id in dict.fromkeys(batch.provider_id for batch in probe.batches):
+            for task in implement_only.get(provider_id, ()):
+                if task.id in allocated_ids or task.id in capability_holds:
+                    continue
+                if held_waits.get(task.id, frozenset()) & held_keys:
+                    continue
+                capability_holds[task.id] = {
+                    "kind": "provider_capability",
+                    "task_id": task.id,
+                    "provider_id": provider_id,
+                    "capability": IMPLEMENT_CAPABILITY,
+                    "reason": (
+                        f"provider {provider_id} lacks the {IMPLEMENT_CAPABILITY} capability "
+                        "required by tasks that invoke the implement skill; waiting for a "
+                        "provider gate that has it"
+                    ),
+                }
+
     adjusted_batches = tuple(
         replace(
             batch,
@@ -665,7 +726,8 @@ def plan_tick(
     )
     return TickPlan(
         anchor, snapshots, adjusted_plan, allocations,
-        tuple(dependency_holds.values()), blocker, frozenset(dispatch_last),
+        tuple(dependency_holds.values()) + tuple(capability_holds.values()),
+        blocker, frozenset(dispatch_last),
     )
 
 

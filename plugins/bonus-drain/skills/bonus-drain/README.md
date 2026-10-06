@@ -164,6 +164,13 @@ rows must explicitly declare the reserved `legacy-exclusive` capability. The nam
 compatibility semantic, not a provider identity: any configured provider may declare it.
 Explicit `allowed_providers` and `required_capabilities` continue to apply independently.
 
+The reserved `implement` capability works the same way for tasks that invoke the implement
+skill (`use_implement`, or `/implement`, `$implement`, or "implement skill" in the prompt
+text). Only providers declaring it plan, claim, or launch that work; a provider that cannot
+drive the skill, such as Grok, omits it. When the only open gate lacks it, the scout reports
+a `provider_capability` blocker naming the task. Auto classification that lands on an
+incapable provider falls through to the first compatible provider, before any claim.
+
 The optional `bonus-drain-account-activation` adapter takes a literal expected account ID,
 rotator label, absolute PIN path, optional rotator executable, and optional active-label
 file. It atomically writes a mode-0600 pin, runs the rotator without a shell or inherited

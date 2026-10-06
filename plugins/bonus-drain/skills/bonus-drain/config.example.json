@@ -100,9 +100,9 @@
     {
       "id": "claude",
       "dispatch": {"adapter_id": "router", "provider": "claude"},
-      "capabilities": ["legacy-exclusive"]
+      "capabilities": ["legacy-exclusive", "implement"]
     },
-    {"id": "codex", "dispatch": {"adapter_id": "router", "provider": "codex"}},
+    {"id": "codex", "dispatch": {"adapter_id": "router", "provider": "codex"}, "capabilities": ["implement"]},
     {"id": "grok", "account_mode": "single", "dispatch": {"adapter_id": "router", "provider": "grok"}}
   ],
   "plans": [

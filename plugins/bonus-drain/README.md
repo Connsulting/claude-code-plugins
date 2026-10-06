@@ -81,8 +81,8 @@ personal and business accounts across Claude, Codex, and Grok without changing c
 ```json
 {
   "providers": [
-    {"id": "claude", "dispatch": {"adapter_id": "router", "provider": "claude"}, "capabilities": ["legacy-exclusive"]},
-    {"id": "codex", "dispatch": {"adapter_id": "router", "provider": "codex"}},
+    {"id": "claude", "dispatch": {"adapter_id": "router", "provider": "claude"}, "capabilities": ["legacy-exclusive", "implement"]},
+    {"id": "codex", "dispatch": {"adapter_id": "router", "provider": "codex"}, "capabilities": ["implement"]},
     {"id": "grok", "dispatch": {"adapter_id": "router", "provider": "grok"}}
   ],
   "plans": [
@@ -125,6 +125,12 @@ The reserved `legacy-exclusive` capability preserves migrated `claude_only` and 
 legacy-exclusive model rows without hard-coding a provider name. Declare it only on providers
 that can run those tasks. Explicit provider allowlists and required capabilities remain
 independent.
+
+The reserved `implement` capability marks providers that can drive the implement skill. A
+task that sets `use_implement` or names `/implement`, `$implement`, or the implement skill in
+its goal, context, constraints, precondition, or done-when runs only on providers declaring
+it. Grok configurations omit it. `add`, `edit`, and `set-providers` refuse to pin such a task
+to a configured provider without it; `bonus-drain set-providers TASK auto` clears the pin.
 
 Every account of a multi-account provider must use the shipped verified activation form with
 a literal expected account, PIN path, active-label proof, and one provider-wide activation

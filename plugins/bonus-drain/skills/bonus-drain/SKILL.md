@@ -21,7 +21,8 @@ source private helper functions or invent a second DB path.
 ## Invariants
 
 1. Provider, plan, account, limit, usage, activation, and dispatch behavior comes from the
-   validated JSON graph. Do not branch on a familiar provider name.
+   validated JSON graph. Do not branch on a familiar provider name. A task that invokes the
+   implement skill runs only on providers declaring the reserved `implement` capability.
 2. The refresher alone calls usage adapters. Scout, plan, viewers, and consumers read cache.
 3. Missing, stale, malformed, or resetless cache closes only that account. No data is not
    zero usage.
@@ -29,6 +30,7 @@ source private helper functions or invent a second DB path.
    launch and `codex-bg-thread` are forbidden.
 5. `auto` classifies in a router dry run only. Validate the result, claim the task, and launch
    once with a concrete provider/account. Never persist `auto` or a null provider.
+   `set-providers TASK auto` clears the provider pin; it stores an empty allowlist.
 6. Classifier uncertainty is pre-claim and retry-safe because `agent-router --dry-run` is
    non-launching. Claiming creates a unique immutable attempt alongside
    `(task_id, eligibility_key)` before concrete activation/routing. Known-not-launched failure

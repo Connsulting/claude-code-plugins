@@ -17,6 +17,8 @@ from bonus_drain import db, goals, dispatcher, scout, usage
 from tests import test_bonus_drain_kick as kick_tests
 
 NOW = 2_000_000_000
+# Coordinator turns and implementation jobs invoke the implement skill.
+IMPLEMENT = (db.IMPLEMENT_CAPABILITY,)
 CANDIDATE = {'commits': {'example': 'a' * 40}, 'runtime': {}}
 
 
@@ -54,7 +56,7 @@ class GoalTests(unittest.TestCase):
         claim = self.queue.claim_for(task_id, key)
         attempt_id = claim.attempt_id if claim else None
         if status == 'done' and attempt_id is None:
-            attempt = self.queue.claim(task_id, key, 'alpha', 'account')
+            attempt = self.queue.claim(task_id, key, 'alpha', 'account', provider_capabilities=IMPLEMENT)
             self.assertIsNotNone(attempt)
             attempt_id = attempt.id
         kwargs = {'attempt_id': attempt_id} if attempt_id is not None else {}
@@ -71,7 +73,7 @@ class GoalTests(unittest.TestCase):
         self.store.tick(now=NOW)
         goal = self.store.show('release')
         task = goal['coordinator_task']
-        attempt = self.queue.claim(task, 'account/manual/2000000000', 'alpha', 'account')
+        attempt = self.queue.claim(task, 'account/manual/2000000000', 'alpha', 'account', provider_capabilities=IMPLEMENT)
         self.assertIsNotNone(attempt)
         self.queue.record(
             task, 'account/manual/2000000000', attempt_id=attempt.id,
@@ -208,8 +210,8 @@ class GoalTests(unittest.TestCase):
         self.finish(turn)
         self.queue.add_task(reviewed(dict(id='other', title='Other', cwd=self.tmp.name)))
         self.store.tick(now=NOW + 3601)
-        self.assertFalse(self.queue.claim('a', 'account/manual/2000000000', 'alpha', 'account'))
-        self.assertTrue(self.queue.claim('other', 'account/manual/2000000000', 'alpha', 'account'))
+        self.assertFalse(self.queue.claim('a', 'account/manual/2000000000', 'alpha', 'account', provider_capabilities=IMPLEMENT))
+        self.assertTrue(self.queue.claim('other', 'account/manual/2000000000', 'alpha', 'account', provider_capabilities=IMPLEMENT))
 
     def test_goal_concurrency_is_enforced_by_claim_in_both_launch_paths(self):
         self.create(max_inflight=1)
@@ -218,7 +220,7 @@ class GoalTests(unittest.TestCase):
         self.finish(turn)
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda task: self.queue.claim(
-                task, 'account/manual/2000000000', 'alpha', 'account'), ['a', 'b']))
+                task, 'account/manual/2000000000', 'alpha', 'account', provider_capabilities=IMPLEMENT), ['a', 'b']))
         self.assertEqual(sum(result is not None for result in results), 1)
 
     def test_explicit_membership_does_not_rewrite_existing_contract(self):
@@ -398,13 +400,13 @@ class GoalTests(unittest.TestCase):
         current = self.store.show('release')
         old = current['coordinator_task']
         paused = self.store.steer('release', current['revision'], 'Hold', pause=True)
-        self.assertFalse(self.queue.claim(old, 'account/manual/2000000000', 'alpha', 'account'))
+        self.assertFalse(self.queue.claim(old, 'account/manual/2000000000', 'alpha', 'account', provider_capabilities=IMPLEMENT))
         self.store.resume('release', paused['revision'], 'Continue', now=NOW)
         self.store.tick(now=NOW)
         resumed = self.store.show('release')
         self.assertNotEqual(resumed['coordinator_task'], old)
         self.assertFalse(self.queue.task(old).active)
-        self.assertTrue(self.queue.claim(resumed['coordinator_task'], 'account/manual/2000000000', 'alpha', 'account'))
+        self.assertTrue(self.queue.claim(resumed['coordinator_task'], 'account/manual/2000000000', 'alpha', 'account', provider_capabilities=IMPLEMENT))
 
     def test_resume_retires_an_undispatched_coordinator_after_deadline(self):
         self.create()
@@ -513,7 +515,9 @@ class GoalScoutTests(unittest.TestCase):
         self.addCleanup(fixture.tearDown)
         queue = fixture.queue
         queue.set_active('portable', False)
-        config = replace(fixture.config, adapters=(replace(fixture.config.adapters[0], argv=('/bin/true',)),))
+        config = replace(fixture.config, adapters=(replace(fixture.config.adapters[0], argv=('/bin/true',)),),
+                         providers=tuple(replace(p, capabilities=p.capabilities | set(IMPLEMENT))
+                                         for p in fixture.config.providers))
         store = goals.GoalStore(queue)
         store.create(dict(id='goal', title='Goal', cwd=str(fixture.root), outcome='Assembled proof',
                           authority='Fixture only', acceptance=[{'id': 'check', 'proof': 'Exercise the fixture'}],

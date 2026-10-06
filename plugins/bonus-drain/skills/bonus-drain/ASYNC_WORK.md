@@ -147,7 +147,10 @@ reviewed field (id, kind, cadence, cwd, goal, context, constraints, precondition
 source_ref, start_ref, depends_on, merged_depends_on, checks, grants) must include a fresh
 `readiness_review` in the same edit; a review written against an earlier contract is stale and
 refused. Routing and display controls (title, priority, size, work_group, model, mcp, providers,
-capabilities, use_implement, and set-model, set-mcp, set-providers) need no review. Active claims and already-run one-off
+capabilities, use_implement, and set-model, set-mcp, set-providers) need no review.
+`set-providers TASK auto` restores automatic routing. A task that invokes the implement skill
+runs only on providers declaring the reserved `implement` capability, so pinning it to one
+that lacks it (Grok configurations omit it) is refused. Active claims and already-run one-off
 contracts cannot be edited. For ordinary tasks outside managed goals, a failed/skipped
 task must first be explicitly requeued; that schedules an operator recovery and preserves every
 prior attempt. Its contract can then be edited only before that exact recovery is claimed.

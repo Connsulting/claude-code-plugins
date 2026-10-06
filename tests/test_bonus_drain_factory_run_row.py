@@ -52,7 +52,7 @@ def _config(root: Path) -> config_module.RuntimeConfig:
         providers=(
             config_module.ProviderConfig(
                 "claude", config_module.DispatchBinding("router", "claude"),
-                frozenset({"legacy-exclusive"}), "single",
+                frozenset({"legacy-exclusive", "implement"}), "single",
             ),
         ),
         plans=(config_module.PlanConfig("claude-plan", "claude"),),

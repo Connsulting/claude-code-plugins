@@ -61,6 +61,24 @@ COMPLETION_MECHANISMS = frozenset({
     "command", "artifact", "operator_receipt", "goal_acceptance",
 })
 LEGACY_EXCLUSIVE_CAPABILITY = "legacy-exclusive"
+# Reserved positive capability: only providers declaring it can drive the implement skill.
+IMPLEMENT_CAPABILITY = "implement"
+# Task text fields that render into the worker prompt as instructions.
+IMPLEMENT_TEXT_FIELDS = ("goal", "context", "constraints", "precondition", "done_when")
+# Grant fields the dispatcher's grants section renders into the worker prompt.
+IMPLEMENT_GRANT_FIELDS = ("scope", "kind", "id")
+# A slash or Codex dollar invocation standing alone (not a path segment such as
+# skills/implement), or prose naming the implement skill.
+_IMPLEMENT_INVOCATION_RE = re.compile(r"(?<![\w./~$-])[/$]implement\b")
+# Formatted names such as `implement`, 'implement', or **implement** count too.
+_IMPLEMENT_SKILL_RE = re.compile(
+    r"\bimplement[`'\"*]*[\s_-]+skill\b", re.IGNORECASE,
+)
+# Reverse order needs "named"/"called" or a wrapped name, so "skill implement the X" stays plain.
+_SKILL_IMPLEMENT_RE = re.compile(
+    r"\bskill\s+(?:(?:named|called)\s+[`'\"*]*implement\b|[`'\"*]+implement[`'\"*]+)",
+    re.IGNORECASE,
+)
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 TASK_SIZES = ("tiny", "small", "medium", "large", "huge")
 CANONICAL_FABLE_MODEL = "claude-fable-5-1"
@@ -333,6 +351,41 @@ def task_requires_legacy_exclusive(task: Task) -> bool:
     """Return whether a migrated compatibility row needs the reserved capability."""
 
     return task.claude_only or legacy_exclusive_model(task.model)
+
+
+def canonical_providers(providers: Iterable[str]) -> tuple[str, ...]:
+    """Validate a provider pin; ``auto`` alone means no pin and is never persisted."""
+
+    canonical = tuple(str(provider).strip() for provider in providers if str(provider).strip())
+    if not canonical:
+        raise QueueError("providers must contain at least one provider id, or auto")
+    if "auto" in canonical:
+        if len(canonical) != 1:
+            raise QueueError("providers auto cannot be combined with provider ids")
+        return ()
+    if len(canonical) != len(set(canonical)):
+        raise QueueError("providers must not contain duplicates")
+    if any(not TASK_ID_RE.fullmatch(provider) for provider in canonical):
+        raise QueueError("providers contains an invalid provider id")
+    return canonical
+
+
+def task_invokes_implement(task: Task) -> bool:
+    """Return whether the task runs the implement skill and so needs the implement capability."""
+
+    if task.use_implement:
+        return True
+    texts = [getattr(task, field) for field in IMPLEMENT_TEXT_FIELDS]
+    for raw in task.grants:
+        grant = json.loads(raw)
+        texts.extend(grant.get(field) for field in IMPLEMENT_GRANT_FIELDS)
+    return any(
+        isinstance(text, str) and text and (
+            _IMPLEMENT_INVOCATION_RE.search(text) or _IMPLEMENT_SKILL_RE.search(text)
+            or _SKILL_IMPLEMENT_RE.search(text)
+        )
+        for text in texts
+    )
 
 
 @dataclass(frozen=True)
@@ -2001,6 +2054,9 @@ class QueueDB:
             return False
         if provider_id and task_requires_legacy_exclusive(task):
             if LEGACY_EXCLUSIVE_CAPABILITY not in capability_set:
+                return False
+        if provider_id and task_invokes_implement(task):
+            if IMPLEMENT_CAPABILITY not in capability_set:
                 return False
         return set(task.required_capabilities).issubset(capability_set)
 
@@ -4262,14 +4318,9 @@ class QueueDB:
         self._update_task(task_id, "mcp", canonical)
 
     def set_providers(self, task_id: str, providers: Iterable[str]) -> None:
-        canonical = tuple(str(provider).strip() for provider in providers if str(provider).strip())
-        if not canonical:
-            raise QueueError("providers must contain at least one provider id")
-        if len(canonical) != len(set(canonical)):
-            raise QueueError("providers must not contain duplicates")
-        if any(not TASK_ID_RE.fullmatch(provider) for provider in canonical):
-            raise QueueError("providers contains an invalid provider id")
-        self._update_task(task_id, "allowed_providers_json", json.dumps(canonical))
+        """Pin the task to provider ids, or ``auto`` alone to clear the pin (any compatible provider)."""
+
+        self._update_task(task_id, "allowed_providers_json", json.dumps(canonical_providers(providers)))
 
     def set_active(self, task_id: str, active: bool) -> None:
         self._update_task(task_id, "active", int(active))

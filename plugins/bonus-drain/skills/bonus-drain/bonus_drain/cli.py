@@ -325,12 +325,33 @@ def _validate_mcp(
         raise db.QueueError(str(exc)) from exc
 
 
-def _legacy_filter(args: argparse.Namespace) -> dict[str, Any]:
-    return {
+def _refuse_incapable_providers(
+    cfg: config_module.RuntimeConfig, preview: tuple[db.Task, Any],
+) -> tuple[db.Task, Any]:
+    """Refuse a previewed task pinned to a provider that cannot run its implement skill."""
+
+    refusal = dispatcher.implement_provider_refusal(cfg, preview[0])
+    if refusal is not None:
+        raise db.QueueError(refusal)
+    return preview
+
+
+def _legacy_filter(cfg: config_module.RuntimeConfig, args: argparse.Namespace) -> dict[str, Any]:
+    filters: dict[str, Any] = {
         "portable_only": bool(getattr(args, "codex", False) or getattr(args, "grok", False)),
         "exclusive_only": bool(getattr(args, "claude_only_filter", False)),
         "claude_priority": bool(getattr(args, "claude_priority", False)),
     }
+    flag = "codex" if getattr(args, "codex", False) else "grok" if getattr(args, "grok", False) else None
+    if flag is not None:
+        # The legacy flag names a provider; apply that provider's compatibility gate. An
+        # unconfigured flag declares no capabilities, so capability-gated work stays excluded.
+        provider = next(
+            (item for item in cfg.providers if flag in {item.id, item.dispatch.provider}), None,
+        )
+        filters["provider_id"] = provider.id if provider is not None else flag
+        filters["capabilities"] = provider.capabilities if provider is not None else ()
+    return filters
 
 
 def _human_queue_status(queue: db.QueueDB, cycle: int) -> None:
@@ -410,7 +431,9 @@ def _command(args: argparse.Namespace) -> int:
         )
         _validate_mcp(cfg, values["mcp"], values["cwd"], values["allowed_providers"])
         task, evaluated, readiness = _admit(
-            queue, args, "add", lambda: queue.preview_add(values), lambda: queue.add_task(values),
+            queue, args, "add",
+            lambda: _refuse_incapable_providers(cfg, queue.preview_add(values)),
+            lambda: queue.add_task(values),
         )
         if args.json:
             _json({"task": task.to_dict(), "checks": evaluated, "readiness": readiness})
@@ -421,8 +444,8 @@ def _command(args: argparse.Namespace) -> int:
             print(f"readiness: {readiness['state']}: {readiness['reason']}")
         return 0
     if command in {"eligible", "count-eligible", "pick"}:
-        _cfg, queue = _queue(args)
-        filters = _legacy_filter(args)
+        cfg, queue = _queue(args)
+        filters = _legacy_filter(cfg, args)
         if command == "eligible":
             print(1 if queue.count_eligible(args.cycle, **filters) else 0)
         elif command == "count-eligible":
@@ -607,7 +630,8 @@ def _command(args: argparse.Namespace) -> int:
             )
         task, evaluated, readiness = _admit(
             queue, args, "edit",
-            lambda: queue.preview_edit(args.task, changes), lambda: queue.edit_task(args.task, changes),
+            lambda: _refuse_incapable_providers(cfg, queue.preview_edit(args.task, changes)),
+            lambda: queue.edit_task(args.task, changes),
             gate=bool(set(changes) & (review.REVIEWED_FIELDS | {"readiness_review"})),
         )
         _json({"task": task.to_dict(), "checks": evaluated, "readiness": readiness})
@@ -676,12 +700,20 @@ def _command(args: argparse.Namespace) -> int:
         _json({"task": task.to_dict()}) if args.json else print(f"mcp: {task.id} {task.mcp or 'default'}")
         return 0
     if command == "set-providers":
-        _cfg, queue = _queue(args)
-        queue.set_providers(args.task, args.providers.split(","))
+        cfg, queue = _queue(args)
+        requested = args.providers.split(",")
+        current = queue.task(args.task)
+        if current is not None:
+            refusal = dispatcher.implement_provider_refusal(
+                cfg, replace(current, allowed_providers=db.canonical_providers(requested)),
+            )
+            if refusal is not None:
+                raise db.QueueError(refusal)
+        queue.set_providers(args.task, requested)
         task = queue.task(args.task)
         assert task is not None
         _json({"task": task.to_dict()}) if args.json else print(
-            f"providers: {task.id} {','.join(task.allowed_providers)}"
+            f"providers: {task.id} {','.join(task.allowed_providers) or 'auto'}"
         )
         return 0
     if command in {"activate", "deactivate"}:
