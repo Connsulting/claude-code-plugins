@@ -3,7 +3,8 @@
 Queue adds require an implementable-ticket/v1 readiness record. Tests that are not about the
 review attach this minimal one: the issue read (derived from an issue source_ref, else none),
 no ADRs, the governing AGENTS.md, yes verdicts on can-start and can-finish, one acceptance
-criterion taken from the task with its verification, and no findings.
+criterion taken from the task with its verification, no findings, and, for ticket work (an
+issue source_ref), no merge gates beyond the PR checks.
 """
 
 from __future__ import annotations
@@ -29,10 +30,11 @@ def _issue(source_ref: Any) -> str | None:
 def minimal_review(
     *, source_ref: Any = None, done_when: Any = None, goal: Any = None,
 ) -> dict[str, Any]:
-    return {
+    issue = _issue(source_ref)
+    value: dict[str, Any] = {
         "contract": "implementable-ticket/v1",
         "executor": "bonus-drain",
-        "issue": _issue(source_ref),
+        "issue": issue,
         "adrs": [],
         "instructions": ["AGENTS.md"],
         "startable": {"verdict": "yes", "evidence": ["test fixture: every precondition exists"]},
@@ -45,6 +47,9 @@ def minimal_review(
         ],
         "findings": [],
     }
+    if issue is not None:
+        value["merge_gates"] = []
+    return value
 
 
 def reviewed(values: Mapping[str, Any]) -> dict[str, Any]:

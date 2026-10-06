@@ -74,6 +74,7 @@ def review_3833(**changes: Any) -> dict[str, Any]:
                 "resolution": {"grant": "worker-kernel"},
             },
         ],
+        "merge_gates": [],
         "reviewer": "planning thread",
     }
     value.update(changes)
@@ -1352,3 +1353,76 @@ class InstallMigrationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- Merge gates: the curie-v0122-4103 shape ---------------------------------------------
+# The Dockerfile change put the PR in the repository's factory evidence tier. The queued
+# review covered only the acceptance criteria, the named harness was a stub, and the waiver
+# issue had already closed, so both workers stopped with verification_needed.
+FACTORY_WAIVER = {"type": "issue_open", "repo": "curie-eng/curie", "number": 4110}
+
+
+def factory_gate(**satisfied_by: Any) -> dict[str, Any]:
+    return {
+        "gate": "factory evidence tier",
+        "required_by": "scripts/check-pr-body.sh maps examples/dark-factory/ to the factory tier",
+        "satisfied_by": satisfied_by or {
+            "waiver": "curie-eng/curie#4110",
+            "detail": "the scripted kind driver does not run its scenario yet",
+        },
+    }
+
+
+class MergeGateTests(ReviewCase):
+    def test_ticket_review_without_merge_gates_is_refused(self) -> None:
+        review = review_3833()
+        del review["merge_gates"]
+        values = {"source_ref": ISSUE_3833_URL, "done_when": DONE_3833, "grants": [GRANT_3833]}
+        self.assertRefused("no-gates", task("no-gates", self.root, readiness_review=review, **values),
+                           "must list merge_gates")
+        # Liveness: the same ticket with the gate list is accepted.
+        self.assertIsNotNone(self.add_3833("no-gates"))
+
+    def test_non_ticket_review_needs_no_merge_gates(self) -> None:
+        added = self.add("weekly-sweep")
+        self.assertNotIn("merge_gates", added.to_dict()["readiness_review"])
+        self.assertEqual(self.queue.review_problems(added.id), [])
+
+    def test_waived_gate_needs_the_waiver_issue_open_check(self) -> None:
+        review = review_3833(merge_gates=[factory_gate()])
+        values = {"source_ref": ISSUE_3833_URL, "done_when": DONE_3833, "grants": [GRANT_3833]}
+        self.assertRefused(
+            "waived", task("waived", self.root, readiness_review=review, **values),
+            r"waived by curie-eng/curie#4110.*issue_open curie-eng/curie#4110",
+        )
+
+        added = self.add_3833("waived", readiness_review=review, checks=[FACTORY_WAIVER])
+        self.assertEqual(added.to_dict()["readiness_review"]["merge_gates"], [factory_gate()])
+        self.assertEqual(self.queue.review_problems(added.id), [])
+
+    def test_command_gate_needs_a_probe(self) -> None:
+        review = review_3833(merge_gates=[factory_gate(command="curie dev factory-e2e scripted")])
+        values = {"source_ref": ISSUE_3833_URL, "done_when": DONE_3833, "grants": [GRANT_3833]}
+        self.assertRefused("unprobed", task("unprobed", self.root, readiness_review=review, **values),
+                           "missing: probe")
+
+        probed = review_3833(merge_gates=[factory_gate(
+            command="curie dev factory-e2e scripted",
+            probe="ran it on origin/main: installed the chart on a kind cluster and asserted the fixture PR",
+        )])
+        self.assertIsNotNone(self.add_3833("probed", readiness_review=probed))
+
+    def test_waiver_must_name_an_issue(self) -> None:
+        review = review_3833(merge_gates=[factory_gate(waiver="the factory row", detail="later")])
+        values = {"source_ref": ISSUE_3833_URL, "done_when": DONE_3833, "grants": [GRANT_3833]}
+        self.assertRefused("vague", task("vague", self.root, readiness_review=review, **values),
+                           "owner/repo#number")
+
+    def test_stored_ticket_review_without_merge_gates_is_held(self) -> None:
+        added = self.add_3833("older")
+        stored = stored_review(self.queue, added.id)
+        del stored["merge_gates"]
+        set_review_json(self.queue, added.id, stored)
+        problems = self.queue.review_problems(added.id)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("must list merge_gates", problems[0])

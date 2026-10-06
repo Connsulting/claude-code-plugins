@@ -4,8 +4,8 @@ A one-off or recurring task is admitted to the queue only with the readiness rec
 implementable-ticket contract (``implementable-ticket/v1``): what was read before queueing
 (the source issue, the ADRs it cites, the governing AGENTS.md or CLAUDE.md files), a yes
 verdict with evidence on "can it start" and "can it finish", every acceptance criterion with
-the command that verifies it and where that runs, and how each blocker knowable at queue
-time was resolved.  A task is queueable only if it can start and finish with no human in the
+the command that verifies it and where that runs, every merge gate the change will trigger
+and how it is satisfied, and how each blocker knowable at queue time was resolved.  A task is queueable only if it can start and finish with no human in the
 loop, so a finding is never resolved by waiting on a person: an authority finding needs a
 grant already on the task or a rewritten done_when.  The queue stamps ``reviewed_at`` and
 ``review_digest``; the digest binds the review to the contract it was written against.
@@ -54,6 +54,15 @@ _REVIEW_KEYS = frozenset({
     "contract", "executor", "issue", "adrs", "instructions", "startable", "finishable",
     "acceptance_criteria", "findings",
 })
+# Ticket work (a review with an issue) ends in a PR, so it must also list merge_gates.
+_TICKET_KEYS = frozenset({"merge_gates"})
+_ISSUE_REF_RE = re.compile(r"^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([1-9][0-9]*)$")
+MERGE_GATES_MISSING = (
+    "ticket work must list merge_gates: every repository gate the change's paths trigger (a PR-body "
+    "evidence tier, a required live run, a path-scoped check) with the command that satisfies it and "
+    "a probe showing that command does the gate's work on the base, or a waiver naming an open issue; "
+    "[] only when the repository has no gate beyond its PR checks"
+)
 # Stamped by the queue; ignored on input and overwritten when stored.
 _STAMP_KEYS = frozenset({"reviewed_at", "review_digest"})
 # The reviewed contract: only these fields are hashed. Routing and display controls (title, priority,
@@ -166,6 +175,40 @@ def _finding(raw: Any) -> dict[str, Any]:
     return value
 
 
+def _merge_gate(raw: Any) -> dict[str, Any]:
+    gate = _object(raw, "merge gate", frozenset({"gate", "required_by", "satisfied_by"}))
+    value: dict[str, Any] = {
+        "gate": _text(gate["gate"], "merge gate name", 200),
+        "required_by": _text(gate["required_by"], "merge gate required_by", 2_000),
+    }
+    satisfied = gate["satisfied_by"]
+    if isinstance(satisfied, Mapping) and "waiver" in satisfied:
+        satisfied = _object(satisfied, "merge gate waiver", frozenset({"waiver", "detail"}))
+        waiver = satisfied["waiver"]
+        if not isinstance(waiver, str) or _ISSUE_REF_RE.fullmatch(waiver.strip()) is None:
+            raise ReviewError("merge gate waiver must name an issue as owner/repo#number")
+        value["satisfied_by"] = {
+            "waiver": waiver.strip(), "detail": _text(satisfied["detail"], "merge gate waiver detail", 2_000),
+        }
+        return value
+    satisfied = _object(satisfied, "merge gate satisfied_by", frozenset({"command", "probe"}))
+    value["satisfied_by"] = {
+        "command": _text(satisfied["command"], "merge gate command", 2_000),
+        "probe": _text(satisfied["probe"], "merge gate probe", 2_000),
+    }
+    return value
+
+
+def waiver_check(gate: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The issue_open check a waived gate depends on: the waiver lapses when its issue closes."""
+
+    waiver = gate["satisfied_by"].get("waiver")
+    if waiver is None:
+        return None
+    repo, number = _ISSUE_REF_RE.fullmatch(waiver).groups()
+    return {"type": "issue_open", "repo": repo, "number": int(number)}
+
+
 def _verdict(raw: Any, name: str) -> dict[str, Any]:
     verdict = _object(raw, name, frozenset({"verdict", "evidence"}))
     if verdict["verdict"] not in VERDICTS:
@@ -209,7 +252,9 @@ def normalize_review(raw: Any) -> dict[str, Any]:
         if "contract" not in raw:
             raise ReviewError(SCHEMA_STALE)
         raise ReviewError(f"readiness review contract must be {CONTRACT}")
-    review = _object(raw, "readiness review", _REVIEW_KEYS, frozenset({"reviewer"}) | _STAMP_KEYS)
+    review = _object(
+        raw, "readiness review", _REVIEW_KEYS, frozenset({"reviewer"}) | _TICKET_KEYS | _STAMP_KEYS,
+    )
     if review["executor"] not in EXECUTORS:
         raise ReviewError(f"readiness review executor must be one of: {', '.join(EXECUTORS)}")
     issue = review["issue"]
@@ -231,6 +276,10 @@ def normalize_review(raw: Any) -> dict[str, Any]:
         ],
         "findings": [_finding(item) for item in _list(review["findings"], "findings")],
     }
+    if "merge_gates" in review:
+        value["merge_gates"] = [_merge_gate(item) for item in _list(review["merge_gates"], "merge_gates")]
+    elif value["issue"] is not None:
+        raise ReviewError(MERGE_GATES_MISSING)
     if "reviewer" in review:
         value["reviewer"] = _text(review["reviewer"], "reviewer", 200)
     if len(checks.canonical(value).encode("utf-8")) > MAX_REVIEW_BYTES:
@@ -296,6 +345,12 @@ def review_problems(task: Task) -> list[str]:
             problems.append("finding resolution done_when does not match the task done_when")
         elif kind == "check" and checks.canonical(target) not in task.checks:
             problems.append(f"finding resolution check {checks.describe(target)} is not a task check")
+    for gate in review.get("merge_gates", ()):
+        if (check := waiver_check(gate)) is not None and checks.canonical(check) not in task.checks:
+            problems.append(
+                f"merge gate {gate['gate']} is waived by {gate['satisfied_by']['waiver']}, so the task "
+                f"needs the check {checks.describe(check)}: the waiver lapses when that issue closes"
+            )
     parsed = checks.parse_issue_ref(task.source_ref)
     if parsed is not None and review["issue"] != f"{parsed[0]}#{parsed[1]}":
         problems.append(f"review issue must be the source issue {parsed[0]}#{parsed[1]}")

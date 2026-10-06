@@ -537,7 +537,10 @@ QUEUE_TIME_KNOWABLE_RULE = (
     "to true if the blocker already existed and could have been found before launch from the task "
     "contract, its source issue, the ADRs it cites, the governing AGENTS.md or CLAUDE.md files, or a "
     "probe of an external dependency (credentials, provider credit, MCP auth, cluster resources, "
-    "vendor capabilities); false if it only emerged from the work itself."
+    "vendor capabilities); false if it only emerged from the work itself. A blocker in a file on "
+    "the base ref counts as found before launch, including a tool, harness, or gate command that "
+    "the contract, its issue, or those instruction files name, and including a gate the changed "
+    "paths trigger. Mark true when reading or running something on the base would have shown it."
 )
 
 

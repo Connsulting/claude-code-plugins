@@ -120,6 +120,12 @@ you do not supply them:
      "detail": "The e2e needs the k8scratch service curie-email-e2e",
      "resolution": {"check": {"type": "k8s_resource_exists", "context": "k8", "namespace": "k8scratch",
                               "kind": "service", "name": "curie-email-e2e"}}}
+  ],
+  "merge_gates": [
+    {"gate": "factory evidence tier",
+     "required_by": "scripts/check-pr-body.sh maps examples/dark-factory/ to the factory tier",
+     "satisfied_by": {"waiver": "Connsulting/curie#4110",
+                      "detail": "the scripted kind driver does not run its scenario yet"}}
   ]
 }
 ```
@@ -133,6 +139,18 @@ criterion with no `verified_by` is not finishable and is refused. `executor` is 
 `dark-factory`. `issue` is the source issue as `owner/repo#N` (null when there is none) and must
 equal the `source_ref` issue when that parses as one. `instructions` must be non-empty; `adrs`
 and `findings` may be empty; `reviewer` is optional.
+
+`merge_gates` is required when `issue` is set, because ticket work ends in a PR. It lists every
+gate the change's paths trigger beyond running the PR's checks: a PR-body evidence tier, a
+required live run, a path-scoped manual proof. Read the repository's gate script and its
+AGENTS.md against the in-scope files to find them. Each entry is `gate`, `required_by` (the rule
+and path that trigger it), and `satisfied_by`, which is either `{"command", "probe"}` or
+`{"waiver", "detail"}`. `probe` is what you observed when you ran the command (or read its
+source) on the base ref, and it must show the command does the gate's work: a status check, a
+render, or a printed plan is not a probe. `waiver` names an open issue as `owner/repo#N`, and the
+task must carry the matching `issue_open` check, so a waived gate is held at launch once its
+issue closes. Use `[]` only when the repository has no such gate. A stored ticket review without
+`merge_gates` is reported malformed and held until it is re-reviewed.
 
 Findings record the blockers the review found and how each was resolved before queueing.
 `category` is `authority`, `contradiction`, `feasibility`, or `external_dependency`; an
@@ -409,7 +427,8 @@ nonempty detail and a stable non-secret signature. Accepted completion mechanism
 `authority_required` and `verification_needed` reasons also carry boolean `reason.queue_time_knowable`:
 `true` when the blocker already existed and could have been found before launch from the task
 contract, its source issue, the ADRs it cites, the governing AGENTS.md or CLAUDE.md files, or a
-probe of an external dependency; `false` when it only emerged from the work. It measures how well
+probe of an external dependency, including any tool, harness, or gate command on the base ref
+that those name or the changed paths trigger; `false` when it only emerged from the work. It measures how well
 the readiness review works. A worker that omits it keeps its blocker outcome (and `resume_when`),
 recorded with the field null as unreported, rather than being rewritten. `bonus-drain held-report`
 shows the value per held item (`yes`, `no`, or empty) and ends with
