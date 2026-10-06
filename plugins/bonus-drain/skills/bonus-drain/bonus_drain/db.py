@@ -242,6 +242,11 @@ REVIEW_STALE_REASON = (
     "(no can-start and can-finish verdicts, no verified_by per criterion). Re-run the "
     "implementable-ticket skill and edit the task with its record as readiness_review"
 )
+REVIEW_GATES_REASON = (
+    "Held until re-reviewed: its ticket readiness review lists no merge_gates, so nothing shows the "
+    "PR can clear the gates its changed paths trigger. Re-run the implementable-ticket skill and "
+    "edit the task with its record as readiness_review"
+)
 
 
 class _PreviewRollback(Exception):
@@ -4415,7 +4420,8 @@ class QueueDB:
 
     @staticmethod
     def _review_hold(task: Task, goal_owned: bool) -> tuple[str, str] | None:
-        """(hold_reason, reason) when the task has no review or a pre-contract one.
+        """(hold_reason, reason) when the task has no review, a pre-contract one, or a ticket
+        review without merge_gates.
 
         Goal-owned work carries no review: goal acceptance governs it.
         """
@@ -4427,6 +4433,8 @@ class QueueDB:
             return "review_missing", REVIEW_MISSING_REASON
         if review.schema_stale(task):
             return "review_stale", REVIEW_STALE_REASON
+        if review.merge_gates_missing(task):
+            return "review_stale", REVIEW_GATES_REASON
         return None
 
     def _could_launch(self, connection: sqlite3.Connection, task: Task) -> bool:

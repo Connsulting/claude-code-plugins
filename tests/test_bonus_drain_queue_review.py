@@ -1373,7 +1373,11 @@ def factory_gate(**satisfied_by: Any) -> dict[str, Any]:
     }
 
 
-class MergeGateTests(ReviewCase):
+class MergeGateTests(HermeticEnvironment, ReviewCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.hermetic(self.mkdir("home"))
+
     def test_ticket_review_without_merge_gates_is_refused(self) -> None:
         review = review_3833()
         del review["merge_gates"]
@@ -1418,11 +1422,34 @@ class MergeGateTests(ReviewCase):
         self.assertRefused("vague", task("vague", self.root, readiness_review=review, **values),
                            "owner/repo#number")
 
-    def test_stored_ticket_review_without_merge_gates_is_held(self) -> None:
+    def test_waiver_check_matches_the_repository_in_any_case(self) -> None:
+        review = review_3833(merge_gates=[factory_gate(
+            waiver="Curie-Eng/Curie#4110", detail="the scripted kind driver does not run its scenario yet",
+        )])
+        added = self.add_3833("cased", readiness_review=review, checks=[FACTORY_WAIVER])
+        self.assertEqual(self.queue.review_problems(added.id), [])
+        # A different issue number in the same repository still does not satisfy it.
+        other = {**FACTORY_WAIVER, "number": 4111}
+        values = {"source_ref": ISSUE_3833_URL, "done_when": DONE_3833, "grants": [GRANT_3833]}
+        self.assertRefused("wrong-number", task("wrong-number", self.root, readiness_review=review,
+                                                checks=[other], **values), "waived by")
+
+    def test_stored_ticket_review_without_merge_gates_is_held_at_launch(self) -> None:
         added = self.add_3833("older")
+        self.add("weekly-sweep")
+        self.assertNotEqual(self.ready("older")["hold_reason"], "review_stale")
         stored = stored_review(self.queue, added.id)
         del stored["merge_gates"]
         set_review_json(self.queue, added.id, stored)
+
         problems = self.queue.review_problems(added.id)
         self.assertEqual(len(problems), 1, problems)
         self.assertIn("must list merge_gates", problems[0])
+        status = self.ready("older")
+        self.assertEqual((status["state"], status["hold_reason"]), ("held", "review_stale"))
+        self.assertIn("lists no merge_gates", status["reason"])
+        self.assertNotIn("older", self.eligible_ids())
+        self.assertIsNone(self.try_claim("older"))
+        self.assertEqual(self.queue.attempts(task_id="older"), [])
+        report = {item["task_id"]: item for item in self.queue.held_authority_report()}
+        self.assertEqual(report["older"]["source"], "stale_review")

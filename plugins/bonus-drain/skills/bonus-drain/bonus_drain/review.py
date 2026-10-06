@@ -310,6 +310,28 @@ def schema_stale(task: Task) -> bool:
     return not isinstance(stored, Mapping) or stored.get("contract") != CONTRACT
 
 
+def merge_gates_missing(task: Task) -> bool:
+    """True when the task carries a ticket review (one with an issue) that lists no merge_gates."""
+
+    if task.readiness_review is None or schema_stale(task):
+        return False
+    stored = json.loads(task.readiness_review)
+    return stored.get("issue") is not None and "merge_gates" not in stored
+
+
+def _has_waiver_check(task: Task, check: Mapping[str, Any]) -> bool:
+    """GitHub repository names are case-insensitive, so the waiver's repo matches in any case."""
+
+    for raw in task.checks:
+        spec = json.loads(raw)
+        if (
+            spec.get("type") == "issue_open" and spec.get("number") == check["number"]
+            and str(spec.get("repo", "")).lower() == check["repo"].lower()
+        ):
+            return True
+    return False
+
+
 def contract_digest(task: Task) -> str:
     """sha256 of the contract as reviewed: exactly the REVIEWED_FIELDS of the task."""
 
@@ -346,7 +368,7 @@ def review_problems(task: Task) -> list[str]:
         elif kind == "check" and checks.canonical(target) not in task.checks:
             problems.append(f"finding resolution check {checks.describe(target)} is not a task check")
     for gate in review.get("merge_gates", ()):
-        if (check := waiver_check(gate)) is not None and checks.canonical(check) not in task.checks:
+        if (check := waiver_check(gate)) is not None and not _has_waiver_check(task, check):
             problems.append(
                 f"merge gate {gate['gate']} is waived by {gate['satisfied_by']['waiver']}, so the task "
                 f"needs the check {checks.describe(check)}: the waiver lapses when that issue closes"

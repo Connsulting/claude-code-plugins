@@ -149,8 +149,9 @@ and path that trigger it), and `satisfied_by`, which is either `{"command", "pro
 source) on the base ref, and it must show the command does the gate's work: a status check, a
 render, or a printed plan is not a probe. `waiver` names an open issue as `owner/repo#N`, and the
 task must carry the matching `issue_open` check, so a waived gate is held at launch once its
-issue closes. Use `[]` only when the repository has no such gate. A stored ticket review without
-`merge_gates` is reported malformed and held until it is re-reviewed.
+issue closes (the repository name matches in any case). Use `[]` only when the repository has no
+such gate. A stored ticket review without `merge_gates` is held with hold reason `review_stale`
+and listed by `held-report` until it is re-reviewed; goal-owned work stays exempt as before.
 
 Findings record the blockers the review found and how each was resolved before queueing.
 `category` is `authority`, `contradiction`, `feasibility`, or `external_dependency`; an
