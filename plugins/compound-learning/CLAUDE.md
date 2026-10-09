@@ -57,7 +57,7 @@ When modifying search ranking, thresholds, or retrieval logic:
 
 ### Sample Learnings
 
-Developers without learnings in `~/.projects/learnings/` can still run the full harness. The fixtures automatically fall back to `tests/fixtures/sample_learnings/` which contains 10 representative learning files.
+Developers without learnings in `~/.local/state/compound-learning/learnings/` can still run the full harness. The fixtures automatically fall back to `tests/fixtures/sample_learnings/` which contains 10 representative learning files.
 
 ### Key Files
 

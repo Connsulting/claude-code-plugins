@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import importlib.util
 import hashlib
+import json
+import threading
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 import os
 import re
 import sys
@@ -28,7 +32,7 @@ class ListMarkdownTest(unittest.TestCase):
     def test_prunes_ignored_trees_before_visiting_markdown(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            published = root / ".projects" / "published.md"
+            published = root / "plans" / "published.plan.md"
             published.parent.mkdir()
             published.write_text("# Published\n")
             server.promote(published)
@@ -56,11 +60,72 @@ class ListMarkdownTest(unittest.TestCase):
 
             self.assertEqual(plans, [published])
             self.assertIn(Path("."), visited)
-            self.assertIn(Path(".projects"), visited)
+            self.assertIn(Path("plans"), visited)
             self.assertFalse(
                 any("node_modules" in path.parts for path in visited),
                 f"ignored tree was traversed: {visited}",
             )
+
+    def test_state_plans_are_discovered_only_after_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            with mock.patch.dict(os.environ, {"HOME": home, "XDG_STATE_HOME": ""}):
+                root = server.plans_root()
+                plan = root / "example-repo" / "review.md"
+                plan.parent.mkdir(parents=True)
+                plan.write_text("# Review\n")
+                self.assertTrue(server.is_plan_file(plan))
+                self.assertEqual(server.list_markdown(root), [])
+                server.promote(plan)
+                self.assertEqual(server.list_markdown(root), [plan])
+                self.assertIn("example-repo/review.md", server.render_index(root).decode())
+
+    def test_xdg_root_and_in_repo_plan_names(self) -> None:
+        with tempfile.TemporaryDirectory() as state:
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": state}):
+                self.assertEqual(server.plans_root(), Path(state) / "big-plan" / "plans")
+                self.assertTrue(server.is_plan_file(Path(state) / "big-plan/plans/repo/a.md"))
+                self.assertTrue(server.is_plan_file(Path("/repo/a.plan.md")))
+                self.assertTrue(server.is_plan_file(Path("/repo/PLAN.md")))
+                self.assertFalse(server.is_plan_file(Path("/repo/drafts/a.md")))
+
+    def test_external_plan_http_review_and_routing(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            with mock.patch.dict(os.environ, {"HOME": home, "XDG_STATE_HOME": ""}):
+                root = server.plans_root()
+                plan = root / "example-repo" / "review.md"
+                plan.parent.mkdir(parents=True)
+                plan.write_text("# External Review\n")
+                old_root = server.ROOT_DIR
+                server.ROOT_DIR = root
+                httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+                thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+                thread.start()
+                base = f"http://127.0.0.1:{httpd.server_port}"
+                relative = "example-repo/review.md"
+                try:
+                    request = Request(base + "/api/promote/" + relative, data=b"{}",
+                                      headers={"Content-Type": "application/json"})
+                    with urlopen(request) as response:
+                        self.assertEqual(response.status, 200)
+                    with urlopen(base) as response:
+                        self.assertIn(relative, response.read().decode())
+                    with urlopen(base + "/" + relative) as response:
+                        self.assertIn("External Review", response.read().decode())
+                    for request in (
+                        Request(base + "/api/submit/" + relative),
+                        Request(base + "/api/submit/" + relative,
+                                data=json.dumps({"expectMode": "dispatch", "prompt": "Review"}).encode(),
+                                headers={"Content-Type": "application/json"}),
+                    ):
+                        with self.assertRaises(HTTPError) as error:
+                            urlopen(request)
+                        self.assertEqual(error.exception.code, 400)
+                        self.assertIn("repository cwd", error.exception.read().decode())
+                finally:
+                    httpd.shutdown()
+                    httpd.server_close()
+                    thread.join(timeout=5)
+                    server.ROOT_DIR = old_root
 
 
 class SidebarControlsTest(unittest.TestCase):

@@ -83,8 +83,8 @@ if [ -z "$TRANSCRIPT_CONTENT" ]; then
   exit 0
 fi
 
-GLOBAL_DIR="$HOME/.projects/learnings"
-REPO_DIR="$REPO_ROOT/.projects/learnings"
+GLOBAL_DIR="$HOME/.local/state/compound-learning/learnings"
+REPO_DIR="$HOME/.local/state/compound-learning/repos${REPO_ROOT}/learnings"
 
 # Capture output to log file generation
 OUTPUT_FILE=$(mktemp)
@@ -93,7 +93,7 @@ PROMPT_FILE=$(mktemp)
 # Snapshot learnings directories before generation for filesystem diff
 BEFORE_FILES=$(mktemp)
 AFTER_FILES=$(mktemp)
-mkdir -p "$GLOBAL_DIR" 2>/dev/null
+mkdir -p "$GLOBAL_DIR" "$REPO_DIR" 2>/dev/null
 find "$GLOBAL_DIR" "$REPO_DIR" -type f -name "*.md" 2>/dev/null | sort > "$BEFORE_FILES"
 
 trap "rm -f $OUTPUT_FILE $PROMPT_FILE $BEFORE_FILES $AFTER_FILES" EXIT
@@ -151,11 +151,12 @@ if [ "${COMPOUND_LEARNING_GENERATION_ENGINE:-}" = "codex" ]; then
     --sandbox workspace-write \
     -C "$REPO_ROOT" \
     --add-dir "$GLOBAL_DIR" \
+    --add-dir "$REPO_DIR" \
     - <"$PROMPT_FILE" >"$OUTPUT_FILE" 2>&1
 else
   CLAUDE_SUBPROCESS=1 claude -p --no-session-persistence \
     --permission-mode bypassPermissions \
-    --add-dir "$HOME/.projects" "$REPO_ROOT/.projects" \
+    --add-dir "$GLOBAL_DIR" "$REPO_DIR" \
     --allowedTools "Write,Bash(mkdir:*)" \
     <"$PROMPT_FILE" >"$OUTPUT_FILE" 2>&1
 fi

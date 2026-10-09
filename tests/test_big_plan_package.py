@@ -14,11 +14,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ROOT = REPO_ROOT / "plugins" / "big-plan"
 SKILL_ROOT = PLUGIN_ROOT / "skills" / "big-plan"
 PRESERVED_SHA256 = {
-    "server.py": "7fd1ee5a0e70abb04e5201054114d3f70efb04ed6c566167bf9f2befb4d87a9a",
     "render.py": "56d6053c98914d70803cf241b6d1f62fb7deaf3cbd7015581f36d3910f7a21c7",
-    "dispatch.py": "074437541a5cb8a1d94aee011a53b86c14a5ce73102385eabdf5dda88b62f8a1",
     "template.md": "f6a28d978c5f8ec1d73193f0e9af560976e1d2230147888849496e8f89e8d007",
-    "test_dispatch.py": "f57f309bd88a622735b6b5e0bf748e7ca648084c116ea1598fa4868e2649eaf4",
     "assets/app.js": "ab7ee45bbb2844dec98c6f3af8af6b3a95cd53c8ffd3dafc012a34b763b247ad",
     "assets/diff.js": "e9102cd30ac1c2006140719d48f4305dde3c91e3e1f41567342f21915c85758d",
     "assets/mermaid.min.js": "74d7c46dabca328c2294733910a8aa1ed0c37451776e8d5295da38a2b758fb9b",
@@ -107,7 +104,6 @@ class BigPlanPackageContractTest(unittest.TestCase):
             *required,
             SKILL_ROOT / "README.md",
             SKILL_ROOT / "big-plan.service",
-            REPO_ROOT / ".projects" / "big-plan-example.md",
         ]
         hardcoded_tailnet = re.compile(r"[a-z0-9-]+\.tail[a-z0-9-]+\.ts\.net", re.I)
         personal_home = re.compile(r"/home/(?!example(?:/|$))[a-z0-9._-]+", re.I)
@@ -121,21 +117,7 @@ class BigPlanPackageContractTest(unittest.TestCase):
             (PLUGIN_ROOT / "scripts" / "big-plan.service").read_bytes(),
         )
 
-        example = REPO_ROOT / ".projects" / "big-plan-example.md"
-        marker = example.with_suffix(example.suffix + ".big-plan")
-        self.assertTrue(marker.is_file(), "example must be promoted")
-        example_text = example.read_text(encoding="utf-8")
-        for token in (
-            "- [ ]",
-            "```decide\n",
-            "```decide-multi\n",
-            '<div class="compare">',
-            "```mermaid\n",
-            "| Surface |",
-            "> [!NOTE]",
-            "```sh\n",
-        ):
-            self.assertIn(token, example_text)
+
 
 
 if __name__ == "__main__":

@@ -45,9 +45,9 @@ def load_config() -> Dict[str, Any]:
             'dbPath': os.path.join(home, '.claude', 'compound-learning.db'),
         },
         'learnings': {
-            'globalDir': os.path.join(home, '.projects/learnings'),
-            'repoSearchPath': home,
-            'archiveDir': os.path.join(home, '.projects/archive/learnings'),
+            'globalDir': os.path.join(home, '.local/state/compound-learning/learnings'),
+            'repoSearchPath': os.path.join(home, '.local/state/compound-learning/repos'),
+            'archiveDir': os.path.join(home, '.local/state/compound-learning/archive/learnings'),
             'highConfidenceThreshold': 0.40,
             'possiblyRelevantThreshold': 0.55,
             'keywordBoostWeight': 0.65,
@@ -422,9 +422,17 @@ def _create_schema(conn: sqlite3.Connection) -> None:
     _backfill_repo_roots(conn)
 
 
-# A learning always lives at <repo_root>/.projects/learnings/<basename>.md, so
-# the repo root is recoverable from file_path alone.
-_LEARNINGS_PATH_SEGMENT = '/.projects/learnings/'
+# External repo storage mirrors the canonical absolute repository path.
+_LEARNINGS_PATH_SEGMENT = '/.local/state/compound-learning/repos/'
+
+
+def repo_learning_dir(repo_root: str | Path, home: str | Path | None = None) -> Path:
+    """Persistent learning storage without collapsing same-named repositories."""
+    import lib.git_utils as git_utils
+    root = Path(git_utils.resolve_repo_root(str(repo_root))).resolve()
+    state = Path(home) if home is not None else Path.home()
+    return state / '.local/state/compound-learning/repos' / str(root).lstrip('/') / 'learnings'
+
 
 # resolve_repo_root walks up the filesystem doing syscalls per level, and a
 # whole corpus usually collapses onto a handful of distinct repo roots, so the
@@ -457,7 +465,10 @@ def _derive_repo_root(file_path: str) -> str:
     idx = file_path.rfind(_LEARNINGS_PATH_SEGMENT)
     if idx <= 0:
         return ''
-    root = file_path[:idx]
+    suffix = file_path[idx + len(_LEARNINGS_PATH_SEGMENT):]
+    if "/learnings/" not in suffix:
+        return ''
+    root = "/" + suffix.rsplit("/learnings/", 1)[0]
 
     try:
         return _resolve_repo_root_cached(root)

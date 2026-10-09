@@ -15,10 +15,12 @@ Indexes all learning markdown files into SQLite and generates a manifest summari
 
 ## What It Does
 
-1. Discovers `.md` files in `~/.projects/learnings/` (global) and `[repo]/.projects/learnings/` (repo)
+1. Discovers `.md` files in `~/.local/state/compound-learning/learnings/` (global) and `~/.local/state/compound-learning/repos/<absolute-repo-path>/learnings/` (repo)
 2. Extracts `**Topic:**` and `**Tags:**` from each file
 3. Indexes into SQLite
-4. Generates `~/.projects/learnings/MANIFEST.md`
+4. Generates `~/.local/state/compound-learning/learnings/MANIFEST.md`
+
+`<absolute-repo-path>` is the canonical main-checkout absolute path with its leading `/` removed. Resolve a worktree to its main checkout before choosing this directory. This preserves separate storage for repositories with the same name.
 
 ## Manifest Format
 

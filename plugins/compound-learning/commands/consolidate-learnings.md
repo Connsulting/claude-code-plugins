@@ -105,7 +105,7 @@ Merged:
 Deleted:
 - 4 outdated learnings removed
 
-Backups at: ~/.projects/archive/learnings/2026-01-22/
+Backups at: ~/.local/state/compound-learning/archive/learnings/2026-01-22/
 ```
 
 ## Key Points

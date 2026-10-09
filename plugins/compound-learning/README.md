@@ -36,7 +36,7 @@ Run `/index-learnings` to build the index. The SQLite database is created automa
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `LEARNINGS_GLOBAL_DIR` | Global learnings directory | `~/.projects/learnings` |
+| `LEARNINGS_GLOBAL_DIR` | Global learnings directory | `~/.local/state/compound-learning/learnings` |
 | `LEARNINGS_REPO_SEARCH_PATH` | Base path to search for repo learnings | `~` |
 | `LEARNINGS_DISTANCE_THRESHOLD` | Similarity threshold (0-1, lower = more similar) | `0.5` |
 
@@ -60,8 +60,8 @@ Create `.claude-plugin/config.json` in the plugin directory:
     "dbPath": "${HOME}/.claude/compound-learning.db"
   },
   "learnings": {
-    "globalDir": "${HOME}/.projects/learnings",
-    "repoSearchPath": "${HOME}",
+    "globalDir": "${HOME}/.local/state/compound-learning/learnings",
+    "repoSearchPath": "${HOME}/.local/state/compound-learning/repos",
     "distanceThreshold": 0.5
   }
 }
@@ -82,8 +82,10 @@ Recommendations: [improvements]
 ```
 
 This extracts learnings and commits them to the appropriate scope:
-- **Global learnings** (`~/.projects/learnings/`): Applicable across all projects
-- **Repo learnings** (`[repo]/.projects/learnings/`): Specific to a repository
+- **Global learnings** (`~/.local/state/compound-learning/learnings/`): Applicable across all projects
+- **Repo learnings** (`~/.local/state/compound-learning/repos/<absolute-repo-path>/learnings/`): Specific to a repository
+
+`<absolute-repo-path>` is the canonical main-checkout absolute path with its leading `/` removed. Resolve a worktree to its main checkout before choosing this directory. This preserves separate storage for repositories with the same name.
 
 ### Extracting Learnings from PRs
 
@@ -112,7 +114,7 @@ Skill(skill="search-learnings", args="JWT authentication patterns")
 /index-learnings
 ```
 
-Also generates a manifest at `~/.projects/learnings/MANIFEST.md` summarizing learnings by topic.
+Also generates a manifest at `~/.local/state/compound-learning/learnings/MANIFEST.md` summarizing learnings by topic.
 
 ### Learnings Manifest
 
@@ -181,8 +183,8 @@ How it works:
 
 ### Learning Scopes
 
-1. **Global** (`~/.projects/learnings/`): Security patterns, general best practices, cross-project knowledge
-2. **Repo** (`[repo]/.projects/learnings/`): Repository-specific gotchas, patterns, architecture decisions
+1. **Global** (`~/.local/state/compound-learning/learnings/`): Security patterns, general best practices, cross-project knowledge
+2. **Repo** (`~/.local/state/compound-learning/repos/<absolute-repo-path>/learnings/`): Repository-specific gotchas, patterns, architecture decisions
 
 The search skill automatically detects which repository you're working in and includes both global and repo-scoped learnings.
 
@@ -235,7 +237,7 @@ Knobs live under `pinned` in config (defaults in `lib/db.py`):
   reindex. Pairs in the softer `--report-threshold` band are flagged, never cut.
 - Never-retrieved learnings should be archived (not deleted) with
   `consolidate-actions.py archive`, which moves the file to
-  `~/.projects/archive/learnings/YYYY-MM-DD/` and drops the index rows. Retrieval
+  `~/.local/state/compound-learning/archive/learnings/YYYY-MM-DD/` and drops the index rows. Retrieval
   relevance degrades as the corpus grows, so a shrinking working corpus is the
   point; the archive keeps it reversible.
 
@@ -246,7 +248,7 @@ Add this to your global `~/.claude/CLAUDE.md`:
 ```markdown
 ## Learning Compounding
 
-@~/.projects/learnings/MANIFEST.md
+@~/.local/state/compound-learning/learnings/MANIFEST.md
 
 **When to search:** If manifest shows a topic matching your task, search for it.
 **When to skip:** If no relevant topic in manifest, don't search.

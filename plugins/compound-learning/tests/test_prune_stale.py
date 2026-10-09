@@ -318,7 +318,7 @@ def test_shared_basename_injections_do_not_make_the_other_row_eligible(
     # access_count > 0 on both, so clause 1 cannot select either and the
     # assertion is about the opportunity clause alone.
     _add_row(conn, "global-copy", "/global/learnings/shared.md", _iso(40), 91)
-    _add_row(conn, "repo-copy", "/repo/.projects/learnings/shared.md", _iso(40), 91)
+    _add_row(conn, "repo-copy", "/synthetic/home/.local/state/compound-learning/repos/repo/learnings/shared.md", _iso(40), 91)
 
     ids = {c["id"] for c in ps.find_candidates(
         conn, 14, None, floor=10, min_age_days=30, pinned=set())}
@@ -338,7 +338,7 @@ def test_unique_basename_still_reaches_the_opportunity_floor(isolated_db) -> Non
     _seed_usefulness(conn, [("unrelated.md", 1, 0)])
     _seed_lifetime(conn, [("shared.md", 40, 0), ("solo.md", 40, 0)])
     _add_row(conn, "global-copy", "/global/learnings/shared.md", _iso(40), 91)
-    _add_row(conn, "repo-copy", "/repo/.projects/learnings/shared.md", _iso(40), 91)
+    _add_row(conn, "repo-copy", "/synthetic/home/.local/state/compound-learning/repos/repo/learnings/shared.md", _iso(40), 91)
     _add_row(conn, "solo", "/global/learnings/solo.md", _iso(40), 91)
 
     ids = {c["id"] for c in ps.find_candidates(

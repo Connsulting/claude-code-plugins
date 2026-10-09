@@ -2,7 +2,7 @@
 Search quality tests against the real indexed corpus.
 
 All tests are marked slow since they depend on the indexed_corpus fixture
-which indexes all learning files from ~/.projects/learnings/.
+which indexes all learning files from ~/.local/state/compound-learning/learnings/.
 """
 
 import pytest

@@ -445,7 +445,7 @@ cat >/dev/null
     assert argv[argv.index("-C") + 1] == str(tmp_path)
     assert "--add-dir" in argv
     assert argv[argv.index("--add-dir") + 1] == str(
-        tmp_path / "home" / ".projects" / "learnings"
+        tmp_path / "home" / ".local/state/compound-learning/learnings"
     )
 
     model_index = argv.index("--model") if "--model" in argv else argv.index("-m")

@@ -136,7 +136,7 @@ def test_search_scope_filtering(isolated_db, tmp_path):
     # search() matches repo-scoped rows on l.repo_root (an absolute repo root
     # path), never on the bare `repo` display label. repo_root is derived from
     # file_path (see lib/db.py _derive_repo_root: everything before the
-    # "/.projects/learnings/" segment), so the repo-scoped docs below need a
+    # "/.local/state/compound-learning/repos/" segment), so the repo-scoped docs below need a
     # file_path that encodes a real root for that derivation to work.
     repo_root = str(tmp_path / "test-repo")
 
@@ -152,11 +152,11 @@ def test_search_scope_filtering(isolated_db, tmp_path):
 
     # Insert 2 repo-scoped docs
     db.upsert_document(conn, "repo-1", "Kubernetes helm chart configuration for test-repo deployment", {
-        "scope": "repo", "repo": "test-repo", "file_path": f"{repo_root}/.projects/learnings/repo-1.md",
+        "scope": "repo", "repo": "test-repo", "file_path": f"/synthetic/home/.local/state/compound-learning/repos{repo_root}/learnings/repo-1.md",
         "topic": "kubernetes-infrastructure", "keywords": "kubernetes,helm",
     })
     db.upsert_document(conn, "repo-2", "Docker compose setup for test-repo local development", {
-        "scope": "repo", "repo": "test-repo", "file_path": f"{repo_root}/.projects/learnings/repo-2.md",
+        "scope": "repo", "repo": "test-repo", "file_path": f"/synthetic/home/.local/state/compound-learning/repos{repo_root}/learnings/repo-2.md",
         "topic": "docker", "keywords": "docker,compose",
     })
 

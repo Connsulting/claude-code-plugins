@@ -274,7 +274,7 @@ def test_same_day_global_and_repo_duplicate_is_not_merged_across_scopes(
     global_file.write_text(EXISTING, encoding="utf-8")
     _index(conn, "global-copy", global_file, EXISTING)
 
-    repo_learnings = tmp_path / "myrepo" / ".projects" / "learnings"
+    repo_learnings = db.repo_learning_dir(tmp_path / "myrepo")
     repo_learnings.mkdir(parents=True)
     repo_file = repo_learnings / "npm-overrides-bundled-deps-2026-08-01.md"
     repo_file.write_text(NEAR_DUPLICATE, encoding="utf-8")
@@ -304,7 +304,7 @@ def test_near_duplicate_in_the_same_repo_is_absorbed(corpus, tmp_path) -> None:
     Without this, refusing every repo-scoped absorb would pass the test above.
     """
     _config, conn, _learnings = corpus
-    repo_learnings = tmp_path / "myrepo" / ".projects" / "learnings"
+    repo_learnings = db.repo_learning_dir(tmp_path / "myrepo")
     repo_learnings.mkdir(parents=True)
 
     existing = repo_learnings / "npm-overrides-bundled-deps-2026-07-01.md"
@@ -499,14 +499,14 @@ def test_global_dir_inside_a_repo_is_still_global_scope(
 ) -> None:
     """`learnings.globalDir` decides scope, exactly as the indexer decides it.
 
-    With globalDir pointed at a `.projects/learnings` directory inside another
+    With globalDir pointed at a external repo learnings directory inside another
     Git repo -- a supported configuration -- the indexer stores those files as
     global while path-based inference called each new one repo scoped. Every
     indexed sibling was then refused as a cross-scope match and write-time
     dedupe silently stopped working for that entire corpus.
     """
     _config, conn, _learnings = corpus
-    host_repo_learnings = tmp_path / "hostrepo" / ".projects" / "learnings"
+    host_repo_learnings = db.repo_learning_dir(tmp_path / "hostrepo")
     host_repo_learnings.mkdir(parents=True)
     monkeypatch.setenv("LEARNINGS_GLOBAL_DIR", str(host_repo_learnings))
 
@@ -596,7 +596,7 @@ def _run_extract_hook(tmp_path, dedupe_stub_case: str):
     """
     home = tmp_path / "home"
     (home / ".claude" / "plugins" / "compound-learning").mkdir(parents=True)
-    global_dir = home / ".projects" / "learnings"
+    global_dir = home / ".local/state/compound-learning/learnings"
     global_dir.mkdir(parents=True)
 
     workdir = tmp_path / "work"

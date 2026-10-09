@@ -217,8 +217,12 @@ def _fallback_dir(md_path: Path, root: Path) -> str:
     """Where a fresh dispatch should start: the plan's repo, else the serve root.
 
     Walks up looking for a .git so the dispatched session lands in the repo that
-    owns the plan rather than the whole ~/git tree.
+    owns an in-repo plan. External plans require a registered repository cwd.
     """
+    state_root = (Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+                  / "big-plan" / "plans").resolve()
+    if md_path.resolve().is_relative_to(state_root):
+        raise ValueError("External plans require session registration with the repository cwd")
     for parent in md_path.parents:
         if (parent / ".git").exists():
             return str(parent)
@@ -348,7 +352,7 @@ def build_payload(md_path: Path, rel: str, prompt: str) -> str:
         "Before you edit the plan, set the diff baseline so your edits highlight "
         "for the reviewer:\n    cp "
         # Quoted because the receiving agent runs this verbatim, and plan paths
-        # under .projects/ routinely contain spaces.
+        # in persistent plan storage routinely contain spaces.
         f"{shlex.quote(str(md_path))} {shlex.quote(str(md_path) + '.snapshot')}\n"
         "\nThen triage every comment into exactly one of three outcomes. Picking "
         "the right one matters, because two of them are invisible if you get it "

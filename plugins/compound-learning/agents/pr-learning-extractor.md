@@ -87,13 +87,15 @@ For each meaningful learning:
 
 ### 5. Determine Scope
 
-**Global** (`~/.projects/learnings/`):
+**Global** (`~/.local/state/compound-learning/learnings/`):
 - Security patterns (ALWAYS)
 - Widely-used library gotchas (React, Node, Python, Go, Rust, etc.)
 - Universal patterns applicable to any project
 - Language-specific best practices
 
-**Repo** (`[repo]/.projects/learnings/`):
+**Repo** (`~/.local/state/compound-learning/repos/<absolute-repo-path>/learnings/`):
+
+`<absolute-repo-path>` is the canonical main-checkout absolute path with its leading `/` removed. Resolve a worktree to its main checkout before choosing this directory. This preserves separate storage for repositories with the same name.
 - Repo-specific conventions or patterns
 - Project-specific library usage
 - Team-specific style guidelines

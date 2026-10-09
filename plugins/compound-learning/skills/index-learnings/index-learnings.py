@@ -21,7 +21,6 @@ from collections import defaultdict
 from typing import Dict, List, Tuple, Any
 
 import lib.db as db
-import lib.git_utils as git_utils
 from lib.topic_mapping import infer_topic_from_tags, canonicalize_topic
 
 
@@ -59,23 +58,20 @@ def find_all_learning_files(config: Dict[str, Any]) -> Tuple[List[Path], Dict[st
                 global_files.append(canonical)
 
     # Repo learnings
-    search_paths = {repo_search_path}
-    if global_dir.parts[1:2] and global_dir.parts[1] != repo_search_path.parts[1]:
-        alt_search = Path('/' + global_dir.parts[1])
-        if alt_search.exists():
-            search_paths.add(alt_search)
-
-    for search_path in search_paths:
+    for search_path in (repo_search_path,):
         if not search_path.exists():
             continue
-        for learnings_dir in _rglob_follow_symlinks(search_path, '.projects/learnings'):
+        for learnings_dir in _rglob_follow_symlinks(search_path, 'learnings'):
             learnings_dir = learnings_dir.resolve()
             if str(learnings_dir).startswith(str(global_dir)):
                 continue
             if any(excluded in learnings_dir.parts for excluded in exclude_dirs):
                 continue
 
-            repo_name = git_utils.resolve_repo_name(str(learnings_dir))
+            repo_root = db._derive_repo_root(str(learnings_dir) + os.sep)
+            if not repo_root:
+                continue
+            repo_name = Path(repo_root).name
             for f in learnings_dir.glob('**/*.md'):
                 canonical = f.resolve()
                 if canonical not in seen_paths and canonical.name != 'MANIFEST.md':
@@ -96,7 +92,7 @@ def extract_metadata_from_path(file_path: Path, config: Dict[str, Any]) -> Dict[
     if path_str.startswith(global_dir):
         return {"scope": "global", "repo": "", "file_path": path_str}
 
-    repo_name = git_utils.resolve_repo_name(str(canonical_path.parent))
+    repo_name = Path(db._derive_repo_root(path_str)).name
     return {"scope": "repo", "repo": repo_name, "file_path": path_str}
 
 
@@ -189,7 +185,7 @@ def extract_created_at(content: str, file_path: Path) -> str | None:
 
 
 def generate_manifest(manifest_data: Dict[str, List[Dict[str, Any]]], config: Dict[str, Any]) -> None:
-    """Generate single manifest file at ~/.projects/learnings/MANIFEST.md"""
+    """Generate single manifest file at ~/.local/state/compound-learning/learnings/MANIFEST.md"""
     global_dir = Path(config['learnings']['globalDir'])
     global_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = global_dir / 'MANIFEST.md'

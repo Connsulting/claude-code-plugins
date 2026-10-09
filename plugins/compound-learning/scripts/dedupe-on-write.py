@@ -98,7 +98,7 @@ def repo_root_for(path: str) -> str:
     `git_utils.resolve_repo_root`, so every worktree-authored repo learning
     derived `<repo>/.claude/worktrees/x` against a stored `<repo>`.
 
-    The only thing layered on top is the scope call: `~/.projects/learnings` is
+    The only thing layered on top is the scope call: `~/.local/state/compound-learning/learnings` is
     the global scope, not a repo, so the home directory yields ''.
     """
     root = db._derive_repo_root(path)
@@ -114,12 +114,12 @@ def scope_for(path: str, config) -> tuple:
 
     `skills/index-learnings/index-learnings.py:extract_metadata_from_path` calls
     every file under `learnings.globalDir` global and everything else repo
-    scoped, and `find_all_learning_files` skips a `.projects/learnings` dir that
+    scoped, and `find_all_learning_files` skips a external repo learnings dir that
     sits under globalDir for the same reason. That function wrote the `scope`
     column `boundary_refusal` reads, so this must not be a second opinion.
 
     Deriving scope from the repo root alone was: `learnings.globalDir` is a
-    supported pointer at any directory, including a `.projects/learnings` inside
+    supported pointer at any directory, including a external repo learnings inside
     another Git repo. In that configuration the indexer stores those files as
     global while a root-first inference calls each new one repo scoped, so every
     indexed sibling fails `boundary_refusal` as a cross-scope match and

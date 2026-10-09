@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -384,3 +385,17 @@ class DispatchGrokTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExternalPlanRoutingTest(unittest.TestCase):
+    def test_external_plan_uses_registered_repo_cwd(self):
+        with tempfile.TemporaryDirectory() as home:
+            with patch.dict(os.environ, {"HOME": home, "XDG_STATE_HOME": ""}):
+                root = Path(home) / ".local/state/big-plan/plans"
+                plan = root / "repo" / "review.md"
+                plan.parent.mkdir(parents=True)
+                plan.write_text("# Review\n")
+                with self.assertRaisesRegex(ValueError, "repository cwd"):
+                    dispatch.route(plan, root)
+                dispatch.save_provenance(plan, "codex", "01a02ffa-b079-77e0-8c66-97f9d2e39598", "Review", "/repo")
+                self.assertEqual(dispatch.route(plan, root)["cwd"], "/repo")

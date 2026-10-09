@@ -104,7 +104,7 @@ def truncate_for_peek(document: str, max_chars: int, file_path: str) -> str:
 
 
 def detect_learning_roots(cwd: str, home: str) -> List[str]:
-    """Walk up from cwd to home, collect all dirs with .projects/learnings/.
+    """Walk up from cwd to home, collect all dirs with external repo learnings.
 
     Returns ABSOLUTE repo roots, never bare directory names. A basename is not
     an identity: three different repositories across two clients are all named
@@ -131,7 +131,7 @@ def detect_learning_roots(cwd: str, home: str) -> List[str]:
     def canonical_root(directory: Path) -> str:
         """Root the write side would store for a learning under *directory*, or ''.
 
-        `_derive_repo_root` keys off the '/.projects/learnings/' segment, so it
+        `_derive_repo_root` keys off the '/.local/state/compound-learning/repos/' segment, so it
         is handed the learnings dir with a trailing separator. It returns ''
         only when the path is undecidable, in which case the literal directory
         is the historical answer and is kept.
@@ -148,7 +148,7 @@ def detect_learning_roots(cwd: str, home: str) -> List[str]:
         same case the same way on the write side, and the two must stay
         symmetric or the scope query matches zero rows in silence.
         """
-        learnings_path = str(directory / '.projects' / 'learnings') + os.sep
+        learnings_path = str(db.repo_learning_dir(directory, home)) + os.sep
         derived = db._derive_repo_root(learnings_path) or str(directory)
         derived_norm = os.path.normpath(derived)
         home_norm = os.path.normpath(str(home_path))
@@ -158,17 +158,17 @@ def detect_learning_roots(cwd: str, home: str) -> List[str]:
 
     # Resolve the real repo root first (handles worktrees)
     real_root = Path(git_utils.resolve_repo_root(cwd))
-    real_root_learning_dir = real_root / '.projects' / 'learnings'
+    real_root_learning_dir = db.repo_learning_dir(real_root, home)
     if real_root_learning_dir.exists() and real_root != home_path:
         repo_root = canonical_root(real_root)
         if repo_root:
             roots.append(repo_root)
             seen.add(repo_root)
 
-    # Walk up from cwd itself for any additional .projects/learnings/ dirs
+    # Walk up from cwd itself for any additional external repo learnings dirs
     current = Path(cwd).resolve()
     while True:
-        learning_dir = current / '.projects' / 'learnings'
+        learning_dir = db.repo_learning_dir(current, home)
         if learning_dir.exists() and current != home_path:
             repo_root = canonical_root(current)
             if repo_root and repo_root not in seen:

@@ -94,7 +94,7 @@ def _repo_row(conn, doc_id: str, root: str, body: str, repo: str = "platform") -
         {
             "scope": "repo",
             "repo": repo,
-            "file_path": f"{root}/.projects/learnings/{doc_id}.md",
+            "file_path": f"/synthetic/home/.local/state/compound-learning/repos{root}/learnings/{doc_id}.md",
             "created_at": _now(),
         },
     )
@@ -108,7 +108,7 @@ def _global_row(conn, doc_id: str, body: str) -> None:
         {
             "scope": "global",
             "repo": "",
-            "file_path": f"/synthetic/home/.projects/learnings/{doc_id}.md",
+            "file_path": f"/synthetic/home/.local/state/compound-learning/learnings/{doc_id}.md",
             "created_at": _now(),
         },
     )
@@ -211,7 +211,7 @@ def test_repo_root_backfilled_from_file_path(isolated_db) -> None:
     conn.execute(
         "INSERT INTO learnings (id, content, scope, repo, file_path, topic, keywords, created_at) "
         "VALUES (?,?,'repo','platform',?,'other','',?)",
-        ("legacy", ALPHA_BODY, f"{ALPHA_ROOT}/.projects/learnings/legacy.md", _now()),
+        ("legacy", ALPHA_BODY, f"/synthetic/home/.local/state/compound-learning/repos{ALPHA_ROOT}/learnings/legacy.md", _now()),
     )
     conn.commit()
 
@@ -237,10 +237,10 @@ def test_backfill_never_deletes_rows(isolated_db) -> None:
         "INSERT INTO learnings (id, content, scope, repo, file_path, topic, keywords, created_at) "
         "VALUES (?,?,?,?,?,'other','',?)",
         [
-            ("r1", ALPHA_BODY, "repo", "platform", f"{ALPHA_ROOT}/.projects/learnings/r1.md", _now()),
-            ("r2", BETA_BODY, "repo", "platform", f"{BETA_ROOT}/.projects/learnings/r2.md", _now()),
+            ("r1", ALPHA_BODY, "repo", "platform", f"/synthetic/home/.local/state/compound-learning/repos{ALPHA_ROOT}/learnings/r1.md", _now()),
+            ("r2", BETA_BODY, "repo", "platform", f"/synthetic/home/.local/state/compound-learning/repos{BETA_ROOT}/learnings/r2.md", _now()),
             ("r3", GLOBAL_BODY, "repo", "odd", "/synthetic/nowhere/r3.md", _now()),
-            ("g1", GLOBAL_BODY, "global", "", "/synthetic/home/.projects/learnings/g1.md", _now()),
+            ("g1", GLOBAL_BODY, "global", "", "/synthetic/home/.local/state/compound-learning/learnings/g1.md", _now()),
         ],
     )
     conn.commit()

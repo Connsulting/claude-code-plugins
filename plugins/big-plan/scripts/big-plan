@@ -38,7 +38,8 @@ if [ "$#" -gt 0 ]; then
     exec "$uv_bin" run "$server" "$@"
 fi
 
-root=${BIG_PLAN_ROOT:-"$HOME/git"}
+root=${BIG_PLAN_ROOT:-"${XDG_STATE_HOME:-$HOME/.local/state}/big-plan/plans"}
+mkdir -p "$root"
 port=${BIG_PLAN_PORT:-8765}
 index_filter=${BIG_PLAN_FILTER:-plans}
 

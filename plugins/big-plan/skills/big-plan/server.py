@@ -98,7 +98,13 @@ def flip_task_line(md_path: Path, line_no: int, checked: bool) -> bool:
     tmp.replace(md_path)
     return True
 
-ROOT_DIR: Path = Path(".").resolve()
+def plans_root() -> Path:
+    """Persistent plan storage shared by the CLI and discovery heuristic."""
+    return (Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+            / "big-plan" / "plans").resolve()
+
+
+ROOT_DIR: Path = plans_root()
 ASSETS_DIR: Path = Path(__file__).parent / "assets"
 INDEX_FILTER: str = "plans"  # plans | readmes | all
 
@@ -215,9 +221,8 @@ def safe_join(root: Path, rel: str) -> Path | None:
 
 
 def is_plan_file(p: Path) -> bool:
-    """Heuristic: plans live under .projects/ OR end in .plan.md OR are named PLAN.md."""
-    parts = p.parts
-    if ".projects" in parts:
+    """Plans live in persistent plan storage, end in .plan.md, or are PLAN.md."""
+    if p.resolve().is_relative_to(plans_root()):
         return True
     name_lower = p.name.lower()
     if name_lower.endswith(".plan.md"):
@@ -272,8 +277,8 @@ def list_markdown(root: Path) -> list[Path]:
             if not filename.endswith(".md"):
                 continue
             p = parent / filename
-            # A .projects directory is a workspace, not an automatic
-            # publication channel. Keep drafts out of the shared index until
+            # Persistent storage is not an automatic publication channel.
+            # Keep drafts out of the shared index until
             # their author has explicitly promoted them.
             if not is_promoted(p):
                 continue
@@ -589,7 +594,12 @@ class Handler(BaseHTTPRequestHandler):
                 return
             # Preview only: the button labels itself with the target it would
             # actually reach, so nobody presses "send" not knowing where it goes.
-            self._send_json(HTTPStatus.OK, dispatch.route(md_path, ROOT_DIR))
+            try:
+                decision = dispatch.route(md_path, ROOT_DIR)
+            except ValueError as error:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+                return
+            self._send_json(HTTPStatus.OK, decision)
             return
 
         if path.endswith(".md"):
@@ -685,7 +695,11 @@ class Handler(BaseHTTPRequestHandler):
             expect_mode = payload.get("expectMode")
             decision = None
             if expect_mode:
-                decision = dispatch.route(md_path, ROOT_DIR)
+                try:
+                    decision = dispatch.route(md_path, ROOT_DIR)
+                except ValueError as error:
+                    self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
+                    return
                 if (
                     decision["mode"] != expect_mode
                     or decision["sessionId"] != payload.get("expectSessionId")
@@ -1030,7 +1044,7 @@ def get_tailscale_url(port: int) -> str | None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Serve big-plan markdown over HTTP.")
-    parser.add_argument("root", nargs="?", default=".", help="Directory to serve")
+    parser.add_argument("root", nargs="?", default=os.environ.get("BIG_PLAN_ROOT") or str(plans_root()), help="Directory to serve")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument(
@@ -1044,6 +1058,8 @@ def main() -> int:
 
     global ROOT_DIR, INDEX_FILTER
     ROOT_DIR = Path(args.root).resolve()
+    if ROOT_DIR == plans_root():
+        ROOT_DIR.mkdir(parents=True, exist_ok=True)
     INDEX_FILTER = args.index_filter
     if not ROOT_DIR.is_dir():
         print(f"ERROR: {ROOT_DIR} is not a directory", file=sys.stderr)

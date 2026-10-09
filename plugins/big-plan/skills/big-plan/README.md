@@ -2,7 +2,7 @@
 
 Serve markdown project plans as commentable HTML over Tailscale.
 
-The Big Plan skill tells Claude or Codex to save plans under `<repo>/.projects/`, register the plan for review, and share its verified `https://<MagicDNS-name>/<path>` URL when Tailscale Serve proxies HTTPS on port 443. There is no slash command; this is a persistent service, not a workflow. Before using a POST endpoint, verify the staged service responds locally over HTTP on port `8765`; start it with `systemctl --user start big-plan.service` if needed, then check again.
+The Big Plan skill tells Claude or Codex to save plans under `${XDG_STATE_HOME:-$HOME/.local/state}/big-plan/plans/<repo-name>/`, register the plan for review, and share its verified `https://<MagicDNS-name>/<path>` URL when Tailscale Serve proxies HTTPS on port 443. There is no slash command; this is a persistent service, not a workflow. Before using a POST endpoint, verify the staged service responds locally over HTTP on port `8765`; start it with `systemctl --user start big-plan.service` if needed, then check again.
 
 When an operator configures `tailscale serve` (`sudo tailscale serve --bg --https=443 http://127.0.0.1:8765`), it terminates TLS on 443 for the node's MagicDNS name and proxies to the local plain-HTTP server. That optional serve config persists across reboots; disable it with `tailscale serve --https=443 off`. Without it, the direct `http://<MagicDNS-name>:8765/` URL works on the tailnet. The plugin installer does not change Tailscale configuration.
 
@@ -15,9 +15,9 @@ ts_node=$(tailscale status --json | python3 -c 'import json,sys; print(json.load
 tailscale serve status --json
 ```
 
-Check that the Serve result has `TCP["443"].HTTPS` set to true and `Web["<node>:443"].Handlers["/"].Proxy` set to `http://127.0.0.1:8765`. Then use `https://<node>/<encoded-relpath-from-~/git/>`, with no explicit port. Before handing it to a reviewer, make a normal HTTPS GET to that exact plan URL and require HTTP 200. For example, run `curl -sS -o /dev/null -w '%{http_code}\n' "https://$ts_node/<encoded-path>"` with the actual encoded plan path. A HEAD request is insufficient. If the mapping exists but the GET fails, investigate before sharing the URL.
+Check that the Serve result has `TCP["443"].HTTPS` set to true and `Web["<node>:443"].Handlers["/"].Proxy` set to `http://127.0.0.1:8765`. Then use `https://<node>/<encoded-path-relative-to-the-plan-root>`, with no explicit port. Before handing it to a reviewer, make a normal HTTPS GET to that exact plan URL and require HTTP 200. For example, run `curl -sS -o /dev/null -w '%{http_code}\n' "https://$ts_node/<encoded-path>"` with the actual encoded plan path. A HEAD request is insufficient. If the mapping exists but the GET fails, investigate before sharing the URL.
 
-When Serve is not configured, use the direct `http://<node>:8765/<encoded-relpath-from-~/git/>` URL. When Tailscale is unavailable, use `http://127.0.0.1:8765/<encoded-relpath-from-~/git/>`. The local API also uses plain HTTP on port `8765` for registration and other POST requests.
+When Serve is not configured, use the direct `http://<node>:8765/<encoded-path-relative-to-the-plan-root>` URL. When Tailscale is unavailable, use `http://127.0.0.1:8765/<encoded-path-relative-to-the-plan-root>`. The local API also uses plain HTTP on port `8765` for registration and other POST requests.
 
 **Heading text must stay stable once a reviewer has commented.** Review comments
 flow back into the doc in the next session;
@@ -154,7 +154,7 @@ curl -sX POST "http://localhost:8765/api/session/<rel/path.md>" -H 'Content-Type
 
 A Grok-labelled sidecar that was registered as `codex` (the only valid engine before Grok delivery existed) is healed at send time when that id is still a Grok session on disk, so those plans do not mint a new Codex thread.
 
-Missing or corrupt provenance is not an error; it degrades to a fresh dispatch.
+In-repo plans without usable provenance dispatch from their Git ancestor. External plans require session registration with a repository `cwd` before feedback can be dispatched.
 
 ### Index publication
 
@@ -162,7 +162,7 @@ The index is deliberately **opt-in**: a Markdown file appears there only when
 its adjacent `<plan>.md.big-plan` marker exists. Existing `<plan>.md.session`
 provenance registrations also count as already-promoted plans, so the new rule
 does not hide plans that were explicitly handed off before markers existed. This
-keeps ordinary `.projects/` drafts, research notes, and internal handoffs out of
+keeps ordinary unpublished drafts, research notes, and internal handoffs out of
 the phone-facing plan list.
 
 The normal `POST /api/session/<rel>` registration above creates the marker as
@@ -240,7 +240,7 @@ tailscale serve status --json
 curl -sS -o /dev/null -w "%{http_code}\n" "https://$ts_node/<encoded-path>"
 ```
 
-Serves `~/git/` with `--filter plans` on port 8765.
+Serves `${XDG_STATE_HOME:-$HOME/.local/state}/big-plan/plans` with `--filter plans` on port 8765.
 
 ## Index paging
 

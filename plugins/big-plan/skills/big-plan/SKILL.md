@@ -1,6 +1,6 @@
 ---
 name: big-plan
-description: Author, publish, and revise substantial Markdown plans in a repository's .projects directory using the local Big Plan review server. Use when the user asks for a big plan, commentable plan, phone review, decision cards, or Big Plan feedback round-trip.
+description: Author, publish, and revise substantial Markdown plans in persistent storage outside the repository using the local Big Plan review server. Use when the user asks for a big plan, commentable plan, phone review, decision cards, or Big Plan feedback round-trip.
 ---
 
 # Big Plan
@@ -9,15 +9,15 @@ Use Big Plan for substantial plans that benefit from structured review, anchored
 
 ## Author and publish
 
-1. Write the plan under `<repo>/.projects/<descriptive-name>.md`. Start from `template.md` when useful.
+1. Write the plan under `${XDG_STATE_HOME:-$HOME/.local/state}/big-plan/plans/<repo-name>/<descriptive-name>.md`. Start from `template.md` when useful.
 2. Keep headings stable after publication. Heading slugs and block text anchor feedback; renaming a commented heading or rewriting a commented block can orphan its anchor.
 3. Use ordinary Markdown plus the supported affordances documented in `README.md`: task checkboxes, `decide`, `decide-multi`, `.compare` grids, Mermaid fences, and GitHub-style callouts.
-4. Determine the server root from `BIG_PLAN_ROOT`, defaulting to `$HOME/git`, and calculate the plan path relative to that root.
+4. Determine the server root from `BIG_PLAN_ROOT`, defaulting to `${XDG_STATE_HOME:-$HOME/.local/state}/big-plan/plans`, and calculate the plan path relative to that root.
 5. Before any POST, verify `http://127.0.0.1:${BIG_PLAN_PORT:-8765}/` responds. If the staged unit is inactive, start it with `systemctl --user start big-plan.service`, then verify the endpoint again. Do not POST to an unavailable service.
 6. Register provenance with `POST /api/session/<relative-path>` when the current engine and session ID are available. Registration also creates `<plan>.md.big-plan`, making the plan visible in the index. If there is intentionally no session provenance, publish it with `POST /api/promote/<relative-path>` instead.
 7. Return the plan's review URL, not only the index URL. Check its transport and page response as described below before handing it off.
 
-For Claude, send `{engine:"claude", sessionId:$CLAUDE_CODE_SESSION_ID, name, cwd}`. For Grok, use `{engine:"grok", sessionId:$GROK_SESSION_ID, name, cwd}`. For Codex, use the current rollout UUID as `sessionId` and `engine:"codex"`. Never invent a session ID; promote without provenance when it is unavailable.
+For Claude, send `{engine:"claude", sessionId:$CLAUDE_CODE_SESSION_ID, name, cwd}`. For Grok, use `{engine:"grok", sessionId:$GROK_SESSION_ID, name, cwd}`. For Codex, use the current rollout UUID as `sessionId` and `engine:"codex"`. Never invent a session ID; promote without provenance when it is unavailable. Include the repository working directory as `cwd` when registering: external storage cannot infer it from a Git ancestor. Plans promoted without provenance can be reviewed, but feedback dispatch requires registration with a repository `cwd`.
 
 The local API base defaults to `http://127.0.0.1:${BIG_PLAN_PORT:-8765}`. URL-encode the relative path before using it in an API or browser URL.
 

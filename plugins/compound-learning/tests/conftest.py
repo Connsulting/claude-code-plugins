@@ -40,11 +40,11 @@ def _learning_files(directory: Path) -> list[Path]:
 
 @pytest.fixture(scope="session")
 def learning_snapshot(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Copy ~/.projects/learnings/*.md into a temp dir. Returns the temp path.
+    """Copy ~/.local/state/compound-learning/learnings/*.md into a temp dir. Returns the temp path.
 
     Falls back to bundled sample learnings when the user has no personal learnings.
     """
-    source = Path.home() / ".projects" / "learnings"
+    source = Path.home() / ".local/state/compound-learning/learnings"
     md_files = _learning_files(source) if source.exists() else []
 
     if not md_files:
@@ -52,7 +52,7 @@ def learning_snapshot(tmp_path_factory: pytest.TempPathFactory) -> Path:
         md_files = _learning_files(source)
 
     assert len(md_files) > 0, (
-        "No learning files found (checked ~/.projects/learnings/ and tests/fixtures/sample_learnings/)"
+        "No learning files found (checked ~/.local/state/compound-learning/learnings/ and tests/fixtures/sample_learnings/)"
     )
 
     dest = tmp_path_factory.mktemp("learnings")
@@ -154,3 +154,12 @@ def search_fn():
         return results
 
     return _search
+
+
+@pytest.fixture(autouse=True)
+def external_repo_state_home(tmp_path, monkeypatch):
+    """Keep persistent repo storage private while preserving the cached model location."""
+    import os
+    model_cache = Path.home() / ".cache/huggingface/hub"
+    monkeypatch.setenv("HF_HUB_CACHE", os.environ.get("HF_HUB_CACHE", str(model_cache)))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))

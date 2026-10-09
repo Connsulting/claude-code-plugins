@@ -348,10 +348,10 @@ def test_cross_scope_repo_learning_not_injected(peek_env, tmp_path) -> None:
     root_a = (tmp_path / "clientA" / "platform").resolve()
     root_b = (tmp_path / "clientB" / "platform").resolve()
     for root in (root_a, root_b):
-        (root / ".projects" / "learnings").mkdir(parents=True)
+        (db.repo_learning_dir(root)).mkdir(parents=True)
 
-    file_a = root_a / ".projects" / "learnings" / "zephyrine-deploy-runbook-2026-07-01.md"
-    file_b = root_b / ".projects" / "learnings" / "zephyrine-deploy-runbook-2026-07-02.md"
+    file_a = db.repo_learning_dir(root_a) / "zephyrine-deploy-runbook-2026-07-01.md"
+    file_b = db.repo_learning_dir(root_b) / "zephyrine-deploy-runbook-2026-07-02.md"
     file_a.write_text(RUNBOOK_A, encoding="utf-8")
     file_b.write_text(RUNBOOK_B, encoding="utf-8")
 
@@ -390,10 +390,10 @@ def test_cross_scope_repo_learning_not_injected(peek_env, tmp_path) -> None:
         for item in payload.get("learnings", [])
     ]
 
-    assert any(p.startswith(str(root_a)) for p in paths), (
+    assert any(p.startswith(str(db.repo_learning_dir(root_a))) for p in paths), (
         f"the session's own repo learning must still be injected; got {paths}"
     )
-    assert not any(p.startswith(str(root_b)) for p in paths), (
+    assert not any(p.startswith(str(db.repo_learning_dir(root_b))) for p in paths), (
         f"another client's repo learning leaked into this session: {paths}"
     )
 
@@ -404,7 +404,7 @@ def test_cross_scope_repo_learning_not_injected(peek_env, tmp_path) -> None:
 def test_learning_root_matches_the_root_the_writer_stores(tmp_path) -> None:
     """A learnings dir below the git root must be QUERIED under the stored root.
 
-    `<repo>/sub/.projects/learnings/` is written with `repo_root = <repo>`,
+    `<repo>/sub/.local/state/compound-learning/repos/` is written with `repo_root = <repo>`,
     because the writer canonicalizes through `db._derive_repo_root`. Reporting
     the literal `<repo>/sub` at query time asks for a root no row carries, so
     every learning in that tree becomes unreachable with no error anywhere.
@@ -416,7 +416,7 @@ def test_learning_root_matches_the_root_the_writer_stores(tmp_path) -> None:
     repo = (home / "repo").resolve()
     (repo / ".git").mkdir(parents=True)
     sub = repo / "sub"
-    learnings = sub / ".projects" / "learnings"
+    learnings = db.repo_learning_dir(sub, home)
     learnings.mkdir(parents=True)
 
     learning_file = learnings / "sub-tree-learning-2026-07-01.md"
@@ -438,7 +438,7 @@ def test_canonical_root_at_home_yields_no_repo_scope(tmp_path) -> None:
     """A git repo at `~` must not collapse every client subtree into one scope.
 
     Canonicalization walks UP to the nearest git ancestor, so a dotfiles repo at
-    the home directory makes every client's `.projects/learnings` resolve to
+    the home directory makes every client's external repo learnings resolve to
     `~`. Scoping a session to `~` matches the repo-scoped rows of every other
     client at once, which is the cross-client leak this scoping closes. Fail
     closed: no repo scope at all, never a broader one.
@@ -448,7 +448,7 @@ def test_canonical_root_at_home_yields_no_repo_scope(tmp_path) -> None:
     client_a = home / "clientA"
     client_b = home / "clientB"
     for client in (client_a, client_b):
-        (client / ".projects" / "learnings").mkdir(parents=True)
+        (db.repo_learning_dir(client, home)).mkdir(parents=True, exist_ok=True)
 
     roots = sl.detect_learning_roots(str(client_a), str(home))
 

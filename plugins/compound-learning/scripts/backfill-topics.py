@@ -2,7 +2,7 @@
 """
 Backfill missing **Topic:** fields in learning markdown files.
 
-Scans ~/.projects/learnings/*.md for files that lack a **Topic:** line,
+Scans ~/.local/state/compound-learning/learnings/*.md for files that lack a **Topic:** line,
 infers the topic from existing **Tags:**, then either prints the proposed
 changes (--dry-run, the default) or writes them to disk (--apply).
 """
@@ -113,8 +113,8 @@ def main() -> None:
     parser.add_argument(
         "--dir",
         metavar="PATH",
-        default="~/.projects/learnings",
-        help="Directory to scan (default: ~/.projects/learnings)",
+        default="~/.local/state/compound-learning/learnings",
+        help="Directory to scan (default: ~/.local/state/compound-learning/learnings)",
     )
     args = parser.parse_args()
 

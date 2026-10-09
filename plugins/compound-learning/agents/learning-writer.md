@@ -34,12 +34,14 @@ You do not perform the duplicate check yourself. `scripts/dedupe-on-write.py` me
 
 ## Scope Decision (Simple)
 
-**Global** (`~/.projects/learnings/`):
+**Global** (`~/.local/state/compound-learning/learnings/`):
 - Security patterns (ALWAYS)
 - Widely-used library gotchas (React, Node, Python stdlib, etc.)
 - Universal patterns applicable anywhere
 
-**Repo** (`[repo]/.projects/learnings/`):
+**Repo** (`~/.local/state/compound-learning/repos/<absolute-repo-path>/learnings/`):
+
+`<absolute-repo-path>` is the canonical main-checkout absolute path with its leading `/` removed. Resolve a worktree to its main checkout before choosing this directory. This preserves separate storage for repositories with the same name.
 - Repo-specific library or tooling
 - Custom scripts or Makefile usage
 - Project-specific patterns
