@@ -8,10 +8,11 @@ import os
 import re
 import tempfile
 import time
-from dataclasses import asdict, dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 
 from .config import AccountConfig, AdapterConfig, RuntimeConfig
 
@@ -327,7 +328,7 @@ def refresh_all(
             missing_usage = expected_ids - set(snapshot.limits)
             if missing_usage:
                 raise AdapterFailure(
-                    f"usage adapter omitted configured limit {sorted(missing_usage)[0]}"
+                    f"usage adapter omitted configured limit {min(missing_usage)}"
                 )
             if account.reset_adapter_id is not None:
                 reset_adapter = config.adapter(account.reset_adapter_id)
@@ -339,7 +340,7 @@ def refresh_all(
                 missing_resets = expected_ids - set(resets)
                 if missing_resets:
                     raise AdapterFailure(
-                        f"reset adapter omitted configured limit {sorted(missing_resets)[0]}"
+                        f"reset adapter omitted configured limit {min(missing_resets)}"
                     )
                 merged = {
                     limit_id: {
@@ -354,7 +355,8 @@ def refresh_all(
                 )
             _atomic_write(cache_path(root, account.provider_id, account.id), snapshot)
             results[key] = snapshot
-        except Exception as exc:  # an account failure is data, never a sibling-killing exception
+        except Exception as exc:  # noqa: BLE001
+            # An account failure is data and must not abort refreshing sibling accounts.
             existing = read_cached(
                 root, account, now_epoch=now, max_age_seconds=config.usage_max_age_seconds,
             )

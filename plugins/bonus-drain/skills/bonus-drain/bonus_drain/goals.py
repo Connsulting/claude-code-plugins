@@ -6,9 +6,18 @@ import json
 import re
 import sqlite3
 import time
-from typing import Any, Mapping
+from collections.abc import Mapping
+from typing import Any
 
-from .db import QueueDB, QueueError, Task, TERMINAL_STATUSES, _contract_hash, is_safe_task_id, utc_now
+from .db import (
+    TERMINAL_STATUSES,
+    QueueDB,
+    QueueError,
+    Task,
+    _contract_hash,
+    is_safe_task_id,
+    utc_now,
+)
 
 
 def _json(value: Any) -> str:
@@ -247,10 +256,11 @@ class GoalStore:
             raise QueueError('coordinator only accepts ordinary task routing fields')
         _text(routing.get('model'), 'explicit coordinator model')
         for field in ('allowed_providers', 'required_capabilities'):
-            if field in routing:
-                if (not isinstance(routing[field], list) or
-                        any(not isinstance(x, str) or not x.strip() for x in routing[field])):
-                    raise QueueError(f'coordinator {field} must be an array of nonempty strings')
+            if field in routing and (
+                not isinstance(routing[field], list)
+                or any(not isinstance(x, str) or not x.strip() for x in routing[field])
+            ):
+                raise QueueError(f'coordinator {field} must be an array of nonempty strings')
         if routing.get('mcp') is not None:
             _text(routing['mcp'], 'coordinator mcp')
         value['coordinator'] = routing

@@ -9,20 +9,20 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from collections.abc import Iterator
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterator
 from unittest import mock
-from tests.readiness_fixture import review_args, reviewed
 
+from tests.readiness_fixture import review_args, reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
 
-from bonus_drain import cli, config as config_module, db, dispatcher, scout, usage  # noqa: E402
-
+from bonus_drain import cli, db, dispatcher, scout, usage
+from bonus_drain import config as config_module
 
 SIZES = ("tiny", "small", "medium", "large", "huge")
 NOW = 2_000_000_000
@@ -572,9 +572,9 @@ class TaskSizeContractTests(unittest.TestCase):
         legacy_queue = db.QueueDB(self.root / "legacy.db")
         sized_queue = db.QueueDB(self.root / "sized.db")
         assignments = {"alpha": "huge", "beta": "tiny", "gamma": "medium"}
-        for task_id in assignments:
+        for task_id, size in assignments.items():
             legacy_queue.add_task(reviewed(_task_values(task_id)))
-            sized_queue.add_task(reviewed(_task_values(task_id, size=assignments[task_id])))
+            sized_queue.add_task(reviewed(_task_values(task_id, size=size)))
 
         legacy_eligible = legacy_queue.eligible_tasks(
             NOW, provider_id="alpha", capabilities=("cpu",),

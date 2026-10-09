@@ -14,7 +14,6 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COLLECTOR = (
     REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain" / "grok-usage.sh"

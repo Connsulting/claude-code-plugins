@@ -9,16 +9,17 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
-from tests.readiness_fixture import reviewed
 
+from tests.readiness_fixture import reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
 
-from bonus_drain import config as config_module, db, scout, usage  # noqa: E402
-from tests.test_bonus_drain_scout_inflight import _open_snapshots, _two_provider_config
+from bonus_drain import config as config_module
+from bonus_drain import db, scout, usage
 
+from tests.test_bonus_drain_scout_inflight import _open_snapshots, _two_provider_config
 
 NOW = 2_000_000_000
 RESET = NOW + 1_000

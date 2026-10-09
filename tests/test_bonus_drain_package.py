@@ -18,10 +18,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 from unittest import mock
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ROOT = REPO_ROOT / "plugins" / "bonus-drain"
@@ -203,16 +203,15 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             self.assertIsInstance(manifest.get("description"), str, manifest_path)
             self.assertTrue(manifest["description"].strip(), manifest_path)
             versions.append(manifest["version"])
-        self.assertEqual(versions, ["0.3.14", "0.3.14"])
+        self.assertEqual(versions, ["0.3.15", "0.3.15"])
 
         sys.path.insert(0, str(SKILL_ROOT))
         try:
-            from bonus_drain import __version__
-            from bonus_drain import lifecycle
+            from bonus_drain import __version__, lifecycle
         finally:
             sys.path.pop(0)
-        self.assertEqual(__version__, "0.3.14")
-        self.assertEqual(lifecycle._DEFAULT_VERSION, "0.3.14")
+        self.assertEqual(__version__, "0.3.15")
+        self.assertEqual(lifecycle._DEFAULT_VERSION, "0.3.15")
 
     def test_packaged_viewer_supports_secretless_tailnet_controls(self) -> None:
         example = self.load_json(SKILL_ROOT / "config.example.json")
@@ -427,8 +426,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                 [str(SKILL_ROOT / "install.sh"), "--home", str(home)],
                 check=True,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
             )
             config_path.parent.mkdir(parents=True)
@@ -449,8 +447,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                 check=True,
                 env=environment,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
             )
             subprocess.run(
@@ -464,8 +461,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                 check=True,
                 env=environment,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
             )
             generated = sorted(current.rglob("*.pyc"))
@@ -483,8 +479,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                 check=False,
                 env=environment,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
             )
 
@@ -498,8 +493,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                 [str(SKILL_ROOT / "install.sh"), "--home", str(home)],
                 check=True,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
             )
             current = home / ".local" / "lib" / "bonus-drain" / "current"
@@ -522,8 +516,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                         check=False,
                         env={**os.environ, "HOME": str(home)},
                         stdin=subprocess.DEVNULL,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
+                        capture_output=True,
                         text=True,
                     )
                     self.assertEqual(completed.returncode, 1)
@@ -541,8 +534,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                 [str(SKILL_ROOT / "install.sh"), "--home", str(home)],
                 check=True,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
             )
             self.installed_config(home, config_path)
@@ -561,8 +553,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                 check=True,
                 env=environment,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
             )
             results = [
@@ -571,8 +562,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                     check=False,
                     env=environment,
                     stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    capture_output=True,
                     text=True,
                 )
                 for _ in range(2)
@@ -720,10 +710,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
         )
         retired = {
             path for path in actual
-            if path == "skills/bonus-drain/VIEWER_FOLLOW_UP.md"
-            or path.endswith("services/jobs-viewer/usage.sh")
-            or path.endswith("services/jobs-viewer/codex-usage.sh")
-            or path.endswith("services/jobs-viewer/grok-usage.sh")
+            if path == "skills/bonus-drain/VIEWER_FOLLOW_UP.md" or path.endswith(("services/jobs-viewer/usage.sh", "services/jobs-viewer/codex-usage.sh", "services/jobs-viewer/grok-usage.sh"))
         }
         self.assertFalse(
             retired,
@@ -810,8 +797,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                 ),
                 check=False,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
                 timeout=5,
             )
@@ -843,8 +829,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                         command,
                         check=False,
                         stdin=subprocess.DEVNULL,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
+                        capture_output=True,
                         text=True,
                         timeout=5,
                     )
@@ -865,8 +850,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                 ),
                 check=False,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
                 timeout=5,
             )
@@ -944,8 +928,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                 ),
                 check=False,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
                 timeout=5,
             )
@@ -969,8 +952,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                 ),
                 check=False,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
                 timeout=5,
             )
@@ -996,8 +978,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                 ),
                 check=False,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
                 timeout=5,
             )
@@ -1027,8 +1008,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                 ),
                 check=False,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
                 timeout=5,
             )
@@ -1057,8 +1037,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                 ),
                 check=False,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
                 timeout=5,
             )
@@ -1085,8 +1064,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             results = [
                 subprocess.run(
                     command, cwd=checkout, env=environment, check=False,
-                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    text=True, timeout=30,
+                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
                 )
                 for _ in range(2)
             ]
@@ -1159,8 +1137,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                 [analyzer, "verify", str(SKILL_ROOT / "systemd" / "bonus-drain-viewer.service")],
                 check=False,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 text=True,
                 timeout=20,
             )
@@ -1431,7 +1408,7 @@ class UpgradeOrderingTests(unittest.TestCase):
         completed = subprocess.run(
             [str(self.home / ".local" / "bin" / "bonus-drain"), "queue", "0", "--json", "--local"],
             check=False, env=environment, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            capture_output=True, text=True,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         payload = json.loads(completed.stdout)

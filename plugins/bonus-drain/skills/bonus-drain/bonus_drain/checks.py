@@ -14,12 +14,12 @@ import os
 import re
 import subprocess
 import time
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Literal, Mapping, Sequence
+from typing import Any, Literal
 from urllib.parse import quote
 
 from .handoff import DependencyHandoffError, _canonical_remote, normalize_branch_ref
-
 
 CHECK_FIELDS: Mapping[str, tuple[frozenset[str], frozenset[str]]] = {
     "base_ref_exists": (frozenset({"ref"}), frozenset()),

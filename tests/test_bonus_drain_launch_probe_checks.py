@@ -11,17 +11,30 @@ import contextlib
 import io
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 from unittest import mock
 
+sys.path.insert(
+    0,
+    str(Path(__file__).resolve().parents[1] / "plugins" / "bonus-drain" / "skills" / "bonus-drain"),
+)
+
+from bonus_drain import checks, cli
+
+from tests.readiness_fixture import review_json
 from tests.test_bonus_dependency_recovery import NOW, captured_json, rows, runtime
 from tests.test_bonus_drain_preflight_checks import (
-    GH_OFFLINE_STDERR, ISSUE_OPEN_3815, FakeRunner, PreflightCase, exited, gh_issue, ok,
+    GH_OFFLINE_STDERR,
+    ISSUE_OPEN_3815,
+    FakeRunner,
+    PreflightCase,
+    exited,
+    gh_issue,
+    ok,
 )
 from tests.test_bonus_drain_preflight_dispatch import HermeticEnvironment
-from tests.readiness_fixture import review_json
-from bonus_drain import checks, cli
 
 # --- Claude: ``claude mcp get <server>`` ----------------------------------------------
 # Observed 2026-10-03 on this host (plan D4): a connected server prints its name line, a

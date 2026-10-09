@@ -9,15 +9,15 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from tests.readiness_fixture import reviewed
 
+from tests.readiness_fixture import reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
 
-from bonus_drain import config as config_module, db, dispatcher  # noqa: E402
-
+from bonus_drain import config as config_module
+from bonus_drain import db, dispatcher
 
 T3_THREAD_ID = "thr_01J9ZQ7K3V8M2N4P6R8T0W2Y4A"
 

@@ -10,8 +10,9 @@ import signal
 import subprocess
 import tempfile
 import time
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from . import config as config_module
 from .config import AdapterConfig, RuntimeConfig

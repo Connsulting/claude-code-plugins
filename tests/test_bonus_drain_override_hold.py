@@ -2,18 +2,30 @@
 
 from __future__ import annotations
 
-import contextlib
-import io
-import json
 import sqlite3
+import sys
 import unittest
+from pathlib import Path
 from unittest import mock
 
-from tests.test_bonus_dependency_recovery import (
-    NOW, KEY, RecoveryCase, as_dict, captured_json, iso, reason, rows, verified,
+sys.path.insert(
+    0,
+    str(Path(__file__).resolve().parents[1] / "plugins" / "bonus-drain" / "skills" / "bonus-drain"),
 )
+
 from bonus_drain import cli, db, goals
+
 from tests.readiness_fixture import rereviewed
+from tests.test_bonus_dependency_recovery import (
+    NOW,
+    RecoveryCase,
+    as_dict,
+    captured_json,
+    iso,
+    reason,
+    rows,
+    verified,
+)
 
 
 class OverrideHoldCase(RecoveryCase):
@@ -207,13 +219,15 @@ class DefaultAndAutomaticUnchanged(OverrideHoldCase):
     def test_automatic_recovery_cannot_use_the_override(self) -> None:
         self.held_by("auto", "authority_required")
         self.add("auto-child", depends_on=["auto"])
-        with self.queue._transaction() as connection:
-            with self.assertRaisesRegex(db.QueueError, "only operator"):
-                self.queue._request_recovery_in_connection(
-                    connection, "auto", expected_attempt_id=None,
-                    expected_legacy_run_rowid=None, mode=None, source="automatic",
-                    now_epoch=NOW, override_reason="sneaky",
-                )
+        with (
+            self.queue._transaction() as connection,
+            self.assertRaisesRegex(db.QueueError, 'only operator'),
+        ):
+            self.queue._request_recovery_in_connection(
+                connection, "auto", expected_attempt_id=None,
+                expected_legacy_run_rowid=None, mode=None, source="automatic",
+                now_epoch=NOW, override_reason="sneaky",
+            )
         self.queue.reconcile_recoveries(now_epoch=NOW + 1, dry_run=False)
         self.assertEqual(self.recovery("auto")["state"], "held")
 

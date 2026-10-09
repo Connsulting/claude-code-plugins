@@ -2,14 +2,29 @@
 
 from __future__ import annotations
 
+import sys
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.test_bonus_dependency_recovery import (
-    KEY, NOW, RecoveryCase, captured_json, iso, reason, rows, runtime, verified,
+sys.path.insert(
+    0,
+    str(Path(__file__).resolve().parents[1] / "plugins" / "bonus-drain" / "skills" / "bonus-drain"),
 )
+
 from bonus_drain import cli, db, dispatcher, reconcile
+
+from tests.test_bonus_dependency_recovery import (
+    KEY,
+    NOW,
+    RecoveryCase,
+    captured_json,
+    iso,
+    reason,
+    rows,
+    runtime,
+    verified,
+)
 
 
 def authority(detail: str = "the controlling decision is still draft") -> dict[str, object]:

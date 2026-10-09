@@ -5,17 +5,15 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+
 from tests.readiness_fixture import reviewed
-
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
 
-from bonus_drain.config import LimitConfig  # noqa: E402
-from bonus_drain.planner import _limit_admission, build_plan  # noqa: E402
-
+from bonus_drain.config import LimitConfig, RuntimeConfig
+from bonus_drain.planner import _limit_admission, build_plan
 
 NOW = 2_000_000_000
 HOUR = 3_600
@@ -110,7 +108,7 @@ class RemainingHeadroomFloorTests(unittest.TestCase):
         self.assertEqual(reason, "at ceiling for limit weekly")
 
 
-def _two_account_config() -> SimpleNamespace:
+def _two_account_config() -> RuntimeConfig:
     from bonus_drain import config as config_module
 
     router = config_module.AdapterConfig("router", "agent-router", ("/bin/true",))
@@ -324,6 +322,7 @@ class SameProviderAccountSelectionTests(unittest.TestCase):
 class RecurringCycleEligibilityTests(unittest.TestCase):
     def test_weekly_task_cannot_rerun_on_the_same_reset_cycle(self) -> None:
         import tempfile
+
         from bonus_drain import db as bonus_db
 
         reset = NOW + 40 * HOUR

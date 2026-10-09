@@ -11,20 +11,26 @@ import subprocess
 import sys
 import tempfile
 import time
-import uuid
-from hashlib import sha256
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
+from hashlib import sha256
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any
 
 from . import checks
-from .config import AccountConfig, AdapterConfig, ConfigError, ProviderConfig, RuntimeConfig
+from .config import (
+    AccountConfig,
+    AdapterConfig,
+    ConfigError,
+    ProviderConfig,
+    RuntimeConfig,
+)
 from .db import (
     COMPLETION_MECHANISMS,
     IMPLEMENT_CAPABILITY,
-    AccountHold,
     LEGACY_EXCLUSIVE_CAPABILITY,
     REASON_CODES,
+    AccountHold,
     QueueDB,
     QueueError,
     Task,
@@ -1230,7 +1236,7 @@ def _router_diagnostic(
 
     try:
         secret_values, _secret_env = _secrets(adapter, {}, config, os.environ)
-    except Exception:
+    except Exception:  # noqa: BLE001
         # Failure to resolve a redaction secret must not turn a router error into a new failure.
         # _redact still removes named credential assignments and bounds the diagnostic.
         secret_values = {}
@@ -1872,7 +1878,8 @@ def dispatch(
         if activation_call is not None and activated:
             try:
                 _activation(config, account, "release", activation_call)
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
+                # Cleanup failures must preserve the original classification failure.
                 pass
         raise
     except ActivationUnavailable as exc:

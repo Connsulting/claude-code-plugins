@@ -14,23 +14,47 @@ import io
 import json
 import os
 import sqlite3
+import sys
 import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest import mock
 
-from tests.test_bonus_dependency_recovery import KEY, NOW, captured_json, rows, runtime, task
-from tests.test_bonus_drain_preflight_checks import (
-    ISSUE_3815_OPEN, PreflightCase, authority, exited, gh_issue, ok, table_counts,
+sys.path.insert(
+    0,
+    str(Path(__file__).resolve().parents[1] / "plugins" / "bonus-drain" / "skills" / "bonus-drain"),
 )
-from tests.test_bonus_drain_preflight_dispatch import HermeticEnvironment
-from tests.test_bonus_drain_launch_probe_checks import K8S_SERVICE, KUBECTL_NOT_FOUND_STDERR, kubectl
-from tests import test_bonus_drain_package as package_tests
-from tests.readiness_fixture import minimal_review, rereviewed, reviewed
+
 from bonus_drain import checks, cli, db, dispatcher
 from bonus_drain import review as review_module
+
+from tests import test_bonus_drain_package as package_tests
+from tests.readiness_fixture import minimal_review, rereviewed, reviewed
+from tests.test_bonus_dependency_recovery import (
+    KEY,
+    NOW,
+    captured_json,
+    rows,
+    runtime,
+    task,
+)
+from tests.test_bonus_drain_launch_probe_checks import (
+    K8S_SERVICE,
+    KUBECTL_NOT_FOUND_STDERR,
+    kubectl,
+)
+from tests.test_bonus_drain_preflight_checks import (
+    ISSUE_3815_OPEN,
+    PreflightCase,
+    authority,
+    exited,
+    gh_issue,
+    ok,
+    table_counts,
+)
+from tests.test_bonus_drain_preflight_dispatch import HermeticEnvironment
 
 SKILL_ROOT = package_tests.SKILL_ROOT
 REVIEW_REQUIRED = "readiness review required"
@@ -782,7 +806,7 @@ class PreviewScriptTests(unittest.TestCase):
                 [sys.executable, str(self.SCRIPT), "--source-config", str(config_path),
                  "--destination", str(destination), "--host", "preview.example.ts.net:8443", "--examples"],
                 check=False, env=environment, stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=120,
+                capture_output=True, text=True, timeout=120,
             )
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -940,12 +964,11 @@ class OutcomeMeasurementTests(ReviewCase):
 
     def test_blocker_outcomes_require_the_field(self) -> None:
         for status, code in self.CASES:
-            with self.subTest(status=status, code=code):
-                with self.assertRaisesRegex(
-                    db.QueueError,
-                    "reason.queue_time_knowable is required for authority_required and verification_needed outcomes",
-                ):
-                    db.validate_outcome(status, blocker(code, include=False))
+            with (
+                self.subTest(status=status, code=code),
+                self.assertRaisesRegex(db.QueueError, 'reason.queue_time_knowable is required for authority_required and verification_needed outcomes'),
+            ):
+                db.validate_outcome(status, blocker(code, include=False))
 
     def test_both_boolean_values_are_kept(self) -> None:
         for status, code in self.CASES:
@@ -1012,7 +1035,7 @@ class OutcomeMeasurementTests(ReviewCase):
 class RecordUnreportedTests(ReviewCase):
     """A worker that omits queue_time_knowable keeps its authority blocker, recorded as unreported."""
 
-    RESUME = [{"type": "issue_open", "repo": "curie-eng/curie", "number": 3815}]
+    RESUME: ClassVar[list[dict[str, Any]]] = [{"type": "issue_open", "repo": "curie-eng/curie", "number": 3815}]
 
     def stored_outcome(self, attempt) -> dict[str, Any]:
         return json.loads(rows(

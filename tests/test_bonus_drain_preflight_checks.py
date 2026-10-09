@@ -12,16 +12,30 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 import unittest
+from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any
 from unittest import mock
 
-from tests.test_bonus_dependency_recovery import (
-    KEY, NOW, RecoveryCase, iso, reason, rows, task, verified,
+sys.path.insert(
+    0,
+    str(Path(__file__).resolve().parents[1] / "plugins" / "bonus-drain" / "skills" / "bonus-drain"),
 )
+
 from bonus_drain import checks, db, goals
+
 from tests.readiness_fixture import rereviewed, reviewed
+from tests.test_bonus_dependency_recovery import (
+    KEY,
+    NOW,
+    RecoveryCase,
+    iso,
+    rows,
+    task,
+    verified,
+)
 
 HOUR = 3_600
 REPO = "curie-eng/curie"
@@ -103,11 +117,11 @@ def git_ls_remote(cwd: object, ref: str = "refs/heads/main") -> tuple[str, ...]:
     return ("git", "-C", str(cwd), "ls-remote", "--exit-code", "--heads", "origin", ref)
 
 
-def ok(stdout: str) -> "checks.RunnerResult":
+def ok(stdout: str) -> checks.RunnerResult:
     return checks.RunnerResult(returncode=0, stdout=stdout, stderr="")
 
 
-def exited(code: int, stderr: str = "", stdout: str = "") -> "checks.RunnerResult":
+def exited(code: int, stderr: str = "", stdout: str = "") -> checks.RunnerResult:
     return checks.RunnerResult(returncode=code, stdout=stdout, stderr=stderr)
 
 
@@ -747,7 +761,10 @@ class CheckGatingTests(PreflightCase):
 
                 manual = self.runner({argv: ok(nested_shape)})
 
-                def scout_answer(_argv: tuple[str, ...], task_id: str = task_id, manual=manual):
+                def scout_answer(
+                    _argv: tuple[str, ...], task_id: str = task_id, manual=manual,
+                    outer_shape: str = outer_shape,
+                ):
                     # A manual dispatch evaluates the same row while the scout's call is in
                     # flight; it began later, so its result must win.
                     checks.refresh(self.queue, runner=manual, now_epoch=NOW, task_ids=(task_id,))
@@ -1043,9 +1060,11 @@ class MergedEdgeTests(PreflightCase):
 class QueueValidationTests(PreflightCase):
     def test_remote_tracking_start_ref_rejected(self) -> None:
         for value in ("origin/main", "refs/heads/origin/main", "upstream/main", "remotes/origin/main"):
-            with self.subTest(start_ref=value):
-                with self.assertRaisesRegex(db.QueueError, "remote-tracking"):
-                    self.add(f"bad-{len(value)}", start_ref=value)
+            with (
+                self.subTest(start_ref=value),
+                self.assertRaisesRegex(db.QueueError, 'remote-tracking'),
+            ):
+                self.add(f"bad-{len(value)}", start_ref=value)
         self.assertEqual(self.queue.tasks(), [])
         self.assertEqual(self.add("good", start_ref="main").start_ref, "refs/heads/main")
         self.assertEqual(self.add("epic", start_ref="epic/next").start_ref, "refs/heads/epic/next")
@@ -1450,23 +1469,20 @@ class QueueReadinessTests(PreflightCase):
 
 
 class CollisionTests(PreflightCase):
-    def test_same_work_group_serializes(self) -> None:
+    def test_same_work_group_runs_concurrently(self) -> None:
         self.add("first", work_group="Report work", priority=1)
         self.add("second", work_group="Report work", priority=2)
-        attempt = self.claim("first")
+        self.claim("first")
 
         status = self.ready("second")
-        self.assertEqual((status["state"], status["hold_reason"]), ("waiting", "collision"))
-        self.assertEqual(status["reason"], "Serialized behind first (shared group:Report work)")
-        self.assertIsNone(self.try_claim("second"))
-        self.assertNotIn("second", self.eligible_ids())
-        self.assertEqual(self.queue.collision_keys(["first", "second"]), {
-            "first": frozenset({"group:Report work"}),
-            "second": frozenset({"group:Report work"}),
-        })
-
-        self.terminal("first", attempt, "failed", reason(), now=NOW + 5)
-        self.assertTrue(self.ready("second")["ready"])
+        self.assertEqual((status["state"], status["hold_reason"]), ("ready", None))
+        self.assertIn("second", self.eligible_ids())
+        for keys in (self.queue.collision_keys, self.queue.reserved_collision_keys):
+            self.assertEqual(keys(["first", "second"]), {
+                "first": frozenset(), "second": frozenset(),
+            })
+        with self.queue._connect() as connection:
+            self.assertIsNone(db.QueueDB._collision_holder(connection, self.queue.task("second"), False))
         self.assertIsNotNone(self.try_claim("second"))
 
     def test_same_issue_key_serializes_across_forms(self) -> None:
@@ -1492,10 +1508,11 @@ class CollisionTests(PreflightCase):
         self.assertEqual(self.queue.collision_keys(["loose"]), {"loose": frozenset()})
 
     def test_goal_members_exempt_from_collision(self) -> None:
-        self.add("member-a", work_group="Goal work")
-        self.add("member-b", work_group="Goal work")
-        self.add("outsider", work_group="Goal work")
+        self.add("member-a", work_group="Goal work", source_ref="owner/repo#12")
+        self.add("member-b", work_group="Goal work", source_ref="owner/repo#12")
+        self.add("outsider", work_group="Goal work", source_ref="owner/repo#12")
         add_goal(self.queue, "goal-1", ["member-a", "member-b"], max_inflight=2)
+        self.refresh(self.runner({gh_issue(12, "owner/repo"): ok(ISSUE_3815_OPEN)}))
 
         self.assertEqual(self.queue.collision_keys(["member-a"]), {"member-a": frozenset()})
         self.assertIsNotNone(self.try_claim("member-a"))

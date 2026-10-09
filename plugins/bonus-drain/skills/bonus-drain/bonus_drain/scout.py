@@ -5,14 +5,18 @@ from __future__ import annotations
 import fcntl
 import os
 import time
-from dataclasses import asdict, dataclass, replace
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 
 from . import checks, db, goals, notifications
 from .config import HostLoadGateConfig, RuntimeConfig
 from .db import (
-    IMPLEMENT_CAPABILITY, QueueDB, hour_round, task_invokes_implement,
+    IMPLEMENT_CAPABILITY,
+    QueueDB,
+    hour_round,
+    task_invokes_implement,
     task_requires_legacy_exclusive,
 )
 from .dispatcher import (
@@ -32,7 +36,6 @@ from .planner import (
 )
 from .reconcile import reconcile_inflight
 from .usage import read_all
-
 
 # Held for a whole tick so a timer run and a slot-freed path run never overlap.
 TICK_LOCK_NAME = "scout.lock"
@@ -105,7 +108,8 @@ def read_host_load(
     root = Path(proc_root)
     try:
         cpus = cpu_count()
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # An injected CPU reader must retain read_host_load's never-raises contract.
         cpus = None
     return HostLoad(
         cpu_some_avg60=_psi_some_avg60(_read_text(root / "pressure" / "cpu")),
@@ -629,8 +633,8 @@ def plan_tick(
     # queue's normal priority order within each class, but exhaust exclusive work first so
     # portable tasks cannot consume every compatible slot across a multi-provider tick.
     task_order.sort(key=lambda task_id: not task_requires_legacy_exclusive(task_by_id[task_id]))
-    # Collision keys (work group, source issue) are reserved only by tasks that actually win a
-    # slot, so a same-group task that can run elsewhere is still considered. Augmenting paths
+    # Source issue keys are reserved only by tasks that actually win a slot, so another task
+    # for the same issue that can run elsewhere is still considered. Augmenting paths
     # move matched incumbents between slots but never unmatch them, so reserved keys stay exact.
     # Goal-owned work never waits on keys but reserves them once allocated, so later ordinary
     # work sharing a key waits.  A goal task allocated after an earlier ordinary task with a
@@ -842,7 +846,7 @@ def _run_locked(
             resumed = queue.resume_satisfied_holds(now_epoch=now)
             notified = notifications.blocker_notice(config, queue, now_epoch=now)
             preflight = {"checks": refreshed, "resumed": resumed, "notified": notified}
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             # A broken refresher must surface as a scout failure rather than silently
             # leaving gated work pending; ungated work keeps dispatching.
             errors.append({"task_id": "*", "kind": "preflight_failed", "message": str(exc)[:500]})
@@ -921,7 +925,8 @@ def _run_locked(
                     # The claim and durable activation lease remain fail-closed because the job may
                     # exist. Continue with compatible work on the same account only; doctor requires
                     # explicit reconciliation before an account switch.
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001
+                    # A task failure becomes scout report data so sibling work can continue.
                     errors.append({"task_id": task.id, "kind": "failed", "message": str(exc)})
 
     return ScoutReport(

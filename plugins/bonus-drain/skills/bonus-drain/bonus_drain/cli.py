@@ -8,13 +8,23 @@ import os
 import runpy
 import sys
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, is_dataclass, replace
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
-from . import __version__
+from . import (
+    __version__,
+    checks,
+    db,
+    dispatcher,
+    factory_terminal,
+    planner,
+    review,
+    scout,
+    usage,
+)
 from . import config as config_module
-from . import checks, db, dispatcher, factory_terminal, planner, review, scout, usage
 from .kick import kick_task, resolve_active_accounts
 
 
@@ -776,7 +786,7 @@ def _command(args: argparse.Namespace) -> int:
         records = usage.refresh_all(cfg, now_epoch=_now(args))
         try:
             db.QueueDB(cfg.database).record_usage(records.values())
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             # History is observability, not control flow: a refresh must still report the
             # readings it just fetched even if the queue database is unwritable.
             pass
@@ -1215,6 +1225,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except dispatcher.AmbiguousDispatch as exc:
         _json({"ok": False, "error": str(exc), "code": "ambiguous_dispatch"}, stream=sys.stderr)
         return 3
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
+        # The CLI boundary reports every runtime failure through its JSON error contract.
         _json({"ok": False, "error": str(exc), "code": "runtime_error"}, stream=sys.stderr)
         return 1

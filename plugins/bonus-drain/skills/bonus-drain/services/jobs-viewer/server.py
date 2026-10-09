@@ -47,11 +47,11 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from bonus_drain import config as graph_config  # noqa: E402
-from bonus_drain import dispatcher as graph_dispatcher  # noqa: E402
-from bonus_drain import usage as graph_usage  # noqa: E402
-from bonus_drain.db import QueueDB, QueueError  # noqa: E402
-from bonus_drain.kick import kick_task  # noqa: E402
+from bonus_drain import config as graph_config
+from bonus_drain import dispatcher as graph_dispatcher
+from bonus_drain import usage as graph_usage
+from bonus_drain.db import QueueDB, QueueError
+from bonus_drain.kick import kick_task
 
 BONUS_SKILL_DIR = Path(os.environ.get("BONUS_SKILL_DIR", str(REPO)))
 BONUSDB_SH = BONUS_SKILL_DIR / "bonusdb.sh"
@@ -84,7 +84,8 @@ def _config_urgency_hours(provider_id: str) -> int | None:
         hours = {int(lim.urgency_seconds // 3600)
                  for lim in c.limits if plan_provider.get(lim.plan_id) == provider_id
                  and getattr(lim, "urgency_seconds", 0)}
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # Optional urgency metadata must not stop rendering the viewer.
         return None
     return hours.pop() if len(hours) == 1 else None
 
@@ -102,7 +103,8 @@ def _config_lead_hours(provider_id: str) -> int | None:
         plan_provider = {p.id: p.provider_id for p in c.plans}
         hours = {int(lim.lead_seconds // 3600)
                  for lim in c.limits if plan_provider.get(lim.plan_id) == provider_id}
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # Optional lead-window metadata must not stop rendering the viewer.
         return None
     return hours.pop() if len(hours) == 1 else None
 
@@ -120,7 +122,8 @@ def _config_floor_params(provider_id: str) -> tuple[float, int] | None:
             (float(lim.max_percent_per_window), int(lim.pacing_window_seconds))
             for lim in c.limits if plan_provider.get(lim.plan_id) == provider_id
         }
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # Optional floor metadata must not stop rendering the viewer.
         return None
     return params.pop() if len(params) == 1 else None
 
@@ -453,11 +456,11 @@ def get_gates(n_elig: int, n_codex: int, n_grok: int,
         return _gates_cache["val"]
     out: dict = {"acct": [], "codex_acct": [], "allocations": {}}
     try:
-        cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
+        graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
         result = subprocess.run(
             ["bash", "-c", _GATES_SH, "gates", str(n_elig), str(n_codex),
              str(n_grok), grok_json, codex_json, str(int(now))],
-            capture_output=True, text=True, timeout=25,
+            capture_output=True, text=True, timeout=25, check=False,
             env={**os.environ, "BD": str(BONUS_SKILL_DIR)},
         )
         raw = result.stdout
@@ -529,7 +532,8 @@ def get_gates(n_elig: int, n_codex: int, n_grok: int,
                 ):
                     planned[task_id] = provider
         out["allocations"] = planned
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
+        # Gate reads are best effort; retain any parsed data if a later step fails.
         pass
     if PREVIEW:
         _preview_account_gates(graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG")), out)
@@ -599,7 +603,8 @@ def current_cycle(usage: dict | None) -> int:
             row = cx.execute("SELECT MAX(cycle) FROM runs").fetchone()
             if row and row[0]:
                 return int(row[0])
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
+        # Missing or unreadable cycle history keeps the viewer on its zero-cycle fallback.
         pass
     return 0
 
@@ -616,7 +621,7 @@ def _remaining_snapshot(cycle: int) -> list[dict]:
     try:
         result = subprocess.run(
             ["bash", str(BONUSDB_SH), "queue", "--json", "--local", str(cycle)],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True, text=True, timeout=15, check=False,
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError("bonus queue command timed out") from None
@@ -727,7 +732,8 @@ def _last_runs() -> dict[str, dict]:
             ).fetchall()
             for r in rows:
                 out[r["task"]] = {"ts": r["ts"], "status": r["status"], "engine": r["engine"]}
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
+        # Run-history read failures must leave the rest of the viewer available.
         pass
     return out
 
@@ -742,7 +748,8 @@ def get_recent_runs(limit: int = 80) -> list[dict]:
             value["title"] = titles.get(event.task, event.task)
             result.append(value)
         return result
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # Recent-run history is optional when the queue cannot be read.
         return []
 
 
@@ -766,7 +773,8 @@ def get_inflight() -> list[dict]:
                    ORDER BY r.ts DESC"""
             ).fetchall()
             return [dict(r) for r in rows]
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # Unavailable in-flight history must not prevent rendering the queue.
         return []
 
 
@@ -779,7 +787,8 @@ def get_dispatch_times(cycle: int) -> list[float]:
                 "SELECT ts FROM runs WHERE status='dispatched' AND ((cycle+1800)/3600*3600)=? ",
                 (cycle,),
             ).fetchall()
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # Dispatch-history failures leave the optional pacing strip empty.
         return out
     for r in rows:
         e = _iso_epoch(r["ts"])
@@ -795,7 +804,8 @@ def _iso_epoch(iso) -> float | None:
     try:
         t = time.strptime(str(iso).replace("Z", "").split(".")[0], "%Y-%m-%dT%H:%M:%S")
         return time.mktime(t) - time.timezone
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # Malformed log timestamps are omitted from the pacing strip.
         return None
 
 
@@ -808,7 +818,8 @@ def get_disabled() -> list[dict]:
                    FROM tasks WHERE active=0 ORDER BY priority, title"""
             ).fetchall()
             return [dict(r) for r in rows]
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # Unavailable disabled-task history must not prevent rendering active work.
         return []
 
 
@@ -820,15 +831,17 @@ def set_task_active(task_id: str, active: bool) -> tuple[bool, str]:
         with _db() as cx:
             if cx.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone() is None:
                 return False, "task not found"
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # The mutation boundary must report every queue-read failure to the caller.
         return False, "could not read task"
     command = "activate" if active else "deactivate"
     try:
         result = subprocess.run(
             ["bash", str(BONUSDB_SH), command, task_id],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, check=False,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # The mutation boundary must report every command failure to the caller.
         return False, "could not update task"
     if result.returncode != 0:
         return False, result.stderr.strip() or "could not update task"
@@ -990,9 +1003,10 @@ def finish_inflight_task(task_id: str, status: str) -> tuple[bool, str]:
 def _systemctl(*args: str) -> str:
     try:
         return subprocess.run(
-            ["systemctl", "--user", *args], capture_output=True, text=True, timeout=12
+            ["systemctl", "--user", *args], capture_output=True, text=True, timeout=12, check=False
         ).stdout
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # Unavailable systemd data must not prevent rendering Bonus Drain work.
         return ""
 
 
@@ -1000,7 +1014,8 @@ def list_timers() -> list[dict]:
     raw = _systemctl("list-timers", "--all", "--output=json")
     try:
         rows = json.loads(raw) if raw.strip() else []
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # Unreadable timer output leaves the optional schedule list empty.
         rows = []
     out = []
     for r in rows:
@@ -1035,7 +1050,8 @@ def _read_unit_file(unit: str) -> str:
     p = UNIT_DIR / unit
     try:
         return p.read_text()
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # Unreadable unit metadata is optional in the schedule view.
         return ""
 
 
@@ -1113,21 +1129,23 @@ def _calendar_iterations(expr: str, n: int) -> list[float]:
     try:
         out = subprocess.run(
             ["systemd-analyze", "calendar", f"--iterations={n}", expr],
-            capture_output=True, text=True, timeout=6,
+            capture_output=True, text=True, timeout=6, check=False,
         ).stdout
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # Calendar command failures leave the optional recurrence details empty.
         return []
     epochs = []
     for m in _ELAPSE_RE.finditer(out):
         try:
             epochs.append(_cal.timegm(time.strptime(m.group(1), "%a %Y-%m-%d %H:%M:%S")))
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
+            # Skip malformed calendar dates without losing the other occurrences.
             pass
     return epochs
 
 
 def _humanize_period(secs: float) -> str:
-    hour, day, week, month = 3600, 86400, 604800, 2592000
+    hour, day, week = 3600, 86400, 604800
     if abs(secs - hour) <= 0.1 * hour:
         return "hourly"
     if abs(secs - day) <= 0.1 * day:
@@ -1137,10 +1155,10 @@ def _humanize_period(secs: float) -> str:
     if 27 * day <= secs <= 31 * day:
         return "monthly"
     if secs < hour:
-        return f"every {int(round(secs / 60))}min"
+        return f"every {round(secs / 60)}min"
     if secs < day:
-        return f"every {int(round(secs / hour))}h"
-    return f"every {int(round(secs / day))}d"
+        return f"every {round(secs / hour)}h"
+    return f"every {round(secs / day)}d"
 
 
 def _weekday_note(expr: str, base: float) -> str:
@@ -1167,13 +1185,15 @@ def _resolve_prompt(execstart: str, svc: str) -> str:
     if m:
         try:
             return Path(m.group(1)).read_text().strip()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
+            # An unreadable referenced prompt still permits the sibling prompt lookup.
             pass
     sibling = UNIT_DIR / svc.replace(".service", ".prompt")
     if sibling.exists():
         try:
             return sibling.read_text().strip()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
+            # An unreadable sibling prompt leaves the optional preview empty.
             pass
     return ""
 
@@ -1186,7 +1206,7 @@ def _result(svc: str) -> str:
 
 
 def _family(unit: str) -> str:
-    if unit.startswith("cc-bonus-scout") or unit.startswith("cc-weekly-anchor"):
+    if unit.startswith(("cc-bonus-scout", "cc-weekly-anchor")):
         return "bonus-drain"
     if unit.startswith("cc-token-rotator"):
         return "rotator"
@@ -1789,7 +1809,7 @@ def _rotation(cards: list[dict]) -> str:
             urg_h = int(_f(c.get("urgency_h"))) or 24
             card_reset = _f(c.get("r7"))
             urg_start = card_reset - urg_h * 3600
-            if card_reset > now and now >= urg_start:
+            if card_reset > now >= urg_start:
                 label = "bonus drain"
             elif card_reset > now:
                 label = f'opens {dur(urg_start - now)}'
@@ -2007,8 +2027,8 @@ def _verdict(cards: list[dict], coord: str, lead_secs: int) -> tuple[str, str, s
         nxt = min(opening, key=lambda c: c["opens_in"])
         return ("idle", "nothing draining",
                 "Every account is outside its drain window or spent.",
-                f'next opens in {dur(nxt["opens_in"])} &middot; '
-                f'{ico(nxt["engine"])}{esc(nxt["name"])}')
+                (f'next opens in {dur(nxt["opens_in"])} &middot; '
+                 f'{ico(nxt["engine"])}{esc(nxt["name"])}'))
     return ("idle", "nothing draining", "No account has a usable drain window.", "")
 
 
@@ -2562,7 +2582,7 @@ def render_bonus_body() -> str:
     else:
         disabled_sec = ""
 
-    anchor = min((c["r7"] for c in cards
+    _anchor = min((c["r7"] for c in cards
                   if c["engine"] == "claude" and c.get("r7") and _f(c["r7"]) > time.time()),
                  default=None)
 
@@ -3530,11 +3550,13 @@ PAGE = """<!doctype html><html lang="en"><head>
 def render_page() -> bytes:
     try:
         bonus = render_bonus_body()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
+        # Isolate every queue-rendering failure so the schedule tab remains available.
         bonus = f'<h1>bonus-drain</h1><p class="empty">error: {esc(e)}</p>'
     try:
         schedule = render_schedule_body()
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
+        # Isolate every schedule-rendering failure so the queue tab remains available.
         schedule = f'<h1>scheduled jobs</h1><p class="empty">error: {esc(e)}</p>'
     return PAGE.format(title="Async Work", css=CSS, script=SCRIPT,
                        bonus=bonus, schedule=schedule).encode("utf-8")
@@ -3554,7 +3576,8 @@ class Handler(BaseHTTPRequestHandler):
         if self.path in ("/", "/index.html"):
             try:
                 body = render_page()
-            except Exception as e:  # never 500 the whole page on a data hiccup
+            except Exception as e:  # noqa: BLE001
+                # The HTTP page boundary must render its existing error page for any data failure.
                 body = PAGE.format(title="Async Work", css=CSS, script="",
                                    bonus=f'<p class="empty">error: {esc(e)}</p>',
                                    schedule="").encode()
@@ -3639,7 +3662,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError
             payload = json.loads(self.rfile.read(length))
             if not isinstance(payload, dict):
-                raise ValueError
+                raise TypeError
             return payload
         except (ValueError, TypeError, json.JSONDecodeError):
             self._bad_request()

@@ -9,22 +9,29 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 from unittest import mock
-from tests.readiness_fixture import reviewed
 
+from tests.readiness_fixture import reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
 
-from bonus_drain import cli, config as config_module, db, lifecycle, reconcile, scout  # noqa: E402
-from tests.test_bonus_drain_review_repairs import (  # noqa: E402
-    ELIGIBILITY_KEY, NOW, RESET, runtime, snapshots, task, verified_outcome,
-)
+from bonus_drain import cli, db, lifecycle, reconcile, scout
+from bonus_drain import config as config_module
 
+from tests.test_bonus_drain_review_repairs import (
+    ELIGIBILITY_KEY,
+    NOW,
+    RESET,
+    runtime,
+    snapshots,
+    task,
+    verified_outcome,
+)
 
 GIB = 2 ** 30
 
@@ -274,9 +281,8 @@ class HostLoadGateConfigTests(unittest.TestCase):
             "not an object": ["enabled"],
         }
         for label, block in invalid.items():
-            with self.subTest(label):
-                with self.assertRaises(config_module.ConfigError):
-                    self.validate(_raw_config(self.root, host_load_gate=block))
+            with self.subTest(label), self.assertRaises(config_module.ConfigError):
+                self.validate(_raw_config(self.root, host_load_gate=block))
 
 
 class ScoutTickCase(unittest.TestCase):
@@ -311,15 +317,17 @@ class ScoutTickCase(unittest.TestCase):
         completed = {"rows": [{
             "provider": "alpha", "job_id": "job-stale", "state": "completed",
         }]}
-        with mock.patch.object(reconcile, "execute_adapter", return_value=completed):
-            with mock.patch.object(scout, "read_all", return_value=snapshots()):
-                with mock.patch.object(
-                    scout, "reconcile_inflight", wraps=scout.reconcile_inflight,
-                ) as spy:
-                    report = scout.run_once(
-                        self.config, self.queue, now_epoch=NOW,
-                        router_call=self.route, host_load_reader=reader, **kwargs,
-                    )
+        with (
+            mock.patch.object(reconcile, "execute_adapter", return_value=completed),
+            mock.patch.object(scout, "read_all", return_value=snapshots()),
+            mock.patch.object(
+                scout, "reconcile_inflight", wraps=scout.reconcile_inflight,
+            ) as spy,
+        ):
+            report = scout.run_once(
+                self.config, self.queue, now_epoch=NOW,
+                router_call=self.route, host_load_reader=reader, **kwargs,
+            )
         return report, spy
 
 
@@ -594,19 +602,18 @@ class SlotFreedMarkerTests(unittest.TestCase):
         attempt = self.dispatch("rolled-back")
         self.assertFalse(self.marker.exists())
 
-        with self.assertRaises(Sentinel):
-            with self.queue._transaction() as connection:
+        with self.assertRaises(Sentinel), self.queue._transaction() as connection:
+            connection.execute(
+                "UPDATE task_attempts SET state = 'failed', terminal_at = ? WHERE id = ?",
+                ("2026-01-01T00:00:00Z", attempt.id),
+            )
+            self.assertEqual(
                 connection.execute(
-                    "UPDATE task_attempts SET state = 'failed', terminal_at = ? WHERE id = ?",
-                    ("2026-01-01T00:00:00Z", attempt.id),
-                )
-                self.assertEqual(
-                    connection.execute(
-                        "SELECT state FROM task_attempts WHERE id = ?", (attempt.id,),
-                    ).fetchone()[0],
-                    "failed",
-                )
-                raise Sentinel()
+                    "SELECT state FROM task_attempts WHERE id = ?", (attempt.id,),
+                ).fetchone()[0],
+                "failed",
+            )
+            raise Sentinel()
 
         self.assertFalse(self.marker.exists())
         self.assertEqual(self.attempt_state(attempt.id), "dispatched")
@@ -638,7 +645,7 @@ class SlotFreedMarkerTests(unittest.TestCase):
         self.assertEqual(self.queue.attempts(task_id="finisher")[0].state, "done")
         self.assertEqual(self.queue.claims(), [])
         self.assertEqual(
-            [run.status for run in self.queue.runs(task_id="finisher")][0], "done",
+            self.queue.runs(task_id="finisher")[0].status, "done",
         )
 
 

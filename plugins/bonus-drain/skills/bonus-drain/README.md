@@ -340,6 +340,7 @@ of runtime removal.
 
 Every ready task is eligible for Bonus capacity; `run-now` accelerates an individual task.
 Tasks can carry source references, 15-character work groups, and one-off prerequisites.
+Work groups are display and navigation labels and do not affect scheduling or limit concurrency.
 See [ASYNC_WORK.md](ASYNC_WORK.md) for the contract and commands.
 Repository tasks may also set `start_ref` with `--start-ref` on add or through `start_ref` in
 edit changes. The viewer's read only `--local` queue and gates view shows the selected start

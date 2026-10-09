@@ -12,29 +12,67 @@ import io
 import json
 import os
 import subprocess
+import sys
 import unittest
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from unittest import mock
 
-from tests.test_bonus_dependency_recovery import (
-    KEY, NOW, captured_json, iso, reason, rows, runtime,
+sys.path.insert(
+    0,
+    str(Path(__file__).resolve().parents[1] / "plugins" / "bonus-drain" / "skills" / "bonus-drain"),
 )
-from tests.test_bonus_drain_preflight_checks import (
-    GH_OFFLINE_STDERR, ISSUE_2855_CLOSED, ISSUE_3815_OPEN, ISSUE_OPEN_2855, ISSUE_OPEN_3815,
-    ISSUE_OPEN_IN_V0_10_0, LS_REMOTE_MAIN, PR_2994_INTO_EPIC, PR_2994_MERGED, RELEASE_0_11_1,
-    FakeRunner, PreflightCase, authority, exited, add_goal, gh_issue, gh_pr, gh_release,
-    git_ls_remote, handoff,
-    in_milestone, ok, table_counts, with_fields,
-)
-from tests.test_bonus_drain_scout_inflight import (
-    HOUR, _multi_account_config, _multi_snapshots, _open_snapshots, _task as provider_task,
-    _two_provider_config,
-)
+
 from bonus_drain import checks, cli, db, dispatcher, notifications, scout, usage
 from bonus_drain import config as config_module
+
 from tests.readiness_fixture import rereviewed, review_args, reviewed
+from tests.test_bonus_dependency_recovery import (
+    KEY,
+    NOW,
+    captured_json,
+    iso,
+    reason,
+    rows,
+    runtime,
+)
+from tests.test_bonus_drain_preflight_checks import (
+    GH_OFFLINE_STDERR,
+    ISSUE_2855_CLOSED,
+    ISSUE_3815_OPEN,
+    ISSUE_OPEN_2855,
+    ISSUE_OPEN_3815,
+    ISSUE_OPEN_IN_V0_10_0,
+    LS_REMOTE_MAIN,
+    PR_2994_INTO_EPIC,
+    PR_2994_MERGED,
+    RELEASE_0_11_1,
+    FakeRunner,
+    PreflightCase,
+    add_goal,
+    authority,
+    exited,
+    gh_issue,
+    gh_pr,
+    gh_release,
+    git_ls_remote,
+    handoff,
+    in_milestone,
+    ok,
+    table_counts,
+    with_fields,
+)
+from tests.test_bonus_drain_scout_inflight import (
+    HOUR,
+    _multi_account_config,
+    _multi_snapshots,
+    _open_snapshots,
+    _two_provider_config,
+)
+from tests.test_bonus_drain_scout_inflight import (
+    _task as provider_task,
+)
 
 UNSWITCHED = "requested account did not become active"
 # The exact agent-router diagnostic for a Codex daemon that never started (no thread launched).
@@ -587,7 +625,7 @@ class QueueTimeCheckCliTests(HermeticEnvironment, PreflightCase):
     an unverifiable one always refuses, asking for a retry.
     """
 
-    OPEN_12 = {"type": "issue_open", "repo": "owner/repo", "number": 12}
+    OPEN_12: ClassVar[dict[str, Any]] = {"type": "issue_open", "repo": "owner/repo", "number": 12}
 
     def setUp(self) -> None:
         super().setUp()
@@ -1110,7 +1148,7 @@ class PromptPreflightTests(PreflightCase):
         self.add("child", depends_on=["parent"], merged_depends_on=["parent"])
         self.complete("parent", handoff(), now=NOW - 4_000)
 
-    MERGE_SPEC = {"type": "pr_merged", "repo": "owner/repo", "head": "task/x", "base": "main"}
+    MERGE_SPEC: ClassVar[dict[str, Any]] = {"type": "pr_merged", "repo": "owner/repo", "head": "task/x", "base": "main"}
 
     def test_prompt_lists_unverified_dependency_merge(self) -> None:
         # Review r1 P1: a merge GitHub could not confirm for an hour still launches, so the
@@ -1185,46 +1223,94 @@ class CollisionAllocationTests(PreflightCase):
         }
         return config, snapshots
 
-    def grouped(self, task_id: str, priority: int, *providers: str, group: str | None = None) -> None:
+    def routed(
+        self, task_id: str, priority: int, *providers: str,
+        source_ref: str | None = None,
+    ) -> None:
         value = provider_task(task_id, *providers)
         value["priority"] = priority
         value["cwd"] = str(self.root)
-        if group:
-            value["work_group"] = group
+        if source_ref:
+            value["source_ref"] = source_ref
         self.queue.add_task(reviewed(value))
 
-    def test_plan_tick_allocates_one_task_per_group(self) -> None:
+    def test_plan_tick_allocates_same_group_tasks_without_source_issues(self) -> None:
         self.add("g1", work_group="Report work", priority=1)
         self.add("g2", work_group="Report work", priority=2)
-        self.add("solo", priority=3)
+        self.assertTrue(self.ready("g1")["ready"])
+        self.assertTrue(self.ready("g2")["ready"])
 
         tick = self.tick(runtime(self.queue.path), alpha_snapshots())
 
         allocated = sorted(item for ids in self.allocated(tick).values() for item in ids)
-        self.assertEqual(allocated, ["g1", "solo"])
+        self.assertEqual(allocated, ["g1", "g2"])
+        self.assertEqual(self.queue.reserved_collision_keys(allocated), {
+            "g1": frozenset(), "g2": frozenset(),
+        })
+        self.assertIsNotNone(self.try_claim("g1"))
+        with self.queue._connect() as connection:
+            self.assertIsNone(db.QueueDB._collision_holder(connection, self.queue.task("g2"), False))
+        self.assertTrue(self.ready("g2")["ready"])
+        self.assertIsNotNone(self.try_claim("g2"))
+
+    def test_plan_tick_allocates_same_group_tasks_with_distinct_source_issues(self) -> None:
+        self.add("g1", work_group="Report work", source_ref="owner/repo#12", priority=1)
+        self.add("g2", work_group="Report work", source_ref="owner/repo#13", priority=2)
+        self.refresh(self.runner({
+            gh_issue(number, "owner/repo"): ok(ISSUE_3815_OPEN) for number in (12, 13)
+        }))
+        self.assertTrue(self.ready("g1")["ready"])
+        self.assertTrue(self.ready("g2")["ready"])
+
+        tick = self.tick(runtime(self.queue.path), alpha_snapshots())
+
+        allocated = sorted(item for ids in self.allocated(tick).values() for item in ids)
+        self.assertEqual(allocated, ["g1", "g2"])
+        self.assertEqual(self.queue.reserved_collision_keys(allocated), {
+            "g1": frozenset({"issue:owner/repo#12"}),
+            "g2": frozenset({"issue:owner/repo#13"}),
+        })
+        self.assertIsNotNone(self.try_claim("g1"))
+        with self.queue._connect() as connection:
+            self.assertIsNone(db.QueueDB._collision_holder(connection, self.queue.task("g2"), False))
+        self.assertTrue(self.ready("g2")["ready"])
+        self.assertIsNotNone(self.try_claim("g2"))
+
+    def test_plan_tick_allocates_one_task_per_source_issue(self) -> None:
+        self.add("first", source_ref="owner/repo#12", priority=1)
+        self.add("second", source_ref="https://github.com/owner/repo/issues/12", priority=2)
+        self.add("solo", priority=3)
+        self.refresh(self.runner({gh_issue(12, "owner/repo"): ok(ISSUE_3815_OPEN)}))
+
+        tick = self.tick(runtime(self.queue.path), alpha_snapshots())
+
+        allocated = sorted(item for ids in self.allocated(tick).values() for item in ids)
+        self.assertEqual(allocated, ["first", "solo"])
 
     def test_unallocated_task_reserves_no_key(self) -> None:
         # One Claude-like slot (alpha) and one Codex-like slot (beta).
         config, snapshots = self.slots()
-        self.grouped("unrelated", 0, "alpha")
-        self.grouped("group-a", 1, "alpha", group="Group G")
-        self.grouped("group-b", 2, "alpha", "beta", group="Group G")
+        self.routed("unrelated", 0, "alpha")
+        self.routed("issue-a", 1, "alpha", source_ref="owner/repo#12")
+        self.routed("issue-b", 2, "alpha", "beta", source_ref="owner/repo#12")
+        self.refresh(self.runner({gh_issue(12, "owner/repo"): ok(ISSUE_3815_OPEN)}))
 
         tick = self.tick(config, snapshots)
 
-        # group-a found no slot, so it reserved nothing and beta is not left idle.
-        self.assertEqual(self.allocated(tick), {"alpha": ["unrelated"], "beta": ["group-b"]})
+        # issue-a found no slot, so it reserved nothing and beta is not left idle.
+        self.assertEqual(self.allocated(tick), {"alpha": ["unrelated"], "beta": ["issue-b"]})
 
     def test_reassignment_keeps_reserved_key(self) -> None:
-        # Beta has a spare second slot, so only the reserved key keeps group-b out of it.
+        # Beta has a spare second slot, so only the reserved issue key keeps issue-b out of it.
         config, snapshots = self.slots(alpha_used=74, beta_used=73)
-        self.grouped("group-a", 0, "alpha", "beta", group="Group G")
-        self.grouped("constrained", 1, "alpha")
-        self.grouped("group-b", 2, "alpha", "beta", group="Group G")
+        self.routed("issue-a", 0, "alpha", "beta", source_ref="owner/repo#12")
+        self.routed("constrained", 1, "alpha")
+        self.routed("issue-b", 2, "alpha", "beta", source_ref="owner/repo#12")
+        self.refresh(self.runner({gh_issue(12, "owner/repo"): ok(ISSUE_3815_OPEN)}))
 
         tick = self.tick(config, snapshots)
 
-        self.assertEqual(self.allocated(tick), {"alpha": ["constrained"], "beta": ["group-a"]})
+        self.assertEqual(self.allocated(tick), {"alpha": ["constrained"], "beta": ["issue-a"]})
 
 
 class GoalCollisionReservationTests(PreflightCase):
@@ -1234,9 +1320,11 @@ class GoalCollisionReservationTests(PreflightCase):
         super().setUp()
         self.config = _two_provider_config(self.queue, self.root / "cache")
 
-    def member(self, task_id: str, priority: int) -> None:
+    def member(self, task_id: str, priority: int, *, source_ref: str | None = None) -> None:
         value = provider_task(task_id, "alpha", "beta")
         value.update(priority=priority, cwd=str(self.root), work_group="Group G")
+        if source_ref:
+            value["source_ref"] = source_ref
         self.queue.add_task(reviewed(value))
 
     def run_tick(self) -> tuple[scout.TickPlan, scout.ScoutReport]:
@@ -1251,7 +1339,8 @@ class GoalCollisionReservationTests(PreflightCase):
         ):
             report = scout.run_once(
                 self.config, self.queue, now_epoch=NOW,
-                router_call=launched_router(), check_runner=self.runner(),
+                router_call=launched_router(),
+                check_runner=self.runner({gh_issue(12, "owner/repo"): ok(ISSUE_3815_OPEN)}),
             )
         return tick, report
 
@@ -1259,10 +1348,11 @@ class GoalCollisionReservationTests(PreflightCase):
     def allocated(tick: scout.TickPlan) -> list[str]:
         return sorted(item.id for tasks in tick.allocations.values() for item in tasks)
 
-    def test_goal_member_reserves_group_against_ordinary_task_in_same_tick(self) -> None:
-        self.member("goal-member", 0)
-        self.member("ordinary", 1)
+    def test_goal_member_reserves_source_issue_against_ordinary_task_in_same_tick(self) -> None:
+        self.member("goal-member", 0, source_ref="owner/repo#12")
+        self.member("ordinary", 1, source_ref="owner/repo#12")
         add_goal(self.queue, "goal-1", ["goal-member"])
+        self.refresh(self.runner({gh_issue(12, "owner/repo"): ok(ISSUE_3815_OPEN)}))
 
         tick, report = self.run_tick()
 
@@ -1274,11 +1364,26 @@ class GoalCollisionReservationTests(PreflightCase):
             self.queue.readiness("ordinary", now_epoch=NOW)["hold_reason"], "collision",
         )
 
-    def task_for(self, task_id: str, priority: int, *providers: str, group: str | None = None) -> None:
+    def test_goal_member_and_ordinary_task_sharing_group_dispatch_together(self) -> None:
+        self.member("goal-member", 0)
+        self.member("ordinary", 1)
+        add_goal(self.queue, "goal-1", ["goal-member"])
+
+        tick, report = self.run_tick()
+
+        self.assertEqual(self.allocated(tick), ["goal-member", "ordinary"])
+        self.assertEqual(report.errors, ())
+        self.assertEqual(sorted(item.task_id for item in report.dispatched), ["goal-member", "ordinary"])
+        self.assertFalse([item for item in report.blockers if item.get("kind") == "collision"])
+
+    def task_for(
+        self, task_id: str, priority: int, *providers: str,
+        source_ref: str | None = None,
+    ) -> None:
         value = provider_task(task_id, *providers)
         value.update(priority=priority, cwd=str(self.root))
-        if group:
-            value["work_group"] = group
+        if source_ref:
+            value["source_ref"] = source_ref
         self.queue.add_task(reviewed(value))
 
     def one_slot_each(self) -> dict[tuple[str, str], usage.UsageSnapshot]:
@@ -1292,13 +1397,14 @@ class GoalCollisionReservationTests(PreflightCase):
         }
 
     def test_unplaced_goal_does_not_starve_higher_priority_ordinary_task(self) -> None:
-        # Review r2 P2: an ordinary task ahead of a goal candidate in its group must keep its
+        # Review r2 P2: an ordinary task ahead of a goal candidate for its issue must keep its
         # priority when the goal never gets a slot.
         self.task_for("unrelated-alpha", 0, "alpha")
-        self.task_for("ordinary", 1, "alpha", "beta", group="Group G")
-        self.task_for("goal-member", 2, "alpha", group="Group G")
+        self.task_for("ordinary", 1, "alpha", "beta", source_ref="owner/repo#12")
+        self.task_for("goal-member", 2, "alpha", source_ref="owner/repo#12")
         self.task_for("low", 3, "alpha", "beta")
         add_goal(self.queue, "goal-1", ["goal-member"])
+        self.refresh(self.runner({gh_issue(12, "owner/repo"): ok(ISSUE_3815_OPEN)}))
 
         with mock.patch.object(scout, "read_all", return_value=self.one_slot_each()):
             tick = scout.plan_tick(self.config, self.queue, now_epoch=NOW, provider_holds=())
@@ -1311,9 +1417,10 @@ class GoalCollisionReservationTests(PreflightCase):
     def test_ordinary_before_goal_member_dispatches_without_scout_error(self) -> None:
         # Goal members never wait on collision keys, so an ordinary task ahead of one in
         # priority order cannot turn the goal's claim into a scout error.
-        self.member("ordinary", 0)
-        self.member("goal-member", 1)
+        self.member("ordinary", 0, source_ref="owner/repo#12")
+        self.member("goal-member", 1, source_ref="owner/repo#12")
         add_goal(self.queue, "goal-1", ["goal-member"])
+        self.refresh(self.runner({gh_issue(12, "owner/repo"): ok(ISSUE_3815_OPEN)}))
 
         tick, report = self.run_tick()
 

@@ -12,13 +12,14 @@ import subprocess
 import sys
 import tempfile
 import threading
-from types import SimpleNamespace
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
+from typing import ClassVar
 from unittest import mock
-from tests.readiness_fixture import reviewed
 
+from tests.readiness_fixture import reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
@@ -449,8 +450,7 @@ class JobsViewerContractTests(unittest.TestCase):
                     "--disable-dev-shm-usage", "--no-proxy-server",
                     f"--user-data-dir={work}/profile", "--dump-dom", target.as_uri(),
                 ],
-                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, timeout=60, check=False,
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60, check=False,
             )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         dom = completed.stdout
@@ -727,8 +727,7 @@ class JobsViewerContractTests(unittest.TestCase):
                     "--host-resolver-rules=MAP viewer.example.test 127.0.0.1",
                     "--dump-dom", f"http://{host}/",
                 ],
-                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, timeout=30, check=False,
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, check=False,
             )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("01 work queue", completed.stdout)
@@ -847,7 +846,7 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertNotIn("size estimate", disabled_section)
 
 
-    QUEUE_FIXTURE = [
+    QUEUE_FIXTURE: ClassVar[list[dict[str, object]]] = [
         {
             "id": "weekly-claude", "title": "Weekly Claude sweep", "kind": "recurring",
             "priority": 1, "cadence": "weekly", "cwd": "/tmp/one", "goal": "sweep",
@@ -976,14 +975,14 @@ class JobsViewerContractTests(unittest.TestCase):
         waiting_row = body[body.rfind('<div class="qrow"', 0, waiting_at):waiting_at]
         self.assertIn('data-providers="claude"', waiting_row)
         self.assertIn(
-            f'data-value="claude" aria-pressed="false" '
-            f'aria-label="Claude" title="Claude">'
+            'data-value="claude" aria-pressed="false" '
+            'aria-label="Claude" title="Claude">'
             + self.viewer.ico("claude") + "<i>2</i>",
             bar,
         )
         self.assertIn(
-            f'data-value="codex" aria-pressed="false" '
-            f'aria-label="Codex" title="Codex">'
+            'data-value="codex" aria-pressed="false" '
+            'aria-label="Codex" title="Codex">'
             + self.viewer.ico("codex") + "<i>1</i>",
             bar,
         )
@@ -1026,8 +1025,7 @@ class JobsViewerContractTests(unittest.TestCase):
                     "--disable-dev-shm-usage", "--no-proxy-server",
                     f"--user-data-dir={work}/profile", "--dump-dom", target.as_uri(),
                 ],
-                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, timeout=60, check=False,
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60, check=False,
             )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         dom = completed.stdout
@@ -1110,8 +1108,7 @@ class JobsViewerContractTests(unittest.TestCase):
                         "--disable-dev-shm-usage", "--no-proxy-server",
                         f"--user-data-dir={work}/profile", "--dump-dom", target.as_uri(),
                     ],
-                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    text=True, timeout=60, check=False,
+                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60, check=False,
                 )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             return completed.stdout
@@ -1269,8 +1266,7 @@ class JobsViewerContractTests(unittest.TestCase):
                         "--disable-dev-shm-usage", "--no-proxy-server",
                         f"--user-data-dir={work}/profile", "--dump-dom", target.as_uri(),
                     ],
-                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    text=True, timeout=60, check=False,
+                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60, check=False,
                 )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             return completed.stdout
@@ -1338,8 +1334,7 @@ class JobsViewerContractTests(unittest.TestCase):
                         "--disable-dev-shm-usage", "--no-proxy-server",
                         f"--user-data-dir={work}/profile", "--dump-dom", target.as_uri(),
                     ],
-                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    text=True, timeout=60, check=False,
+                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60, check=False,
                 )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             return completed.stdout
@@ -1429,6 +1424,7 @@ class CheckReadinessViewerTests(unittest.TestCase):
 
     def test_never_evaluated_check_renders_not_checked_yet(self) -> None:
         from bonus_drain import checks, db
+
         from tests.test_bonus_dependency_recovery import NOW, task
 
         queue = db.QueueDB(self.root / "queue.db")

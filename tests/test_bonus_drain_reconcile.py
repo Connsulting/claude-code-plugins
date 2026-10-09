@@ -14,11 +14,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/bonus-drai
 from bonus_drain import db, reconcile, scout
 from bonus_drain.adapters import AdapterError
 from bonus_drain.dispatcher import DispatchError
+
+from tests.readiness_fixture import reviewed
 from tests.test_bonus_drain_review_repairs import (
-    ELIGIBILITY_KEY, NOW, RESET, runtime, snapshots, task,
+    ELIGIBILITY_KEY,
+    NOW,
+    RESET,
+    runtime,
+    snapshots,
+    task,
 )
 from tests.test_bonus_drain_scout_inflight import _open_snapshots, _two_provider_config
-from tests.readiness_fixture import reviewed
 
 
 def verified_outcome():
@@ -61,16 +67,15 @@ class ScoutReconciliationTests(unittest.TestCase):
         }]}
 
     def run_scout(self, response, *, dry_run=False, release=None, config=None, usage_snapshots=None):
-        with mock.patch.object(reconcile, "execute_adapter", return_value=response):
-            with mock.patch.object(
-                scout, "read_all",
-                return_value=snapshots() if usage_snapshots is None else usage_snapshots,
-            ):
-                with mock.patch.object(scout, "dispatch") as dispatch:
-                    report = scout.run_once(
-                        config or self.config, self.queue, now_epoch=NOW, dry_run=dry_run,
-                        activation_call=release,
-                    )
+        with (
+            mock.patch.object(reconcile, 'execute_adapter', return_value=response),
+            mock.patch.object(scout, 'read_all', return_value=snapshots() if usage_snapshots is None else usage_snapshots),
+            mock.patch.object(scout, 'dispatch') as dispatch,
+        ):
+            report = scout.run_once(
+                config or self.config, self.queue, now_epoch=NOW, dry_run=dry_run,
+                activation_call=release,
+            )
         return report, dispatch
 
     def test_terminal_worker_releases_ownership_and_unblocks_dispatch_once(self):
@@ -174,9 +179,11 @@ class ScoutReconciliationTests(unittest.TestCase):
 
     def test_ambiguous_claim_stops_before_probing(self):
         self.queue.mark_ambiguous("abandoned", ELIGIBILITY_KEY, detail="unknown launch")
-        with mock.patch.object(reconcile, "execute_adapter") as probe:
-            with mock.patch.object(scout, "read_all", return_value=snapshots()):
-                report = scout.run_once(self.config, self.queue, now_epoch=NOW)
+        with (
+            mock.patch.object(reconcile, 'execute_adapter') as probe,
+            mock.patch.object(scout, 'read_all', return_value=snapshots()),
+        ):
+            report = scout.run_once(self.config, self.queue, now_epoch=NOW)
         self.assertEqual(report.blockers[0]["kind"], "reconciliation_required")
         probe.assert_not_called()
 

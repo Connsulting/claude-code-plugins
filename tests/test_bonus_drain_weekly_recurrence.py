@@ -8,14 +8,14 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
-from tests.readiness_fixture import reviewed
 
+from tests.readiness_fixture import reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
 
-from bonus_drain import db  # noqa: E402
+from bonus_drain import db
 
 
 def epoch(value: str) -> int:

@@ -9,18 +9,26 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
 
-from bonus_drain import cli, db, dispatcher, factory_terminal  # noqa: E402
+from bonus_drain import cli, db, dispatcher, factory_terminal
 
-from tests.test_bonus_dependency_recovery import (  # noqa: E402
-    KEY, NOW, RecoveryCase, captured_json, iso, rows, runtime, task, verified,
+from tests.test_bonus_dependency_recovery import (
+    KEY,
+    NOW,
+    RecoveryCase,
+    captured_json,
+    iso,
+    rows,
+    runtime,
+    verified,
 )
-from tests.test_bonus_drain_jobs_viewer import _load_server  # noqa: E402
+from tests.test_bonus_drain_jobs_viewer import _load_server
 
 DETAIL = "Approve the CI workflow diff in PR 42 before it is committed"
 PR_URL = "https://github.com/example/repo/pull/42"
@@ -289,9 +297,8 @@ class MigrationTests(RecoveryCase):
             "INSERT INTO runs(task,kind,cycle,eligibility_key,status,ts) "
             "VALUES('new','oneoff',0,NULL,'awaiting_human',?)"
         )
-        with sqlite3.connect(path) as connection:
-            with self.assertRaises(sqlite3.IntegrityError):
-                connection.execute(insert, (iso(NOW),))
+        with sqlite3.connect(path) as connection, self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(insert, (iso(NOW),))
 
         queue = db.QueueDB(path)
         queue.initialize()
@@ -384,7 +391,7 @@ class PromptTests(RecoveryCase):
 
 
 class FactoryTerminalTests(unittest.TestCase):
-    ROW = {"factory_version": "v1", "repo": "r", "tier": "quick", "status": "dispatched",
+    ROW: ClassVar[dict[str, object]] = {"factory_version": "v1", "repo": "r", "tier": "quick", "status": "dispatched",
            "completed_at": None, "outcome": None, "pr_url": None}
 
     def test_awaiting_human_maps_to_factory_awaiting_human(self) -> None:

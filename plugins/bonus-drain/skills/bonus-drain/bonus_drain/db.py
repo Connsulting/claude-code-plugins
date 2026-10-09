@@ -9,11 +9,16 @@ import re
 import sqlite3
 import time
 import uuid
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Literal, Mapping, Sequence
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Literal,
+)
 from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:
@@ -209,7 +214,7 @@ def validate_outcome(
     return value
 
 
-def _contract_hash(task: "Task") -> str:
+def _contract_hash(task: Task) -> str:
     value = task.to_dict()
     # The readiness review is evidence about the contract, not part of it.
     for field in ("priority", "size", "active", "readiness_review"):
@@ -709,7 +714,7 @@ class QueueDB:
                 os.write(fd, f"{time.time():.6f}\n".encode("ascii"))
             finally:
                 os.close(fd)
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             # The transition already committed; a missing wake-up only defers to the timer.
             pass
 
@@ -841,7 +846,7 @@ class QueueDB:
         for snapshot in snapshots:
             if not getattr(snapshot, "fresh", True):
                 continue
-            stamp = snapshot.captured_at
+            _stamp = snapshot.captured_at
             for limit_id, reading in (snapshot.limits or {}).items():
                 rows.append((
                     utc_now(), snapshot.provider_id, snapshot.account_id, limit_id,
@@ -1723,7 +1728,7 @@ class QueueDB:
         return counts
 
     def readiness(
-        self, task_id: str, *, now_epoch: int | float | None = None,
+        self, task_id: str, *, now_epoch: float | None = None,
     ) -> dict[str, Any]:
         from .goals import recovery_admission, task_admitted
         now = float(time.time() if now_epoch is None else now_epoch)
@@ -1921,7 +1926,7 @@ class QueueDB:
     def edit_task(self, task_id: str, changes: Mapping[str, Any]) -> Task:
         """Edit a queued task; a contract change must carry a review of the new contract.
 
-        Title, priority, size, and work_group are scheduling and display fields: editing them
+        Title and work_group are display fields; priority and size affect scheduling. Editing them
         never needs a review and does not stale the stored one.
         """
 
@@ -2057,12 +2062,16 @@ class QueueDB:
         capability_set = set(capabilities)
         if provider_id and task.allowed_providers and provider_id not in task.allowed_providers:
             return False
-        if provider_id and task_requires_legacy_exclusive(task):
-            if LEGACY_EXCLUSIVE_CAPABILITY not in capability_set:
-                return False
-        if provider_id and task_invokes_implement(task):
-            if IMPLEMENT_CAPABILITY not in capability_set:
-                return False
+        if (
+            provider_id and task_requires_legacy_exclusive(task)
+            and LEGACY_EXCLUSIVE_CAPABILITY not in capability_set
+        ):
+            return False
+        if (
+            provider_id and task_invokes_implement(task)
+            and IMPLEMENT_CAPABILITY not in capability_set
+        ):
+            return False
         return set(task.required_capabilities).issubset(capability_set)
 
     def _weekly_window(self, now_epoch: float) -> tuple[float, float]:
@@ -3316,9 +3325,11 @@ class QueueDB:
             if completed:
                 continue
             effective = event.provider_id
-            if provider_id is not None and effective != provider_id:
-                if not (include_legacy and effective is None):
-                    continue
+            if (
+                provider_id is not None and effective != provider_id
+                and not (include_legacy and effective is None)
+            ):
+                continue
             result.append(event)
         return result
 
@@ -4569,8 +4580,6 @@ class QueueDB:
     def _raw_collision_keys(task: Task) -> frozenset[str]:
         from . import checks
         keys = set()
-        if task.work_group:
-            keys.add(f"group:{task.work_group}")
         issue = checks.parse_issue_ref(task.source_ref)
         if issue is not None:
             keys.add(f"issue:{issue[0]}#{issue[1]}")
@@ -4580,7 +4589,7 @@ class QueueDB:
     def _collision_holder(
         connection: sqlite3.Connection, task: Task, goal_owned: bool,
     ) -> dict[str, str] | None:
-        """Return the claimed task sharing a work group or issue key, if any.
+        """Return the claimed task sharing a source issue key, if any.
 
         Goal-owned work never waits (its goal bounds concurrency), but its claims still
         hold their keys, so non-goal work waits behind it.
@@ -4598,7 +4607,7 @@ class QueueDB:
         ):
             shared = keys & QueueDB._raw_collision_keys(QueueDB._task_from_row(row))
             if shared:
-                return {"task_id": row["id"], "key": sorted(shared)[0]}
+                return {"task_id": row["id"], "key": min(shared)}
         return None
 
     def collision_keys(self, task_ids: Iterable[str]) -> dict[str, frozenset[str]]:

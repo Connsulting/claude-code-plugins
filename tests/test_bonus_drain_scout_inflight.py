@@ -8,15 +8,15 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 from unittest import mock
-from tests.readiness_fixture import reviewed
 
+from tests.readiness_fixture import reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
 
-from bonus_drain import config as config_module, db, dispatcher, scout, usage  # noqa: E402
-
+from bonus_drain import config as config_module
+from bonus_drain import db, dispatcher, scout, usage
 
 NOW = 2_000_000_000
 HOUR = 3_600
@@ -405,9 +405,11 @@ class ScoutInflightCapTests(unittest.TestCase):
                 dispatched.append(kwargs["task_id"])
                 return mock.Mock(to_dict=lambda: {"task_id": kwargs["task_id"]})
 
-            with mock.patch.object(scout, "read_all", return_value=snapshots):
-                with mock.patch.object(scout, "dispatch", side_effect=fake_dispatch):
-                    report = scout.run_once(config, queue, now_epoch=NOW)
+            with (
+                mock.patch.object(scout, 'read_all', return_value=snapshots),
+                mock.patch.object(scout, 'dispatch', side_effect=fake_dispatch),
+            ):
+                report = scout.run_once(config, queue, now_epoch=NOW)
 
             self.assertEqual(report.errors, ())
             self.assertIn("beta-one", dispatched)
@@ -449,9 +451,11 @@ class ScoutInflightCapTests(unittest.TestCase):
                 dispatched.append(kwargs["task_id"])
                 return mock.Mock(to_dict=lambda: {"task_id": kwargs["task_id"]})
 
-            with mock.patch.object(scout, "read_all", return_value=snapshots):
-                with mock.patch.object(scout, "dispatch", side_effect=fake_dispatch):
-                    report = scout.run_once(config, queue, now_epoch=NOW)
+            with (
+                mock.patch.object(scout, 'read_all', return_value=snapshots),
+                mock.patch.object(scout, 'dispatch', side_effect=fake_dispatch),
+            ):
+                report = scout.run_once(config, queue, now_epoch=NOW)
 
             self.assertEqual(report.errors, ())
             self.assertEqual(len(dispatched), 2)
@@ -511,9 +515,11 @@ class ScoutMatchingAndGlobalCapTests(unittest.TestCase):
                 dispatched.append(kwargs["task_id"])
                 return mock.Mock(to_dict=lambda: {"task_id": kwargs["task_id"]})
 
-            with mock.patch.object(scout, "read_all", return_value=snapshots):
-                with mock.patch.object(scout, "dispatch", side_effect=fake_dispatch):
-                    report = scout.run_once(config, queue, now_epoch=NOW)
+            with (
+                mock.patch.object(scout, 'read_all', return_value=snapshots),
+                mock.patch.object(scout, 'dispatch', side_effect=fake_dispatch),
+            ):
+                report = scout.run_once(config, queue, now_epoch=NOW)
 
             self.assertEqual(report.errors, ())
             self.assertEqual(len(dispatched), 8)
@@ -545,9 +551,11 @@ class ScoutMatchingAndGlobalCapTests(unittest.TestCase):
                 dispatched.append(kwargs["task_id"])
                 return mock.Mock(to_dict=lambda: {"task_id": kwargs["task_id"]})
 
-            with mock.patch.object(scout, "read_all", return_value=snapshots):
-                with mock.patch.object(scout, "dispatch", side_effect=fake_dispatch):
-                    report = scout.run_once(config, queue, now_epoch=NOW)
+            with (
+                mock.patch.object(scout, 'read_all', return_value=snapshots),
+                mock.patch.object(scout, 'dispatch', side_effect=fake_dispatch),
+            ):
+                report = scout.run_once(config, queue, now_epoch=NOW)
 
             self.assertEqual(report.errors, ())
             self.assertEqual(len(dispatched), 12)

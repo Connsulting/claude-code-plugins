@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any
 from urllib.request import Request, urlopen
 
 from .config import RuntimeConfig
-from .db import QueueDB, TASK_ID_RE
+from .db import TASK_ID_RE, QueueDB
 
 
 def _task_ids(candidates: Iterable[Any]) -> list[str]:
@@ -67,7 +68,7 @@ def scout_health(
             "Inspect: bonus-drain doctor --json."
         )
         _post_ntfy(config, message)
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         # The scout's dispatch decisions and exit status remain authoritative even when
         # SQLite is unavailable or ntfy rejects/times out the notification.
         pass
@@ -84,7 +85,8 @@ def blocker_notice(config: RuntimeConfig, queue: QueueDB, *, now_epoch: int) -> 
         return []
     try:
         items = queue.reserve_blocker_notices(now_epoch=now_epoch)
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # Notice reservation failures must not change the scout's dispatch result.
         return []
     task_ids = _task_ids(item.get("task_id") for item in items)
     if not task_ids:
@@ -95,7 +97,7 @@ def blocker_notice(config: RuntimeConfig, queue: QueueDB, *, now_epoch: int) -> 
             "Inspect: bonus-drain held-report --json."
         )
         _post_ntfy(config, message)
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         # The reservation is consumed either way, matching scout_health semantics.
         pass
     return task_ids

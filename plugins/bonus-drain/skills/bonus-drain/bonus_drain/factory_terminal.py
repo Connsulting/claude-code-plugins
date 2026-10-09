@@ -17,15 +17,15 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 
 from .dispatcher import (
     factory_telemetry_script,
     new_factory_run_id,
 )
-
 
 OPEN_RUN_STATUSES = frozenset({"dispatched", "running"})
 RUN_FILL_FIELDS = ("status", "completed_at", "outcome", "pr_url", "pr_state", "merged_at")

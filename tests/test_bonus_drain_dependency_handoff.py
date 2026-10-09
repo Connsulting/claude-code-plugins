@@ -12,14 +12,15 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
+
 from tests.readiness_fixture import reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
 
-from bonus_drain import config as config_module
 from bonus_drain import cli, db, dispatcher, handoff, scout, usage
+from bonus_drain import config as config_module
 
 NOW = 2_000_000_000
 BRANCH_FIELDS = {"branch_ref", "parent_ids"}
@@ -357,9 +358,8 @@ class QueueBranchChoiceContract(unittest.TestCase):
         strict = self.queue.readiness("child", now_epoch=NOW)
         local = db.LocalQueueReader(self.queue.path)
         self.assertEqual(local.readiness("child", now_epoch=NOW), strict)
-        with self.assertRaises(sqlite3.OperationalError):
-            with local._connect() as connection:
-                connection.execute("UPDATE tasks SET title='changed' WHERE id='child'")
+        with self.assertRaises(sqlite3.OperationalError), local._connect() as connection:
+            connection.execute("UPDATE tasks SET title='changed' WHERE id='child'")
         self.assertEqual(self.queue.task("child").title, "child")
         with mock.patch.object(cli, "_json") as output:
             self.assertEqual(cli.main([

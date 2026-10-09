@@ -12,20 +12,20 @@ import tempfile
 import threading
 import time
 import unittest
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
-from typing import Iterator
 from unittest import mock
-from tests.readiness_fixture import reviewed
 
+from tests.readiness_fixture import reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
 
-from bonus_drain import adapters, cli, config as config_module, db, dispatcher, usage  # noqa: E402
-
+from bonus_drain import adapters, cli, db, dispatcher, usage
+from bonus_drain import config as config_module
 
 NOW = 2_000_000_000
 
@@ -732,8 +732,8 @@ class KickContractTests(unittest.TestCase):
                         task_id="portable",
                         requested_provider="alpha",
                         now_epoch=NOW,
-                        router_call=lambda *args, **kwargs: router_calls.append((args, kwargs)),
-                        activation_call=lambda *args: activation_calls.append(args),
+                        router_call=lambda *args, calls=router_calls, **kwargs: calls.append((args, kwargs)),
+                        activation_call=lambda *args, calls=activation_calls: calls.append(args),
                     )
                 self.assertEqual(router_calls, [])
                 self.assertEqual(activation_calls, [])
@@ -1183,13 +1183,15 @@ class KickContractTests(unittest.TestCase):
             return {"provider_id": "alpha", "dispatch": {"job_id": "unexpected"}}
 
         for requested in ("auto", "alpha"):
-            with self.subTest(requested=requested):
-                with self.assertRaises(dispatcher.DispatchError):
-                    dispatcher.dispatch(
-                        cfg, self.queue, task_id="portable",
-                        eligibility_key=f"manual/{requested}", requested_provider=requested,
-                        router_call=must_not_run,
-                    )
+            with (
+                self.subTest(requested=requested),
+                self.assertRaises(dispatcher.DispatchError),
+            ):
+                dispatcher.dispatch(
+                    cfg, self.queue, task_id="portable",
+                    eligibility_key=f"manual/{requested}", requested_provider=requested,
+                    router_call=must_not_run,
+                )
         self.assertEqual(called, [])
         self.assertEqual(self.queue.claims(), [])
 
@@ -1204,7 +1206,9 @@ class KickContractTests(unittest.TestCase):
             self.queue.add_task(reviewed(_task(task_id)))
             calls: list[list[str]] = []
 
-            def uncertain(argv: list[str], **_kwargs: object) -> object:
+            def uncertain(
+                argv: list[str], *, calls=calls, outcome=outcome, **_kwargs: object,
+            ) -> object:
                 calls.append(argv)
                 if isinstance(outcome, BaseException):
                     raise outcome
@@ -1293,12 +1297,14 @@ class KickContractTests(unittest.TestCase):
             f"stderr token={secret} " + ("y" * 800),
         )
         key = "manual/redacted-launch"
-        with mock.patch.dict(os.environ, {"BONUS_TEST_ROUTER_SECRET": secret}, clear=False):
-            with self.assertRaises(dispatcher.AmbiguousDispatch) as raised:
-                dispatcher.dispatch(
-                    cfg, self.queue, task_id="portable", eligibility_key=key,
-                    requested_provider="alpha", router_call=lambda *_args, **_kwargs: completed,
-                )
+        with (
+            mock.patch.dict(os.environ, {'BONUS_TEST_ROUTER_SECRET': secret}, clear=False),
+            self.assertRaises(dispatcher.AmbiguousDispatch) as raised,
+        ):
+            dispatcher.dispatch(
+                cfg, self.queue, task_id="portable", eligibility_key=key,
+                requested_provider="alpha", router_call=lambda *_args, **_kwargs: completed,
+            )
 
         claim = self.queue.claim_for("portable", key)
         self.assertIsNotNone(claim)
@@ -1387,7 +1393,9 @@ class KickContractTests(unittest.TestCase):
                 self.queue.add_task(reviewed(_task(task_id, mcp=task_mcp)))
                 seen: list[list[str]] = []
 
-                def router(argv: list[str], **_kwargs: object) -> dict[str, object]:
+                def router(
+                    argv: list[str], *, seen=seen, task_id=task_id, **_kwargs: object,
+                ) -> dict[str, object]:
                     seen.append(argv)
                     if "--dry-run" in argv:
                         return {"provider_id": "codex"}
@@ -1507,12 +1515,14 @@ class KickContractTests(unittest.TestCase):
                 b"to codex: rerun with --provider claude, or drop --mcp-config"
             ),
         )
-        with mock.patch("bonus_drain.adapters.run_bounded_process", return_value=rejected) as launched:
-            with self.assertRaises(dispatcher.KnownDispatchFailure):
-                dispatcher.dispatch(
-                    cfg, self.queue, task_id="mcp-parser-rejection",
-                    eligibility_key="manual/mcp-parser-rejection", requested_provider="claude",
-                )
+        with (
+            mock.patch('bonus_drain.adapters.run_bounded_process', return_value=rejected) as launched,
+            self.assertRaises(dispatcher.KnownDispatchFailure),
+        ):
+            dispatcher.dispatch(
+                cfg, self.queue, task_id="mcp-parser-rejection",
+                eligibility_key="manual/mcp-parser-rejection", requested_provider="claude",
+            )
         argv = launched.call_args.args[0]
         self.assertIn("--mcp-config", argv)
         self.assertEqual(self.queue.claim_for("mcp-parser-rejection"), None)

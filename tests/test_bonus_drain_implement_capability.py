@@ -11,15 +11,15 @@ from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
 from unittest import mock
-from tests.readiness_fixture import review_json, reviewed
 
+from tests.readiness_fixture import review_json, reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
 
-from bonus_drain import cli, config as config_module, db, dispatcher, scout, usage  # noqa: E402
-
+from bonus_drain import cli, db, dispatcher, scout, usage
+from bonus_drain import config as config_module
 
 NOW = 2_000_000_000
 HOUR = 3_600
@@ -193,14 +193,15 @@ class PlanningTests(CapabilityRoutingCase):
         holds = [item for item in tick.dependency_holds if item["kind"] == "provider_capability"]
         self.assertEqual([(item["task_id"], item["provider_id"]) for item in holds], [("impl", "grok")])
 
-    def test_implement_task_waiting_on_a_held_work_group_gets_no_capability_blocker(self) -> None:
+    def test_shared_work_group_does_not_hide_implement_capability_blocker(self) -> None:
         self.queue.add_task(reviewed(_task("plain", priority=1, work_group="parser")))
         self.queue.add_task(reviewed(_task("impl", goal=IMPLEMENT_GOAL, work_group="parser")))
 
         tick = self._plan(("grok",))
 
         self.assertEqual(self._allocated(tick), {"plain": "grok"})
-        self.assertFalse([item for item in tick.dependency_holds if item["kind"] == "provider_capability"])
+        holds = [item for item in tick.dependency_holds if item["kind"] == "provider_capability"]
+        self.assertEqual([(item["task_id"], item["provider_id"]) for item in holds], [("impl", "grok")])
 
     def test_grok_closed_by_usage_reports_no_capability_blocker(self) -> None:
         self.queue.add_task(reviewed(_task("impl", goal=IMPLEMENT_GOAL)))
@@ -412,13 +413,13 @@ class LongHorizonCoordinatorTests(CapabilityRoutingCase):
         from bonus_drain import goals
 
         store = goals.GoalStore(self.queue)
-        store.create(dict(
-            id="release", title="Release", cwd=str(self.root), outcome="The release works",
-            authority="Local disposable work only.",
-            acceptance=[{"id": "journey", "proof": "Run the journey"}],
-            merge_policy="stack", max_turns=4, deadline=NOW + 3600, max_inflight=1,
-            coordinator={"model": "gpt-6-astra"}, task_ids=[],
-        ), now=NOW)
+        store.create({
+            "id": "release", "title": "Release", "cwd": str(self.root), "outcome": "The release works",
+            "authority": "Local disposable work only.",
+            "acceptance": [{"id": "journey", "proof": "Run the journey"}],
+            "merge_policy": "stack", "max_turns": 4, "deadline": NOW + 3600, "max_inflight": 1,
+            "coordinator": {"model": "gpt-6-astra"}, "task_ids": [],
+        }, now=NOW)
         store.tick(now=NOW)
         coordinator = store.show("release")["coordinator_task"]
         task = self.queue.task(coordinator)

@@ -11,14 +11,15 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
-from tests.readiness_fixture import reviewed
 
+from tests.readiness_fixture import reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
 
-from bonus_drain import config as config_module, db, dispatcher  # noqa: E402
+from bonus_drain import config as config_module
+from bonus_drain import db, dispatcher
 
 REAL_TELEMETRY = Path.home() / ".claude" / "skills" / "implement" / "factory-telemetry.py"
 

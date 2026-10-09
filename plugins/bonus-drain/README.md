@@ -321,6 +321,7 @@ For the runtime contracts and command reference, see
 
 Every ready task is eligible for Bonus capacity; `run-now` accelerates an individual task.
 Tasks can carry source references, 15-character work groups, and one-off prerequisites.
+Work groups are display and navigation labels and do not affect scheduling or limit concurrency.
 See [ASYNC_WORK.md](skills/bonus-drain/ASYNC_WORK.md) for the contract and commands.
 
 A task is queueable only if it can start and can finish with no human in the loop. `add` requires

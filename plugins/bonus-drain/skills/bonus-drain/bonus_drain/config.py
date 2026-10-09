@@ -10,10 +10,11 @@ import json
 import os
 import re
 import stat
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Any, Iterable, Mapping, MutableMapping, Sequence
+from typing import Any
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -337,9 +338,11 @@ def _reject_inline_secrets(value: Any, trail: str = "config") -> None:
         for raw_key, child in value.items():
             key = str(raw_key)
             normalized = key.lower().replace("-", "_")
-            if normalized not in _REFERENCE_KEYS and _SECRET_KEY_RE.search(normalized):
-                if child not in (None, "", {}, []):
-                    raise ConfigError(f"inline secret-like field is forbidden: {trail}.{key}")
+            if (
+                normalized not in _REFERENCE_KEYS and _SECRET_KEY_RE.search(normalized)
+                and child not in (None, "", {}, [])
+            ):
+                raise ConfigError(f"inline secret-like field is forbidden: {trail}.{key}")
             _reject_inline_secrets(child, f"{trail}.{key}")
     elif isinstance(value, list):
         for index, child in enumerate(value):
@@ -366,7 +369,7 @@ def _argv(value: Any, label: str, source_dir: Path) -> tuple[str, ...]:
             raise ConfigError(f"unsafe argv token in {label}[{index}]")
         unknown = set(_PLACEHOLDER_RE.findall(text)) - _ALLOWED_PLACEHOLDERS
         if unknown:
-            raise ConfigError(f"unsafe argv placeholder in {label}[{index}]: {sorted(unknown)[0]}")
+            raise ConfigError(f"unsafe argv placeholder in {label}[{index}]: {min(unknown)}")
         result.append(text)
     executable = Path(result[0]).expanduser()
     if not executable.is_absolute():

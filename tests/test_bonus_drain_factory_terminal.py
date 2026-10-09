@@ -14,14 +14,14 @@ import unittest
 from pathlib import Path
 from typing import Any
 from unittest import mock
-from tests.readiness_fixture import reviewed
 
+from tests.readiness_fixture import reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
 
-from bonus_drain import cli, db, dispatcher, factory_terminal  # noqa: E402
+from bonus_drain import cli, db, dispatcher, factory_terminal
 
 REAL_TELEMETRY = Path.home() / ".claude" / "skills" / "implement" / "factory-telemetry.py"
 EVENT_TS = "2026-09-14T15:00:00Z"

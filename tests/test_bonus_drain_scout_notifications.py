@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -12,11 +13,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
-from tests.test_bonus_drain_scout_host_gate import SKILL_ROOT, _raw_config
-from tests.test_bonus_drain_review_repairs import ELIGIBILITY_KEY, NOW, runtime, task
+sys.path.insert(
+    0,
+    str(Path(__file__).resolve().parents[1] / "plugins" / "bonus-drain" / "skills" / "bonus-drain"),
+)
+
 from bonus_drain import cli, config, db, notifications, scout
 from bonus_drain.planner import PlanResult
+
 from tests.readiness_fixture import reviewed
+from tests.test_bonus_drain_review_repairs import ELIGIBILITY_KEY, NOW, runtime, task
+from tests.test_bonus_drain_scout_host_gate import SKILL_ROOT, _raw_config
 
 
 class ScoutNotificationTests(unittest.TestCase):
@@ -182,7 +189,7 @@ class ScoutNotificationTests(unittest.TestCase):
         def run_tick(now):
             result = subprocess.run(
                 [str(SKILL_ROOT / "bin" / "bonus-drain"), "scout", "--json", "--config", str(path), "--now", str(now)],
-                capture_output=True, text=True, timeout=30,
+                capture_output=True, text=True, timeout=30, check=False,
             )
             return result.returncode, json.loads(result.stdout)
 

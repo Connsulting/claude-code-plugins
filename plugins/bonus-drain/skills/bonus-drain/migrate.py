@@ -17,7 +17,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from bonus_drain import cutover, db  # noqa: E402
+from bonus_drain import cutover, db
 
 
 def main(argv: list[str] | None = None) -> int:

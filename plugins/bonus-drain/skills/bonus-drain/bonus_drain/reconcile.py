@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any
 
 from .adapters import AdapterError, execute_adapter
 from .config import ConfigError, RuntimeConfig
@@ -112,7 +113,7 @@ def reconcile_inflight(
                     if now_epoch is not None else None
                 ),
                 now_epoch=now_epoch,
-                release_activation=lambda: _activation(config, account, "release", activation_call),
+                release_activation=lambda account=account: _activation(config, account, "release", activation_call),
             )
             report.update(action="failed", terminal_rowid=event.rowid_pk)
         except (ConfigError, QueueError, DispatchError) as exc:

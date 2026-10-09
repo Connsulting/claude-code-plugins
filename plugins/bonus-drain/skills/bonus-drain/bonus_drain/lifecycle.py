@@ -15,12 +15,12 @@ import json
 import os
 import re
 import shutil
-import stat
 import sys
 import tempfile
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any
 
 
 class LifecycleError(RuntimeError):
@@ -42,7 +42,7 @@ UNIT_NAMES = (
 _OWNED_NAME = ".bonus-drain-owned.json"
 _INSTALL_NAME = ".bonus-drain-install.json"
 _WRAPPER_MARKER = "# managed-by: bonus-drain lifecycle v1"
-_DEFAULT_VERSION = "0.3.14"
+_DEFAULT_VERSION = "0.3.15"
 _BYTECODE_CACHE_NAME = re.compile(
     r"^(?P<module>[A-Za-z_][A-Za-z0-9_]*)\."
     r"(?P<tag>[A-Za-z][A-Za-z0-9_]*-\d+)(?:\.opt-\d+)?\.pyc$"
@@ -134,7 +134,7 @@ def _version(source: Path, requested: str | None) -> str:
         candidate = _DEFAULT_VERSION
         init = source / "bonus_drain" / "__init__.py"
         if init.is_file():
-            match = re.search(r"^__version__\s*=\s*['\"]([^'\"]+)['\"]", init.read_text(), re.M)
+            match = re.search(r"^__version__\s*=\s*['\"]([^'\"]+)['\"]", init.read_text(), re.MULTILINE)
             if match:
                 candidate = match.group(1)
     if not re.fullmatch(r"[0-9]+(?:\.[0-9]+){2}(?:[-+][A-Za-z0-9.-]+)?", candidate):
@@ -560,7 +560,8 @@ def doctor(
             cfg = config.load_config(Path(config_path))
             checks["config"] = True
             required_checks.add("config")
-        except Exception as exc:  # config publishes its own safe diagnostics
+        except Exception as exc:  # noqa: BLE001
+            # Doctor must report any config failure; config publishes safe diagnostics.
             checks["config"] = False
             required_checks.add("config")
             diagnostics.append(f"config: {exc}")
@@ -642,9 +643,10 @@ def uninstall(home: str | Path | None = None) -> tuple[Path, ...]:
         raise OwnershipError(f"unsafe current path: {lib / 'current'}")
 
     expected_wrapper = record.get("wrapper", {})
-    if wrapper.exists() or wrapper.is_symlink():
-        if wrapper.is_symlink() or not wrapper.is_file() or _sha256(wrapper) != expected_wrapper.get("sha256"):
-            raise OwnershipError(f"stable wrapper changed or is unowned: {wrapper}")
+    if (wrapper.exists() or wrapper.is_symlink()) and (
+        wrapper.is_symlink() or not wrapper.is_file() or _sha256(wrapper) != expected_wrapper.get("sha256")
+    ):
+        raise OwnershipError(f"stable wrapper changed or is unowned: {wrapper}")
     units = record.get("units")
     if not isinstance(units, dict):
         raise OwnershipError("invalid unit ownership record")
@@ -658,9 +660,10 @@ def uninstall(home: str | Path | None = None) -> tuple[Path, ...]:
     for path, digest in confined_units.items():
         if path.parent != unit_dir or path.name not in UNIT_NAMES:
             raise OwnershipError(f"unsafe unit ownership path: {path}")
-        if path.exists() or path.is_symlink():
-            if path.is_symlink() or not path.is_file() or _sha256(path) != digest:
-                raise OwnershipError(f"systemd template changed or is unowned: {path}")
+        if (path.exists() or path.is_symlink()) and (
+            path.is_symlink() or not path.is_file() or _sha256(path) != digest
+        ):
+            raise OwnershipError(f"systemd template changed or is unowned: {path}")
 
     removed: list[Path] = []
     for path in confined_units:

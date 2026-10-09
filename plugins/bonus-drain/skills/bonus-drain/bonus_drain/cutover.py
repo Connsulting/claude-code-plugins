@@ -8,12 +8,12 @@ MIGRATION.md.  This module never stops, masks, enables, copies, or removes units
 from __future__ import annotations
 
 import json
-import os
 import re
 import sqlite3
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any
 from urllib.parse import quote
 
 
@@ -301,7 +301,8 @@ def _existing_task_ids(queue: Any) -> set[str]:
         return set()
     try:
         rows = callback()
-    except Exception:
+    except Exception:  # noqa: BLE001
+        # A failed legacy queue callback must not prevent importing the supplied backlog.
         return set()
     result = set()
     for row in rows or ():
