@@ -1315,6 +1315,125 @@ class KickContractTests(unittest.TestCase):
             self.assertIn("token=[REDACTED]", diagnostic)
             self.assertLessEqual(len(diagnostic), 1000)
 
+    def _router_with_bound_secret(self) -> config_module.RuntimeConfig:
+        adapter = replace(
+            self.config.adapters[0], secret_refs={"TYPESAFE_API_KEY": "classifier-key"},
+        )
+        return replace(
+            self.config,
+            adapters=(adapter,),
+            secret_refs=(
+                config_module.SecretRef(
+                    "classifier-key", "env", name="BONUS_TEST_CLASSIFIER_KEY",
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _completed_router(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess:
+        if "--dry-run" in argv:
+            return subprocess.CompletedProcess([], 0, b'{"provider_id":"alpha"}', b"")
+        return subprocess.CompletedProcess(
+            [], 0, b'{"dispatch":{"job_id":"job-bound","launched":true}}', b"",
+        )
+
+    @staticmethod
+    def _example_with_router_binding(ref_id: str) -> dict[str, object]:
+        example = json.loads((SKILL_ROOT / "config.example.json").read_text(encoding="utf-8"))
+        example["secret_refs"] = [
+            {"id": "typesafe-api-key", "source": "env", "name": "TYPESAFE_API_KEY"},
+        ]
+        example["adapters"][0]["secret_refs"] = {"TYPESAFE_API_KEY": ref_id}
+        return example
+
+    def test_router_secret_ref_binding_may_export_a_credential_shaped_name(self) -> None:
+        validated = config_module.validate_config(
+            self._example_with_router_binding("typesafe-api-key"),
+            source_dir=SKILL_ROOT, source_path=SKILL_ROOT / "config.example.json",
+        )
+        self.assertEqual(
+            dict(validated.adapter("router").secret_refs),
+            {"TYPESAFE_API_KEY": "typesafe-api-key"},
+        )
+
+    def test_binding_to_an_undeclared_ref_fails_without_echoing_the_value(self) -> None:
+        pasted = "pasted-literal-credential-value"
+        with self.assertRaises(config_module.ConfigError) as raised:
+            config_module.validate_config(
+                self._example_with_router_binding(pasted),
+                source_dir=SKILL_ROOT, source_path=SKILL_ROOT / "config.example.json",
+            )
+        self.assertIn("adapters[0].secret_refs.TYPESAFE_API_KEY", str(raised.exception))
+        self.assertNotIn(pasted, str(raised.exception))
+
+    def test_inline_credential_fields_outside_secret_refs_are_still_rejected(self) -> None:
+        example = json.loads((SKILL_ROOT / "config.example.json").read_text(encoding="utf-8"))
+        example["providers"][0]["api_key"] = "inline-value"
+        with self.assertRaisesRegex(config_module.ConfigError, "inline secret-like field"):
+            config_module.validate_config(
+                example, source_dir=SKILL_ROOT, source_path=SKILL_ROOT / "config.example.json",
+            )
+
+    def test_router_subprocess_receives_bound_secret_refs_and_nothing_else(self) -> None:
+        cfg = self._router_with_bound_secret()
+        secret = "bound-classifier-key-value"
+        environ = {
+            "BONUS_TEST_CLASSIFIER_KEY": secret,
+            "BONUS_TEST_UNRELATED_SECRET": "must-not-reach-the-router",
+        }
+        with (
+            mock.patch.dict(os.environ, environ, clear=False),
+            mock.patch(
+                "bonus_drain.adapters.run_bounded_process", side_effect=self._completed_router,
+            ) as spawned,
+        ):
+            dispatcher.dispatch(
+                cfg, self.queue, task_id="portable", eligibility_key="manual/bound-secret",
+                requested_provider="auto",
+            )
+
+        phases = [("--dry-run" in call.args[0], call.kwargs["env"]) for call in spawned.call_args_list]
+        self.assertEqual([dry for dry, _env in phases], [True, False])
+        for _dry, env in phases:
+            self.assertEqual(env.get("TYPESAFE_API_KEY"), secret)
+            self.assertNotIn("BONUS_TEST_CLASSIFIER_KEY", env)
+            self.assertNotIn("BONUS_TEST_UNRELATED_SECRET", env)
+
+    def test_router_subprocess_without_binding_gets_no_ambient_secret(self) -> None:
+        with (
+            mock.patch.dict(os.environ, {"TYPESAFE_API_KEY": "ambient"}, clear=False),
+            mock.patch(
+                "bonus_drain.adapters.run_bounded_process", side_effect=self._completed_router,
+            ) as spawned,
+        ):
+            dispatcher.dispatch(
+                self.config, self.queue, task_id="portable", eligibility_key="manual/unbound",
+                requested_provider="alpha",
+            )
+        self.assertNotIn("TYPESAFE_API_KEY", spawned.call_args.kwargs["env"])
+
+    def test_unresolvable_bound_router_secret_is_known_not_launched_and_retry_safe(self) -> None:
+        cfg = self._router_with_bound_secret()
+        environ = {key: value for key, value in os.environ.items() if key != "BONUS_TEST_CLASSIFIER_KEY"}
+        for requested, failure in (
+            ("auto", dispatcher.ClassificationFailure),
+            ("alpha", dispatcher.KnownDispatchFailure),
+        ):
+            key = f"manual/unresolved-{requested}"
+            with (
+                mock.patch.dict(os.environ, environ, clear=True),
+                mock.patch("bonus_drain.adapters.run_bounded_process") as spawned,
+                self.assertRaises(failure) as raised,
+            ):
+                dispatcher.dispatch(
+                    cfg, self.queue, task_id="portable", eligibility_key=key,
+                    requested_provider=requested,
+                )
+            self.assertNotIsInstance(raised.exception, dispatcher.AmbiguousDispatch)
+            self.assertIn("classifier-key", str(raised.exception))
+            spawned.assert_not_called()
+            self.assertEqual(self.queue.claim_for("portable", key), None)
+
     def test_explicit_router_launched_false_is_known_not_launched_and_retry_safe(self) -> None:
         task_id = "known-negative"
         key = "manual/known-negative"

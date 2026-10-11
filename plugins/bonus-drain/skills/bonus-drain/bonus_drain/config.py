@@ -343,6 +343,13 @@ def _reject_inline_secrets(value: Any, trail: str = "config") -> None:
                 and child not in (None, "", {}, [])
             ):
                 raise ConfigError(f"inline secret-like field is forbidden: {trail}.{key}")
+            if normalized in _REFERENCE_KEYS and isinstance(child, Mapping):
+                # A binding maps an exported variable name to a declared ref id, so a
+                # credential-shaped name (TYPESAFE_API_KEY) is the point, not an inline value.
+                # _ref_map rejects any value that is not a declared ref id.
+                for name, ref in child.items():
+                    _reject_inline_secrets(ref, f"{trail}.{key}.{name}")
+                continue
             _reject_inline_secrets(child, f"{trail}.{key}")
     elif isinstance(value, list):
         for index, child in enumerate(value):
@@ -389,7 +396,9 @@ def _ref_map(value: Any, label: str, known: set[str]) -> Mapping[str, str]:
         name = _identifier(key, f"{label} key")
         ref_id = _identifier(ref, f"{label}.{name}")
         if ref_id not in known:
-            raise ConfigError(f"{label}.{name} references missing-ref {ref_id}")
+            # Never echo the value: a pasted credential lands here once binding names may be
+            # credential-shaped.
+            raise ConfigError(f"{label}.{name} references an undeclared secret_refs id")
         result[name] = ref_id
     return result
 

@@ -778,13 +778,25 @@ def classification_prompt(task: Task) -> str:
     return "\n".join(fields)
 
 
-def _safe_environment(adapter: AdapterConfig) -> dict[str, str]:
+def _safe_environment(adapter: AdapterConfig, config: RuntimeConfig) -> dict[str, str]:
+    """The router child environment: a small base, the allowlist, and bound secret refs.
+
+    Secrets reach the router only through the adapter's ``secret_refs`` bindings, the same
+    contract usage adapters honour, so a credential is named once in config and is also
+    registered for diagnostic redaction. Raises ``AdapterError`` when a binding cannot resolve.
+    """
+
+    from .adapters import _secrets
+
     permitted = {"HOME", "PATH", "LANG", "LC_ALL", "TMPDIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"}
     permitted.update(adapter.env_allowlist)
     # Hermetic router adapters commonly expose their output/control channel through these
     # non-credential variables. Keep this narrow instead of inheriting the whole environment.
     permitted.update(name for name in os.environ if name.startswith("ROUTER_"))
-    return {name: os.environ[name] for name in permitted if name in os.environ}
+    child_env = {name: os.environ[name] for name in permitted if name in os.environ}
+    _secret_values, secret_env = _secrets(adapter, {}, config, os.environ)
+    child_env.update(secret_env)
+    return child_env
 
 
 def _read_mcp_json(path: Path, label: str) -> Mapping[str, Any]:
@@ -1318,13 +1330,20 @@ def _subprocess_call(
     phase: str,
     **_kwargs: Any,
 ) -> Mapping[str, Any]:
-    from .adapters import ProcessOutputLimit, run_bounded_process
+    from .adapters import AdapterError, ProcessOutputLimit, run_bounded_process
 
+    try:
+        env = _safe_environment(adapter, config)
+    except AdapterError as exc:
+        # Nothing was spawned, so an unresolvable binding is known not launched on both phases.
+        if phase == "classification":
+            raise ClassificationFailure(f"agent-router classifier environment: {exc}") from exc
+        raise KnownDispatchFailure(f"agent-router environment: {exc}") from exc
     try:
         completed = run_bounded_process(
             list(argv), timeout=adapter.timeout_seconds,
             max_output_bytes=adapter.max_output_bytes,
-            env=_safe_environment(adapter),
+            env=env,
         )
     except subprocess.TimeoutExpired as exc:
         raise _phase_uncertainty(
