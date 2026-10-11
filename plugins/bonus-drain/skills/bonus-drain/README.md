@@ -195,7 +195,13 @@ reconciliation and no caller retries automatically.
 Normalized usage always includes explicit `provider_id`, `account_id`, and `captured_at`.
 The shipped direct Grok collector is bound to one configured account adapter. If Grok omits
 its utilization percentage, capacity stays unknown and the account closes; omission is never
-converted to zero usage.
+converted to zero usage. Grok leaves the percent unset at the start of each weekly period and
+first reports it as an integer step of 1, so a closed account cannot drain the use that would
+make Grok report it. Adding `--unreported-percent-probe` to the `bonus-drain-grok-usage` argv
+reports an unset percent in a started, exactly one-week provider period as 1 with
+`unreported_since` set to the period start. The planner admits one job on such a reading, and
+the scout closes the account with "weekly usage still unreported after this period's probe
+run" once any claim or run on it is recorded after the period start.
 
 File-backed secret references must be current-user-owned, non-symlink regular files with
 mode `0600` and size at most 65536 bytes. `doctor` validates those properties without printing

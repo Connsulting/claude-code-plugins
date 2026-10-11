@@ -4645,6 +4645,21 @@ class QueueDB:
                     result[task_id] = self._raw_collision_keys(self._task_from_row(row))
         return result
 
+    def dispatched_since(self, provider_id: str, account_id: str, *, since_epoch: float) -> bool:
+        """True when any claim or run on this account was recorded at or after ``since_epoch``."""
+
+        self.initialize()
+        with self._connect() as connection:
+            stamps = [
+                row[0] for row in connection.execute(
+                    """SELECT claimed_at FROM dispatch_claims WHERE provider_id=? AND account_id=?
+                       UNION ALL
+                       SELECT ts FROM runs WHERE provider_id=? AND account_id=?""",
+                    (provider_id, account_id, provider_id, account_id),
+                )
+            ]
+        return any(_timestamp_epoch(stamp) >= float(since_epoch) for stamp in stamps if stamp)
+
     def account_backoffs(self, *, now_epoch: float) -> list[dict[str, Any]]:
         self.initialize()
         with self._connect() as connection:

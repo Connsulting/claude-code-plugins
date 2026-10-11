@@ -130,6 +130,16 @@ def normalize_snapshot(
         limits[limit_id] = {"used_percent": used_number}
         if require_resets or reset is not None:
             limits[limit_id]["resets_at"] = _epoch(reset, f"limit {limit_id} resets_at")
+        if "unreported_since" in raw_reading:
+            # The provider left this period's percent unset; used_percent is its first
+            # reported step. The planner and scout bound such a reading to one probe job.
+            since = _epoch(raw_reading.get("unreported_since"), f"limit {limit_id} unreported_since")
+            # A separate reset adapter supplies resets_at later; refresh_all re-normalizes the
+            # merged reading, so the ordering is always checked before the cache is written.
+            limit_reset = limits[limit_id].get("resets_at")
+            if limit_reset is not None and since >= limit_reset:
+                raise AdapterFailure(f"limit {limit_id} unreported_since must precede its reset")
+            limits[limit_id]["unreported_since"] = since
     return UsageSnapshot(account.provider_id, account.id, captured_at, limits)
 
 
@@ -349,9 +359,16 @@ def refresh_all(
                     }
                     for limit_id in expected_ids
                 }
-                snapshot = UsageSnapshot(
-                    account.provider_id, account.id,
-                    min(snapshot.captured_at, reset_captured), merged,
+                for limit_id in expected_ids:
+                    # Dropping the flag would turn a bounded probe reading into real usage.
+                    if "unreported_since" in snapshot.limits[limit_id]:
+                        merged[limit_id]["unreported_since"] = snapshot.limits[limit_id]["unreported_since"]
+                snapshot = normalize_snapshot(
+                    UsageSnapshot(
+                        account.provider_id, account.id,
+                        min(snapshot.captured_at, reset_captured), merged,
+                    ),
+                    account, now_epoch=now,
                 )
             _atomic_write(cache_path(root, account.provider_id, account.id), snapshot)
             results[key] = snapshot

@@ -139,6 +139,10 @@ def _limit_admission(limit: LimitConfig, reading: Any, now_epoch: int) -> tuple[
         # estimate, one launch could cross it, so missing accounting is not spare
         # capacity.
         return 0, reset, f"cannot enforce reserve without a job estimate for limit {limit.id}"
+    if "unreported_since" in reading:
+        # The provider has not reported this period's percent. One probe job is the whole
+        # budget; the scout closes the account once that probe is dispatched.
+        allowed = min(allowed, 1)
     return allowed, reset, None
 
 
