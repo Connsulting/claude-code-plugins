@@ -110,7 +110,7 @@ NORMALIZER = (
     REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain" / "bin"
     / "bonus-drain-grok-usage"
 )
-PERIOD_START = int(datetime(2026, 8, 15, 0, 0, tzinfo=timezone.utc).timestamp())
+PERIOD_START = RESET - 7 * 86400
 
 
 class GrokUsageNormalizerTests(unittest.TestCase):
