@@ -1419,7 +1419,7 @@ class QueueDB:
         for dependency in task.depends_on:
             satisfy = "merged" if dependency in task.merged_depends_on else "done"
             parent = connection.execute(
-                "SELECT title,kind FROM tasks WHERE id=?", (dependency,),
+                "SELECT title,kind,active FROM tasks WHERE id=?", (dependency,),
             ).fetchone()
             claim = connection.execute(
                 "SELECT state,attempt_id FROM dispatch_claims WHERE task_id=?", (dependency,),
@@ -1438,6 +1438,9 @@ class QueueDB:
                 status = "done"
             elif claim is not None:
                 status = "ambiguous" if claim["state"] == "ambiguous" else "running"
+            elif not parent["active"]:
+                # A paused parent never launches, whatever recovery it retains.
+                status = "paused"
             elif recovery is not None and recovery["state"] in {"scheduled", "backoff", "consumed"}:
                 status = "recovering"
             elif recovery is not None:
@@ -1451,7 +1454,8 @@ class QueueDB:
             edge = (
                 QueueDB._merged_edge(connection, task, dependency, done, now_epoch)
                 if done is not None and satisfy == "merged"
-                else {"satisfied": done is not None, "status": status, "detail": None}
+                else {"satisfied": done is not None, "status": status,
+                      "detail": "paused" if status == "paused" else None}
             )
             if not edge["satisfied"] and done is not None:
                 # A done parent whose merged edge is unsatisfied reports why it still blocks.
@@ -1739,7 +1743,14 @@ class QueueDB:
                 raise QueueError(f"unknown task: {task_id}")
             task = self._task_from_row(row)
             dependencies = self._dependency_statuses(connection, task, now_epoch=now)
-            waiting = [item for item in dependencies if not item["satisfied"]]
+            # check_work refreshes merged edges only for work that could launch, so a lapsed
+            # merge check on work that cannot is not a wait: the task's own state reports instead.
+            could_launch = self._could_launch(connection, task)
+            waiting = [
+                item for item in dependencies
+                if not item["satisfied"]
+                and (could_launch or item["status"] != "merge_check_pending")
+            ]
             goal_owned = self._goal_owned(connection, task_id)
             # Stored results only: readiness never evaluates a check or touches the network.
             launch_verdicts = self._launch_verdicts(connection, task, now, goal_owned)
@@ -5067,6 +5078,28 @@ class QueueDB:
                 report.append(item(
                     source, task_row, latest["terminal_at"], detail, latest, latest["reason_code"],
                 ))
+            # A paused parent holds every active dependent until Brian activates or re-points it.
+            for task_row in connection.execute(
+                "SELECT * FROM tasks WHERE active=0 AND kind='oneoff' ORDER BY id",
+            ).fetchall():
+                task_id = task_row["id"]
+                waiting = [
+                    child for child in descendants(task_id)
+                    if self._verified_done_row(connection, child) is None
+                ]
+                if not waiting or self._verified_done_row(connection, task_id) is not None:
+                    continue
+                latest = self._latest_effective_attempt(connection, task_id)
+                recovery = connection.execute(
+                    "SELECT detail FROM task_recovery WHERE task_id=?", (task_id,),
+                ).fetchone()
+                entry = item(
+                    "paused_dependency", task_row,
+                    latest["terminal_at"] if latest is not None else task_row["created_at"],
+                    recovery["detail"] if recovery is not None else None, latest, "paused",
+                )
+                entry["blocked_descendants"] = len(waiting)
+                report.append(entry)
             # Work that could still launch but has no review, or a pre-contract one, is held.
             for task_row in connection.execute("SELECT * FROM tasks WHERE active=1").fetchall():
                 task = self._task_from_row(task_row)
@@ -5115,11 +5148,14 @@ class QueueDB:
                     "SELECT detail FROM task_recovery WHERE task_id=?", (parent_id,),
                 ).fetchone()
                 status = edge["status"]
-                reason = (
-                    (recovery["detail"] if recovery is not None else None)
-                    or edge["detail"]
-                    or ("Queued" if status == "queued" else f"Last run: {status}")
-                )
+                last = recovery["detail"] if recovery is not None else None
+                if status == "paused":
+                    reason = "Paused" + (f"; last blocker: {last}" if last else "")
+                else:
+                    reason = (
+                        last or edge["detail"]
+                        or ("Queued" if status == "queued" else f"Last run: {status}")
+                    )
                 return {"task_id": parent_id, "title": edge["title"], "status": status, "reason": reason}
             return None
 

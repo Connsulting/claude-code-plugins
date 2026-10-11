@@ -1056,6 +1056,48 @@ class MergedEdgeTests(PreflightCase):
         )
         self.assertEqual(work[0].context, {})
 
+    def test_lapsed_merge_check_never_masks_a_child_that_cannot_launch(self) -> None:
+        # The scout re-checks merged edges only for work that could launch, so a
+        # child whose own last attempt failed keeps a lapsed result forever.
+        self.merged_child()
+        self.complete("parent", handoff())
+        merged = self.runner({gh_pr("task/x", "owner/repo"): ok(TASK_X_PR_MERGED)})
+        self.refresh(merged, now=NOW + 20)
+        self.fail_task("child", now=NOW + 30)
+        lapsed = NOW + 30 + checks.RESULT_TTL_SECONDS + 1
+        self.assertEqual(self.queue.check_work(now_epoch=lapsed, task_ids=["child"]), [])
+
+        status = self.ready("child", now=lapsed)
+
+        self.assertEqual(self.edge(status)["status"], "merge_check_pending")
+        self.assertEqual((status["state"], status["reason"]), ("failed", "Last run: failed"))
+        self.assertIsNone(status["root_blocker"])
+        self.assertTrue(status["requeue"]["allowed"], status)
+
+        # Once requeued the child could launch again: the lapsed edge gates it until refreshed.
+        self.queue.requeue("child", now_epoch=lapsed + 1)
+        requeued = self.ready("child", now=lapsed + 2)
+        self.assertEqual(requeued["state"], "waiting")
+        self.assertIn("waiting for merge check of task/x into main", requeued["reason"])
+        self.assertEqual(
+            [item.origin for item in self.queue.check_work(now_epoch=lapsed + 2, task_ids=["child"])],
+            ["dependency"],
+        )
+
+    def test_paused_parent_reports_paused_not_its_recovery(self) -> None:
+        self.add("child", depends_on=["parent"])
+        source = self.fail_task("parent")
+        self.queue.requeue("parent", attempt_id=source.id, now_epoch=NOW + 1)
+        self.queue.set_active("parent", False)
+
+        status = self.ready("child")
+
+        self.assertEqual(status["state"], "waiting")
+        self.assertEqual(self.edge(status)["status"], "paused")
+        self.assertIn("parent (paused)", status["reason"])
+        self.assertEqual(status["root_blocker"]["status"], "paused")
+        self.assertEqual(status["root_blocker"]["reason"], "Paused; last blocker: fixture retryable outcome")
+
 
 class QueueValidationTests(PreflightCase):
     def test_remote_tracking_start_ref_rejected(self) -> None:
@@ -1877,6 +1919,25 @@ class RootBlockerTests(PreflightCase):
         )
         self.assertEqual(decision.state, "scheduled")
 
+        self.assertEqual(self.queue.held_authority_report(), [])
+
+    def test_held_report_lists_paused_parent_with_waiting_dependents(self) -> None:
+        self.add("P")
+        self.add("C", depends_on=["P"])
+        self.add("Q")
+        source = self.fail_task("P")
+        self.queue.requeue("P", attempt_id=source.id, now_epoch=NOW + 1)
+        self.queue.set_active("P", False)
+        self.queue.set_active("Q", False)
+
+        report = self.queue.held_authority_report()
+
+        self.assertEqual([(item["task_id"], item["source"]) for item in report], [("P", "paused_dependency")])
+        self.assertEqual(report[0]["reason_code"], "paused")
+        self.assertEqual(report[0]["descendants"], ["C"])
+        self.assertEqual(report[0]["blocked_descendants"], 1)
+
+        self.queue.set_active("P", True)
         self.assertEqual(self.queue.held_authority_report(), [])
 
 
