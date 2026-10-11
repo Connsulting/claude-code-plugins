@@ -20,6 +20,13 @@ class AdapterError(RuntimeError):
     """The direct collector did not provide a trustworthy capacity reading."""
 
 
+# Grok leaves creditUsagePercent unset at the start of every weekly period and first reports
+# it as this integer step. An opted-in unreported reading uses the step, never zero, and is
+# flagged so the planner admits at most one probe job and the scout closes the account once
+# that probe has been dispatched in the period.
+_FIRST_REPORTED_STEP = 1.0
+_WEEK_SECONDS = 604_800
+
 _SAFE_ENV = {
     "HOME", "LANG", "LC_ALL", "PATH", "SSL_CERT_DIR", "SSL_CERT_FILE", "TMPDIR",
     "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME",
@@ -51,6 +58,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-age", required=True, type=int)
     parser.add_argument("--timeout", required=True, type=float)
     parser.add_argument("--now", type=int)
+    parser.add_argument(
+        "--unreported-percent-probe",
+        action="store_true",
+        help="report an unset weekly percent in a started weekly period as the first "
+        "provider step, flagged unreported_since, instead of failing",
+    )
     return parser
 
 
@@ -61,6 +74,21 @@ def _percentage(value: Any) -> float:
     if not math.isfinite(result) or result < 0 or result > 100:
         raise AdapterError("weekly_percent must be between 0 and 100")
     return result
+
+
+def _unreported_reading(raw: Mapping[str, Any], reset: int, now: int) -> dict[str, Any]:
+    if raw.get("weekly_period_start") is None:
+        raise AdapterError("weekly_percent is unset and weekly_period_start is missing")
+    start = _epoch(raw.get("weekly_period_start"), "weekly_period_start")
+    if start > now:
+        raise AdapterError("weekly_percent is unset and the weekly period has not started")
+    if reset - start != _WEEK_SECONDS:
+        raise AdapterError("weekly_percent is unset and the period is not one weekly period")
+    return {
+        "used_percent": _FIRST_REPORTED_STEP,
+        "resets_at": reset,
+        "unreported_since": start,
+    }
 
 
 def main() -> int:
@@ -121,17 +149,17 @@ def main() -> int:
     if reset <= now:
         raise AdapterError("weekly_reset must be in the future")
 
+    if raw.get("weekly_percent") is None and args.unreported_percent_probe:
+        reading = _unreported_reading(raw, reset, now)
+    else:
+        reading = {"used_percent": _percentage(raw.get("weekly_percent")), "resets_at": reset}
+
     json.dump(
         {
             "provider_id": args.provider,
             "account_id": args.account,
             "captured_at": captured_at,
-            "limits": {
-                args.limit: {
-                    "used_percent": _percentage(raw.get("weekly_percent")),
-                    "resets_at": reset,
-                }
-            },
+            "limits": {args.limit: reading},
         },
         sys.stdout,
         sort_keys=True,

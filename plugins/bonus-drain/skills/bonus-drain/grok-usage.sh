@@ -49,18 +49,32 @@ cleanup() {
 trap cleanup EXIT
 
 emit_json() {
-  local tier="$1" weekly_percent="$2" weekly_reset="$3" source_ts="$4"
+  local tier="$1" weekly_percent="$2" weekly_reset="$3" source_ts="$4" period_start="$5"
   jq -cn \
     --arg tier "$tier" \
     --argjson weekly_percent "$weekly_percent" \
     --argjson weekly_reset "$weekly_reset" \
+    --argjson weekly_period_start "$period_start" \
     --arg source_ts "$source_ts" \
     '{
       tier: (if $tier == "" then null else $tier end),
       weekly_percent: $weekly_percent,
       weekly_reset: $weekly_reset,
+      weekly_period_start: $weekly_period_start,
       source_ts: (if $source_ts == "" then null else $source_ts end)
     }'
+}
+
+# The provider's own currentPeriod.start, as an epoch, or null. The normalizer uses it to
+# bound an unreported percent to the period it belongs to; it is never usage on its own.
+period_start_epoch() {
+  local start_epoch
+  start_epoch="$(date -u -d "$1" +%s 2>/dev/null)" || start_epoch=""
+  if [[ "$start_epoch" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$start_epoch"
+  else
+    printf '%s\n' null
+  fi
 }
 
 # Billing logs and the cache use display names; /v1/user uses the API spelling.
@@ -88,6 +102,7 @@ fi
 disk_tier=""
 disk_percent=null
 disk_reset=null
+disk_period_start=null
 disk_source_ts=""
 
 event=""
@@ -107,6 +122,8 @@ if [ -n "$event" ]; then
     <<<"$event")"
   period_end="$(jq -r '.ctx.config.currentPeriod.end | if type == "string" then . else "" end' \
     <<<"$event")"
+  period_start="$(jq -r '.ctx.config.currentPeriod.start | if type == "string" then . else "" end' \
+    <<<"$event")"
   disk_source_ts="$(jq -r '.ts | if type == "string" then . else "" end' <<<"$event")"
 
   fresh=0
@@ -124,6 +141,7 @@ if [ -n "$event" ]; then
     reset_epoch="$(date -u -d "$period_end" +%s 2>/dev/null)" || reset_epoch=""
     if [[ "$reset_epoch" =~ ^[0-9]+$ ]]; then
       disk_reset="$reset_epoch"
+      disk_period_start="$(period_start_epoch "$period_start")"
       if [ "$clock_valid" -eq 1 ] && [ "$fresh" -eq 1 ] && \
          [ "$reset_epoch" -gt "$now_epoch" ] && \
          jq -e '.ctx.config.creditUsagePercent |
@@ -145,6 +163,7 @@ fi
 direct_valid=0
 direct_percent=null
 direct_reset=null
+direct_period_start=null
 direct_tier=""
 direct_source_ts=""
 if [ -n "$access_token" ] && [ "$clock_valid" -eq 1 ]; then
@@ -183,6 +202,9 @@ if [ -n "$access_token" ] && [ "$clock_valid" -eq 1 ]; then
         reset_epoch="$(date -u -d "$period_end" +%s 2>/dev/null)" || reset_epoch=""
         if [[ "$reset_epoch" =~ ^[0-9]+$ ]] && [ "$reset_epoch" -gt "$now_epoch" ]; then
           direct_reset="$reset_epoch"
+          direct_period_start="$(period_start_epoch \
+            "$(jq -r '.currentPeriod.start | if type == "string" then . else "" end' \
+              <<<"$billing_config")")"
           if jq -e 'has("creditUsagePercent")' <<<"$billing_config" >/dev/null 2>&1; then
             direct_percent="$(jq -c '.creditUsagePercent' <<<"$billing_config")"
           else
@@ -206,7 +228,8 @@ if [ -n "$access_token" ] && [ "$clock_valid" -eq 1 ]; then
 fi
 
 if [ "$direct_valid" -eq 1 ]; then
-  emit_json "$direct_tier" "$direct_percent" "$direct_reset" "$direct_source_ts"
+  emit_json "$direct_tier" "$direct_percent" "$direct_reset" "$direct_source_ts" \
+    "$direct_period_start"
 else
-  emit_json "$disk_tier" "$disk_percent" "$disk_reset" "$disk_source_ts"
+  emit_json "$disk_tier" "$disk_percent" "$disk_reset" "$disk_source_ts" "$disk_period_start"
 fi

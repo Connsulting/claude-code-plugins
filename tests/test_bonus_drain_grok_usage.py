@@ -96,6 +96,100 @@ class GrokUsageCollectorTests(unittest.TestCase):
         self.assertIsNone(reading["weekly_percent"])
         self.assertEqual(reading["weekly_reset"], RESET)
 
+    def test_missing_percent_reports_the_provider_period_start(self) -> None:
+        reading = self.collect(_event("SuperGrok Heavy", None))
+        self.assertIsNone(reading["weekly_percent"])
+        self.assertEqual(reading["weekly_period_start"], PERIOD_START)
+
+    def test_free_tier_reports_no_period_start(self) -> None:
+        reading = self.collect(_event("Free", None))
+        self.assertIsNone(reading["weekly_period_start"])
+
+
+NORMALIZER = (
+    REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain" / "bin"
+    / "bonus-drain-grok-usage"
+)
+PERIOD_START = RESET - 7 * 86400
+
+
+class GrokUsageNormalizerTests(unittest.TestCase):
+    """The normalizer turns one collector reading into the Bonus Drain usage contract."""
+
+    def normalize(self, reading: dict, *extra: str) -> subprocess.CompletedProcess:
+        self.assertTrue(NORMALIZER.is_file(), f"normalizer missing: {NORMALIZER}")
+        with tempfile.TemporaryDirectory() as raw_root:
+            collector = Path(raw_root) / "collector"
+            collector.write_text(
+                "#!/bin/sh\ncat <<'JSON'\n" + json.dumps(reading) + "\nJSON\n",
+                encoding="utf-8",
+            )
+            collector.chmod(0o700)
+            return subprocess.run(
+                [
+                    "python3", str(NORMALIZER),
+                    "--provider", "grok", "--account", "grok-personal",
+                    "--collector", str(collector), "--limit", "grok-personal-weekly",
+                    "--max-age", "3600", "--timeout", "10", "--now", str(NOW),
+                    *extra,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+    @staticmethod
+    def reading(percent=None, *, period_start=PERIOD_START, reset=RESET) -> dict:
+        return {
+            "tier": "SuperGrok Heavy",
+            "weekly_percent": percent,
+            "weekly_reset": reset,
+            "weekly_period_start": period_start,
+            "source_ts": EVENT_TS,
+        }
+
+    def limit(self, completed: subprocess.CompletedProcess) -> dict:
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        return json.loads(completed.stdout)["limits"]["grok-personal-weekly"]
+
+    def test_absent_percent_stays_fail_closed_by_default(self) -> None:
+        completed = self.normalize(self.reading())
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("weekly_percent must be a number", completed.stderr)
+
+    def test_opt_in_reports_the_first_provider_step_flagged_unreported(self) -> None:
+        limit = self.limit(self.normalize(self.reading(), "--unreported-percent-probe"))
+        self.assertEqual(
+            limit,
+            {"used_percent": 1.0, "resets_at": RESET, "unreported_since": PERIOD_START},
+        )
+
+    def test_opt_in_never_replaces_a_reported_percent(self) -> None:
+        limit = self.limit(self.normalize(self.reading(37.0), "--unreported-percent-probe"))
+        self.assertEqual(limit, {"used_percent": 37.0, "resets_at": RESET})
+
+    def test_opt_in_without_a_period_start_stays_closed(self) -> None:
+        completed = self.normalize(
+            self.reading(period_start=None), "--unreported-percent-probe",
+        )
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("weekly_period_start", completed.stderr)
+
+    def test_opt_in_rejects_a_period_that_is_not_exactly_one_week(self) -> None:
+        completed = self.normalize(
+            self.reading(period_start=PERIOD_START + 3600), "--unreported-percent-probe",
+        )
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("one weekly period", completed.stderr)
+
+    def test_opt_in_rejects_a_period_that_has_not_started(self) -> None:
+        completed = self.normalize(
+            self.reading(period_start=NOW + 60, reset=NOW + 60 + 604_800),
+            "--unreported-percent-probe",
+        )
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("has not started", completed.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

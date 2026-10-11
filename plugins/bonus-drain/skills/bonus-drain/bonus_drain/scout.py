@@ -416,6 +416,45 @@ def _apply_account_backoff(
     return PlanResult(tuple(kept), closed, gates, plan.generated_at)
 
 
+UNREPORTED_PROBE_SPENT = "weekly usage still unreported after this period's probe run"
+
+
+def _apply_unreported_probe(
+    plan: PlanResult, snapshots: Mapping[Any, Any], queue: Any,
+) -> PlanResult:
+    """Close an account whose unreported period already received its one probe dispatch.
+
+    An ``unreported_since`` reading means the provider has not reported this period's
+    percent. The planner admits one job on it; any claim or run on the account since the
+    period started spends that probe, and the account stays closed until the provider
+    reports a real percent or the period resets.
+    """
+
+    closed = dict(plan.closed)
+    gates_by_key = {(gate.provider_id, gate.account_id): gate for gate in plan.gates}
+    kept = []
+    for batch in plan.batches:
+        key = (batch.provider_id, batch.account_id)
+        snapshot = snapshots.get(key)
+        limits = getattr(snapshot, "limits", None) or {}
+        starts = [
+            int(reading["unreported_since"])
+            for reading in limits.values()
+            if isinstance(reading, Mapping) and "unreported_since" in reading
+        ]
+        if not starts or not queue.dispatched_since(
+            batch.provider_id, batch.account_id, since_epoch=min(starts),
+        ):
+            kept.append(batch)
+            continue
+        closed[key] = UNREPORTED_PROBE_SPENT
+        gates_by_key[key] = replace(
+            gates_by_key[key], open=False, reason=UNREPORTED_PROBE_SPENT, batch_size=0,
+        )
+    gates = tuple(gates_by_key[(gate.provider_id, gate.account_id)] for gate in plan.gates)
+    return PlanResult(tuple(kept), closed, gates, plan.generated_at)
+
+
 def _apply_global_cap(
     plan: PlanResult,
     queue: QueueDB,
@@ -554,6 +593,7 @@ def plan_tick(
         result = build_plan(config, snapshots, eligible_count=eligible_count, now_epoch=now)
         result = close_providers(result, identity_failures)
         result = _apply_account_backoff(result, account_backoffs)
+        result = _apply_unreported_probe(result, snapshots, reader)
         result = _apply_inflight_caps(
             result, queue, now_epoch=now, provider_holds=provider_holds,
         )
