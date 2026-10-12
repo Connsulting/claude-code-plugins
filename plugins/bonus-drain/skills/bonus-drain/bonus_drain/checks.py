@@ -104,7 +104,7 @@ class CheckResult:
 
 @dataclass(frozen=True)
 class CheckWork:
-    """One due evaluation; ``origin`` is declared, builtin, dependency, or resume."""
+    """One due evaluation; ``origin`` is declared, builtin, dependency, resume, or handoff."""
 
     task_id: str
     cwd: str

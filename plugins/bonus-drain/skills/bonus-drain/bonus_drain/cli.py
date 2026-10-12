@@ -894,6 +894,14 @@ def _command(args: argparse.Namespace) -> int:
         _cfg, queue = _queue(args)
         report = queue.held_authority_report()
         measurement = queue.blocker_measurement()
+        if args.observe:
+            # _command binds a local named checks further down, so import the runner by name.
+            from .checks import subprocess_runner
+            cleared = queue.held_cleared_blockers(
+                report, runner=subprocess_runner, now_epoch=_now(args),
+            )
+            for item in report:
+                item["cleared"] = cleared.get(item["task_id"], [])
         if args.json:
             _json({"held": report, "measurement": measurement})
         else:
@@ -920,6 +928,9 @@ def _command(args: argparse.Namespace) -> int:
             missing = sum(item["source"] == "missing_review" for item in report)
             if missing:
                 print(f"held: no readiness review: {missing}")
+            for item in report:
+                for entry in item.get("cleared", ()):
+                    print(f"blocker may have cleared, re-examine (nothing released): {item['task_id']}: {entry['check']}: {entry['detail']}")
         return 0
     if command == "readiness-backfill":
         _cfg, queue = _queue(args)
@@ -1199,7 +1210,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     accounts = sub.add_parser("accounts"); _add_common(accounts); accounts.add_argument("accounts_command", choices=("labels", "count", "multi", "cycle", "canonical-cycle", "usage", "select")); accounts.add_argument("account", nargs="?"); accounts.add_argument("epoch", type=int, nargs="?"); accounts.add_argument("--now", type=int)
     doctor = sub.add_parser("doctor"); _add_common(doctor); _add_json(doctor)
-    held = sub.add_parser("held-report"); _add_common(held); _add_json(held)
+    held = sub.add_parser("held-report"); _add_common(held); _add_json(held); held.add_argument("--observe", action="store_true", help="observe each hold's source issue and handoff PR live; stores nothing"); held.add_argument("--now", type=int)
     backfill = sub.add_parser("readiness-backfill"); _add_common(backfill); _add_json(backfill); backfill.add_argument("--now", type=int)
 
     install = sub.add_parser("install"); install.add_argument("--source", type=Path, required=True); install.add_argument("--home", type=Path); install.add_argument("--version", dest="install_version"); _add_json(install)
