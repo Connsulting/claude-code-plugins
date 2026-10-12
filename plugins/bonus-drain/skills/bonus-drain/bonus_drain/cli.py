@@ -791,7 +791,29 @@ def _command(args: argparse.Namespace) -> int:
             # readings it just fetched even if the queue database is unwritable.
             pass
         _json({"accounts": [record.to_dict() for record in records.values()]})
-        return 0 if all(record.fresh for record in records.values()) else 1
+        stale = sorted(
+            (record for record in records.values() if not record.fresh),
+            key=lambda record: (record.provider_id, record.account_id),
+        )
+        if not stale:
+            return 0
+        # Any stale account still fails the unit; naming each one and its error lets the
+        # journal and systemctl status show when a new account breaks behind a known one.
+        names = ", ".join(f"{record.provider_id}/{record.account_id}" for record in stale)
+        _json({
+            "ok": False,
+            "code": "stale_accounts",
+            "error": f"{len(stale)} of {len(records)} accounts stale: {names}",
+            "stale": [
+                {
+                    "provider_id": record.provider_id,
+                    "account_id": record.account_id,
+                    "error": record.error or "stale",
+                }
+                for record in stale
+            ],
+        }, stream=sys.stderr)
+        return 1
     if command == "scout":
         cfg, queue = _queue(args, graph_required=True)
         report = scout.run_once(
