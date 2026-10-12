@@ -5130,6 +5130,45 @@ class QueueDB:
         report.sort(key=lambda entry: (str(entry["held_since"] or ""), entry["task_id"]))
         return report
 
+    def held_cleared_blockers(
+        self, report: Iterable[Mapping[str, Any]], *, runner: Any, now_epoch: float,
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Observe live, storing nothing, which reported holds' blockers have since cleared.
+
+        Nothing re-examines a hold once it is held or paused, so its source issue can close
+        or its handed-off PR can merge unseen. Lists, per task, a closed source or declared
+        issue (issue_open fail) or a merged handoff PR (pr_merged pass) for Brian to complete,
+        requeue, or retire. It releases nothing.
+        """
+
+        from . import checks
+        ids = sorted({str(item["task_id"]) for item in report})
+        if not ids:
+            return {}
+        work = [
+            item for item in self.check_work(now_epoch=now_epoch, task_ids=ids, due_only=False)
+            if item.spec.get("type") == "issue_open"
+        ]
+        with self._connect() as connection:
+            for task_id in ids:
+                row = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+                latest = self._latest_effective_attempt(connection, task_id)
+                outcome = json.loads(latest["outcome_json"]) if latest and latest["outcome_json"] else None
+                if row is None or not isinstance(outcome, dict):
+                    continue
+                task = self._task_from_row(row)
+                kind, spec = self._merge_rule(task, outcome.get("repository"))
+                if kind == "check" and spec is not None:
+                    context = checks.check_context(spec, cwd=task.cwd)
+                    work.append(checks.CheckWork(
+                        task_id, task.cwd, "handoff", spec, context, checks.check_id(spec, context),
+                    ))
+        cleared: dict[str, list[dict[str, Any]]] = {}
+        for entry in checks.observe(work, runner=runner):
+            if (entry["type"], entry["status"]) in {("issue_open", "fail"), ("pr_merged", "pass")}:
+                cleared.setdefault(entry["task_id"], []).append(entry)
+        return cleared
+
     @staticmethod
     def _root_blocker(
         connection: sqlite3.Connection, task: Task,

@@ -1940,6 +1940,58 @@ class RootBlockerTests(PreflightCase):
         self.queue.set_active("P", True)
         self.assertEqual(self.queue.held_authority_report(), [])
 
+    def test_held_report_observes_cleared_blockers_without_releasing(self) -> None:
+        # A hold whose source issue closed, or whose handed-off PR merged, must surface for
+        # re-examination. Observation stores nothing and releases nothing: the holds stay held.
+        self.add("A", source_ref=f"https://github.com/{REPO}/issues/2855")
+        self.add("B", depends_on=["A"])
+        self.add("H")
+        self.add("J", depends_on=["H"])
+        self.add("O", source_ref=f"{REPO}#3815")
+        # P declares its own source issue as a check too, which dedupes the builtin away.
+        self.add("P", source_ref=f"{REPO}#2856",
+                 checks=[{"type": "issue_open", "repo": REPO, "number": 2856}])
+        self.add("Q", depends_on=["P"])
+        self.refresh(self.runner({
+            gh_issue(2855): ok(ISSUE_OPEN_IN_V0_10_0),
+            gh_issue(2856): ok(ISSUE_OPEN_IN_V0_10_0),
+            gh_issue(3815): ok(ISSUE_3815_OPEN),
+        }), now=NOW - 5)
+        self.block("A", authority("Missing GitHub test actor"))
+        self.block("H", {**authority("Needs an approving review"), "repository": handoff()})
+        self.block("O", authority("Still missing the actor"))
+        self.queue.requeue("P", attempt_id=self.fail_task("P").id, now_epoch=NOW + 1)
+        self.queue.set_active("P", False)
+        self.queue.reconcile_recoveries(now_epoch=NOW + 5, dry_run=False)
+        report = self.queue.held_authority_report()
+        self.assertEqual(
+            sorted((item["task_id"], item["source"]) for item in report),
+            [("A", "held_recovery"), ("H", "held_recovery"), ("O", "failed_attempt"),
+             ("P", "paused_dependency")],
+        )
+        before = table_counts(self.queue.path)
+        fake = self.runner({
+            gh_issue(2855): ok(ISSUE_2855_CLOSED),
+            gh_issue(2856): ok(ISSUE_2855_CLOSED),
+            gh_issue(3815): ok(ISSUE_3815_OPEN),
+            gh_pr("task/x", "owner/repo"): ok(TASK_X_PR_MERGED),
+        })
+
+        cleared = self.queue.held_cleared_blockers(report, runner=fake, now_epoch=NOW + 10)
+
+        self.assertEqual(
+            {task_id: [(item["type"], item["status"]) for item in items]
+             for task_id, items in cleared.items()},
+            {"A": [("issue_open", "fail")], "H": [("pr_merged", "pass")],
+             "P": [("issue_open", "fail")]},
+        )
+        self.assertEqual(table_counts(self.queue.path), before)
+        for task_id in ("A", "H"):
+            self.assertEqual(self.queue.recovery_for(task_id).state, "held")
+        self.assertIsNone(self.queue.recovery_for("O"))
+        self.assertEqual(self.queue.recovery_for("P").state, "scheduled")
+        self.assertEqual(self.queue.held_cleared_blockers([], runner=fake, now_epoch=NOW + 10), {})
+
 
 if __name__ == "__main__":
     unittest.main()
