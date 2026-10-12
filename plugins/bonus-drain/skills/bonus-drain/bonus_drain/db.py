@@ -3539,7 +3539,7 @@ class QueueDB:
             state = "held"
         elif attempt is not None and attempt["recovery_of"] is not None:
             previous = connection.execute(
-                "SELECT reason_signature FROM task_attempts WHERE id=?",
+                "SELECT reason_code, reason_signature, contract_hash FROM task_attempts WHERE id=?",
                 (attempt["recovery_of"],),
             ).fetchone()
             if (
@@ -3549,6 +3549,20 @@ class QueueDB:
             ):
                 state, decision_code = "held", "no_progress"
                 decision_detail = "recovery repeated the same normalized failure"
+            elif (
+                # Worker wording varies, so a blocker repeated on an unchanged contract is
+                # no progress even when the derived signatures differ. Retryable failures
+                # keep their budget because a transient cause is expected to vary.
+                attempt["origin"] == "automatic"
+                and reason_code != "retryable"
+                and previous is not None
+                and previous["reason_code"] == reason_code
+                and previous["contract_hash"] == attempt["contract_hash"]
+            ):
+                state, decision_code = "held", "no_progress"
+                decision_detail = (
+                    f"automatic recovery repeated {reason_code} on an unchanged contract: {detail}"
+                )[:1000]
         if override_reason is not None:
             if state != "held":
                 raise QueueError(
