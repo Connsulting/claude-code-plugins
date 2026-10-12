@@ -1684,6 +1684,60 @@ class ResumeWhenTests(PreflightCase):
                 db.validate_outcome(status, outcome)
 
 
+OWN_RELEASE = {"type": "release_exists", "repo": REPO, "tag": "v0.13.0"}
+
+
+class OwnReleaseResumeTests(PreflightCase):
+    def fail(self, task_id: str, outcome: dict[str, object], *, source_ref: str | None = None,
+             declared: list[dict[str, object]] | None = None):
+        # Claim first: an unevaluated source_ref or declared check would hold the launch.
+        self.add(task_id)
+        attempt = self.claim(task_id)
+        with self.queue._transaction() as connection:
+            connection.execute(
+                "UPDATE tasks SET source_ref=?, checks_json=? WHERE id=?",
+                (source_ref, json.dumps(declared) if declared else None, task_id),
+            )
+        self.terminal(task_id, attempt, "failed", outcome)
+        return attempt
+
+    def stored(self, attempt) -> dict[str, object]:
+        return json.loads(rows(
+            self.queue, "SELECT outcome_json FROM task_attempts WHERE id=?", (attempt.id,),
+        )[0]["outcome_json"])
+
+    def test_own_release_resume_becomes_verification_needed(self) -> None:
+        attempt = self.fail("unreleased", authority(
+            "required v0.13.0 images unavailable", resume_when=[OWN_RELEASE],
+        ), source_ref=f"{REPO}#4412")
+        stored = self.stored(attempt)
+        self.assertNotIn("resume_when", stored)
+        self.assertEqual(stored["reason"]["code"], "verification_needed")
+        self.assertEqual(stored["reason"]["signature"], "verification_needed:own_release_resume_refused")
+        self.assertIn(f"{REPO}@v0.13.0", stored["reason"]["detail"])
+        self.assertIn("required v0.13.0 images unavailable", stored["reason"]["detail"])
+
+    def test_remote_names_the_repo_without_source_ref(self) -> None:
+        outcome = authority(resume_when=[OWN_RELEASE])
+        outcome["repository"] = {"remote": f"git@github.com:{REPO}.git"}
+        stored = self.stored(self.fail("remote-only", outcome))
+        self.assertEqual(stored["reason"]["code"], "verification_needed")
+
+    def test_declared_release_and_other_repo_release_still_resume(self) -> None:
+        declared = self.stored(self.fail(
+            "declared", authority(resume_when=[OWN_RELEASE]),
+            source_ref=f"{REPO}#3936", declared=[OWN_RELEASE],
+        ))
+        self.assertEqual(declared["resume_when"], [OWN_RELEASE])
+
+        upstream = {"type": "release_exists", "repo": "astral-sh/uv", "tag": "0.9.0"}
+        other = self.stored(self.fail(
+            "upstream", authority(resume_when=[upstream]), source_ref=f"{REPO}#4500",
+        ))
+        self.assertEqual(other["reason"]["code"], "authority_required")
+        self.assertEqual(other["resume_when"], [upstream])
+
+
 class ResumeTests(PreflightCase):
     def resumable(self, task_id: str = "blocked", spec: dict[str, object] = PR_2994_INTO_EPIC):
         self.add(task_id)

@@ -118,6 +118,72 @@ def _bounded_text(value: Any, name: str, *, required: bool = True) -> str | None
     return value or None
 
 
+_REMOTE_REPO = re.compile(r"github\.com[:/]+([^/\s]+/[^/\s]+?)(?:\.git)?/?$", re.IGNORECASE)
+
+
+def _outcome_repo(source_ref: str | None, outcome: Mapping[str, Any]) -> str | None:
+    """The owner/name the task's work lands in, from source_ref or the outcome's remote."""
+
+    from . import checks
+    issue = checks.parse_issue_ref(source_ref)
+    if issue is not None:
+        return issue[0].lower()
+    repository = outcome.get("repository")
+    remote = repository.get("remote") if isinstance(repository, Mapping) else None
+    match = _REMOTE_REPO.search(str(remote or "").strip())
+    return match.group(1).lower() if match else None
+
+
+def refuse_own_release_resume(
+    outcome: dict[str, Any], source_ref: str | None, checks_json: str | None,
+) -> dict[str, Any]:
+    """Turn a failure that waits on the task's own repository release into verification_needed.
+
+    A worker on an unreleased line (Curie's ``next``) must not park its task until that line's
+    release exists: the release waits on the work, so the hold never ends. Its pre-release
+    artifacts are the evidence to use. A release the task was queued against (a declared
+    ``release_exists`` check) stays a valid resume condition, as does another repository's.
+    """
+
+    resume = outcome.get("resume_when")
+    if not isinstance(resume, list):
+        return outcome
+    repo = _outcome_repo(source_ref, outcome)
+    if repo is None:
+        return outcome
+    try:
+        declared = json.loads(checks_json) if checks_json else []
+    except json.JSONDecodeError:
+        declared = []
+    allowed = {
+        (str(item.get("repo", "")).lower(), str(item.get("tag", "")))
+        for item in declared
+        if isinstance(item, Mapping) and item.get("type") == "release_exists"
+    }
+    circular = [
+        f"{item.get('repo')}@{item.get('tag')}" for item in resume
+        if isinstance(item, Mapping) and item.get("type") == "release_exists"
+        and str(item.get("repo", "")).lower() == repo
+        and (repo, str(item.get("tag", ""))) not in allowed
+    ]
+    if not circular:
+        return outcome
+    reason = outcome["reason"]
+    detail = (
+        f"Refused resume on own release {', '.join(circular)}: the task's work feeds that "
+        "release, so waiting for it never ends. Verify with the branch's pre-release artifacts "
+        f"or name the real blocker. Worker detail: {reason['detail']}"
+    )[:2000]
+    rewritten = {key: value for key, value in outcome.items() if key != "resume_when"}
+    rewritten["reason"] = {
+        "code": "verification_needed",
+        "detail": detail,
+        "signature": "verification_needed:own_release_resume_refused",
+        "queue_time_knowable": reason.get("queue_time_knowable"),
+    }
+    return validate_outcome("failed", rewritten)
+
+
 def validate_outcome(
     status: str,
     outcome: Mapping[str, Any] | None,
@@ -2879,7 +2945,7 @@ class QueueDB:
 
         with self._connect() as connection:
             task_row = connection.execute(
-                "SELECT kind FROM tasks WHERE id=?", (task_id,),
+                "SELECT kind, source_ref, checks_json FROM tasks WHERE id=?", (task_id,),
             ).fetchone()
             initial_claim = (
                 connection.execute(
@@ -2900,6 +2966,10 @@ class QueueDB:
         canonical = normalized_outcome(
             attempt_id is not None and status in TERMINAL_STATUSES
         )
+        if canonical is not None:
+            canonical = refuse_own_release_resume(
+                canonical, task_row["source_ref"], task_row["checks_json"],
+            )
         canonical_json = _canonical_json(canonical) if canonical is not None else None
 
         # Preserve the established two-phase activation release. A failed external

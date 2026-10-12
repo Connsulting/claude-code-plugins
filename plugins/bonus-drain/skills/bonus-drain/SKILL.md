@@ -424,7 +424,7 @@ Optional audit fields may include `target_base_oid`, `head_oid`, and `merge_rece
 `failed` or `skipped`, omit `completion` and use a reason code of
 `retryable`, `verification_needed`, `authority_required`, `permanent`, or `unknown_launch`, with
 nonempty detail and a stable non-secret signature. Accepted completion mechanisms are `command`,
-`artifact`, `operator_receipt`, and `goal_acceptance`. A `failed` outcome with reason `authority_required` may add `resume_when`, a list of check objects using the check types above.
+`artifact`, `operator_receipt`, and `goal_acceptance`. A `failed` outcome with reason `authority_required` may add `resume_when`, a list of check objects using the check types above. A `release_exists` entry for the task's own repository (from `source_ref`, else the outcome's `repository.remote`) is refused unless the task declared that same release check at queue time: the record is rewritten to `verification_needed` with signature `verification_needed:own_release_resume_refused` and no `resume_when`, because work on an unreleased line feeds that release and the hold would never clear.
 
 `authority_required` and `verification_needed` reasons also carry boolean `reason.queue_time_knowable`:
 `true` when the blocker already existed and could have been found before launch from the task
