@@ -7,7 +7,7 @@
   "scout_ntfy_url": null,
   "host_load_gate": {
     "enabled": true, "cpu_some_avg60_max": 40, "mem_available_min_gib": 4,
-    "load_per_cpu_max": 1.5
+    "load_per_cpu_max": 1.5, "disk_free_min_gib": 30
   },
   "secret_refs": [],
   "adapters": [

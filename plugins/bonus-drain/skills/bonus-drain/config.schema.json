@@ -52,6 +52,10 @@
         "load_per_cpu_max": {
           "type": "number", "exclusiveMinimum": 0, "default": 1.5,
           "description": "Fallback when PSI is unreadable: block when the 1-minute load average per CPU exceeds this."
+        },
+        "disk_free_min_gib": {
+          "type": "number", "minimum": 0, "default": 30,
+          "description": "Block when free space on the queue database's filesystem falls below this many GiB."
         }
       }
     },

@@ -410,6 +410,7 @@ A tick holds `scout.lock` in the state dir. A concurrent tick exits 0 and report
 
 The optional `host_load_gate` config block gates launches on host pressure: `enabled`,
 `cpu_some_avg60_max` (default 40.0, from `/proc/pressure/cpu`), `mem_available_min_gib`
-(default 4.0), and `load_per_cpu_max` (default 1.5, used only when `/proc/pressure/cpu` is
-unavailable). When nothing is readable, no gating happens. A gated tick still reconciles,
+(default 4.0), `load_per_cpu_max` (default 1.5, used only when `/proc/pressure/cpu` is
+unavailable), and `disk_free_min_gib` (default 30.0, free space available to unprivileged
+users on the filesystem holding the queue database). When nothing is readable, no gating happens. A gated tick still reconciles,
 launches nothing, and reports a `host_pressure` blocker.

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import runpy
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, is_dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -171,12 +172,18 @@ def _outcome(args: argparse.Namespace, cfg: config_module.RuntimeConfig) -> tupl
         raise CLIError(str(exc)) from exc
 
 
+def _host_load_reader(cfg: config_module.RuntimeConfig) -> Callable[[], scout.HostLoad]:
+    """Read host load with disk free measured where the queue db lives."""
+
+    return functools.partial(scout.read_host_load, database_dir=cfg.database.parent)
+
+
 def _tick(args: argparse.Namespace) -> tuple[config_module.RuntimeConfig, db.QueueDB, scout.TickPlan]:
     cfg, queue = _queue(args, graph_required=True)
     queue.initialize()
     now = _now(args)
     return cfg, queue, scout.plan_tick(
-        cfg, queue, now_epoch=now, host_load_reader=scout.read_host_load,
+        cfg, queue, now_epoch=now, host_load_reader=_host_load_reader(cfg),
     )
 
 
@@ -818,7 +825,7 @@ def _command(args: argparse.Namespace) -> int:
         cfg, queue = _queue(args, graph_required=True)
         report = scout.run_once(
             cfg, queue, now_epoch=_now(args), dry_run=args.dry_run,
-            host_load_reader=scout.read_host_load,
+            host_load_reader=_host_load_reader(cfg),
         )
         _json(report.to_dict())
         return 0 if not report.errors else 1
