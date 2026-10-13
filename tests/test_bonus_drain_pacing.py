@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
+import shlex
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -275,3 +279,92 @@ class RecurringCycleEligibilityTests(unittest.TestCase):
             self.assertEqual(queue.eligible_tasks(reset), [])
             later = queue.eligible_tasks(reset + 7 * 24 * HOUR)
             self.assertEqual([task.id for task in later], ["weekly-job"])
+
+
+class TerminalConfigAuthorityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.config_path = self.root / "custom config.json"
+        self.raw = {
+            "schema_version": 1,
+            "database": "custom queue.db",
+            "record_command": [str(SKILL_ROOT / "bin" / "bonus-drain"), "record"],
+        }
+        self.config_path.write_text(json.dumps(self.raw), encoding="utf-8")
+        self.environ = {
+            "PATH": os.environ.get("PATH", os.defpath),
+            "HOME": str(self.root),
+            "XDG_CONFIG_HOME": str(self.root / "config"),
+            "XDG_STATE_HOME": str(self.root / "state"),
+            "XDG_CACHE_HOME": str(self.root / "cache"),
+            "BONUS_DRAIN_FACTORY_TELEMETRY": "",
+        }
+
+    def test_generated_worker_receipt_uses_custom_config_not_implicit_default(self) -> None:
+        from bonus_drain import config, db, dispatcher
+
+        cfg = config.load_config(self.config_path, environ=self.environ)
+        queue = db.QueueDB(cfg.database)
+        task = queue.add_task(reviewed({
+            "id": "custom-worker", "title": "Custom worker", "kind": "oneoff",
+            "cwd": str(self.root), "goal": "Record a terminal receipt", "size": "small",
+        }))
+        key = f"alpha/weekly/{NOW + HOUR}"
+        attempt = queue.claim(task.id, key, "alpha", "alpha-account",
+                              provider_max_size="huge", now_epoch=NOW)
+        self.assertIsNotNone(attempt)
+        queue.record(task.id, key, attempt_id=attempt.id, status="dispatched",
+                     provider_id="alpha", account_id="alpha-account")
+
+        default_queue = db.QueueDB(self.root / "default queue.db")
+        default_queue.initialize()
+        default_path = config.default_config_path(self.environ)
+        default_path.parent.mkdir(parents=True)
+        default_path.write_text(json.dumps({**self.raw, "database": str(default_queue.path)}),
+                                encoding="utf-8")
+        self.assertNotIn("BONUS_DRAIN_CONFIG", self.environ)
+        self.assertEqual(config.load_config(environ=self.environ).database, default_queue.path)
+
+        prompt = dispatcher.render_prompt(cfg, task, key, "alpha", "alpha-account",
+                                          attempt=attempt)
+        command = next(line.strip() for line in prompt.splitlines() if "--status" in line)
+        argv = ["failed" if token == "done|skipped|failed" else
+                "custom worker terminal" if token == "<one line>" else token
+                for token in shlex.split(command)]
+
+        mismatched = argv.copy()
+        mismatched[mismatched.index("--database") + 1] = str(default_queue.path)
+        refusal = subprocess.run(mismatched, env=self.environ, cwd=self.root,
+                                 capture_output=True, text=True, check=False, timeout=30)
+        self.assertEqual(refusal.returncode, 2, refusal.stderr)
+        self.assertIn("--database must match config database", refusal.stderr)
+        self.assertEqual([run.status for run in queue.runs(task_id=task.id)], ["dispatched"])
+        self.assertIsNotNone(queue.claim_for(task.id, key))
+        self.assertEqual(default_queue.runs(), [])
+
+        result = subprocess.run(argv, env=self.environ, cwd=self.root,
+                                capture_output=True, text=True, check=False, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipts = [run for run in queue.runs(task_id=task.id) if run.status == "failed"]
+        self.assertEqual(len(receipts), 1)
+        receipt = receipts[0]
+        self.assertEqual((receipt.task, receipt.attempt_id, receipt.eligibility_key,
+                          receipt.provider_id, receipt.account_id, receipt.summary),
+                         (task.id, attempt.id, key, "alpha", "alpha-account",
+                          "custom worker terminal"))
+        self.assertIsNone(queue.claim_for(task.id, key))
+        self.assertEqual(default_queue.runs(), [])
+
+    def test_terminal_and_full_loaders_agree_on_symlink_relative_database(self) -> None:
+        from bonus_drain import config
+
+        link = self.root / "alias" / "config.json"
+        link.parent.mkdir()
+        link.symlink_to(self.config_path)
+        full = config.load_config(link, environ=self.environ)
+        terminal = config.load_terminal_config(link, environ=self.environ)
+        self.assertEqual(full.database, link.parent / self.raw["database"])
+        self.assertEqual(terminal.database, full.database)
+        self.assertEqual(terminal.source_path, full.source_path)

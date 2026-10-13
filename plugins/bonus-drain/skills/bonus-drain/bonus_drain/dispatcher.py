@@ -359,6 +359,8 @@ def _record_line(
             "--provider-id", provider_id,
         ]
     )
+    if config.source_path is not None:
+        command[2:2] = ["--config", str(config.source_path)]
     if account_id:
         command.extend(["--account-id", account_id])
     if attempt_id:

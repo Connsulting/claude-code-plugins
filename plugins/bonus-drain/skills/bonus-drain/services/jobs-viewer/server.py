@@ -62,7 +62,7 @@ DB_PATH = Path(os.environ.get(
 DRAIN_LEAD_MAX_HOURS = int(os.environ.get("DRAIN_LEAD_MAX_HOURS", "30"))
 
 
-def _gate_for_card(gates: dict, account_id: str, engine: str, label: str) -> dict:
+def _gate_for_card(gates: dict, engine: str) -> dict:
     table = gates.get("provider_gates") or {}
     return table.get(engine, {}) if isinstance(table, dict) else {}
 
@@ -1435,23 +1435,6 @@ def _card_name(engine: str, label: str) -> str:
     return f"{titled} · {label}"
 
 
-def _planned_batch(gates: dict, account_id: str, engine: str, label: str) -> int:
-    gate = _gate_for_card(gates, account_id, engine, label)
-    if not gate.get("open"):
-        return 0
-    return max(0, int(_f(gate.get("batch_size"))))
-
-
-def _account_draining(
-    gates: dict, account_id: str, engine: str, label: str, *,
-    selected: bool, coord: str, inflight: int,
-) -> bool:
-    """Shimmer every account the next tick will actually dispatch on, not only the coordinator."""
-    if _planned_batch(gates, account_id, engine, label) > 0:
-        return True
-    return bool(selected) and (coord == engine or inflight > 0)
-
-
 def _floor_rate(c: dict) -> tuple[float, float] | None:
     """(max_percent_per_window, pacing_window_seconds). None if the floor is off."""
     if "floor_ppw" in c:
@@ -1930,7 +1913,7 @@ def _claude_cards(gates: dict, usage: dict | None, n_elig: int, coord: str, batc
     ppw = _f(gates.get("pct_per_window"), 2.5)
     accounts = gates.get("acct") or []
 
-    pool_gate = _gate_for_card(gates, "", "claude", "")
+    pool_gate = _gate_for_card(gates, "claude")
 
     cards = []
     for a in accounts:
@@ -1974,7 +1957,7 @@ def _codex_cards(gates: dict, cx: dict | None, n_codex: int, coord: str, batch: 
     win_h = int(_f(gates.get("window_hours"), 5))
     accounts = gates.get("codex_acct") or []
 
-    pool_gate = _gate_for_card(gates, "", "codex", "")
+    pool_gate = _gate_for_card(gates, "codex")
 
     cards = []
     for a in accounts:
@@ -2017,7 +2000,7 @@ def _codex_cards(gates: dict, cx: dict | None, n_codex: int, coord: str, batch: 
 
 
 def _unmetered_card(gates: dict, provider: str, eligible: int, batch: int) -> list[dict]:
-    pool = _gate_for_card(gates, provider, provider, provider)
+    pool = _gate_for_card(gates, provider)
     configured = any(row.get("provider_id") == provider for row in gates.get("subscriptions", [])) or bool(pool)
     if not configured:
         return []

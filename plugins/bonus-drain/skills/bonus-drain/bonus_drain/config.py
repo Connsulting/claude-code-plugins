@@ -683,7 +683,7 @@ def load_terminal_config(
 ) -> RuntimeConfig:
     """Read receipt authority without interpreting the current provider graph."""
     env = os.environ if environ is None else environ
-    config_path = Path(path).expanduser().resolve(strict=False)
+    config_path = Path(path).expanduser()
     try:
         raw = json.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeError) as exc:
@@ -691,7 +691,7 @@ def load_terminal_config(
     data = _require_mapping(raw, "terminal config")
     database_value = data.get("database")
     database = (
-        _safe_path(database_value, "database", config_path.parent)
+        _safe_path(database_value, "database", config_path.parent.resolve(strict=False))
         if database_value is not None else default_state_dir(env) / "queue.db"
     )
     timezone = _string(data.get("recurrence_timezone", "America/New_York"), "recurrence_timezone")
@@ -701,7 +701,7 @@ def load_terminal_config(
         raise ConfigError("recurrence_timezone must be an IANA timezone") from exc
     return replace(
         minimal_config(database=database, environ=env),
-        source_path=config_path, recurrence_timezone=timezone,
+        source_path=config_path.resolve(strict=False), recurrence_timezone=timezone,
     )
 
 
