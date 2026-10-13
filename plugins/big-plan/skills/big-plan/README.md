@@ -31,10 +31,10 @@ comments anchor on the heading slug, so renaming a heading orphans its comments.
   some-plan.md.comments.json       <- sidecar, written by the server when a comment is posted
 ```
 
-- `render.py` converts markdown to HTML on the fly. Each `##` heading opens a collapsible `<details>` block; every heading gets a stable anchor matching the slugified heading text. Every paragraph, list item, and blockquote gets a `b-<hash>` block anchor derived from its text, so comments can attach to any block.
-- `server.py` is a stdlib HTTP server (no Flask) running under `uv run` with inline deps. Serves HTML, static assets, and POST endpoints for comments.
-- Comments anchor on heading slugs or block-hash anchors, not line numbers, so they survive reorders and edits as long as text stays stable.
-- Sidecar JSON shape: `{"comments": [{"id", "anchor", "type", "author", "timestamp", "resolved", "replies": [...], ...type-specific}]}`
+1. `render.py` converts markdown to HTML on the fly. Each `##` heading opens a collapsible `<details>` block; every heading gets a stable anchor matching the slugified heading text. Every paragraph, list item, and blockquote gets a `b-<hash>` block anchor derived from its text, so comments can attach to any block.
+2. `server.py` is a stdlib HTTP server (no Flask) running under `uv run` with inline deps. Serves HTML, static assets, and POST endpoints for comments.
+3. Comments anchor on heading slugs or block-hash anchors, not line numbers, so they survive reorders and edits as long as text stays stable.
+4. Sidecar JSON shape: `{"comments": [{"id", "anchor", "type", "author", "timestamp", "resolved", "replies": [...], ...type-specific}]}`
 
 ## Change highlighting (diff since last review)
 
@@ -42,9 +42,9 @@ When you revise a plan after the user comments, the changed blocks light up in t
 
 How it works:
 
-- The baseline is a single sidecar named `<plan>.md.snapshot` holding the version the user last reviewed. There is exactly one snapshot per plan; it is overwritten on each revision. It does **not** end in `.md`, so agentic `*.md` search, the Markdown index scan, and direct GETs all ignore it -- the canonical `.md` is always the one people see.
-- `render.py` diffs current-vs-snapshot at the block level by reusing the existing anchor hashes (unchanged text keeps its anchor and aligns; reworded text gets a new anchor). A `replace` of N old blocks by M new ones is read as N edits (`changed`) plus M-N additions (`added`). Removed blocks have no current element to tag and are not surfaced.
-- Comments that get resolved during a revision already disappear from the view (`comments_for_anchor` filters `resolved`), so the right rail clears itself; the highlight is what carries the trace of what changed.
+1. The baseline is a single sidecar named `<plan>.md.snapshot` holding the version the user last reviewed. There is exactly one snapshot per plan; it is overwritten on each revision. It does **not** end in `.md`, so agentic `*.md` search, the Markdown index scan, and direct GETs all ignore it -- the canonical `.md` is always the one people see.
+2. `render.py` diffs current-vs-snapshot at the block level by reusing the existing anchor hashes (unchanged text keeps its anchor and aligns; reworded text gets a new anchor). A `replace` of N old blocks by M new ones is read as N edits (`changed`) plus M-N additions (`added`). Removed blocks have no current element to tag and are not surfaced.
+3. Comments that get resolved during a revision already disappear from the view (`comments_for_anchor` filters `resolved`), so the right rail clears itself; the highlight is what carries the trace of what changed.
 
 Agent workflow for a revision:
 
@@ -58,19 +58,19 @@ The green/amber split is best-effort at edit/insert boundaries; when in doubt a 
 
 The tint answers "where did something change"; the diff tab answers "what exactly changed". `GET /<plan>.md?view=diff` (the **View Diff** link in the topbar) renders a GitHub-style collapsed unified diff of the *raw markdown*, baseline snapshot -> current:
 
-- Only changed hunks show, with 3 lines of context; the unchanged runs between them collapse behind **Expand N unchanged lines** toggles. Red `-` / green `+` lines with old/new line-number gutters.
-- **Word-level highlight**: within a reworded line, `render.py` pairs the old/new lines index-wise and runs a token-level diff (`word_diff`, words + whitespace runs). Only the differing words get a `<span class="wd">` (stronger background + bold), so you see the exact edit, not just the whole line. Because plans write each paragraph as one line, this runs within the paragraph.
-- Each hunk has an inline **Reviewed** button (Cursor-accept style) backed by `POST /api/snapshot/<rel>/accept` with `{old_start, old_end, old_b64, new_b64}`. It splices that hunk's new lines into the snapshot so the hunk stops showing while the others remain. The `*_b64` fields are `base64(JSON(list[str]))` (JSON so empty pure-insert ranges round-trip). The server 409s if the snapshot moved under the client (`old_lines` no longer match), and the client reloads.
-- Accept is positive-only: it advances the baseline, it never rewrites the current plan. There is no reject/revert.
+1. Only changed hunks show, with 3 lines of context; the unchanged runs between them collapse behind **Expand N unchanged lines** toggles. Red `-` / green `+` lines with old/new line-number gutters.
+2. **Word-level highlight**: within a reworded line, `render.py` pairs the old/new lines index-wise and runs a token-level diff (`word_diff`, words + whitespace runs). Only the differing words get a `<span class="wd">` (stronger background + bold), so you see the exact edit, not just the whole line. Because plans write each paragraph as one line, this runs within the paragraph.
+3. Each hunk has an inline **Reviewed** button (Cursor-accept style) backed by `POST /api/snapshot/<rel>/accept` with `{old_start, old_end, old_b64, new_b64}`. It splices that hunk's new lines into the snapshot so the hunk stops showing while the others remain. The `*_b64` fields are `base64(JSON(list[str]))` (JSON so empty pure-insert ranges round-trip). The server 409s if the snapshot moved under the client (`old_lines` no longer match), and the client reloads.
+4. Accept is positive-only: it advances the baseline, it never rewrites the current plan. There is no reject/revert.
 
 ## Comment types
 
 The sidecar records four comment types. All share `id`, `anchor`, `type`, `author`, `timestamp`, `resolved`. Type-specific fields:
 
-- `text` (default): `text` (string). Free-form comment captured via the "+" button. Stacks (multiple text comments per anchor are allowed).
-- `reaction`: `emoji` (one of 👍 👎 🤔). Captured by tapping a reaction button on any anchored block. Stacks. Tap an existing chip to delete it (no confirmation).
-- `decision`: `choices` (string[]), optional `question` (string), and optional `note` (string). Captured by tapping options in a `decide` / `decide-multi` block; saved automatically on change. A note can explain the selected option(s), condition the decision, or name follow-up work. The server replaces any prior unresolved decision on the same anchor, so the sidecar holds at most one open decision per card. Tapping a selected radio again clears the selection (and the sidecar entry).
-- `status`: legacy. Task checkbox taps now mutate the source .md directly (see Task checkboxes below), so new sessions won't write status comments. Existing `status` entries in older sidecars are accepted but not rendered.
+1. `text` (default): `text` (string). Free-form comment captured via the "+" button. Stacks (multiple text comments per anchor are allowed).
+2. `reaction`: `emoji` (thumbs up, thumbs down, or thinking). Captured by tapping a reaction button on any anchored block. Stacks. Tap an existing chip to delete it (no confirmation).
+3. `decision`: `choices` (string[]), optional `question` (string), and optional `note` (string). Captured by tapping options in a `decide` / `decide-multi` block; saved automatically on change. A note can explain the selected option(s), condition the decision, or name follow-up work. The server replaces any prior unresolved decision on the same anchor, so the sidecar holds at most one open decision per card. Tapping a selected radio again clears the selection (and the sidecar entry).
+4. `status`: legacy. Task checkbox taps now mutate the source .md directly (see Task checkboxes below), so new sessions won't write status comments. Existing `status` entries in older sidecars are accepted but not rendered.
 
 ### Replies (threads)
 
@@ -90,8 +90,8 @@ Every text/decision/status comment has a `✓` resolve button and a `×` delete 
 
 Beyond plain markdown, plans can use these block conventions:
 
-- **Task checkboxes**: `- [ ] Set up Postgres` / `- [x] Done`. Rendered as tappable checkboxes. Tapping a checkbox mutates the source .md (flips `[ ]` <-> `[x]` on that line) via `POST /api/task/<rel>` with `{line, checked}`. The marker carries `data-md-line` from render time so the server hits the exact line.
-- **Decision blocks**: a fenced block with info-string `decide` (radio) or `decide-multi` (checkbox). First non-list line is the question; bullets are options. Every card automatically appends an "Other..." row with a text input and an optional note field. Select the option(s), then blur the note field or press Ctrl/Cmd+Enter to save the choice and note together.
+1. **Task checkboxes**: `- [ ] Set up Postgres` / `- [x] Done`. Rendered as tappable checkboxes. Tapping a checkbox mutates the source .md (flips `[ ]` <-> `[x]` on that line) via `POST /api/task/<rel>` with `{line, checked}`. The marker carries `data-md-line` from render time so the server hits the exact line.
+2. **Decision blocks**: a fenced block with info-string `decide` (radio) or `decide-multi` (checkbox). First non-list line is the question; bullets are options. Every card automatically appends an "Other..." row with a text input and an optional note field. Select the option(s), then blur the note field or press Ctrl/Cmd+Enter to save the choice and note together.
   ````markdown
   ```decide
   Which database?
@@ -99,7 +99,7 @@ Beyond plain markdown, plans can use these block conventions:
   - SQLite
   ```
   ````
-- **Comparison grids**: raw HTML `<div class="compare">` containing `<div class="compare-col" markdown="1">` children. Renders as a responsive grid with markdown inside each column.
+3. **Comparison grids**: raw HTML `<div class="compare">` containing `<div class="compare-col" markdown="1">` children. Renders as a responsive grid with markdown inside each column.
 
 ## Copy-feedback round-trip
 
