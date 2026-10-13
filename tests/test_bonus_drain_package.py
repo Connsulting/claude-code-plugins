@@ -367,6 +367,40 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             report.diagnostics,
         )
 
+    def test_doctor_rotator_check_follows_each_activation_rotate_value(self) -> None:
+        # Real rotators are the --rotate value of each activation adapter, whatever their name.
+        sys.path.insert(0, str(SKILL_ROOT))
+        try:
+            from bonus_drain import lifecycle
+        finally:
+            sys.path.pop(0)
+
+        for executable in (True, False):
+            with self.subTest(executable=executable), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                rotator = root / "rotate.sh"
+                rotator.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                rotator.chmod(0o700 if executable else 0o600)
+                activation = root / "bin" / "bonus-drain-account-activation"
+                activation.parent.mkdir()
+                activation.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                activation.chmod(0o700)
+                config = self.load_json(SKILL_ROOT / "config.example.json")
+                config["database"] = str(root / "queue.db")
+                for adapter in config["adapters"]:
+                    adapter["argv"][0] = str(activation) if adapter["kind"] == "activation" else "/bin/true"
+                    adapter["argv"] = [
+                        str(rotator) if token == "/ABSOLUTE/PATH/TO/ai-token-rotator" else token
+                        for token in adapter["argv"]
+                    ]
+                config_path = root / "config.json"
+                config_path.write_text(json.dumps(config), encoding="utf-8")
+
+                report = lifecycle.doctor(root / "home", config_path=config_path)
+
+                self.assertIs(report.checks["config"], True, report)
+                self.assertIs(report.checks["optional:ai-token-rotator"], executable, report)
+
     def test_same_version_install_rejects_changed_source_without_changing_current(self) -> None:
         sys.path.insert(0, str(SKILL_ROOT))
         try:

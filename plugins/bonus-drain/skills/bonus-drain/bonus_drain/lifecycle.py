@@ -454,16 +454,18 @@ def _executable_available(command: str) -> bool:
     return resolved is not None and Path(resolved).is_file()
 
 
-def _configured_rotator(cfg: Any) -> str | None:
-    """Return an explicitly named ai-token-rotator argv entry, if configured."""
+def _configured_rotators(cfg: Any) -> list[str]:
+    """Return the --rotate value of every activation adapter, whatever the rotator is named."""
 
+    rotators: list[str] = []
     for adapter in cfg.adapters:
         if adapter.kind != "activation":
             continue
-        for token in adapter.argv:
-            if Path(token).name in {"ai-token-rotator", "ai-token-rotator.sh"}:
-                return token
-    return None
+        argv = list(adapter.argv)
+        for index, token in enumerate(argv[:-1]):
+            if token == "--rotate":
+                rotators.append(argv[index + 1])
+    return rotators
 
 
 def status(home: str | Path | None = None) -> InstallStatus:
@@ -611,12 +613,11 @@ def doctor(
                 )
 
         activation_configured = any(adapter.kind == "activation" for adapter in cfg.adapters)
-        rotator = _configured_rotator(cfg)
         if activation_configured:
-            checks["optional:ai-token-rotator"] = (
-                (rotator is not None and _executable_available(rotator))
-                or shutil.which("ai-token-rotator") is not None
-            )
+            rotators = _configured_rotators(cfg)
+            unavailable = sorted({rotator for rotator in rotators if not _executable_available(rotator)})
+            checks["optional:ai-token-rotator"] = bool(rotators) and not unavailable
+            diagnostics.extend(f"activation rotator is not executable: {rotator}" for rotator in unavailable)
         if consumers:
             compatibility = check_consumer_compatibility(cfg, consumers)
             checks["consumers"] = compatibility.ok
