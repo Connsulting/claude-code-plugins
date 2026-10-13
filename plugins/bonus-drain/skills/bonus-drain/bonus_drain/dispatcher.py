@@ -1,4 +1,4 @@
-"""Claimed, router-only dispatch with concrete provider bookkeeping."""
+"""Claimed, T3 thread dispatch with concrete provider bookkeeping."""
 
 from __future__ import annotations
 
@@ -57,22 +57,18 @@ class LaunchNotCreated(DispatchError):
 
 
 class KnownDispatchFailure(DispatchError):
-    """The router positively reported that no launch occurred."""
-
-
-class ClassificationFailure(DispatchError):
-    """A non-launching pre-claim router classification could not complete."""
+    """The thread launcher positively reported that no launch occurred."""
 
 
 class ProviderLaunchUnavailable(KnownDispatchFailure):
-    """The router proved the provider launcher could not start; hold the account, not the task."""
+    """The thread launcher proved the provider launcher could not start; hold the account, not the task."""
 
     # Set by dispatch once the managed account hold is recorded; the scout reports it.
     account_hold: AccountHold | None = None
 
 
 class AmbiguousDispatch(DispatchError):
-    """The router response cannot prove whether a launch occurred."""
+    """The thread launcher response cannot prove whether a launch occurred."""
 
 
 
@@ -88,20 +84,9 @@ _MCP_FILE_LIMIT = 1_048_576
 _OUTCOME_FILE_LIMIT = 65_536
 _MCP_SERVER_LIMIT = 64
 _MCP_SELECTION_LIMIT = 32
-_MCP_STALE_SECONDS = 30 * 24 * 60 * 60
 _MCP_ENV_REF_RE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 _MCP_SENSITIVE_RE = re.compile(
     r"(?:authorization|cookie|credential|password|secret|token|api[-_]?key)", re.IGNORECASE
-)
-_MCP_OWNED_FILE_RE = re.compile(r"^task-[0-9a-f]{24}\.json$")
-_MCP_FLAG_REJECTION_RE = re.compile(
-    r"(?:unknown|unrecognized|unexpected)\s+(?:option|argument|flag)"
-    r"|(?:option|argument|flag)\s+(?:is\s+)?(?:unknown|unrecognized|unexpected)",
-    re.IGNORECASE,
-)
-_MCP_CLAUDE_ONLY_RE = re.compile(
-    r"--(?:strict-)?mcp-config\s+is\s+a\s+claude\s+only\s+flag",
-    re.IGNORECASE,
 )
 _CODEX_APP_SERVER_MISSING_RE = re.compile(
     r"could not run [`']codex app-server daemon start[`']:\s*No such file or directory",
@@ -201,7 +186,6 @@ def factory_repo_name(cwd: str) -> str:
 def factory_run_payload(
     task: Task,
     provider: ProviderConfig,
-    router_decision_id: Any,
     attempt_id: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
@@ -212,8 +196,6 @@ def factory_run_payload(
         "status": "dispatched",
         "drain_task_id": task.id,
     }
-    if isinstance(router_decision_id, int) and not isinstance(router_decision_id, bool):
-        payload["router_decision_id"] = router_decision_id
     if attempt_id is not None:
         payload["drain_attempt_id"] = attempt_id
     return payload
@@ -223,7 +205,6 @@ def record_factory_run(
     task: Task,
     provider: ProviderConfig,
     run_id: str,
-    router_decision_id: Any,
     telemetry_call: Callable[[list[str], dict[str, Any]], Any] | None = None,
     attempt_id: str | None = None,
 ) -> bool:
@@ -233,7 +214,7 @@ def record_factory_run(
     stderr: the dispatch has already happened and its bookkeeping is authoritative.
     """
     try:
-        payload = factory_run_payload(task, provider, router_decision_id, attempt_id)
+        payload = factory_run_payload(task, provider, attempt_id)
         if telemetry_call is not None:
             telemetry_call(["record", "run", "--run-id", run_id], payload)
             return True
@@ -704,7 +685,7 @@ def render_prompt(
                 "If a later user message in this same thread continues the work after this "
                 "attempt recorded failed or skipped, keep this task and do not "
                 "launch another worker. Before more work, run the exact continue-progress command "
-                "below. It marks this same router job in progress and does not start a dispatch. "
+                "below. It marks this same T3 thread in progress and does not start a dispatch. "
                 "If it refuses, stop without changing the original attempt and do not launch a replacement."
             ),
             f"  {_continue_progress_line(config, task, attempt.id)}",
@@ -736,28 +717,10 @@ def render_prompt(
     return prompt
 
 
-def classification_prompt(task: Task) -> str:
-    required = list(task.required_capabilities)
-    if task_invokes_implement(task) and IMPLEMENT_CAPABILITY not in required:
-        required.append(IMPLEMENT_CAPABILITY)
-    fields = [
-        f"Title: {task.title}", f"Goal: {task.goal}", f"Working directory: {task.cwd}",
-        f"Allowed provider ids: {', '.join(task.allowed_providers) if task.allowed_providers else 'any configured provider'}",
-        f"Required capabilities: {', '.join(required) if required else 'none'}",
-    ]
-    for label, value in (
-        ("Context", task.context), ("Constraints", task.constraints),
-        ("Precondition", task.precondition), ("Done when", task.done_when),
-    ):
-        if value:
-            fields.append(f"{label}: {value[:2000]}")
-    return "\n".join(fields)
-
-
 def _safe_environment(adapter: AdapterConfig, config: RuntimeConfig) -> dict[str, str]:
-    """The router child environment: a small base, the allowlist, and bound secret refs.
+    """The thread launcher child environment: a small base, the allowlist, and bound secret refs.
 
-    Secrets reach the router only through the adapter's ``secret_refs`` bindings, the same
+    Secrets reach the launcher only through the adapter's ``secret_refs`` bindings, the same
     contract usage adapters honour, so a credential is named once in config and is also
     registered for diagnostic redaction. Raises ``AdapterError`` when a binding cannot resolve.
     """
@@ -766,9 +729,6 @@ def _safe_environment(adapter: AdapterConfig, config: RuntimeConfig) -> dict[str
 
     permitted = {"HOME", "PATH", "LANG", "LC_ALL", "TMPDIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"}
     permitted.update(adapter.env_allowlist)
-    # Hermetic router adapters commonly expose their output/control channel through these
-    # non-credential variables. Keep this narrow instead of inheriting the whole environment.
-    permitted.update(name for name in os.environ if name.startswith("ROUTER_"))
     child_env = {name: os.environ[name] for name in permitted if name in os.environ}
     _secret_values, secret_env = _secrets(adapter, {}, config, os.environ)
     child_env.update(secret_env)
@@ -788,10 +748,10 @@ def _read_mcp_json(path: Path, label: str) -> Mapping[str, Any]:
 
 
 def _private_diagnostic(config: RuntimeConfig, diagnostic: Any) -> str:
-    """Use the router diagnostic redactor for private-file boundary errors."""
+    """Use the launcher diagnostic redactor for private-file boundary errors."""
 
     if config.adapters:
-        return _router_diagnostic(config, config.adapters[0], diagnostic)
+        return _launch_diagnostic(config, config.adapters[0], diagnostic)
     from .adapters import _redact
 
     return _redact(str(diagnostic), [])[:500]
@@ -1088,110 +1048,15 @@ def validate_task_mcp(
     resolve_mcp_selection(raw, cwd)
 
 
-def _prune_owned_mcp_files(directory: Path, current: Path) -> None:
-    cutoff = time.time() - _MCP_STALE_SECONDS
-    try:
-        entries = list(directory.iterdir())
-    except OSError:
-        return
-    for entry in entries:
-        if entry == current or not _MCP_OWNED_FILE_RE.fullmatch(entry.name):
-            continue
-        try:
-            metadata = entry.lstat()
-            if (
-                not stat.S_ISREG(metadata.st_mode)
-                or metadata.st_uid != os.getuid()
-                or metadata.st_mtime >= cutoff
-            ):
-                continue
-            entry.unlink()
-        except OSError:
-            continue
-
-
-def _materialize_mcp_config(config: RuntimeConfig, task: Task, _eligibility_key: str) -> Path | None:
-    if task.mcp is None or not task.mcp.strip():
-        return None
-    servers = resolve_mcp_selection(task.mcp, task.cwd)
-    directory = config.state_dir / "mcp"
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-    metadata = directory.lstat()
-    if not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.getuid():
-        raise DispatchError("MCP state directory is not an owned directory")
-    directory.chmod(0o700)
-    digest = sha256(task.id.encode("utf-8")).hexdigest()[:24]
-    path = directory / f"task-{digest}.json"
-    _prune_owned_mcp_files(directory, path)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".task-{digest}-", suffix=".tmp", dir=directory)
-    temporary = Path(temporary_name)
-    try:
-        os.fchmod(descriptor, 0o600)
-        payload = json.dumps({"mcpServers": servers}, sort_keys=True, separators=(",", ":")) + "\n"
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            descriptor = -1
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        path.chmod(0o600)
-        return path
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        try:
-            temporary.unlink()
-        except FileNotFoundError:
-            pass
-
-
 def _uses_claude_mcp_scoping(provider: ProviderConfig) -> bool:
     """Whether this t3-thread provider accepts Claude's task MCP flags.
 
-    MCP selection is a Claude Code-only router contract.  Codex deliberately uses its
+    MCP selection is a Claude Code-only thread contract.  Codex deliberately uses its
     configured connectors instead of a task-provided MCP file, so do not validate,
     materialize, or pass task MCP state for it (or for other providers).
     """
 
     return provider.dispatch.provider == "claude"
-
-
-def _phase_uncertainty(phase: str, message: str) -> DispatchError:
-    if phase == "classification":
-        detail = message.replace("; launch state is unknown", "")
-        return ClassificationFailure(
-            f"{detail}; dry-run classification failed before claim and is retry-safe"
-        )
-    return AmbiguousDispatch(message)
-
-
-def _explicitly_not_launched(value: Mapping[str, Any]) -> bool:
-    containers = [value]
-    dispatch_value = value.get("dispatch")
-    if isinstance(dispatch_value, Mapping):
-        containers.append(dispatch_value)
-    launch_values = [item.get("launched") for item in containers if "launched" in item]
-    if not launch_values or any(item is not False for item in launch_values):
-        return False
-    return not any(
-        isinstance(item.get("job_id"), str) and bool(item.get("job_id"))
-        for item in containers
-    )
-
-
-def _positive_prelaunch_mcp_flag_rejection(stdout: str, stderr: str) -> str | None:
-    """Return a parser diagnostic that proves a rejected MCP flag never launched work."""
-
-    for line in reversed((stderr + "\n" + stdout).splitlines()):
-        normalized = line.strip()
-        if (
-            "--mcp-config" in normalized or "--strict-mcp-config" in normalized
-        ) and (
-            _MCP_FLAG_REJECTION_RE.search(normalized)
-            or _MCP_CLAUDE_ONLY_RE.search(normalized)
-        ):
-            return normalized
-    return None
 
 
 def _positive_prelaunch_codex_executable_rejection(stdout: str, stderr: str) -> str | None:
@@ -1207,14 +1072,14 @@ def _positive_prelaunch_codex_executable_rejection(stdout: str, stderr: str) -> 
     return None
 
 
-def _router_diagnostic(
+def _launch_diagnostic(
     config: RuntimeConfig,
     adapter: AdapterConfig,
     diagnostic: Any,
 ) -> str:
-    """Redact and bound router-controlled text before it can leave dispatch.
+    """Redact and bound launcher-controlled text before it can leave dispatch.
 
-    Router JSON must remain unmodified for protocol parsing (including ``job_id``), but any
+    T3 JSON must remain unmodified for protocol parsing (including ``threadId``), but any
     stdout/stderr-derived text is untrusted diagnostic data.  Reuse the adapter's configured
     secret resolution and redactor so errors, claim details, summaries, and the viewer never
     retain configured secret values.
@@ -1225,24 +1090,23 @@ def _router_diagnostic(
     try:
         secret_values, _secret_env = _secrets(adapter, {}, config, os.environ)
     except Exception:  # noqa: BLE001
-        # Failure to resolve a redaction secret must not turn a router error into a new failure.
+        # Failure to resolve a redaction secret must not turn a launcher error into a new failure.
         # _redact still removes named credential assignments and bounds the diagnostic.
         secret_values = {}
     return _redact(str(diagnostic), list(secret_values.values()))[:500]
 
 
-def _completed_router_result(
+def _completed_launch_result(
     completed: subprocess.CompletedProcess[Any],
     *,
     config: RuntimeConfig,
     adapter: AdapterConfig,
-    phase: str,
 ) -> Mapping[str, Any]:
     stdout = completed.stdout.decode("utf-8", errors="replace") \
         if isinstance(completed.stdout, bytes) else str(completed.stdout or "")
     stderr = completed.stderr.decode("utf-8", errors="replace") \
         if isinstance(completed.stderr, bytes) else str(completed.stderr or "")
-    if adapter.kind == "t3-thread" and completed.returncode == 6:
+    if completed.returncode == 6:
         raise LaunchNotCreated("t3-thread exited 6 before creating a thread")
     try:
         value = _strict_json_loads(stdout)
@@ -1252,50 +1116,32 @@ def _completed_router_result(
                 (line for line in reversed(stderr.splitlines() + stdout.splitlines()) if line.strip()),
                 "no diagnostic",
             )
-            mcp_rejection = _positive_prelaunch_mcp_flag_rejection(stdout, stderr)
-            codex_rejection = (
-                None if mcp_rejection is not None
-                else _positive_prelaunch_codex_executable_rejection(stdout, stderr)
-            )
-            if phase == "launch" and mcp_rejection is not None:
-                raise KnownDispatchFailure(
-                    _router_diagnostic(config, adapter, mcp_rejection)
-                ) from exc
-            if phase == "launch" and codex_rejection is not None:
+            codex_rejection = _positive_prelaunch_codex_executable_rejection(stdout, stderr)
+            if codex_rejection is not None:
                 # The Codex launcher never started, so no thread exists. The failure belongs
                 # to the provider account, not to this task.
                 raise ProviderLaunchUnavailable(
-                    _router_diagnostic(config, adapter, codex_rejection)
+                    _launch_diagnostic(config, adapter, codex_rejection)
                 ) from exc
-            raise _phase_uncertainty(
-                phase,
+            raise AmbiguousDispatch(
                 f"t3-thread exited {completed.returncode} without validated JSON: "
-                f"{_router_diagnostic(config, adapter, detail)}; launch state is unknown",
+                f"{_launch_diagnostic(config, adapter, detail)}; launch state is unknown",
             ) from exc
-        raise _phase_uncertainty(
-            phase, "t3-thread returned successful non-JSON output; launch state is unknown"
+        raise AmbiguousDispatch(
+            "t3-thread returned successful non-JSON output; launch state is unknown"
         ) from exc
     if not isinstance(value, Mapping):
-        raise _phase_uncertainty(
-            phase, "t3-thread returned non-object output; launch state is unknown"
+        raise AmbiguousDispatch(
+            "t3-thread returned non-object output; launch state is unknown"
         )
-    if phase == "launch" and _explicitly_not_launched(value):
-        detail = value.get("error")
-        if not isinstance(detail, str) or not detail:
-            detail = next(
-                (line for line in reversed(stderr.splitlines()) if line.strip()),
-                "router reported launched=false",
-            )
-        raise KnownDispatchFailure(_router_diagnostic(config, adapter, detail))
     if completed.returncode != 0:
         detail = next(
             (line for line in reversed(stderr.splitlines() + stdout.splitlines()) if line.strip()),
             "no diagnostic",
         )
-        raise _phase_uncertainty(
-            phase,
+        raise AmbiguousDispatch(
             f"t3-thread exited {completed.returncode}: "
-            f"{_router_diagnostic(config, adapter, detail)}; launch state is unknown",
+            f"{_launch_diagnostic(config, adapter, detail)}; launch state is unknown",
         )
     return value
 
@@ -1305,17 +1151,13 @@ def _subprocess_call(
     *,
     config: RuntimeConfig,
     adapter: AdapterConfig,
-    phase: str,
-    **_kwargs: Any,
 ) -> Mapping[str, Any]:
     from .adapters import AdapterError, ProcessOutputLimit, run_bounded_process
 
     try:
         env = _safe_environment(adapter, config)
     except AdapterError as exc:
-        # Nothing was spawned, so an unresolvable binding is known not launched on both phases.
-        if phase == "classification":
-            raise ClassificationFailure(f"t3-thread classifier environment: {exc}") from exc
+        # No child was spawned when a secret binding could not resolve.
         raise KnownDispatchFailure(f"t3-thread environment: {exc}") from exc
     try:
         completed = run_bounded_process(
@@ -1324,63 +1166,43 @@ def _subprocess_call(
             env=env,
         )
     except subprocess.TimeoutExpired as exc:
-        raise _phase_uncertainty(
-            phase,
+        raise AmbiguousDispatch(
             f"t3-thread timed out after {adapter.timeout_seconds:g}s; launch state is unknown"
         ) from exc
     except ProcessOutputLimit as exc:
-        raise _phase_uncertainty(
-            phase, "t3-thread output exceeded configured limit; launch state is unknown"
+        raise AmbiguousDispatch(
+            "t3-thread output exceeded configured limit; launch state is unknown"
         ) from exc
     except OSError as exc:
-        if phase == "classification":
-            raise ClassificationFailure(f"t3-thread classifier could not start: {exc}") from exc
         raise KnownDispatchFailure(f"t3-thread could not start: {exc}") from exc
-    return _completed_router_result(completed, config=config, adapter=adapter, phase=phase)
+    return _completed_launch_result(completed, config=config, adapter=adapter)
 
 
-def _call_router(
+def _call_launcher(
     callback: Callable[..., Any] | None,
     argv: Sequence[str],
     config: RuntimeConfig,
     adapter: AdapterConfig,
-    *,
-    phase: str,
 ) -> Mapping[str, Any]:
-    if phase not in {"classification", "launch"}:
-        raise DispatchError(f"invalid router phase: {phase}")
-    if adapter.kind not in {"agent-router", "t3-thread"}:
-        raise InvalidRoute(f"{phase} adapter {adapter.id} must be kind agent-router or t3-thread")
-    if phase == "classification" and "--dry-run" not in argv:
-        raise DispatchError("router classification must use --dry-run")
-    if phase == "launch" and "--dry-run" in argv:
-        raise DispatchError("router launch must not use --dry-run")
+    if adapter.kind != "t3-thread":
+        raise InvalidRoute(f"launch adapter {adapter.id} must be kind t3-thread")
+    if "--dry-run" in argv:
+        raise DispatchError("thread launch must not use --dry-run")
     try:
         if callback is None:
-            result = _subprocess_call(argv, config=config, adapter=adapter, phase=phase)
+            result = _subprocess_call(argv, config=config, adapter=adapter)
         else:
             result = callback(
                 list(argv), timeout_seconds=adapter.timeout_seconds,
                 max_output_bytes=adapter.max_output_bytes, env_allowlist=adapter.env_allowlist,
-                phase=phase,
             )
-    except ClassificationFailure:
-        raise
-    except KnownDispatchFailure as exc:
-        if phase == "classification":
-            raise ClassificationFailure(str(exc)) from exc
-        raise
-    except AmbiguousDispatch as exc:
-        if phase == "classification":
-            raise ClassificationFailure(str(exc)) from exc
+    except (KnownDispatchFailure, AmbiguousDispatch):
         raise
     except subprocess.TimeoutExpired as exc:
-        raise _phase_uncertainty(
-            phase, "t3-thread timed out; launch state is unknown"
+        raise AmbiguousDispatch(
+            "t3-thread timed out; launch state is unknown"
         ) from exc
     except OSError as exc:
-        if phase == "classification":
-            raise ClassificationFailure(f"t3-thread classifier could not start: {exc}") from exc
         raise KnownDispatchFailure(f"t3-thread could not start: {exc}") from exc
     except Exception as exc:
         from .adapters import ProcessOutputLimit
@@ -1388,46 +1210,26 @@ def _call_router(
         if isinstance(exc, (ProcessOutputLimit, LaunchNotCreated)):
             if isinstance(exc, LaunchNotCreated):
                 raise
-            raise _phase_uncertainty(
-                phase, "t3-thread output exceeded configured limit; launch state is unknown"
-            ) from exc
-        if phase == "classification":
-            raise ClassificationFailure(
-                f"t3-thread dry-run classification failed before claim and is retry-safe: {exc}"
+            raise AmbiguousDispatch(
+                "t3-thread output exceeded configured limit; launch state is unknown"
             ) from exc
         raise AmbiguousDispatch(
             "t3-thread invocation failed after the launch attempt; launch state is unknown"
         ) from exc
     if isinstance(result, subprocess.CompletedProcess):
-        return _completed_router_result(result, config=config, adapter=adapter, phase=phase)
+        return _completed_launch_result(result, config=config, adapter=adapter)
     if isinstance(result, str):
         try:
             result = _strict_json_loads(result)
         except (json.JSONDecodeError, _DuplicateJSONKey) as exc:
-            raise _phase_uncertainty(
-                phase, "t3-thread returned successful non-JSON output; launch state is unknown"
+            raise AmbiguousDispatch(
+            "t3-thread returned successful non-JSON output; launch state is unknown"
             ) from exc
     if not isinstance(result, Mapping):
-        raise _phase_uncertainty(
-            phase, "t3-thread returned successful non-object output; launch state is unknown"
-        )
-    if phase == "launch" and _explicitly_not_launched(result):
-        detail = result.get("error")
-        raise KnownDispatchFailure(
-            _router_diagnostic(config, adapter, detail)
-            if isinstance(detail, str) and detail else "router reported launched=false"
+        raise AmbiguousDispatch(
+            "t3-thread returned successful non-object output; launch state is unknown"
         )
     return result
-
-
-def _classified_provider(config: RuntimeConfig, raw: Mapping[str, Any]) -> ProviderConfig:
-    candidate: Any = raw.get("provider") or raw.get("provider_id")
-    if candidate is None and isinstance(raw.get("decision"), Mapping):
-        candidate = raw["decision"].get("provider") or raw["decision"].get("provider_id")
-    for provider in config.providers:
-        if candidate in {provider.id, provider.dispatch.provider}:
-            return provider
-    raise InvalidRoute(f"t3-thread classified unknown provider: {candidate!r}")
 
 
 def _provider(config: RuntimeConfig, provider_id: str) -> ProviderConfig:
@@ -1502,7 +1304,7 @@ def dispatch(
     task_id: str,
     eligibility_key: str,
     requested_provider: str,
-    router_call: Callable[..., Any] | None = None,
+    launch_call: Callable[..., Any] | None = None,
     telemetry_call: Callable[[list[str], dict[str, Any]], Any] | None = None,
     trigger: str = "manual",
     now_epoch: int | None = None,
@@ -1550,8 +1352,8 @@ def dispatch(
     if provider.id == "auto" or not provider_compatible(task, provider):
         raise InvalidRoute(f"provider {provider.id} is incompatible with task {task.id}")
     adapter = config.adapter(provider.dispatch.adapter_id)
-    if adapter.kind not in {"agent-router", "t3-thread"}:
-        raise InvalidRoute(f"launch adapter {adapter.id} must be kind agent-router or t3-thread")
+    if adapter.kind not in {"t3-thread"}:
+        raise InvalidRoute(f"launch adapter {adapter.id} must be kind t3-thread")
 
     account_id = provider.id
     if eligibility_key.startswith("manual/manual/"):
@@ -1599,7 +1401,7 @@ def dispatch(
             raise KnownDispatchFailure(str(exc)) from exc
         if rechecked_dependency_base != selected_dependency_base:
             raise KnownDispatchFailure(
-                "dependency base changed after claim; refusing the router launch"
+                "dependency base changed after claim; refusing the thread launch"
             )
         factory_run_id = new_factory_run_id(task.id, attempt.id) if task.use_implement else None
         prompt = render_prompt(
@@ -1624,43 +1426,31 @@ def dispatch(
         prompt_path = prompt_dir / f"{attempt.id}.txt"
         prompt_path.write_text(prompt, encoding="utf-8")
         prompt_path.chmod(0o600)
-        if adapter.kind == "t3-thread":
-            launch_argv = [
-                *adapter.argv,
-                "--project", task.cwd,
-                "--engine", t3_engine(provider.dispatch.provider),
-                "--prompt-file", str(prompt_path),
-                "--title", task.title,
-            ]
-        else:
-            launch_argv = [
-                *adapter.argv, "run", "--provider", provider.dispatch.provider,
-                "--dir", task.cwd, "--name", task.title, "--surface", "t3",
-            ]
+        launch_argv = [
+            *adapter.argv,
+            "--project", task.cwd,
+            "--engine", t3_engine(provider.dispatch.provider),
+            "--prompt-file", str(prompt_path),
+            "--title", task.title,
+        ]
         model = canonical_model(task.model)
         if model:
             launch_argv.extend(["--model", model])
         launch_argv.append("--json")
-        if adapter.kind == "agent-router":
-            launch_argv.append(prompt)
         surface = "t3"
         run_summary: str | None = None
         response: Mapping[str, Any] | None = None
         sleeper = time.sleep if retry_sleep is None else retry_sleep
         for launch_try in range(3):
             try:
-                response = _call_router(router_call, launch_argv, config, adapter, phase="launch")
+                response = _call_launcher(launch_call, launch_argv, config, adapter)
                 break
             except LaunchNotCreated:
                 if launch_try == 2:
                     raise
                 sleeper(60)
         assert response is not None
-        dispatch_data = response.get("dispatch")
-        job_id = response.get("threadId") or response.get("job_id")
-        if (not isinstance(job_id, str) or not job_id) and isinstance(dispatch_data, Mapping):
-            nested = dispatch_data.get("threadId") or dispatch_data.get("job_id")
-            job_id = nested if isinstance(nested, str) else None
+        job_id = response.get("threadId")
         if not isinstance(job_id, str) or not job_id:
             raise AmbiguousDispatch("t3-thread response did not contain a thread id")
         try:
@@ -1671,7 +1461,7 @@ def dispatch(
                 summary=run_summary, surface=surface,
             )
         except Exception as exc:
-            raise AmbiguousDispatch("router launched but dispatch bookkeeping failed") from exc
+            raise AmbiguousDispatch("thread launched but dispatch bookkeeping failed") from exc
         if factory_run_id is not None:
             # After the queue's own dispatched record so a telemetry problem can never
             # leave the claim in a state that looks unlaunched.
@@ -1679,7 +1469,6 @@ def dispatch(
                 task,
                 provider,
                 factory_run_id,
-                response.get("log_id"),
                 telemetry_call,
                 attempt.id,
             )
@@ -1724,7 +1513,7 @@ def dispatch_batch(
     task_ids: Iterable[str],
     eligibility_key: str,
     provider_id: str,
-    router_call: Callable[..., Any] | None = None,
+    launch_call: Callable[..., Any] | None = None,
     now_epoch: int | None = None,
 ) -> tuple[DispatchResult, ...]:
     results: list[DispatchResult] = []
@@ -1732,7 +1521,7 @@ def dispatch_batch(
         try:
             results.append(dispatch(
                 config, queue, task_id=task_id, eligibility_key=eligibility_key,
-                requested_provider=provider_id, router_call=router_call,
+                requested_provider=provider_id, launch_call=launch_call,
                 now_epoch=now_epoch,
             ))
         except (AlreadyClaimed, KnownDispatchFailure):

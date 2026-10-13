@@ -5,7 +5,7 @@ that would otherwise expire. It is a Python-standard-library runtime with one st
 `bonus-drain` command. Configuration defines providers and pacing limits. CLIProxyAPI
 supplies enabled accounts and their capacity readings.
 
-Every launch opens a T3 thread through a `t3-thread` or `agent-router` adapter. `auto` selects a compatible provider
+Every launch opens a T3 thread through a `t3-thread` adapter. `auto` selects a compatible provider
 from cached proxy usage before claiming and launching a T3 thread. Missing, malformed, resetless, or
 stale subscription data closes its entire provider pool. Leaving work queued is expected.
 
@@ -112,8 +112,8 @@ The configuration graph is versioned and uses IDs for all relationships:
 1. `recurrence_timezone` is the IANA timezone used for weekly boundaries. The default and
   example use `America/New_York`: weeks start Saturday at midnight, and Saturday through Sunday is the
   automatic dispatch window.
-1. `adapters[]` declares argv arrays for `t3-thread` and `agent-router`.
-1. `providers[]` binds a provider ID to the router adapter, router-facing name, and required `max_size`;
+1. `adapters[]` declares argv arrays for `t3-thread`.
+1. `providers[]` binds a provider ID to the thread launcher adapter, T3 provider name, and required `max_size`;
   The proxy inventory supplies enabled account identities.
 1. `limits[]` binds pacing thresholds to `provider_id`. Weekly windows use `seven_day` and
   five-hour windows use `five_hour` in the normalized cache.
@@ -132,7 +132,7 @@ The configuration graph is versioned and uses IDs for all relationships:
   [SECURITY.md](SECURITY.md).
 
 The installed viewer preserves the existing `background jobs` frontend unchanged, including
-the Bonus Drain and scheduled tabs. Its Run now buttons delegate to the shared router-only kickoff service.
+the Bonus Drain and scheduled tabs. Its Run now buttons delegate to the shared T3 thread kickoff service.
 There is no application-auth configuration or login flow.
 
 After installation, expand the operator home and replace every illustrative
@@ -252,7 +252,7 @@ systemd-analyze verify systemd/*.service systemd/*.timer
 Treat static unit verification, HTTP boundary verification, and browser verification as
 separate evidence. Exact unit text plus `systemd-analyze verify` proves the direct viewer
 server command and refresh-timer ordering. HTTP contracts prove exact Host/HTTPS Origin,
-JSON-only mutations, body limits, and router-only delegation. A disposable Chrome test loads
+JSON-only mutations, body limits, and T3 thread delegation. A disposable Chrome test loads
 the frozen frontend through the real handler and proves the controls render without a login;
 it does not exercise systemd, product TLS, or Tailscale.
 

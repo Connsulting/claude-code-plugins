@@ -241,7 +241,7 @@ class BonusDrainReviewRepairTests(unittest.TestCase):
         self.assertEqual(report.errors, ())
         router = Path("/bin/true")
         router_stat = router.stat()
-        self.assertEqual(report.router_preflight, ({
+        self.assertEqual(report.launcher_preflight, ({
             "adapter_id": "router",
             "executable": str(router),
             "available": True,
@@ -271,10 +271,10 @@ class BonusDrainReviewRepairTests(unittest.TestCase):
             )
 
         self.assertEqual(report.dispatched, ())
-        self.assertEqual(report.blockers[0]["kind"], "router_unavailable")
-        self.assertEqual(report.router_preflight[0]["executable"], missing)
-        self.assertFalse(report.router_preflight[0]["available"])
-        self.assertEqual(report.errors[0]["kind"], "router_unavailable")
+        self.assertEqual(report.blockers[0]["kind"], "launcher_unavailable")
+        self.assertEqual(report.launcher_preflight[0]["executable"], missing)
+        self.assertFalse(report.launcher_preflight[0]["available"])
+        self.assertEqual(report.errors[0]["kind"], "launcher_unavailable")
         self.assertEqual(self.queue.claims(), [])
         dispatch_mock.assert_not_called()
 

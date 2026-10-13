@@ -142,11 +142,11 @@ class SameProviderPoolTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         root = Path(self.temporary.name)
-        self.config = _multi_account_config(db.QueueDB(root / "queue.db"), root / "cache", root / "unused")
+        self.config = _multi_account_config(db.QueueDB(root / "queue.db"), root / "cache")
 
-    def plan(self, personal: float, business: float, **kwargs):
+    def plan(self, primary: float, secondary: float, **kwargs):
         from tests.test_bonus_drain_scout_inflight import _multi_snapshots
-        return build_plan(self.config, _multi_snapshots(personal, business, **kwargs),
+        return build_plan(self.config, _multi_snapshots(primary, secondary, **kwargs),
                           eligible_count=20, now_epoch=NOW)
 
     def test_positive_mean_includes_negative_subscription_and_sums_job_budget(self) -> None:
@@ -158,17 +158,17 @@ class SameProviderPoolTests(unittest.TestCase):
         self.assertEqual(gate["surplus"], 2.5)
         readings = {row["account_id"]: row for row in result.to_dict()["subscriptions"]
                     if row["provider_id"] == "alpha"}
-        self.assertEqual(set(readings), {"alpha-personal", "alpha-business"})
-        self.assertEqual(readings["alpha-personal"]["pacing"]["alpha-weekly"]["surplus"], -5)
-        self.assertEqual(readings["alpha-business"]["pacing"]["alpha-weekly"]["surplus"], 10)
-        self.assertEqual(readings["alpha-personal"]["pacing"]["alpha-weekly"]["reserve"], 20)
-        self.assertEqual(readings["alpha-personal"]["limits"]["seven_day"]["used_percent"], 80)
+        self.assertEqual(set(readings), {"alpha-primary", "alpha-secondary"})
+        self.assertEqual(readings["alpha-primary"]["pacing"]["alpha-weekly"]["surplus"], -5)
+        self.assertEqual(readings["alpha-secondary"]["pacing"]["alpha-weekly"]["surplus"], 10)
+        self.assertEqual(readings["alpha-primary"]["pacing"]["alpha-weekly"]["reserve"], 20)
+        self.assertEqual(readings["alpha-primary"]["limits"]["seven_day"]["used_percent"], 80)
         self.assertEqual(result.batches[0].eligibility_key, f"alpha/alpha-weekly/{NOW + 40 * HOUR}")
 
     def test_zero_and_negative_means_close_whole_pool(self) -> None:
-        for personal, business in ((80, 70), (80, 75)):
-            with self.subTest(personal=personal, business=business):
-                result = self.plan(personal, business)
+        for primary, secondary in ((80, 70), (80, 75)):
+            with self.subTest(primary=primary, secondary=secondary):
+                result = self.plan(primary, secondary)
                 self.assertEqual(result.batches, ())
                 self.assertIn(("alpha", "alpha"), result.closed)
                 gate = next(g for g in result.gates if g.provider_id == "alpha")
@@ -177,8 +177,8 @@ class SameProviderPoolTests(unittest.TestCase):
                                      for row in result.to_dict()["subscriptions"]), 2)
 
     def test_earliest_reset_sets_pool_cycle_and_sum_is_capped_at_batch_size(self) -> None:
-        result = self.plan(70, 70, personal_reset=NOW + 36 * HOUR,
-                           business_reset=NOW + 40 * HOUR)
+        result = self.plan(70, 70, primary_reset=NOW + 36 * HOUR,
+                           secondary_reset=NOW + 40 * HOUR)
         self.assertEqual(len(result.batches), 1)
         self.assertEqual(result.batches[0].resets_at, NOW + 36 * HOUR)
         self.assertEqual(result.batches[0].batch_size, 6)
@@ -187,8 +187,8 @@ class SameProviderPoolTests(unittest.TestCase):
     def test_stale_sibling_closes_whole_pool_and_fresh_recovery_reopens_it(self) -> None:
         from tests.test_bonus_drain_scout_inflight import _multi_snapshots
         records = _multi_snapshots(70, 70)
-        records[("alpha", "alpha-personal")] = replace(
-            records[("alpha", "alpha-personal")], captured_at=NOW - 3_601,
+        records[("alpha", "alpha-primary")] = replace(
+            records[("alpha", "alpha-primary")], captured_at=NOW - 3_601,
         )
         result = build_plan(self.config, records, eligible_count=20, now_epoch=NOW)
         self.assertEqual(result.batches, ())
@@ -205,8 +205,8 @@ class SameProviderPoolTests(unittest.TestCase):
                         {"used_percent": 10, "resets_at": NOW + 80 * HOUR}):
             with self.subTest(reading=reading):
                 records = _multi_snapshots(70, 70)
-                records[("alpha", "alpha-personal")] = replace(
-                    records[("alpha", "alpha-personal")], limits={"seven_day": reading},
+                records[("alpha", "alpha-primary")] = replace(
+                    records[("alpha", "alpha-primary")], limits={"seven_day": reading},
                 )
                 result = build_plan(self.config, records, eligible_count=20, now_epoch=NOW)
                 self.assertEqual(result.batches, ())
@@ -220,7 +220,7 @@ class SameProviderPoolTests(unittest.TestCase):
                             estimated_percent_per_job=1)
         cfg = replace(self.config, limits=(*self.config.limits, short))
         records = _multi_snapshots(70, 70)
-        for key in (("alpha", "alpha-personal"), ("alpha", "alpha-business")):
+        for key in (("alpha", "alpha-primary"), ("alpha", "alpha-secondary")):
             records[key] = replace(records[key], limits={**records[key].limits,
                 "five_hour": {"used_percent": 79, "resets_at": NOW + 1_000}})
         result = build_plan(cfg, records, eligible_count=20, now_epoch=NOW)
@@ -243,7 +243,7 @@ class SameProviderPoolTests(unittest.TestCase):
     def test_mixed_metering_and_no_inventory_fail_closed(self) -> None:
         from tests.test_bonus_drain_scout_inflight import _multi_snapshots
         records = _multi_snapshots(70, 70)
-        records[("alpha", "alpha-business")] = replace(records[("alpha", "alpha-business")],
+        records[("alpha", "alpha-secondary")] = replace(records[("alpha", "alpha-secondary")],
                                                         unmetered=True, limits={})
         self.assertEqual(build_plan(self.config, records, eligible_count=20, now_epoch=NOW).batches, ())
         absent = build_plan(self.config, {}, eligible_count=20, now_epoch=NOW)

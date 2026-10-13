@@ -279,14 +279,11 @@ class QueueBranchChoiceContract(unittest.TestCase):
         self.assertIn("child", [
             item.id for tasks in tick.allocations.values() for item in tasks
         ])
-        router = mock.Mock(return_value={
-            "provider": "alpha",
-            "dispatch": {"job_id": "local-child", "launched": True},
-        })
+        router = mock.Mock(return_value={"threadId": "local-child"})
         result = dispatcher.dispatch(
             runtime(self.queue.path), self.queue,
             task_id="child", eligibility_key="manual/child",
-            requested_provider="alpha", router_call=router,
+            requested_provider="alpha", launch_call=router,
         )
         self.assertEqual(self.prompt_branch(result.prompt), selected)
         self.assertIn("refs/heads/epic/next", result.prompt)
@@ -311,7 +308,7 @@ class QueueBranchChoiceContract(unittest.TestCase):
             dispatcher.dispatch(
                 runtime(self.queue.path), self.queue,
                 task_id="child", eligibility_key="manual/child",
-                requested_provider="alpha", router_call=router,
+                requested_provider="alpha", launch_call=router,
             )
         router.assert_not_called()
         snapshots = {
@@ -354,16 +351,14 @@ class QueueBranchChoiceContract(unittest.TestCase):
         self.complete("a", repository("task/a"))
         routed: list[str] = []
 
-        def router_call(*_args: object, **_kwargs: object) -> dict[str, object]:
+        def launch_call(*_args: object, **_kwargs: object) -> dict[str, object]:
             routed.append("launched")
-            return {"provider": "alpha", "dispatch": {
-                "job_id": f"local-job-{len(routed)}", "launched": True,
-            }}
+            return {"threadId": f"local-job-{len(routed)}"}
 
         first = dispatcher.dispatch(
             runtime(self.queue.path), self.queue,
             task_id="b", eligibility_key="manual/b",
-            requested_provider="alpha", router_call=router_call,
+            requested_provider="alpha", launch_call=launch_call,
         )
         self.assertEqual(self.prompt_branch(first.prompt)["branch_ref"], "refs/heads/task/a")
         first_claim = self.queue.claim_for("b")
@@ -384,7 +379,7 @@ class QueueBranchChoiceContract(unittest.TestCase):
         with mock.patch.object(scout, "read_all", return_value=snapshots):
             recovered = scout.run_once(
                 runtime(self.queue.path), self.queue, now_epoch=NOW + 300,
-                router_call=router_call,
+                launch_call=launch_call,
             )
         self.assertEqual([item.task_id for item in recovered.dispatched], ["b"])
         self.assertEqual(
@@ -405,7 +400,7 @@ class QueueBranchChoiceContract(unittest.TestCase):
         with mock.patch.object(scout, "read_all", return_value=snapshots):
             successor = scout.run_once(
                 runtime(self.queue.path), self.queue, now_epoch=NOW + 301,
-                router_call=router_call,
+                launch_call=launch_call,
             )
         self.assertEqual([item.task_id for item in successor.dispatched], ["c"])
         self.assertEqual(

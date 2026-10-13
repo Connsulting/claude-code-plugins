@@ -19,11 +19,11 @@ def kick_task(
     eligibility_key: str | None = None,
     now_epoch: int | None = None,
     *,
-    router_call: Callable[..., Any] | None = None,
+    launch_call: Callable[..., Any] | None = None,
 ) -> dispatcher.DispatchResult:
     """Dispatch one manual task without retrying or applying pacing gates.
 
-    ``router_call`` is a dependency-injection seam for tests. Runtime
+    ``launch_call`` is a dependency-injection seam for tests. Runtime
     callers leave them unset so every job launch follows the configured dispatcher path.
     """
 
@@ -42,6 +42,6 @@ def kick_task(
         task_id=task_id,
         eligibility_key=key,
         requested_provider=requested_provider,
-        router_call=router_call,
+        launch_call=launch_call,
         now_epoch=now,
     )

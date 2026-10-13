@@ -163,7 +163,7 @@ class ContinuationTests(RecoveryCase):
             dispatcher.dispatch(
                 runtime(self.queue.path), self.queue,
                 task_id="resume", eligibility_key=KEY,
-                requested_provider="claude", router_call=router,
+                requested_provider="claude", launch_call=router,
                 now_epoch=NOW + 100_000,
             )
         router.assert_not_called()
@@ -312,10 +312,11 @@ class ContinuationTests(RecoveryCase):
             "live", expected_attempt_id=source.id, now_epoch=NOW + 3,
         )
         with mock.patch(
-            "bonus_drain.reconcile.execute_adapter",
-            return_value={"rows": [{
-                "provider": "claude", "job_id": "job-live", "state": "running",
-            }]},
+            "bonus_drain.reconcile.lookup_thread",
+            return_value=reconcile.T3Thread(
+                run_status="running", active_run=True, last_error=None, last_activity_at=None,
+                completed_at=None, unsettled_run=False, live_descendant=False,
+            ),
         ):
             reports = reconcile.reconcile_inflight(
                 runtime(self.queue.path), self.queue, now_epoch=NOW + 4,
@@ -326,10 +327,11 @@ class ContinuationTests(RecoveryCase):
         self.assertEqual(self.source_row(source.id), before)
 
         with mock.patch(
-            "bonus_drain.reconcile.execute_adapter",
-            return_value={"rows": [{
-                "provider": "claude", "job_id": "job-live", "state": "completed",
-            }]},
+            "bonus_drain.reconcile.lookup_thread",
+            return_value=reconcile.T3Thread(
+                run_status="completed", active_run=False, last_error=None, last_activity_at=None,
+                completed_at=None, unsettled_run=False, live_descendant=False,
+            ),
         ):
             reports = reconcile.reconcile_inflight(
                 runtime(self.queue.path), self.queue, now_epoch=NOW + 5,

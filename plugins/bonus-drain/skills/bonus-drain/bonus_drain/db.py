@@ -3089,9 +3089,9 @@ class QueueDB:
         return {"allowed": True, "reason": "Operator retry is available"}
 
     def continuation_lacks_separate_liveness(self, run: RunEvent) -> bool:
-        """True when this continuation only reuses an already terminal router job.
+        """True when this continuation only reuses an already terminal T3 thread.
 
-        The router's completed or failed state can be the original attempt's end.
+        The thread's completed or failed state can be the original attempt's end.
         That is not proof the continuation died, so reconciliation must hold it.
         """
 
@@ -3917,10 +3917,10 @@ class QueueDB:
         expected_attempt_id: str,
         now_epoch: float | None = None,
     ) -> dict[str, Any]:
-        """Show same-thread resumed work as running without a second router launch.
+        """Show same-thread resumed work as running without a second thread launch.
 
         The original terminal attempt stays immutable. A new continuation attempt
-        reuses that attempt's router job, so scout and reconciliation see the same
+        reuses that attempt's T3 thread, so scout and reconciliation see the same
         worker. A held or exhausted recovery is refused. A scheduled recovery for
         this same source is consumed so it cannot launch a second worker later.
         """
@@ -4059,7 +4059,7 @@ class QueueDB:
             ).fetchone()
             if source_run is None:
                 raise QueueError(
-                    "same-thread continuation requires the original router job"
+                    "same-thread continuation requires the original T3 thread"
                 )
             ordinal = int(connection.execute(
                 "SELECT COALESCE(MAX(ordinal),0)+1 FROM task_attempts WHERE task_id=?",
@@ -5143,7 +5143,7 @@ def doctor(queue: QueueDB) -> DoctorReport:
         return DoctorReport(False, (), (f"database unavailable: {exc}",))
     reconciliation = ambiguous
     provider_holds = tuple(dict.fromkeys(claim.provider_id for claim in ambiguous_claims))
-    diagnostics = ("ambiguous router outcomes require explicit reconciliation",) if reconciliation else ()
+    diagnostics = ("ambiguous thread outcomes require explicit reconciliation",) if reconciliation else ()
     return DoctorReport(
         not reconciliation, reconciliation, diagnostics, provider_holds,
     )

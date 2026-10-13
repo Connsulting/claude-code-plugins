@@ -1,7 +1,7 @@
 # Long Horizon goals
 
 A goal adds durable coordination to the same Async Work queue. It does not replace
-task claims, success-only dependencies, router dispatch or `/implement` pipelines.
+task claims, success-only dependencies, thread launcher dispatch or `/implement` pipelines.
 The runtime has no new dependency or service. The existing scout tick reconciles
 goal joins, queues a short coordinator task when needed, then applies ordinary
 capacity policy. `goal tick` performs reconciliation only; it never calls a model.
@@ -190,13 +190,13 @@ verifier cannot supply a passing observation. The goal never silently rewrites a
 dependency or treats obsolete verification as successful.
 
 If a user continues the same failed implementation or integration thread, the worker first runs
-the prompt's `continue-progress` command. That shows the same router job as running and does not
+the prompt's `continue-progress` command. That shows the same T3 thread as running and does not
 launch another worker. GoalStore must admit it against the unchanged contract and exact failed
 attempt. When the continued work finishes, the worker records the terminal result on the attempt
 that command returns. If `continue-progress` was not opened and the work later proves done-when,
 the worker uses the exact stable package CLI `recover-complete` command embedded in its original
 prompt, not the configurable terminal-record adapter. That command retains the task ID, appends
-verified evidence without a new router launch or claim, and works without a scheduled recovery
+verified evidence without a new thread launch or claim, and works without a scheduled recovery
 projection; it atomically consumes one when present. Either command refuses an active or queued
 successor and a held recovery. Both refuse coordinator and acceptance completion; use the
 fresh-turn and fresh-verifier flows above. A refusal does not authorize a second dispatch.
@@ -242,7 +242,7 @@ Steering is durable and coalesced into the active or next turn. It does not repl
 a live coordinator. A pause holds future managed admission and leaves active owners
 alone. A failed coordinator or one that exits without a decision pauses the goal;
 positively reconcile its effects and queue claim before resuming. A heartbeat timeout
-does not prove retirement. The existing router reconciliation rules still apply.
+does not prove retirement. The existing T3 reconciliation rules still apply.
 If a coordinator was paused before it ever claimed or dispatched, resume retires
 that provably unlaunched task atomically and queues a fresh turn. Its old identity
 and consumed turn remain in history; actual live/ambiguous owners are never replaced.
@@ -260,6 +260,6 @@ discovery when installing this version; preserve old run artifacts and ownership
 Do not version-bump or reinstall the live runtime for each source iteration.
 
 SQLite/CLI tests prove joins, atomic updates, waiting, budget admission, recovery,
-and acceptance linkage. Hermetic router tests prove dispatcher mechanics. They do
+and acceptance linkage. Hermetic thread launcher tests prove dispatcher mechanics. They do
 not prove a real model completed `/implement`, that a remote PR merged, or that a
 live assembled user journey passed. Retain those separate proof tiers for a real run.

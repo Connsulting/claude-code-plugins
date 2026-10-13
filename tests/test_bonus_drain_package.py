@@ -240,7 +240,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             config["record_command"] = [str(missing_recorder), "record"]
             config["adapters"] = [
                 adapter for adapter in config["adapters"]
-                if adapter["id"] in {"router", "codex-personal-usage"}
+                if adapter["id"] in {"router"}
             ]
             config["providers"] = [
                 provider for provider in config["providers"] if provider["id"] == "codex"

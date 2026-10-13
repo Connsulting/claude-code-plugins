@@ -50,12 +50,8 @@ def _config(root: Path) -> config_module.RuntimeConfig:
         ), viewer={}, pr_exceptions=(), usage_max_age_seconds=3600, cache_dir=root / "cache", proxy_secret_ref=None), (("claude", "claude-account"),))
 
 
-def _router_response(job_id: str = "job-1", log_id: Any = 4242) -> dict[str, Any]:
-    return {
-        "provider": "claude",
-        "dispatch": {"job_id": job_id, "launched": True, "job_name": "Bonus: x"},
-        "log_id": log_id,
-    }
+def _router_response(job_id: str = "job-1") -> dict[str, Any]:
+    return {"threadId": job_id}
 
 
 class FactoryRunRowTests(unittest.TestCase):
@@ -81,14 +77,14 @@ class FactoryRunRowTests(unittest.TestCase):
     def _dispatch(self, task_id: str, **kwargs: Any) -> tuple[dispatcher.DispatchResult, list[list[str]]]:
         seen: list[list[str]] = []
 
-        def router_call(argv: list[str], **_kwargs: object) -> dict[str, object]:
+        def launch_call(argv: list[str], **_kwargs: object) -> dict[str, object]:
             seen.append(list(argv))
             return _router_response()
 
         result = dispatcher.dispatch(
             self.config, self.queue, task_id=task_id,
             eligibility_key=f"manual/{task_id}", requested_provider="claude",
-            router_call=router_call, **kwargs,
+            launch_call=launch_call, **kwargs,
         )
         return result, seen
 
@@ -108,7 +104,6 @@ class FactoryRunRowTests(unittest.TestCase):
         self.assertTrue(run_id.startswith("drain-impl-task-"), run_id)
         self.assertEqual(result.factory_run_id, run_id)
         self.assertEqual(payload["drain_task_id"], "impl-task")
-        self.assertEqual(payload["router_decision_id"], 4242)
         self.assertEqual(payload["tier"], "quick")
         self.assertEqual(payload["launch_mode"], "background")
         self.assertEqual(payload["status"], "dispatched")
@@ -133,22 +128,6 @@ class FactoryRunRowTests(unittest.TestCase):
         launch = next(argv for argv in seen if "--prompt-file" in argv)
         prompt = Path(launch[launch.index("--prompt-file") + 1]).read_text(encoding="utf-8")
         self.assertNotIn("FACTORY_RUN_ID", prompt)
-
-    def test_router_without_log_id_omits_decision_id(self) -> None:
-        self.queue.add_task(reviewed(_task("no-log", use_implement=True, cwd=str(self.root))))
-        calls: list[tuple[list[str], dict[str, Any]]] = []
-
-        def router_call(argv: list[str], **_kwargs: object) -> dict[str, object]:
-            return {"dispatch": {"job_id": "job-2", "launched": True}, "log_id": None}
-
-        dispatcher.dispatch(
-            self.config, self.queue, task_id="no-log", eligibility_key="manual/no-log",
-            requested_provider="claude", router_call=router_call,
-            telemetry_call=lambda a, p: calls.append((a, p)),
-        )
-        self.assertEqual(len(calls), 1)
-        self.assertNotIn("router_decision_id", calls[0][1])
-        self.assertEqual(calls[0][1]["drain_task_id"], "no-log")
 
     def test_telemetry_failure_never_fails_the_dispatch(self) -> None:
         self.queue.add_task(reviewed(_task("boom", use_implement=True, cwd=str(self.root))))
@@ -202,7 +181,6 @@ class FactoryRunRowTests(unittest.TestCase):
         recorded = json.loads(capture.read_text(encoding="utf-8"))
         self.assertEqual(recorded["argv"][:4], ["record", "run", "--run-id", result.factory_run_id])
         self.assertEqual(recorded["payload"]["drain_task_id"], "captured")
-        self.assertEqual(recorded["payload"]["router_decision_id"], 4242)
         self.assertIsNone(recorded["session"])
         self.assertIsNone(recorded["thread"])
         self.assertFalse(list(self.root.glob("bonus-drain-factory-run-*.json")))

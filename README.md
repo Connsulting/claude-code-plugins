@@ -40,9 +40,8 @@ See [plugins/compound-learning/README.md](plugins/compound-learning/README.md) f
 A standalone queue, capacity planner, usage-cache refresher, scout, dispatcher, and secure
 localhost viewer for autonomous async work. Ready tasks can be accelerated with an explicit
 start or launched automatically by Bonus capacity; they also support dependencies and source
-references. Providers, plans, accounts, limits,
-resets, and adapters are generic JSON configuration; dispatch goes through
-`agent-router`.
+references. Providers, weekly limits, reset windows, and adapters are validated JSON configuration;
+every job launches as a T3 thread through `t3-thread`. CLIProxyAPI owns account selection.
 
 The included Long Horizon skill coordinates entire goals through those jobs, with
 stacked or authorized merged PRs, combined E2E, and further fix rounds. The coordinator

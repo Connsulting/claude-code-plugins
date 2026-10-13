@@ -11,7 +11,7 @@ the agreed outcome. Each build job still runs its own `/implement` pipeline.
 
 Read [the queue skill](../bonus-drain/SKILL.md) for preflight, capacity and dispatch
 ownership, and [GOALS.md](../bonus-drain/GOALS.md) for the goal CLI and recovery contract.
-The plugin's existing SQLite queue, scout, dispatcher and router own execution.
+The plugin's existing SQLite queue, scout, dispatcher and thread launcher own execution.
 
 ## Start or resume
 
@@ -106,7 +106,7 @@ Neither all tasks being `done` nor all PRs being merged proves goal acceptance.
 For Codex goals, explicitly select Astra (`gpt-6-astra`) for coordination; select Sol
 (`gpt-5.6-sol`) for complex drivers, Terra (`gpt-5.6-terra`) for clear bounded builds,
 and Luna (`gpt-5.6-luna`) for mechanical work. Pass choices through task routing fields
-and record actual router results. Claude goals retain their native model semantics.
+and record actual thread launcher results. Claude goals retain their native model semantics.
 
 After context compaction, reread this skill and GOALS.md, then reconcile durable goal
 state. Reconnect a healthy owner; never replace one because its heartbeat is old.

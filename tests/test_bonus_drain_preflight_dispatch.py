@@ -74,7 +74,6 @@ from tests.test_bonus_drain_scout_inflight import (
     _task as provider_task,
 )
 
-UNSWITCHED = "requested account did not become active"
 # The exact t3-thread diagnostic for a Codex daemon that never started (no thread launched).
 CODEX_DAEMON_TIMEOUT = (
     b"t3-thread: `/home/user/.local/bin/codex app-server daemon start` timed out after 10s\n"
@@ -97,7 +96,7 @@ def launched_router(calls: list[list[str]] | None = None):
         record.append(list(argv))
         if "--dry-run" in argv:
             return {"provider_id": "claude"}
-        return {"dispatch": {"job_id": f"job-{len(record)}", "launched": True}}
+        return {"threadId": f"job-{len(record)}"}
 
     return route
 
@@ -136,7 +135,7 @@ class HermeticEnvironment:
 
 class AccountHoldDispatchTests(PreflightCase):
     def dispatch(self, task_id: str, cfg, **kwargs: Any):
-        kwargs.setdefault("router_call", launched_router())
+        kwargs.setdefault("launch_call", launched_router())
         kwargs.setdefault("check_runner", self.runner())
         return dispatcher.dispatch(
             cfg, self.queue, task_id=task_id, eligibility_key=f"manual/{task_id}",
@@ -175,25 +174,21 @@ class AccountHoldDispatchTests(PreflightCase):
 class AccountHoldScoutTests(PreflightCase):
     def setUp(self) -> None:
         super().setUp()
-        self.active = self.root / "active"
-        self.active.write_text("Personal\n", encoding="utf-8")
-        self.config = _multi_account_config(self.queue, self.root / "cache", self.active)
-        self.events: list[tuple[str, str]] = []
+        self.config = _multi_account_config(self.queue, self.root / "cache")
         self.routed: list[str] = []
-        self.personal_refusal = UNSWITCHED
 
 
     def route(self, argv: list[str], **_kwargs: object) -> dict[str, object]:
         self.routed.append(argv[argv.index("--engine") + 1])
-        return {"dispatch": {"job_id": f"job-{len(self.routed)}", "launched": True}}
+        return {"threadId": f"job-{len(self.routed)}"}
 
-    def tick(self, now: int, *, business_used: float = 70, config=None, queue=None) -> scout.ScoutReport:
+    def tick(self, now: int, *, secondary_used: float = 70, config=None, queue=None) -> scout.ScoutReport:
         with (
-            mock.patch.object(scout, "read_all", return_value=_multi_snapshots(70, business_used)),
+            mock.patch.object(scout, "read_all", return_value=_multi_snapshots(70, secondary_used)),
             mock.patch.object(db.time, "time", return_value=now),
         ):
             return scout.run_once(
-                config or self.config, queue or self.queue, now_epoch=now, router_call=self.route,
+                config or self.config, queue or self.queue, now_epoch=now, launch_call=self.route,
                 check_runner=self.runner(),
             )
 
@@ -221,14 +216,14 @@ class AccountHoldScoutTests(PreflightCase):
             routed.append(provider)
             if provider == "alpha":
                 return subprocess.CompletedProcess([], 1, b"", CODEX_DAEMON_TIMEOUT)
-            return {"dispatch": {"job_id": "beta-job", "launched": True}}
+            return {"threadId": "beta-job"}
 
         with (
             mock.patch.object(scout, "read_all", return_value=_open_snapshots()),
             mock.patch.object(db.time, "time", return_value=NOW),
         ):
             report = scout.run_once(
-                config, self.queue, now_epoch=NOW, router_call=route, check_runner=self.runner(),
+                config, self.queue, now_epoch=NOW, launch_call=route, check_runner=self.runner(),
             )
 
         self.assertEqual(routed.count("alpha"), 1)
@@ -860,7 +855,7 @@ class ScoutPreflightTests(HermeticEnvironment, PreflightCase):
 
         report = self.scout(
             dry_run=True, check_runner=fake,
-            router_call=lambda *_args, **_kwargs: self.fail("dry run called the router"),
+            launch_call=lambda *_args, **_kwargs: self.fail("dry run called the router"),
         )
 
         self.assertEqual(fake.calls, [])
@@ -875,7 +870,7 @@ class ScoutPreflightTests(HermeticEnvironment, PreflightCase):
 
         result = dispatcher.dispatch(
             runtime(self.queue.path), self.queue, task_id="gated", eligibility_key="manual/gated",
-            requested_provider="claude", router_call=launched_router(calls), check_runner=fake,
+            requested_provider="claude", launch_call=launched_router(calls), check_runner=fake,
             now_epoch=NOW,
         )
 
@@ -891,7 +886,7 @@ class ScoutPreflightTests(HermeticEnvironment, PreflightCase):
         with self.assertRaises(dispatcher.AlreadyClaimed) as raised:
             dispatcher.dispatch(
                 runtime(self.queue.path), self.queue, task_id="closed", eligibility_key="manual/closed",
-                requested_provider="claude", router_call=router, check_runner=closed, now_epoch=NOW,
+                requested_provider="claude", launch_call=router, check_runner=closed, now_epoch=NOW,
             )
         self.assertIn("issue is CLOSED", str(raised.exception))
         router.assert_not_called()
@@ -903,7 +898,7 @@ class ScoutPreflightTests(HermeticEnvironment, PreflightCase):
         with self.assertRaises(dispatcher.AlreadyClaimed):
             dispatcher.dispatch(
                 runtime(self.queue.path), self.queue, task_id="gated", eligibility_key=KEY,
-                requested_provider="claude", trigger="bonus", router_call=launched_router(),
+                requested_provider="claude", trigger="bonus", launch_call=launched_router(),
                 check_runner=idle, now_epoch=NOW,
             )
         self.assertEqual(idle.calls, [])
@@ -912,7 +907,7 @@ class ScoutPreflightTests(HermeticEnvironment, PreflightCase):
         self.refresh(self.runner({gh_issue(3815): ok(ISSUE_3815_OPEN)}), now=NOW)
         result = dispatcher.dispatch(
             runtime(self.queue.path), self.queue, task_id="gated", eligibility_key=KEY,
-            requested_provider="claude", trigger="bonus", router_call=launched_router(),
+            requested_provider="claude", trigger="bonus", launch_call=launched_router(),
             check_runner=idle, now_epoch=NOW + 10,
         )
         self.assertEqual(result.task_id, "gated")
@@ -921,7 +916,7 @@ class ScoutPreflightTests(HermeticEnvironment, PreflightCase):
     def test_refresher_failure_reports_preflight_failed(self) -> None:
         self.add("plain")
         with mock.patch.object(checks, "refresh", side_effect=RuntimeError("gh auth expired")):
-            report = self.scout(router_call=launched_router(), check_runner=self.runner())
+            report = self.scout(launch_call=launched_router(), check_runner=self.runner())
 
         self.assertIn(
             ("*", "preflight_failed"),
@@ -935,7 +930,7 @@ class PromptPreflightTests(PreflightCase):
         result = dispatcher.dispatch(
             runtime(self.queue.path), self.queue, task_id=task_id,
             eligibility_key=f"manual/{task_id}", requested_provider="claude",
-            router_call=launched_router(), check_runner=fake, now_epoch=now,
+            launch_call=launched_router(), check_runner=fake, now_epoch=now,
         )
         return result.prompt
 
@@ -1159,7 +1154,7 @@ class GoalCollisionReservationTests(PreflightCase):
         ):
             report = scout.run_once(
                 self.config, self.queue, now_epoch=NOW,
-                router_call=launched_router(),
+                launch_call=launched_router(),
                 check_runner=self.runner({gh_issue(12, "owner/repo"): ok(ISSUE_3815_OPEN)}),
             )
         return tick, report
@@ -1270,7 +1265,7 @@ class ResumeAndNoticeScoutTests(HermeticEnvironment, PreflightCase):
         with mock.patch.object(scout, "read_all", return_value=claude_snapshots(NOW)):
             return scout.run_once(
                 cfg or runtime(self.queue.path), self.queue, now_epoch=now,
-                router_call=launched_router(), check_runner=runner or self.runner(),
+                launch_call=launched_router(), check_runner=runner or self.runner(),
             )
 
     def test_record_cli_refuses_awaiting_human(self) -> None:

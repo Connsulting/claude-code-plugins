@@ -6,7 +6,7 @@ size ceilings, pacing limits, reset windows, and dispatch bindings are validated
 CLIProxyAPI supplies subscription inventory and owns credential selection. The planner does not contain provider-name branches.
 
 Installing this marketplace plugin only makes its skill available. It does not switch a
-live Bonus Drain installation, enable a systemd unit, migrate a database, change a router,
+live Bonus Drain installation, enable a systemd unit, migrate a database, change a thread launcher,
 or configure Tailscale Serve. Runtime installation also stages files without enabling or
 starting services. Cutover remains an explicit manual operation.
 
@@ -15,7 +15,7 @@ starting services. Cutover remains an explicit manual operation.
 Required runtime dependencies are:
 
 1. Python 3.10 or newer with the standard-library `sqlite3` module.
-2. An executable `t3-thread` or `agent-router`, referenced by absolute argv in configuration.
+2. An executable `t3-thread`, referenced by absolute argv in configuration.
 3. CLIProxyAPI management access through a private dotenv file containing `CPA_BASE_URL`
    and `CPA_MGMT_KEY`, referenced by `proxy_secret_ref`.
 
@@ -25,7 +25,7 @@ systemd user services are optional. For the explicitly configured remote viewer,
 Tailscale Serve is the sole access boundary, including for explicitly enabled mutations.
 
 Run `bonus-drain doctor --json` after configuring the runtime. It validates the graph,
-queue, router-only dispatch boundary, reconciliation state, and file-secret ownership/mode
+queue, T3 thread dispatch boundary, reconciliation state, and file-secret ownership/mode
 without printing secret values.
 
 ## Install or stage
@@ -122,20 +122,15 @@ activation are owned by the proxy; `dispatch` and `run-now` have no `--account` 
 Unexpired historical subscription backoffs hold the entire provider pool, and a proven
 launch clears its provider's backoffs.
 
-CLI `auto` classification is a non-launching `t3-thread --dry-run` before a claim, so its
-uncertainty is retry-safe. Once a concrete launch has been attempted, timeout, malformed
-output, missing job identity, or bookkeeping uncertainty is ambiguous: no caller retries it,
-and the claim stays fail-closed until reconciliation.
+CLI `auto` selects a compatible provider using configured size ceilings and usage before
+claiming the task. Once a launch has been attempted, timeout, malformed output, missing
+thread identity, or bookkeeping uncertainty is ambiguous: no caller retries it, and the
+claim stays held until reconciliation. Exit 6 from `t3-thread` proves no thread was created
+and permits a bounded retry.
 
-Top-level `launch_surface` chooses where concrete launches run: `background` (the default,
-and the unchanged argv) or `t3`, which adds `--surface t3` so t3-thread opens a T3 Code
-thread. A provider may set its own `launch_surface` to override the global value. The
-classification dry-run never passes `--surface`. On `t3`, the returned job identity is the T3
-thread ID and is stored verbatim. The run records its surface, and the viewer badges t3 jobs
-in flight. t3-thread accepts `--mcp-config` and `--strict-mcp-config` on `t3` but ignores
-them with a warning, so they cannot enforce a Claude task's MCP scope. Bonus Drain therefore
-omits both flags, skips the scoped MCP file, and notes the dropped scope in the dispatched
-run's summary.
+Every launch calls `t3-thread` with the task project, provider engine, prompt file, title,
+and optional model. Its top-level `threadId` is stored verbatim, and the run records its
+surface as `t3`. Task MCP flags are omitted; the T3 provider uses its configured connectors.
 
 Scout reserves actual compatible task IDs in nearest-reset order, preventing a portable task
 from consuming two provider slots while preserving exclusive work for a capable provider.
@@ -148,7 +143,7 @@ task reports `cooldown` ("Waiting for weekend window") rather than ready, so the
 the scout; a manual start may still launch it.
 Monthly tasks start waiting when their 28-day cooldown ends. Before any claim, scout reports
 queue reconciliation blockers, global in-flight runs with their ages, and the resolved executable
-identity for every router needed by the tick. A lifecycle or router failure stops the tick once
+identity for every thread launcher needed by the tick. A lifecycle or thread launcher failure stops the tick once
 instead of failing each selected task.
 Before applying the in-flight gate, each normal scout tick reads T3 state through read-only
 SQLite. An active parent run or any recursive subagent descendant with an active run or
@@ -162,7 +157,7 @@ and `--dry-run` reports `would_fail` without changing the queue.
 Existing ambiguous claims still stop the scout before any automatic reconciliation.
 Normalized usage requires explicit provider/account identity and capture time. Missing Grok
 utilization stays unknown. Source and installed wrappers ignore caller `PYTHONPATH`/cwd
-packages; timed-out collector and rotator process groups are terminated with descendants.
+packages; timed-out adapter process groups are terminated with descendants.
 
 File-backed secret references must be current-user-owned, non-symlink regular files with mode
 `0600` and a maximum size of 65536 bytes.
@@ -170,13 +165,13 @@ File-backed secret references must be current-user-owned, non-symlink regular fi
 Secrets are references only. Declare an environment-variable or file reference in
 `secret_refs` and map it by ID from an adapter. Never place a secret value in the
 JSON, an argv, a unit, a log, or the repository. Every launch goes through an explicit
-`t3-thread` or `agent-router` adapter. CLIProxyAPI owns subscription selection.
+`t3-thread` adapter. CLIProxyAPI owns subscription selection.
 
 ## Viewer
 
 Bonus Drain ships the established two-tab background-jobs viewer: the Async Work queue
 and scheduled systemd jobs. Its HTML and interactions are preserved from the standalone
-viewer while Run now dispatch now delegates to the shared router-only kickoff service.
+viewer while Run now delegates to the shared T3 thread kickoff service.
 
 ```sh
 BONUS_DRAIN_CONFIG="${BONUS_DRAIN_CONFIG}" bonus-drain viewer --port 8766
@@ -195,7 +190,7 @@ not call provider APIs from a request.
 
 Run now is never automatic and bypasses pacing only. It still requires an active compatible
 task and an atomic claim. Concrete-provider and `auto` buttons both use the shared
-`kick_task` service; `auto` asks `t3-thread` to classify before the one launch.
+`kick_task` service; `auto` selects a compatible provider before the one launch.
 
 ### Tailscale access boundary
 
@@ -228,7 +223,7 @@ From a source checkout that contains the regression suites, follow
 systemd validation commands. Verify the unit separately with exact unit text and
 `systemd-analyze verify`. The disposable browser E2E loads the frozen frontend through the
 real HTTP handler; HTTP contracts separately prove exact Host/HTTPS Origin, JSON-only
-mutations, body limits, and router-only delegation. These do not prove systemd, product TLS,
+mutations, body limits, and T3 thread delegation. These do not prove systemd, product TLS,
 or Tailscale. For a credential-free smoke test, set `HOME`
 and every XDG directory to a new temporary directory, install with `--home`, use fixture
 adapters, run `doctor`, `plan`, migration `--dry-run`, and the loopback viewer, then

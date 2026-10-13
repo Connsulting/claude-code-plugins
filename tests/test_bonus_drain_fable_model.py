@@ -94,14 +94,14 @@ class FableModelCanonicalizationTests(unittest.TestCase):
 
             seen: list[list[str]] = []
 
-            def router_call(argv: list[str], **_kwargs: object) -> dict[str, object]:
+            def launch_call(argv: list[str], **_kwargs: object) -> dict[str, object]:
                 seen.append(argv)
-                return {"dispatch": {"job_id": "job-fable", "launched": True}}
+                return {"threadId": "job-fable"}
 
             dispatcher.dispatch(
                 config, queue, task_id="legacy-fable",
                 eligibility_key="manual/legacy-fable", requested_provider="claude",
-                router_call=router_call,
+                launch_call=launch_call,
             )
             launch = next(argv for argv in seen if "--dry-run" not in argv)
             model_index = launch.index("--model")

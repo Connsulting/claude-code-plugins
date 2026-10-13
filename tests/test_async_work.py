@@ -214,7 +214,7 @@ class DispatchReadinessTests(unittest.TestCase):
         f.queue.add_task(reviewed({'id': 'child', 'title': 'child', 'cwd': '/tmp', 'goal': 'proof', 'depends_on': ['portable']}))
         router, activation = mock.Mock(), mock.Mock()
         with self.assertRaises(dispatcher.AlreadyClaimed):
-            dispatcher.dispatch(f.config, f.queue, task_id='child', eligibility_key='alpha-account/manual/2000000000', requested_provider='auto', router_call=router)
+            dispatcher.dispatch(f.config, f.queue, task_id='child', eligibility_key='alpha-account/manual/2000000000', requested_provider='auto', launch_call=router)
         router.assert_not_called()
         activation.assert_not_called()
 
@@ -223,13 +223,13 @@ class DispatchReadinessTests(unittest.TestCase):
         f.queue.add_task(reviewed({'id': 'weekly', 'title': 'Weekly', 'cwd': '/tmp', 'goal': 'proof', 'kind': 'recurring', 'cadence': 'weekly'}))
         self.assertEqual(f.queue.readiness('weekly', now_epoch=kick_tests.NOW)['hold_reason'], 'weekend_window')
         with self.assertRaises(dispatcher.AlreadyClaimed):
-            dispatcher.dispatch(f.config, f.queue, task_id='weekly', eligibility_key='claude/limit/2000000000', requested_provider='claude', trigger='bonus', router_call=f._router, now_epoch=kick_tests.NOW)
-        result = dispatcher.dispatch(f.config, f.queue, task_id='weekly', eligibility_key='claude/manual/2000000000', requested_provider='claude', trigger='manual', router_call=f._router, now_epoch=kick_tests.NOW)
+            dispatcher.dispatch(f.config, f.queue, task_id='weekly', eligibility_key='claude/limit/2000000000', requested_provider='claude', trigger='bonus', launch_call=f._router, now_epoch=kick_tests.NOW)
+        result = dispatcher.dispatch(f.config, f.queue, task_id='weekly', eligibility_key='claude/manual/2000000000', requested_provider='claude', trigger='manual', launch_call=f._router, now_epoch=kick_tests.NOW)
         self.assertEqual(result.task_id, 'weekly')
 
     def test_automatic_trigger_accepts_any_ready_task(self):
         f = self.fixture
-        result = dispatcher.dispatch(f.config, f.queue, task_id='portable', eligibility_key='claude/limit/2000000000', requested_provider='claude', trigger='bonus', router_call=f._router)
+        result = dispatcher.dispatch(f.config, f.queue, task_id='portable', eligibility_key='claude/limit/2000000000', requested_provider='claude', trigger='bonus', launch_call=f._router)
         self.assertEqual(result.task_id, 'portable')
 
 
@@ -246,7 +246,7 @@ class ScoutWorkflowTests(unittest.TestCase):
         snapshots = {(provider, provider+'-account'): usage.UsageSnapshot(provider, provider+'-account', kick_tests.NOW,
             {"seven_day": {'used_percent': 20, 'resets_at': kick_tests.NOW+1000}}) for provider in ('claude', 'beta')}
         with mock.patch.object(scout, 'read_all', return_value=snapshots):
-            report = scout.run_once(config, queue, now_epoch=kick_tests.NOW, router_call=fixture._router)
+            report = scout.run_once(config, queue, now_epoch=kick_tests.NOW, launch_call=fixture._router)
         self.assertEqual({result.task_id for result in report.dispatched}, {'portable', 'other-ready'})
         self.assertEqual(queue.runs(task_id='portable')[0].trigger, 'bonus')
         self.assertEqual(queue.runs(task_id='other-ready')[0].trigger, 'bonus')

@@ -243,16 +243,16 @@ class ClaimTwinTests(CapabilityRoutingCase):
 
 class AutoClassificationTests(CapabilityRoutingCase):
     def _router(self, seen: list[list[str]]):
-        def router_call(argv: list[str], **_kwargs: object) -> dict[str, object]:
+        def launch_call(argv: list[str], **_kwargs: object) -> dict[str, object]:
             seen.append(list(argv))
             return {"threadId": "thread-1"}
-        return router_call
+        return launch_call
 
     def _dispatch_auto(self, config, task_id: str, seen: list[list[str]], providers: tuple[str, ...]):
         with mock.patch("bonus_drain.usage.read_all", return_value=_snapshots(providers)):
             dispatcher.dispatch(
                 config, self.queue, task_id=task_id, eligibility_key=f"manual/{task_id}",
-                requested_provider="auto", router_call=self._router(seen), now_epoch=NOW,
+                requested_provider="auto", launch_call=self._router(seen), now_epoch=NOW,
             )
 
     def test_incompatible_classification_falls_through_to_a_capable_provider(self) -> None:
@@ -316,14 +316,14 @@ class DispatchBoundaryTests(AutoClassificationTests):
         with self.assertRaisesRegex(dispatcher.InvalidRoute, "provider grok is incompatible with task impl"):
             dispatcher.dispatch(
                 config, self.queue, task_id="impl", eligibility_key="manual/impl",
-                requested_provider="grok", router_call=self._router(seen),
+                requested_provider="grok", launch_call=self._router(seen),
             )
         self.assertEqual(seen, [])
         self._assert_unclaimed("impl")
 
         dispatcher.dispatch(
             config, self.queue, task_id="impl", eligibility_key="manual/impl",
-            requested_provider="codex", router_call=self._router(seen),
+            requested_provider="codex", launch_call=self._router(seen),
         )
         self.assertEqual(seen[-1][seen[-1].index("--engine") + 1], "codex")
 
@@ -367,9 +367,9 @@ class DispatchBoundaryTests(AutoClassificationTests):
 
         def router(argv, **_kwargs):
             launches.append(list(argv))
-            return {"dispatch": {"job_id": f"job-{len(launches)}", "launched": True}}
+            return {"threadId": f"job-{len(launches)}"}
 
-        # run_task_now offers no router_call seam; fake only the router subprocess boundary.
+        # run_task_now offers no launch_call seam; fake only the router subprocess boundary.
         with (
             mock.patch.object(viewer.graph_config, "load_config", return_value=config),
             mock.patch.object(dispatcher, "_subprocess_call", side_effect=router),

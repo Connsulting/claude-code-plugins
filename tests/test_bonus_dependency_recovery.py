@@ -699,7 +699,7 @@ class AutomaticRecoveryContracts(RecoveryCase):
             dispatcher.dispatch(
                 runtime(self.queue.path), self.queue, task_id="unlocker",
                 eligibility_key="manual/too-early", requested_provider="claude",
-                router_call=router,
+                launch_call=router,
             )
         router.assert_not_called()
 
@@ -975,8 +975,8 @@ class RecoverCompleteContracts(RecoveryCase):
         source = self.prepare()
         before_runs = list(self.queue.runs(task_id="parent"))
         with (
-            mock.patch.object(dispatcher, "_call_router") as router,
-            mock.patch("bonus_drain.reconcile.execute_adapter") as status_probe,
+            mock.patch.object(dispatcher, "_call_launcher") as router,
+            mock.patch("bonus_drain.reconcile.lookup_thread") as status_probe,
         ):
             completed = self.queue.recover_complete(
                 "parent", expected_attempt_id=source.id,
@@ -1251,7 +1251,7 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
         with self.assertRaises(dispatcher.DispatchError):
             dispatcher.dispatch(
                 cfg, self.queue, task_id=task_id, eligibility_key=f"manual/{task_id}",
-                requested_provider="claude", router_call=callback,
+                requested_provider="claude", launch_call=callback,
             )
         return callback
 
@@ -1269,9 +1269,10 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
                 runtime(self.queue.path), self.queue, task_id="retry", eligibility_key=KEY,
                 requested_provider="claude",
                 trigger="bonus",
-                router_call=lambda *_args, **_kwargs: {
-                    "dispatch": {"launched": False}, "error": "admission refused",
-                },
+                launch_call=lambda *_args, **_kwargs: subprocess.CompletedProcess(
+                    [], 6, b"", b"not created",
+                ),
+                retry_sleep=lambda _seconds: None,
             )
         public_requeue.assert_not_called()
         attempts = rows(self.queue, "SELECT * FROM task_attempts WHERE task_id='retry' ORDER BY ordinal")
@@ -1332,7 +1333,7 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
             "missing": {},
             "duplicate": subprocess.CompletedProcess(
                 [], 0,
-                b'{"dispatch":{"job_id":"one"},"dispatch":{"job_id":"two"}}', b"",
+                b'{"threadId":"one","threadId":"two"}', b"",
             ),
         }
         for name, response in cases.items():
@@ -1347,7 +1348,7 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
                     dispatcher.dispatch(
                         runtime(self.queue.path), self.queue, task_id=name,
                         eligibility_key=f"manual/{name}", requested_provider="claude",
-                        router_call=callback,
+                        launch_call=callback,
                     )
                 self.assertEqual(callback.call_count, 1)
 
@@ -1358,9 +1359,7 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
         result = dispatcher.dispatch(
             runtime(self.queue.path), self.queue, task_id="outcome",
             eligibility_key="manual/outcome", requested_provider="claude",
-            router_call=lambda *_args, **_kwargs: {
-                "dispatch": {"job_id": "job-outcome", "launched": True},
-            },
+            launch_call=lambda *_args, **_kwargs: {"threadId": "job-outcome"},
         )
         command_line = next(
             line.strip() for line in result.prompt.splitlines()

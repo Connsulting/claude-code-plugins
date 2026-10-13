@@ -690,7 +690,7 @@ class TaskSizeContractTests(unittest.TestCase):
                 if accepted:
                     result = dispatcher.dispatch(
                         cfg, self.queue, task_id=task_id, eligibility_key=f"alpha/manual/{NOW}",
-                        requested_provider="alpha", router_call=launch, now_epoch=NOW,
+                        requested_provider="alpha", launch_call=launch, now_epoch=NOW,
                     )
                     self.assertEqual(result.account_id, "alpha")
                     launch.assert_called_once()
@@ -698,7 +698,7 @@ class TaskSizeContractTests(unittest.TestCase):
                     with self.assertRaises(dispatcher.InvalidRoute):
                         dispatcher.dispatch(
                             cfg, self.queue, task_id=task_id, eligibility_key=f"alpha/manual/{NOW}",
-                            requested_provider="alpha", router_call=launch, now_epoch=NOW,
+                            requested_provider="alpha", launch_call=launch, now_epoch=NOW,
                         )
                     launch.assert_not_called()
                     self.assertIsNone(self.queue.claim_for(task_id))
@@ -721,7 +721,7 @@ class TaskSizeContractTests(unittest.TestCase):
             if expected:
                 result = dispatcher.dispatch(
                     cfg, self.queue, task_id=task_id, eligibility_key=f"manual/{task_id}",
-                    requested_provider="auto", router_call=launch, now_epoch=NOW,
+                    requested_provider="auto", launch_call=launch, now_epoch=NOW,
                 )
                 self.assertEqual(result.provider_id, expected)
                 self.assertEqual(result.account_id, expected)
@@ -730,7 +730,7 @@ class TaskSizeContractTests(unittest.TestCase):
                 with self.assertRaises(dispatcher.InvalidRoute):
                     dispatcher.dispatch(
                         cfg, self.queue, task_id=task_id, eligibility_key=f"manual/{task_id}",
-                        requested_provider="auto", router_call=launch, now_epoch=NOW,
+                        requested_provider="auto", launch_call=launch, now_epoch=NOW,
                     )
                 launch.assert_not_called()
                 self.assertIsNone(self.queue.claim_for(task_id))

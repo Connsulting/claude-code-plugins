@@ -43,7 +43,7 @@ source private helper functions or invent a second DB path.
 8. No publish, merge, credential change, production mutation, contract/schema/ADR change, or
    other externally consequential action is implied by being bonus work. The task contract
    or a grant Brian already gave, recorded on the task at queue time, must grant it explicitly.
-9. Only explicit done-when verification satisfies a dependency. A PR, branch, router status,
+9. Only explicit done-when verification satisfies a dependency. A PR, branch, T3 thread state,
    failed attempt, or skipped attempt is not completion evidence. A `merged` dependency edge
    additionally requires the parent's recorded branch to be merged into the child's base.
 10. Recovery keeps the original task ID and prior attempts. It cannot weaken authority,
@@ -362,9 +362,9 @@ Ambiguous claims still require operator reconciliation and are never cleared aut
 ## Mode: explicit acceleration
 
 An explicit acceleration is a one-task bypass of capacity pacing, not of queue safety. Keep normal
-eligibility, compatibility, atomic claim, concrete router launch, and
-terminal-record contracts. CLI `auto` may classify immediately before its one concrete launch;
-the viewer never accepts `auto`. Do not loop or retry ambiguous launches.
+eligibility, compatibility, atomic claim, concrete T3 thread launch, and
+terminal-record contracts. `auto` selects a compatible provider from configured size ceilings
+and usage before its one concrete launch. Do not loop or retry ambiguous launches.
 
 Use the stable CLI's shared dispatch path; never call a provider command or a legacy monitor
 directly:
@@ -456,7 +456,7 @@ without Git calls, remote checks, or an immutable SHA pin. The worker fetches th
 branch's current tip during setup. If that branch is missing, setup stops with reason code
 `verification_needed`; it does not fall back to the target.
 
-Do not call an ambiguous router response failed: its claim remains held until `doctor` and an
+Do not call an ambiguous thread launcher response failed: its claim remains held until `doctor` and an
 operator reconcile whether a job exists.
 
 Automatic recovery applies only when active work depends on a failed or skipped one-off. It keeps
@@ -473,7 +473,7 @@ uses its documented fresh follow-up path.
 
 If the user later says “try harder” in the same thread after this attempt recorded failed or
 skipped, continue under the original task ID and contract. Before more work, run the exact
-`continue-progress` command embedded in the prompt. It marks that same router job in progress
+`continue-progress` command embedded in the prompt. It marks that same T3 thread in progress
 and does not launch another worker. When the continued work finishes, record the terminal
 result with the prompt's record command, replacing only the attempt id with the `attempt_id`
 `continue-progress` printed. Do not call `recover-complete` after `continue-progress` succeeds.
@@ -482,7 +482,7 @@ replacement. If `continue-progress` was not opened and the continued work alread
 done-when, write the required evidence and run the exact stable package CLI `recover-complete`
 command already embedded in the prompt before replying. This command is separate from the
 configurable record adapter, which may not support recovery. It appends a verification attempt
-without a new claim or router launch and does not require a previously scheduled recovery
+without a new claim or thread launch and does not require a previously scheduled recovery
 projection; if an exact projection exists, it consumes it atomically. If it refuses because a
 successor owns the task, keep the evidence for that successor and do not overwrite its state.
 An unknown-launch reconciliation closure is recoverable only with signature

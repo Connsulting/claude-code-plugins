@@ -208,7 +208,7 @@ class ScoutReport:
     previews: tuple[dict[str, Any], ...]
     errors: tuple[dict[str, str], ...]
     blockers: tuple[dict[str, Any], ...] = ()
-    router_preflight: tuple[dict[str, Any], ...] = ()
+    launcher_preflight: tuple[dict[str, Any], ...] = ()
     reconciliation: tuple[dict[str, Any], ...] = ()
     goal_updates: tuple[dict[str, Any], ...] = ()
     recoveries: tuple[dict[str, Any], ...] = ()
@@ -225,7 +225,7 @@ class ScoutReport:
             "previews": list(self.previews),
             "errors": list(self.errors),
             "blockers": list(self.blockers),
-            "router_preflight": list(self.router_preflight),
+            "launcher_preflight": list(self.launcher_preflight),
             "reconciliation": list(self.reconciliation),
             "goal_updates": list(self.goal_updates),
             "recoveries": list(self.recoveries),
@@ -277,8 +277,8 @@ def _cycle_anchor(config: RuntimeConfig, snapshots: Mapping[Any, Any], now_epoch
     return hour_round(min(resets)) if resets else hour_round(now_epoch)
 
 
-def _router_preflight(config: RuntimeConfig, plan: PlanResult) -> tuple[dict[str, Any], ...]:
-    """Describe each resolved router executable needed by this tick without launching it."""
+def _launcher_preflight(config: RuntimeConfig, plan: PlanResult) -> tuple[dict[str, Any], ...]:
+    """Describe each resolved thread launcher executable needed by this tick without launching it."""
 
     adapter_ids = {
         config.provider(batch.provider_id).dispatch.adapter_id for batch in plan.batches
@@ -295,7 +295,7 @@ def _router_preflight(config: RuntimeConfig, plan: PlanResult) -> tuple[dict[str
                 stat = executable.stat()
                 identity = f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
         except OSError:
-            # A router replaced between the checks is unavailable for this tick.
+            # A launcher replaced between the checks is unavailable for this tick.
             available = False
         result.append({
             "adapter_id": adapter.id,
@@ -744,7 +744,7 @@ def run_once(
     *,
     now_epoch: int | None = None,
     dry_run: bool = False,
-    router_call: Callable[..., Any] | None = None,
+    launch_call: Callable[..., Any] | None = None,
     host_load_reader: Callable[[], HostLoad] | None = None,
     check_runner: checks.CheckRunner | None = None,
 ) -> ScoutReport:
@@ -774,7 +774,7 @@ def run_once(
         try:
             report = _run_locked(
                 config, queue, cache_root, now=now, dry_run=dry_run,
-                router_call=router_call,
+                launch_call=launch_call,
                 host_load_reader=host_load_reader, check_runner=check_runner,
             )
         except Exception:
@@ -802,7 +802,7 @@ def _run_locked(
     *,
     now: int,
     dry_run: bool,
-    router_call: Callable[..., Any] | None,
+    launch_call: Callable[..., Any] | None,
     host_load_reader: Callable[[], HostLoad] | None,
     check_runner: checks.CheckRunner | None = None,
 ) -> ScoutReport:
@@ -858,22 +858,22 @@ def _run_locked(
     plan = tick.plan
     # A pressured host launches nothing; its batches are already empty, so only report why.
     host_blockers = (tick.host_pressure,) if tick.host_pressure is not None else ()
-    router_preflight = _router_preflight(config, plan)
+    launcher_preflight = _launcher_preflight(config, plan)
 
-    unavailable = [item for item in router_preflight if not item["available"]]
+    unavailable = [item for item in launcher_preflight if not item["available"]]
     if unavailable:
         blockers = lifecycle_blockers + tick.dependency_holds + host_blockers + tuple({
-            "kind": "router_unavailable",
+            "kind": "launcher_unavailable",
             "adapter_id": item["adapter_id"],
             "executable": item["executable"],
             "message": "resolved t3-thread executable is missing or not executable",
         } for item in unavailable)
-        router_errors = lifecycle_errors + tuple(errors) + tuple({
-            "task_id": "*", "kind": "router_unavailable",
-            "message": f"router preflight failed: {item['executable']}",
+        launcher_errors = lifecycle_errors + tuple(errors) + tuple({
+            "task_id": "*", "kind": "launcher_unavailable",
+            "message": f"launcher preflight failed: {item['executable']}",
         } for item in unavailable)
         return ScoutReport(
-            now, dry_run, plan, (), (), router_errors, blockers, router_preflight,
+            now, dry_run, plan, (), (), launcher_errors, blockers, launcher_preflight,
             reconciliation, goal_updates, recoveries, preflight=preflight,
         )
 
@@ -905,7 +905,7 @@ def _run_locked(
                         requested_provider=batch.provider_id,
                         trigger="bonus",
                         now_epoch=now,
-                        router_call=router_call,
+                        launch_call=launch_call,
                     ))
                 except ProviderLaunchUnavailable as exc:
                     hold = exc.account_hold
@@ -933,7 +933,7 @@ def _run_locked(
         now, dry_run, plan, tuple(dispatched), tuple(previews),
         lifecycle_errors + tuple(errors),
         lifecycle_blockers + tick.dependency_holds + host_blockers,
-        router_preflight,
+        launcher_preflight,
         reconciliation, goal_updates, recoveries,
         preflight=preflight, account_holds=tuple(account_holds),
     )

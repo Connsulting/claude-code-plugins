@@ -52,7 +52,7 @@ class AsyncViewerTests(unittest.TestCase):
         with self.assertRaisesRegex(dispatcher.InvalidRoute, 'Preview'):
             dispatcher.dispatch(replace(self.fixture.config, viewer={'preview': True}), self.fixture.queue,
                 task_id='portable', eligibility_key='alpha-account/manual/2000000000',
-                requested_provider='auto', router_call=callback)
+                requested_provider='auto', launch_call=callback)
         callback.assert_not_called()
 
     def test_waiting_tasks_are_visible_even_without_eligible_provider_ids(self):

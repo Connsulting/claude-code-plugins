@@ -440,7 +440,7 @@ def validate_config(
     secret_ids = {item.id for item in secrets}
 
     adapters: list[AdapterConfig] = []
-    allowed_kinds = {"agent-router", "t3-thread"}
+    allowed_kinds = {"t3-thread"}
     for index, row in enumerate(adapter_rows):
         _reject_unknown(row, {
             "id", "kind", "argv", "timeout_seconds", "max_output_bytes",
@@ -485,11 +485,11 @@ def validate_config(
         adapter = adapter_by_id.get(adapter_id)
         if adapter is None or adapter.kind not in allowed_kinds:
             raise ConfigError(f"provider {item_id} dispatch must reference an t3-thread adapter")
-        router_provider = _string(dispatch.get("provider", item_id), f"providers[{index}].dispatch.provider")
+        thread_provider = _string(dispatch.get("provider", item_id), f"providers[{index}].dispatch.provider")
         capabilities_raw = _require_list(row.get("capabilities", []), f"providers[{index}].capabilities")
         capabilities = frozenset(_identifier(value, f"providers[{index}].capabilities") for value in capabilities_raw)
         providers.append(ProviderConfig(
-            item_id, DispatchBinding(adapter_id, router_provider), row.get("max_size"), capabilities,
+            item_id, DispatchBinding(adapter_id, thread_provider), row.get("max_size"), capabilities,
         ))
     provider_ids = {provider.id for provider in providers}
 

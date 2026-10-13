@@ -70,36 +70,35 @@ def _open_snapshots() -> dict[tuple[str, str], usage.UsageSnapshot]:
 def _multi_account_config(
     queue: db.QueueDB,
     cache: Path,
-    active_path: Path,
     *,
     max_jobs: int | None = None,
 ) -> config_module.RuntimeConfig:
     base = _two_provider_config(queue, cache)
     return proxy_fixture(replace(base, limits=(_limit("alpha"), _limit("beta")), max_jobs=max_jobs),
-                         (("alpha", "alpha-personal"), ("alpha", "alpha-business"), ("beta", "beta-account")))
+                         (("alpha", "alpha-primary"), ("alpha", "alpha-secondary"), ("beta", "beta-account")))
 
 
 def _multi_snapshots(
-    personal_used: float,
-    business_used: float,
+    primary_used: float,
+    secondary_used: float,
     *,
-    personal_reset: int | None = None,
-    business_reset: int | None = None,
+    primary_reset: int | None = None,
+    secondary_reset: int | None = None,
     beta_used: float = 95,
 ) -> dict[tuple[str, str], usage.UsageSnapshot]:
-    personal_reset = personal_reset or NOW + 40 * HOUR
-    business_reset = business_reset or NOW + 40 * HOUR
+    primary_reset = primary_reset or NOW + 40 * HOUR
+    secondary_reset = secondary_reset or NOW + 40 * HOUR
     return {
-        ("alpha", "alpha-personal"): usage.UsageSnapshot(
-            "alpha", "alpha-personal", NOW,
+        ("alpha", "alpha-primary"): usage.UsageSnapshot(
+            "alpha", "alpha-primary", NOW,
             {"seven_day": {
-                "used_percent": personal_used, "resets_at": personal_reset,
+                "used_percent": primary_used, "resets_at": primary_reset,
             }},
         ),
-        ("alpha", "alpha-business"): usage.UsageSnapshot(
-            "alpha", "alpha-business", NOW,
+        ("alpha", "alpha-secondary"): usage.UsageSnapshot(
+            "alpha", "alpha-secondary", NOW,
             {"seven_day": {
-                "used_percent": business_used, "resets_at": business_reset,
+                "used_percent": secondary_used, "resets_at": secondary_reset,
             }},
         ),
         ("beta", "beta-account"): usage.UsageSnapshot(
@@ -118,15 +117,15 @@ class ScoutPoolSelectionTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.queue = db.QueueDB(self.root / "queue.db")
         self.queue.initialize()
-        self.config = _multi_account_config(self.queue, self.root / "cache", self.root / "unused")
+        self.config = _multi_account_config(self.queue, self.root / "cache")
         self.queue.add_task(reviewed(_task("alpha-next", "alpha")))
 
-    def tick(self, personal: float, business: float, **kwargs):
-        with mock.patch.object(scout, "read_all", return_value=_multi_snapshots(personal, business, **kwargs)):
+    def tick(self, primary: float, secondary: float, **kwargs):
+        with mock.patch.object(scout, "read_all", return_value=_multi_snapshots(primary, secondary, **kwargs)):
             return scout.plan_tick(self.config, self.queue, now_epoch=NOW, provider_holds=())
 
     def test_pool_selects_earliest_reset_with_headroom(self):
-        tick = self.tick(70, 70, personal_reset=NOW + 36 * HOUR, business_reset=NOW + 40 * HOUR)
+        tick = self.tick(70, 70, primary_reset=NOW + 36 * HOUR, secondary_reset=NOW + 40 * HOUR)
         self.assertEqual([b.account_id for b in tick.plan.batches], ["alpha"])
         self.assertEqual(tick.plan.batches[0].resets_at, NOW + 36 * HOUR)
 
@@ -139,8 +138,8 @@ class ScoutPoolSelectionTests(unittest.TestCase):
 
     def test_running_sibling_consumes_capacity_without_blocking_pool(self):
         self.queue.add_task(reviewed(_task("running", "alpha")))
-        self.queue.record("running", "alpha-business/weekly/123", status="dispatched", provider_id="alpha", account_id="alpha-business", cycle=123)
-        tick = self.tick(70, 70, personal_reset=NOW + 36 * HOUR)
+        self.queue.record("running", "alpha-secondary/weekly/123", status="dispatched", provider_id="alpha", account_id="alpha-secondary", cycle=123)
+        tick = self.tick(70, 70, primary_reset=NOW + 36 * HOUR)
         self.assertEqual([b.account_id for b in tick.plan.batches], ["alpha"])
 
     def test_historical_subscription_backoff_closes_pool_until_it_expires(self) -> None:

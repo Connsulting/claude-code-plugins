@@ -13,12 +13,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ROOT = REPO_ROOT / "plugins" / "big-plan"
 SKILL_ROOT = PLUGIN_ROOT / "skills" / "big-plan"
 PRESERVED_SHA256 = {
-    "server.py": "30d84e07b6705df3d547adf523595e12ed51272617b099f8f13850ed634fe960",
-    "render.py": "56d6053c98914d70803cf241b6d1f62fb7deaf3cbd7015581f36d3910f7a21c7",
-    "dispatch.py": "dc5bfc352a9159f96f16c9ea808e4126fbd486f7797deae3a14618cbcfbe12b3",
+    "server.py": "a62f3528a7863a142771c39aff9c0a5c525860838c2ac9ba582e63b0c3bbd9f9",
+    "render.py": "87252caf8f3616f16ffb46bfb9577f0fec699f9924e00f3cde33946951d5181c",
+    "dispatch.py": "853f0467a4369fc7d53d43363db9a67779f80396bf6ba519b0d1797b5e2d8435",
     "template.md": "f6a28d978c5f8ec1d73193f0e9af560976e1d2230147888849496e8f89e8d007",
-    "test_dispatch.py": "756349a441685361d76480af8726cc5d6c4a108fad986a900c002713ab24a851",
-    "assets/app.js": "ab7ee45bbb2844dec98c6f3af8af6b3a95cd53c8ffd3dafc012a34b763b247ad",
+    "test_dispatch.py": "33fa3b2e0d11335688dce35ed33ddd263dc893973934e2ba502084fbfb2fbe23",
+    "assets/app.js": "f82959fab0d33259c592466f9c96190229aa51815b5a6639d11edc071001eeb0",
     "assets/diff.js": "e9102cd30ac1c2006140719d48f4305dde3c91e3e1f41567342f21915c85758d",
     "assets/mermaid.min.js": "74d7c46dabca328c2294733910a8aa1ed0c37451776e8d5295da38a2b758fb9b",
     "assets/style.css": "c3b44e7ba8862ff0ecfa33eade859fc137e372c31f96b6f6c00a35ed4d5587e9",

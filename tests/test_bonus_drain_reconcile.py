@@ -14,7 +14,6 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/bonus-drain/skills/bonus-drain"))
 
 from bonus_drain import db, reconcile, scout, t3_state
-from bonus_drain.adapters import AdapterError
 
 from tests.readiness_fixture import reviewed
 from tests.test_bonus_drain_review_repairs import (
@@ -212,14 +211,16 @@ class ScoutReconciliationTests(unittest.TestCase):
             provider_id="alpha", account_id="alpha-account", router_job_id="job-1",
         )
 
-    def response(self, state: str = "completed", **extra):
-        return {"rows": [{
-            "provider": "alpha", "job_id": "job-1", "state": state, **extra,
-        }]}
+    def response(self, status: str = "completed", *, ended_age: int = 1800):
+        return t3_state.T3Thread(
+            run_status=status, active_run=status == "running", last_error=None,
+            last_activity_at=None, completed_at=self._activity_stamp(ended_age),
+            unsettled_run=status not in t3_state.TERMINAL_RUN_STATUSES, live_descendant=False,
+        )
 
     def run_scout(self, response, *, dry_run=False, config=None, usage_snapshots=None):
         with (
-            mock.patch.object(reconcile, 'execute_adapter', return_value=response),
+            mock.patch.object(reconcile, 'lookup_thread', return_value=response),
             mock.patch.object(scout, 'read_all', return_value=snapshots() if usage_snapshots is None else usage_snapshots),
             mock.patch.object(scout, 'dispatch') as dispatch,
         ):
@@ -238,19 +239,15 @@ class ScoutReconciliationTests(unittest.TestCase):
         self.assertEqual(self.queue.claims(), [])
         self.assertEqual([r.status for r in self.queue.runs()], ["failed", "dispatched"])
         self.assertFalse(self.queue.eligible_tasks(RESET, task_id="abandoned"))
-        with mock.patch.object(reconcile, "execute_adapter") as probe:
+        with mock.patch.object(reconcile, "lookup_thread") as probe:
             self.assertEqual(reconcile.reconcile_inflight(self.config, self.queue), ())
             probe.assert_not_called()
         self.assertEqual(len(self.queue.runs()), 2)
 
-    def test_live_unknown_absent_wrong_provider_and_duplicate_jobs_stay_blocked(self):
+    def test_live_unknown_and_absent_threads_stay_blocked(self):
         self.queue.add_task(reviewed(task("healthy-beta") | {"allowed_providers": ["beta"]}))
         two_provider = _two_provider_config(self.queue, self.root / "cache")
-        responses = [
-            self.response("running"), self.response("unknown", persisted="completed"),
-            {"rows": []}, {"rows": [dict(self.response()["rows"][0], provider="other")]},
-            {"rows": self.response()["rows"] * 2}, {"rows": "bad"},
-        ]
+        responses = [self.response("running"), self.response("unknown"), None]
         for response in responses:
             with self.subTest(response=response):
                 report, dispatch = self.run_scout(
@@ -271,7 +268,7 @@ class ScoutReconciliationTests(unittest.TestCase):
         dispatch.assert_not_called()
 
     def test_unavailable_probe_preserves_claim(self):
-        with mock.patch.object(reconcile, "execute_adapter", side_effect=AdapterError("timeout")):
+        with mock.patch.object(reconcile, "lookup_thread", side_effect=t3_state.T3StateError("timeout")):
             report = reconcile.reconcile_inflight(self.config, self.queue)
         self.assertEqual(report[0]["reason"], "timeout")
         self.assertEqual(len(self.queue.inflight()), 1)
@@ -284,8 +281,8 @@ class ScoutReconciliationTests(unittest.TestCase):
             )
             return self.response()
 
-        with mock.patch.object(reconcile, "execute_adapter", side_effect=probe):
-            report = reconcile.reconcile_inflight(self.config, self.queue)
+        with mock.patch.object(reconcile, "lookup_thread", side_effect=probe):
+            report = reconcile.reconcile_inflight(self.config, self.queue, now_epoch=NOW)
         self.assertEqual(report[0]["action"], "already_recorded")
         self.assertEqual([r.status for r in self.queue.runs()], ["done", "dispatched"])
 
@@ -312,7 +309,7 @@ class ScoutReconciliationTests(unittest.TestCase):
     def test_ambiguous_claim_stops_before_probing(self):
         self.queue.mark_ambiguous("abandoned", ELIGIBILITY_KEY, detail="unknown launch")
         with (
-            mock.patch.object(reconcile, 'execute_adapter') as probe,
+            mock.patch.object(reconcile, 'lookup_thread') as probe,
             mock.patch.object(scout, 'read_all', return_value=snapshots()),
         ):
             report = scout.run_once(self.config, self.queue, now_epoch=NOW)
@@ -326,8 +323,7 @@ class ScoutReconciliationTests(unittest.TestCase):
 
     def test_cancelled_t3_run_idle_30_minutes_is_recorded_failed(self):
         report, _dispatch = self.run_scout(self.response(
-            "turn_ended", run_status="cancelled",
-            last_activity_at=self._activity_stamp(1800), surface="t3",
+            "cancelled", ended_age=1800,
         ))
         self.assertEqual(report.reconciliation[0]["action"], "failed")
         self.assertEqual([row.status for row in self.queue.runs()], ["failed", "dispatched"])
@@ -337,35 +333,21 @@ class ScoutReconciliationTests(unittest.TestCase):
 
     def test_cancelled_t3_run_idle_5_minutes_stays_held(self):
         report, _dispatch = self.run_scout(self.response(
-            "turn_ended", run_status="cancelled",
-            last_activity_at=self._activity_stamp(300), surface="t3",
+            "cancelled", ended_age=300,
         ))
         self.assertEqual(report.reconciliation[0]["action"], "held")
-        self.assertEqual(len(self.queue.claims()), 1)
-        self.assertEqual(len(self.queue.runs()), 1)
-
-    def test_turn_ended_completed_t3_run_keeps_current_hold(self):
-        report, _dispatch = self.run_scout(self.response(
-            "turn_ended", run_status="completed",
-            last_activity_at=self._activity_stamp(1800), surface="t3",
-        ))
-        self.assertEqual(report.reconciliation[0]["action"], "held")
-        self.assertEqual(
-            report.reconciliation[0]["reason"],
-            "worker state is unknown; operator reconciliation required",
-        )
         self.assertEqual(len(self.queue.claims()), 1)
         self.assertEqual(len(self.queue.runs()), 1)
 
     def test_state_read_failure_preserves_the_claim_and_a_terminal_run_fails_it(self):
         with mock.patch.object(
-            reconcile, "execute_adapter", side_effect=reconcile.T3StateError("locked"),
+            reconcile, "lookup_thread", side_effect=reconcile.T3StateError("locked"),
         ):
             report = reconcile.reconcile_inflight(self.config, self.queue)
         self.assertEqual(report[0]["action"], "held")
         self.assertIn("locked", report[0]["reason"])
         with mock.patch.object(
-            reconcile, "execute_adapter",
+            reconcile, "lookup_thread",
             return_value=reconcile.T3Thread(
                 run_status="failed", active_run=False, last_error=None, last_activity_at=None,
                 completed_at=None, unsettled_run=False, live_descendant=False,
@@ -440,9 +422,9 @@ class ScoutReconciliationTests(unittest.TestCase):
                     run_status=status, active_run=False, last_error=None, last_activity_at=None,
                     completed_at=self._activity_stamp(899), unsettled_run=False, live_descendant=False,
                 )
-                held = reconcile._normalize_observation(observed, "job-1", provider_name="alpha", now_epoch=NOW)
+                held = reconcile._normalize_observation(observed, now_epoch=NOW)
                 self.assertEqual(held.hold_reason, "worker is running")
-                terminal = reconcile._normalize_observation(observed, "job-1", provider_name="alpha", now_epoch=NOW + 1)
+                terminal = reconcile._normalize_observation(observed, now_epoch=NOW + 1)
                 self.assertIsNone(terminal.hold_reason)
                 self.assertEqual(terminal.signature, (
                     f"unknown_launch:t3_run_{status}" if status in {"cancelled", "interrupted"}

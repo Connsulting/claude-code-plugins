@@ -8,26 +8,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .adapters import AdapterError
 from .config import ConfigError, RuntimeConfig
 from .db import QueueDB, QueueError
 from .dispatcher import DispatchError
 from .t3_state import TERMINAL_RUN_STATUSES, T3StateError, T3Thread, lookup_thread
 
 _ABANDONED_TURN_IDLE_SECONDS = 900
-
-
-def execute_adapter(adapter, fields, **_kwargs):
-    """Observation seam. Production reads the T3 state database.
-
-    Tests replace this with the historical status-row payload. A direct call
-    passes ``thread_id`` and optional ``state_path``.
-    """
-
-    del adapter
-    thread_id = fields["thread_id"]
-    path = fields.get("state_path")
-    return lookup_thread(thread_id, path)
 
 
 def _rfc3339_epoch(value: str) -> float | None:
@@ -41,27 +27,6 @@ def _rfc3339_epoch(value: str) -> float | None:
     return parsed.timestamp()
 
 
-def _abandoned_turn(row: dict[str, Any], now_epoch: int | None) -> tuple[str, str] | None:
-    if row.get("state") != "turn_ended":
-        return None
-    run_status = row.get("run_status")
-    if run_status not in ("cancelled", "interrupted"):
-        return None
-    activity = row.get("last_activity_at")
-    if not isinstance(activity, str):
-        return None
-    activity_epoch = _rfc3339_epoch(activity)
-    if activity_epoch is None:
-        return None
-    now = (
-        float(now_epoch) if now_epoch is not None
-        else datetime.now(timezone.utc).timestamp()
-    )
-    if now - activity_epoch < _ABANDONED_TURN_IDLE_SECONDS:
-        return None
-    return run_status, activity
-
-
 @dataclass(frozen=True)
 class _Observation:
     run_status: str | None
@@ -70,58 +35,27 @@ class _Observation:
     signature: str
 
 
-def _normalize_observation(raw: Any, thread_id: str, *, provider_name: str, now_epoch: int | None) -> _Observation | str | None:
-    if isinstance(raw, T3Thread):
-        status = raw.run_status
-        if raw.active_run or raw.unsettled_run or raw.live_descendant or status not in TERMINAL_RUN_STATUSES:
-            hold = (
-                "worker is running" if raw.active_run or raw.unsettled_run or raw.live_descendant or status in {
-                    "preparing", "starting", "running", "queued",
-                } or status is None
-                else "worker state is unknown; operator reconciliation required"
-            )
-            return _Observation(status, hold, hold, "")
-        ended_at = _rfc3339_epoch(raw.completed_at) if raw.completed_at is not None else None
-        now = float(now_epoch) if now_epoch is not None else datetime.now(timezone.utc).timestamp()
-        if ended_at is not None and now - ended_at < _ABANDONED_TURN_IDLE_SECONDS:
-            return _Observation(status, "worker is running", "worker is running", "")
-        if status in {"cancelled", "interrupted"}:
-            reason = f"T3 run_status {status} without a terminal record"
-            return _Observation(status, None, reason, f"unknown_launch:t3_run_{status}")
-        reason = f"T3 observed {status} execution without a terminal record"
-        return _Observation(status, None, reason, "unknown_launch:missing_terminal_record")
+def _normalize_observation(raw: T3Thread | None, *, now_epoch: int | None) -> _Observation | None:
     if raw is None:
         return None
-    if not isinstance(raw, dict):
-        return "router status returned malformed rows"
-    rows = raw.get("rows")
-    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
-        return "router status returned malformed rows"
-    matches = [
-        row for row in rows
-        if row.get("job_id") == thread_id and row.get("provider") == provider_name
-    ]
-    if len(matches) != 1:
-        return "job missing or duplicated in router status; operator reconciliation required"
-    row = matches[0]
-    state = row.get("state")
-    abandoned = _abandoned_turn(row, now_epoch)
-    if state not in ("completed", "failed") and abandoned is None:
+    status = raw.run_status
+    if raw.active_run or raw.unsettled_run or raw.live_descendant or status not in TERMINAL_RUN_STATUSES:
         hold = (
-            "worker is running" if state == "running"
+            "worker is running" if raw.active_run or raw.unsettled_run or raw.live_descendant or status in {
+                "preparing", "starting", "running", "queued",
+            } or status is None
             else "worker state is unknown; operator reconciliation required"
         )
-        return _Observation(None, hold, hold, "")
-    if abandoned is None:
-        reason = f"router observed {state} execution without a terminal record"
-        return _Observation(str(state), None, reason, "unknown_launch:missing_terminal_record")
-    run_status, activity = abandoned
-    reason = (
-        "router observed turn_ended "
-        f"run_status {run_status} last_activity_at {activity} "
-        "without a terminal record"
-    )
-    return _Observation(run_status, None, reason, f"unknown_launch:t3_run_{run_status}")
+        return _Observation(status, hold, hold, "")
+    ended_at = _rfc3339_epoch(raw.completed_at) if raw.completed_at is not None else None
+    now = float(now_epoch) if now_epoch is not None else datetime.now(timezone.utc).timestamp()
+    if ended_at is not None and now - ended_at < _ABANDONED_TURN_IDLE_SECONDS:
+        return _Observation(status, "worker is running", "worker is running", "")
+    if status in {"cancelled", "interrupted"}:
+        reason = f"T3 run_status {status} without a terminal record"
+        return _Observation(status, None, reason, f"unknown_launch:t3_run_{status}")
+    reason = f"T3 observed {status} execution without a terminal record"
+    return _Observation(status, None, reason, "unknown_launch:missing_terminal_record")
 
 
 def reconcile_inflight(
@@ -133,7 +67,7 @@ def reconcile_inflight(
     """Read T3 thread state and record a missing terminal event as failed.
 
     ``thread_lookup`` is a test seam. Runtime callers leave it unset and read
-    ``~/.t3/userdata/statev2.sqlite`` read-only. A missing or duplicate observation
+    ``~/.t3/userdata/statev2.sqlite`` read-only. A missing observation
     stays held. Active or unsettled parent/descendant runs and a parent run that
     ended less than 900 seconds ago stay held.
     """
@@ -161,18 +95,11 @@ def reconcile_inflight(
                     if thread_lookup is not None:
                         raw = thread_lookup(thread_id)
                     else:
-                        provider = config.provider(run.provider_id)
-                        adapter = config.adapter(provider.dispatch.adapter_id)
-                        raw = execute_adapter(
-                            adapter,
-                            {"thread_id": thread_id, "state_path": state_path},
-                            config=config,
-                        )
+                        raw = lookup_thread(thread_id, state_path)
                     observations[thread_id] = _normalize_observation(
-                        raw, thread_id, provider_name=config.provider(run.provider_id).dispatch.provider,
-                        now_epoch=now_epoch,
+                        raw, now_epoch=now_epoch,
                     )
-                except (T3StateError, AdapterError) as exc:
+                except T3StateError as exc:
                     observations[thread_id] = str(exc)
             observed = observations[thread_id]
             if isinstance(observed, str):

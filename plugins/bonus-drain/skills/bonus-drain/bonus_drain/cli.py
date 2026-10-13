@@ -948,7 +948,7 @@ def _command(args: argparse.Namespace) -> int:
         diagnostics = list(queue_report.diagnostics) + list(lifecycle_report.diagnostics)
         executable_checks = {
             "record_command_absolute": bool(cfg.record_command and Path(cfg.record_command[0]).is_absolute()),
-            "router_only": all(
+            "t3_thread_only": all(
                 cfg.adapter(provider.dispatch.adapter_id).kind == "t3-thread"
                 for provider in cfg.providers
             ),
@@ -1215,9 +1215,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     except dispatcher.AlreadyClaimed as exc:
         _json({"ok": False, "error": str(exc), "code": "already_claimed"}, stream=sys.stderr)
-        return 1
-    except dispatcher.ClassificationFailure as exc:
-        _json({"ok": False, "error": str(exc), "code": "classification_failure"}, stream=sys.stderr)
         return 1
     except dispatcher.AmbiguousDispatch as exc:
         _json({"ok": False, "error": str(exc), "code": "ambiguous_dispatch"}, stream=sys.stderr)

@@ -41,36 +41,16 @@ export BONUS_DB
 
 export BONUSDB="${BONUSDB:-$_BONUS_DRAIN_SOURCE_DIR/bonusdb.sh}"
 
-# Legacy shell consumers still source these policy defaults.  The generic JSON graph remains
-# authoritative for the Python planner; these exports are compatibility inputs only.
-export DRAIN_MIN_WEEKLY_REMAINING_PCT="${DRAIN_MIN_WEEKLY_REMAINING_PCT:-2}"
-export DRAIN_UNTIL_PCT="${DRAIN_UNTIL_PCT:-$((100 - DRAIN_MIN_WEEKLY_REMAINING_PCT))}"
-export FIVE_HOUR_START_MAX="${FIVE_HOUR_START_MAX:-75}"
-export DRAIN_LEAD_MAX_HOURS="${DRAIN_LEAD_MAX_HOURS:-72}"
-export WINDOW_HOURS="${WINDOW_HOURS:-5}"
-export PCT_PER_WINDOW="${PCT_PER_WINDOW:-2.5}"
-export EST_PCT_PER_JOB="${EST_PCT_PER_JOB:-0.75}"
-export BATCH_N="${BATCH_N:-4}"
-
-export BONUS_MODEL="${BONUS_MODEL:-opus[1m]}"
+# Provider executable overrides are used only to build the launcher's PATH.
 export CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
 export CODEX_BIN="${CODEX_BIN:-$HOME/.local/bin/codex}"
 export GROK_BIN="${GROK_BIN:-$HOME/.local/bin/grok}"
 export T3_THREAD_BIN="${T3_THREAD_BIN:-$HOME/.local/bin/t3-thread}"
 export SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
-export BONUS_PR_REPOS="${BONUS_PR_REPOS:-}"
-
-export CODEX_DRAIN_LEAD_MAX_HOURS="${CODEX_DRAIN_LEAD_MAX_HOURS:-$DRAIN_LEAD_MAX_HOURS}"
-export CODEX_WEEKLY_CEIL="${CODEX_WEEKLY_CEIL:-98}"
-export CODEX_PCT_PER_WINDOW="${CODEX_PCT_PER_WINDOW:-$PCT_PER_WINDOW}"
-export CODEX_EST_PCT_PER_JOB="${CODEX_EST_PCT_PER_JOB:-$EST_PCT_PER_JOB}"
-export BEHIND_SAFETY_PCT="${BEHIND_SAFETY_PCT:-100}"
-
 export BONUS_WEEKLY_ANCHOR_DOW="${BONUS_WEEKLY_ANCHOR_DOW:-6}"
 export BONUS_WEEKLY_ANCHOR_HHMM="${BONUS_WEEKLY_ANCHOR_HHMM:-2205}"
-export BONUS_USAGE_MAX_AGE="${BONUS_USAGE_MAX_AGE:-3600}"
 
-# Router subprocesses resolve concrete provider binaries by bare name.  Add only existing
+# Thread launcher subprocesses resolve concrete provider binaries by bare name.  Add only existing
 # override directories and never launch a provider here.
 bonus_ensure_provider_path() {
   local bin dir

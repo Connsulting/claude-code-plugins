@@ -83,7 +83,7 @@ class KickContractTests(unittest.TestCase):
     def _router(argv: list[str], **_kwargs: object) -> dict[str, object]:
         if "--dry-run" in argv:
             return {"provider_id": "claude"}
-        return {"dispatch": {"job_id": "job-1", "launched": True}}
+        return {"threadId": "job-1"}
 
 
     def test_cli_and_viewer_name_the_same_manual_kick_service(self) -> None:
@@ -200,7 +200,7 @@ class KickContractTests(unittest.TestCase):
 
         def must_not_run(argv: list[str], **_kwargs: object) -> dict[str, object]:
             called.append(argv)
-            return {"provider_id": "claude", "dispatch": {"job_id": "unexpected"}}
+            return {"threadId": "unexpected"}
 
         for requested in ("auto", "claude"):
             with (
@@ -210,7 +210,7 @@ class KickContractTests(unittest.TestCase):
                 dispatcher.dispatch(
                     cfg, self.queue, task_id="portable",
                     eligibility_key=f"manual/{requested}", requested_provider=requested,
-                    router_call=must_not_run,
+                    launch_call=must_not_run,
                 )
         self.assertEqual(called, [])
         self.assertEqual(self.queue.claims(), [])
@@ -227,31 +227,11 @@ class KickContractTests(unittest.TestCase):
         result = dispatcher.dispatch(
             self.config, self.queue, task_id="classify-none",
             eligibility_key="manual/classify-none", requested_provider="auto",
-            router_call=must_not_launch,
+            launch_call=must_not_launch,
         )
         self.assertEqual(result.provider_id, "claude")
         self.assertEqual(len(calls), 1)
         self.assertNotIn("--dry-run", calls[0])
-
-    def test_agent_router_adapter_uses_its_t3_launch_protocol(self) -> None:
-        cfg = replace(self.config, adapters=(replace(self.config.adapters[0], kind="agent-router"),))
-        seen = []
-
-        def route(argv, **_kwargs):
-            seen.append(argv)
-            return {"dispatch": {"threadId": "thread-router"}}
-
-        result = dispatcher.dispatch(
-            cfg, self.queue, task_id="portable", eligibility_key="manual/router",
-            requested_provider="claude", router_call=route, now_epoch=NOW,
-        )
-        argv = seen[0]
-        self.assertEqual(argv[1:3], ["run", "--provider"])
-        self.assertEqual(argv[argv.index("--provider") + 1], "claude-engine")
-        self.assertEqual(argv[argv.index("--surface") + 1], "t3")
-        self.assertEqual(argv[-1], result.prompt)
-        self.assertEqual(result.surface, "t3")
-        self.assertEqual(self.queue.inflight()[0].router_job_id, "thread-router")
 
     def test_t3_noncreation_retries_then_records_one_dispatch(self) -> None:
         sleeps = []
@@ -303,7 +283,7 @@ class KickContractTests(unittest.TestCase):
             dispatcher.dispatch(
                 self.config, self.queue, task_id="portable", eligibility_key="manual/malformed",
                 requested_provider="auto", now_epoch=NOW,
-                router_call=lambda *_args, **_kwargs: self.fail("unexpected launch"),
+                launch_call=lambda *_args, **_kwargs: self.fail("unexpected launch"),
             )
         self.assertEqual(self.queue.claims(), [])
         self.assertEqual(self.queue.attempts(), [])
@@ -320,7 +300,7 @@ class KickContractTests(unittest.TestCase):
                 with self.assertRaises(dispatcher.InvalidRoute):
                     dispatcher.dispatch(
                         self.config, self.queue, task_id="portable", eligibility_key=f"manual/{state}",
-                        requested_provider="auto", now_epoch=NOW, router_call=launch,
+                        requested_provider="auto", now_epoch=NOW, launch_call=launch,
                     )
                 launch.assert_not_called()
                 self.assertEqual(self.queue.claims(), [])
@@ -332,7 +312,7 @@ class KickContractTests(unittest.TestCase):
         with self.assertRaises((dispatcher.InvalidRoute, usage.UsageError)):
             dispatcher.dispatch(
                 self.config, self.queue, task_id="portable", eligibility_key="manual/inventory",
-                requested_provider="auto", now_epoch=NOW, router_call=launch,
+                requested_provider="auto", now_epoch=NOW, launch_call=launch,
             )
         launch.assert_not_called()
         self.assertEqual(self.queue.claims(), [])
@@ -375,7 +355,7 @@ class KickContractTests(unittest.TestCase):
         key = "manual/bookkeeping"
         self.queue.add_task(reviewed(_task(task_id)))
         launched = subprocess.CompletedProcess(
-            [], 0, b'{"dispatch":{"job_id":"job-bookkeeping","launched":true}}', b"",
+            [], 0, b'{"threadId":"job-bookkeeping"}', b"",
         )
         with (
             mock.patch("bonus_drain.adapters.run_bounded_process", return_value=launched),
@@ -388,17 +368,17 @@ class KickContractTests(unittest.TestCase):
             )
         self.assertEqual(self.queue.claim_for(task_id, key).state, "ambiguous")
 
-    def test_post_spawn_router_diagnostics_redact_configured_secrets_before_persistence_or_viewing(self) -> None:
+    def test_post_spawn_launch_diagnostics_redact_configured_secrets_before_persistence_or_viewing(self) -> None:
         secret = "configured-router-secret-value"
         adapter = replace(
-            self.config.adapters[0], secret_refs={"ROUTER_TOKEN": "router-secret"},
+            self.config.adapters[0], secret_refs={"T3_LAUNCH_TOKEN": "router-secret"},
         )
         cfg = replace(
             self.config,
             adapters=(adapter,),
             secret_refs=(
                 config_module.SecretRef(
-                    "router-secret", "env", name="BONUS_TEST_ROUTER_SECRET",
+                    "router-secret", "env", name="BONUS_TEST_LAUNCH_SECRET",
                 ),
             ),
         )
@@ -409,12 +389,12 @@ class KickContractTests(unittest.TestCase):
         )
         key = "manual/redacted-launch"
         with (
-            mock.patch.dict(os.environ, {'BONUS_TEST_ROUTER_SECRET': secret}, clear=False),
+            mock.patch.dict(os.environ, {'BONUS_TEST_LAUNCH_SECRET': secret}, clear=False),
             self.assertRaises(dispatcher.AmbiguousDispatch) as raised,
         ):
             dispatcher.dispatch(
                 cfg, self.queue, task_id="portable", eligibility_key=key,
-                requested_provider="claude", router_call=lambda *_args, **_kwargs: completed,
+                requested_provider="claude", launch_call=lambda *_args, **_kwargs: completed,
             )
 
         claim = self.queue.claim_for("portable", key)
@@ -445,7 +425,7 @@ class KickContractTests(unittest.TestCase):
         if "--dry-run" in argv:
             return subprocess.CompletedProcess([], 0, b'{"provider_id":"claude"}', b"")
         return subprocess.CompletedProcess(
-            [], 0, b'{"dispatch":{"job_id":"job-bound","launched":true}}', b"",
+            [], 0, b'{"threadId":"job-bound"}', b"",
         )
 
     @staticmethod
@@ -548,22 +528,6 @@ class KickContractTests(unittest.TestCase):
             spawned.assert_not_called()
             self.assertEqual(self.queue.claim_for("portable", key), None)
 
-    def test_explicit_router_launched_false_is_known_not_launched_and_retry_safe(self) -> None:
-        task_id = "known-negative"
-        key = "manual/known-negative"
-        self.queue.add_task(reviewed(_task(task_id)))
-        negative = subprocess.CompletedProcess(
-            [], 9, b'{"launched":false,"error":"admission refused"}', b"router refused",
-        )
-        with mock.patch("bonus_drain.adapters.run_bounded_process", return_value=negative):
-            for _attempt in range(2):
-                with self.assertRaises(dispatcher.KnownDispatchFailure):
-                    dispatcher.dispatch(
-                        self.config, self.queue, task_id=task_id,
-                        eligibility_key=key, requested_provider="claude",
-                    )
-                self.assertEqual(self.queue.claim_for(task_id, key), None)
-
     def test_router_missing_codex_executable_is_known_not_launched_and_retry_safe(self) -> None:
         codex = config_module.ProviderConfig("codex", config_module.DispatchBinding("router", "codex"), "huge", frozenset())
         cfg = replace(self.config, providers=(codex,), limits=())
@@ -626,11 +590,11 @@ class KickContractTests(unittest.TestCase):
                     seen.append(argv)
                     if "--dry-run" in argv:
                         return {"provider_id": "codex"}
-                    return {"dispatch": {"job_id": f"job-{task_id}", "launched": True}}
+                    return {"threadId": f"job-{task_id}"}
 
                 result = dispatcher.dispatch(
                     cfg, self.queue, task_id=task_id, eligibility_key=f"manual/{task_id}",
-                    requested_provider=requested_provider, router_call=router,
+                    requested_provider=requested_provider, launch_call=router,
                 )
                 self.assertEqual(result.provider_id, "codex")
                 launch = next(argv for argv in seen if "--dry-run" not in argv)
@@ -650,11 +614,11 @@ class KickContractTests(unittest.TestCase):
 
         def router(argv: list[str], **_kwargs: object) -> dict[str, object]:
             seen.append(argv)
-            return {"dispatch": {"job_id": "job-claude-mcp", "launched": True}}
+            return {"threadId": "job-claude-mcp"}
 
         dispatcher.dispatch(
             cfg, self.queue, task_id="claude-mcp", eligibility_key="manual/claude-mcp",
-            requested_provider="claude", router_call=router,
+            requested_provider="claude", launch_call=router,
         )
         launch = seen[0]
         self.assertNotIn("--mcp-config", launch)
@@ -681,12 +645,12 @@ class KickContractTests(unittest.TestCase):
 
         def router(argv: list[str], **_kwargs: object) -> dict[str, object]:
             seen.append(argv)
-            return {"dispatch": {"job_id": "job-named-mcp", "launched": True}}
+            return {"threadId": "job-named-mcp"}
 
         with mock.patch.dict(os.environ, {"HOME": str(self.root)}, clear=False):
             dispatcher.dispatch(
                 cfg, self.queue, task_id="named-mcp", eligibility_key="manual/named-mcp",
-                requested_provider="claude", router_call=router,
+                requested_provider="claude", launch_call=router,
             )
 
         launch = seen[0]
@@ -714,33 +678,6 @@ class KickContractTests(unittest.TestCase):
         self.assertEqual(payloads[0]["task"]["allowed_providers"], ["beta"])
         self.assertEqual(self.queue.task("portable").allowed_providers, ("beta",))
 
-    def test_router_mcp_flag_parser_rejection_is_known_not_launched(self) -> None:
-        claude = config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), "huge", frozenset())
-        cfg = replace(self.config, providers=(claude,), limits=())
-        source_mcp = self.root / "rejected-mcp.json"
-        source_mcp.write_text(
-            json.dumps({"mcpServers": {"project": {"command": "project-mcp"}}}),
-            encoding="utf-8",
-        )
-        self.queue.add_task(reviewed(_task("mcp-parser-rejection", mcp=str(source_mcp))))
-        rejected = subprocess.CompletedProcess(
-            [], 2, b"", (
-                b"t3-thread: --mcp-config is a claude only flag, but this task routed "
-                b"to codex: rerun with --provider claude, or drop --mcp-config"
-            ),
-        )
-        with (
-            mock.patch('bonus_drain.adapters.run_bounded_process', return_value=rejected) as launched,
-            self.assertRaises(dispatcher.KnownDispatchFailure),
-        ):
-            dispatcher.dispatch(
-                cfg, self.queue, task_id="mcp-parser-rejection",
-                eligibility_key="manual/mcp-parser-rejection", requested_provider="claude",
-            )
-        argv = launched.call_args.args[0]
-        self.assertNotIn("--mcp-config", argv)
-        self.assertEqual(self.queue.claim_for("mcp-parser-rejection"), None)
-
     def test_racing_concrete_kicks_produce_exactly_one_router_launch(self) -> None:
         from bonus_drain import kick
 
@@ -751,13 +688,13 @@ class KickContractTests(unittest.TestCase):
             with lock:
                 launches.append(argv)
             time.sleep(0.05)
-            return {"dispatch": {"job_id": "job-race", "launched": True}}
+            return {"threadId": "job-race"}
 
         def invoke() -> str:
             try:
                 return kick.kick_task(
                     self.config, self.queue, task_id="portable", requested_provider="claude",
-                    eligibility_key="manual/race", now_epoch=NOW, router_call=router,
+                    eligibility_key="manual/race", now_epoch=NOW, launch_call=router,
                 ).job_id
             except dispatcher.AlreadyClaimed:
                 return "already-claimed"

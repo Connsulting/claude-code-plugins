@@ -8,7 +8,7 @@ launch a concrete provider. It does not execute a provider directly.
 
 Config rejects inline credential-shaped values, shell interpolation, relative or unsafe
 adapter executables, duplicate/dangling graph IDs, traversal, and dispatch adapters other
-than `t3-thread` or `agent-router`. Adapter subprocesses use argv arrays with `shell=False`, an allowlisted
+than `t3-thread`. Adapter subprocesses use argv arrays with `shell=False`, an allowlisted
 environment, time and output caps, and redacted diagnostics. Cache replacement is atomic,
 mode `0600`, and only a coherent normalized record replaces the last good value.
 
@@ -25,7 +25,7 @@ mode-0600 regular files no larger than 65536 bytes. Diagnostics report validity,
 Claims are made transactionally before routing and carry an immutable attempt ID. A terminal
 record may close only the exact matching attempt, claim ownership; a late or
 mismatched attempt cannot release a successor. A proved-not-launched failure retains an `aborted`
-attempt and releases only its matching ownership. An ambiguous router response or timeout retains
+attempt and releases only its matching ownership. An ambiguous thread launcher response or timeout retains
 the exact attempt and claim to prevent a duplicate launch.
 Ordinary requeue schedules recovery without deleting terminal rows or attempts, and managed goal
 tasks remain protected by their public requeue guard. `doctor` reports reconciliation requirements.
@@ -38,7 +38,7 @@ only as current-user-owned, non-symlink, mode-0600 bounded JSON objects. New `do
 reason code `done_when_verified`, `completion.verified: true`, a mechanism of `command`, `artifact`,
 `operator_receipt`, or `goal_acceptance`, and nonempty bounded evidence. Repository and PR fields
 cannot grant completion or external authority. Same-thread completion uses the exact stable package
-CLI command embedded in the original prompt, creates no claim or router launch, and compare-and-swap
+CLI command embedded in the original prompt, creates no claim or thread launch, and compare-and-swap
 refuses changed contracts, ambiguous ownership, and active or queued successors. It may append the
 verified attempt without a preexisting recovery projection; when one exists, only the exact match
 is consumed.
@@ -51,9 +51,9 @@ timestamps remain historical evidence and cannot shorten recovery backoff or byp
 
 Bonus Drain preserves the established two-tab background-jobs viewer. Request threads read
 persisted usage snapshots and SQLite, and inspect local systemd timer metadata; they never call
-a provider API or router for a GET. The separate
+a provider API or thread launcher for a GET. The separate
 `bonus-drain-refresh.timer` owns bounded usage refresh. Run now is always an explicit button
-action. Concrete and `auto` Run now both delegate to the shared router-only kickoff service.
+action. Concrete and `auto` Run now both delegate to the shared T3 thread kickoff service.
 
 The viewer defaults to:
 
@@ -90,7 +90,7 @@ Mutations remain absent unless `mutations_enabled` is explicitly true. When enab
 enable/disable and Run now require exact Host, exact HTTPS Origin, JSON body limits, safe task
 and provider IDs. Exact Origin plus JSON-only request handling prevents a public page from
 submitting a simple cross-site browser request without altering the established frontend.
-Run now then uses the shared router-only kickoff path and still enforces active state,
+Run now then uses the shared T3 thread kickoff path and still enforces active state,
 compatibility, and atomic claims.
 
 ### Tailscale Serve example

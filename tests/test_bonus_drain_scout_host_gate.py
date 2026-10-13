@@ -338,14 +338,14 @@ class ScoutTickCase(unittest.TestCase):
         self.queue = db.QueueDB(self.root / "state" / "queue.db")
         self.queue.initialize()
         self.config = runtime(self.queue.path)
-        self.router_calls: list[list[str]] = []
+        self.launch_calls: list[list[str]] = []
 
     def route(self, argv: list[str], **_kwargs: object) -> dict[str, object]:
-        self.router_calls.append(list(argv))
-        return {"dispatch": {"job_id": f"job-{len(self.router_calls)}", "launched": True}}
+        self.launch_calls.append(list(argv))
+        return {"threadId": f"job-{len(self.launch_calls)}"}
 
     def add_stale_inflight(self) -> None:
-        """An abandoned dispatched attempt the router reports as completed."""
+        """An abandoned dispatched attempt T3 reports as completed."""
 
         self.queue.add_task(reviewed(task("stale")))
         attempt = self.queue.claim(
@@ -359,11 +359,12 @@ class ScoutTickCase(unittest.TestCase):
         )
 
     def run_tick(self, reader=None, **kwargs):
-        completed = {"rows": [{
-            "provider": "alpha", "job_id": "job-stale", "state": "completed",
-        }]}
+        completed = reconcile.T3Thread(
+            run_status="completed", active_run=False, last_error=None, last_activity_at=None,
+            completed_at=None, unsettled_run=False, live_descendant=False,
+        )
         with (
-            mock.patch.object(reconcile, "execute_adapter", return_value=completed),
+            mock.patch.object(reconcile, "lookup_thread", return_value=completed),
             mock.patch.object(scout, "read_all", return_value=snapshots()),
             mock.patch.object(
                 scout, "reconcile_inflight", wraps=scout.reconcile_inflight,
@@ -371,7 +372,7 @@ class ScoutTickCase(unittest.TestCase):
         ):
             report = scout.run_once(
                 self.config, self.queue, now_epoch=NOW,
-                router_call=self.route, host_load_reader=reader, **kwargs,
+                launch_call=self.route, host_load_reader=reader, **kwargs,
             )
         return report, spy
 
@@ -384,7 +385,7 @@ class GatedTickTests(ScoutTickCase):
 
         self.assertEqual(report.errors, ())
         self.assertEqual([item.task_id for item in report.dispatched], ["ready"])
-        self.assertEqual(len(self.router_calls), 1)
+        self.assertEqual(len(self.launch_calls), 1)
         self.assertNotIn("host_pressure", [b.get("kind") for b in report.blockers])
         self.assertIsNone(report.to_dict()["skipped"])
 
@@ -401,7 +402,7 @@ class GatedTickTests(ScoutTickCase):
 
         report, spy = self.run_tick(_pressured)
 
-        self.assertEqual(self.router_calls, [])
+        self.assertEqual(self.launch_calls, [])
         self.assertEqual(report.dispatched, ())
         self.assertEqual(report.previews, ())
         self.assertEqual(report.errors, ())
@@ -426,7 +427,7 @@ class GatedTickTests(ScoutTickCase):
 
         report, _ = self.run_tick(lambda: _load(cpu=5.0, disk_gib=8.0))
 
-        self.assertEqual(self.router_calls, [])
+        self.assertEqual(self.launch_calls, [])
         self.assertEqual(report.dispatched, ())
         host = [b for b in report.blockers if b.get("kind") == "host_pressure"]
         self.assertEqual([b["reasons"] for b in host], [["disk free 8.00 GiB < 30 GiB"]])
@@ -494,7 +495,7 @@ class TickLockTests(ScoutTickCase):
         self.assertEqual(report.skipped["reason"], "tick_in_progress")
         self.assertEqual(report.errors, ())
         self.assertEqual(report.dispatched, ())
-        self.assertEqual(self.router_calls, [])
+        self.assertEqual(self.launch_calls, [])
         spy.assert_not_called()
         payload = report.to_dict()
         self.assertEqual(payload["skipped"]["reason"], "tick_in_progress")

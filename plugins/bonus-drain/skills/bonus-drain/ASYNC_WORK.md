@@ -6,7 +6,7 @@ remain navigation labels unless explicitly linked to a goal contract.
 
 Plan in a thread, hand off a concrete contract, queue it, start it, and review the result.
 Bonus Drain is the optional spare-capacity scheduler for the same queue. The executable,
-installation paths, database identity, router, and release version keep their existing names.
+installation paths, database identity, thread launcher, and release version keep their existing names.
 
 ## Execution policy
 
@@ -21,7 +21,7 @@ Use `--depends-on parent-id,other-parent-id` on add, or update the prerequisite 
 Use repeatable `--check JSON` for structured preflight checks (see SKILL.md); waiting on a failing check consumes no attempt. Besides the repository checks, `mcp_authenticated`, `k8s_resource_exists`, and `openrouter_credit` probe launch blockers; they hold the task, spend no attempt, and unlike the others never proceed as unverified when they cannot be evaluated. `add` and `edit` evaluate all of the task's checks immediately, even while it waits on a prerequisite, and print each result and the resulting readiness; a failing or unverifiable check is reported on stderr, the task stays queued, and the scout retries it every 10 minutes, once the task can launch, until it passes and the task becomes ready. `bonus-drain held-report --json` lists held authority-required and verification-needed work, its blocked dependents, and how many blockers were knowable at queue time. Tasks that share the same `source_ref` issue run one at a time; goal-managed tasks use the goal's own concurrency bound. Work groups are display labels and do not affect scheduling or limit concurrency.
 The graph can branch and join. Each edge is `done` or `merged`; write `--depends-on parent-id:merged,other-id:done`. An edge without a suffix defaults to `merged` when the parent runs in a repository configured to open pull requests, and to `done` otherwise. A `done` edge needs the parent's verified completion. A `merged` edge also needs the parent's recorded branch merged into the child's base (the child's `start_ref`, or the parent's target branch); the scout verifies that on GitHub, and the child waits with the reason until it lands. A child becomes ready only when **every edge is satisfied**.
 Failed and skipped prerequisites leave it waiting; they do not launch a child or mark it failed.
-A waiting child creates no run, consumes no claim, and does not call the router.
+A waiting child creates no run, consumes no claim, and does not call the thread launcher.
 
 Failed and skipped attempts remain attached to the original task ID. When such a one-off blocks
 active dependent work, the automatic scout may schedule at most two recovery attempts: the first
@@ -69,13 +69,13 @@ Failed, skipped, ambiguous, and proved-not-launched aborted attempts remain in h
 
 If the user continues the same failed/skipped worker thread with “try harder”, the worker keeps
 the original task ID and runs the prompt's `continue-progress` command before more work. That
-marks the same router job in progress and does not launch another worker. When the continued
+marks the same T3 thread in progress and does not launch another worker. When the continued
 work finishes, the worker records the terminal result on the attempt `continue-progress` returns.
 It does not call `recover-complete` after that command succeeds. If `continue-progress` was not
 opened and the work then meets done-when, the worker writes the required verified evidence and
 runs the exact stable package CLI `recover-complete` command already embedded in its prompt before
 replying. That command is separate from the configurable terminal-record adapter, which may not
-support recovery. It appends a verification attempt without a new claim or router launch and works
+support recovery. It appends a verification attempt without a new claim or thread launch and works
 even when no recovery projection has been scheduled; when one exists, it consumes only the exact
 matching projection. It refuses changed contracts, ambiguous ownership, a held recovery, or an
 already queued or active successor; the worker then keeps its evidence for that successor instead

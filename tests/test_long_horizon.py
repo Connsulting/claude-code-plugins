@@ -534,10 +534,10 @@ class GoalScoutTests(unittest.TestCase):
 
         def router(argv, **kwargs):
             calls.append(argv)
-            return {'dispatch': {'job_id': f'fixture-job-{len(calls)}', 'launched': True}}
+            return {"threadId": f'fixture-job-{len(calls)}'}
 
         def tick():
-            return scout.run_once(config, queue, now_epoch=NOW, router_call=router)
+            return scout.run_once(config, queue, now_epoch=NOW, launch_call=router)
 
         def finish(task):
             event = queue.runs(task_id=task)[0]

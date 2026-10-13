@@ -377,9 +377,7 @@ class TerminalUpsertTests(unittest.TestCase):
         result = dispatcher.dispatch(
             config, self.queue, task_id="via-cli", eligibility_key="manual/via-cli",
             requested_provider="claude",
-            router_call=lambda argv, **_kwargs: {
-                "dispatch": {"job_id": "job-1", "launched": True}, "log_id": 7,
-            },
+            launch_call=lambda argv, **_kwargs: {"threadId": "job-1"},
         )
         run_id = result.factory_run_id
         assert run_id is not None and result.attempt_id is not None
@@ -430,9 +428,7 @@ class TerminalUpsertTests(unittest.TestCase):
         result = dispatcher.dispatch(
             config, self.queue, task_id="fast-skip", eligibility_key="manual/fast-skip",
             requested_provider="claude",
-            router_call=lambda argv, **_kwargs: {
-                "dispatch": {"job_id": "job-fast", "launched": True}, "log_id": 8,
-            },
+            launch_call=lambda argv, **_kwargs: {"threadId": "job-fast"},
             telemetry_call=telemetry_call,
         )
         assert result.factory_run_id is not None
