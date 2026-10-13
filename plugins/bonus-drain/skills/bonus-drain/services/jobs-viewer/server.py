@@ -2,25 +2,7 @@
 # requires-python = ">=3.10"
 # dependencies = []
 # ///
-"""Web viewer for background jobs: bonus-drain queue + scheduled timers.
-
-One page, two tabs:
-  - Bonus-drain (default): what's remaining this week in drain order, a live
-    weekly/5h usage header, and a recent-run log. Sourced from the bonus-drain
-    SQLite ledger + bonusdb.sh/usage.sh in skills/bonus-drain.
-  - Scheduled jobs: every `systemd --user` timer with its next/last fire, schedule
-    expression, and the command/prompt it runs. Spent one-shots (already run, no
-    future fire) are tucked into a collapsed "Archive" section, hidden by default.
-
-This replaces the two former in-skill viewers (bonus-drain :8766, bg-schedule
-:8767). It now serves both on a single port (:8766).
-
-Localhost-agnostic: binds the configured loopback address and knows nothing about
-Tailscale. HTTPS over the tailnet is fronted separately by `tailscale serve`.
-
-Usage:
-    python3 server.py [--port 8766] [--host 127.0.0.1]
-"""
+"""Bonus Drain queue, planner capacity, run history and systemd timer viewer."""
 from __future__ import annotations
 
 import argparse
@@ -41,9 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from ipaddress import ip_address
 from pathlib import Path
 
-# services/jobs-viewer/ -> services/ -> installed Bonus Drain skill root.
-# BONUS_SKILL_DIR remains overrideable so the same literal server can run from a source tree
-# during validation without depending on the claude-settings checkout at runtime.
+# Load the installed skill, with a source-tree override for CLI reads.
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
@@ -52,74 +32,13 @@ from bonus_drain import dispatcher as graph_dispatcher
 from bonus_drain import usage as graph_usage
 from bonus_drain.db import QueueDB, QueueError
 from bonus_drain.kick import kick_task
+from bonus_drain.planner import limit_window
 
 BONUS_SKILL_DIR = Path(os.environ.get("BONUS_SKILL_DIR", str(REPO)))
 BONUSDB_SH = BONUS_SKILL_DIR / "bonusdb.sh"
-ACCOUNTS_SH = BONUS_SKILL_DIR / "accounts.sh"
 DB_PATH = Path(os.environ.get(
     "BONUS_DB", str(Path.home() / ".local" / "state" / "bonus-drain" / "queue.db")
 ))
-DRAIN_LEAD_MAX_HOURS = int(os.environ.get("DRAIN_LEAD_MAX_HOURS", "30"))
-
-
-def _gate_for_card(gates: dict, engine: str) -> dict:
-    table = gates.get("provider_gates") or {}
-    return table.get(engine, {}) if isinstance(table, dict) else {}
-
-
-def _config_urgency_hours(provider_id: str) -> int | None:
-    try:
-        c = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
-        hours = {int(lim.urgency_seconds // 3600)
-                 for lim in c.limits if lim.provider_id == provider_id
-                 and getattr(lim, "urgency_seconds", 0)}
-    except Exception:  # noqa: BLE001
-        # Optional urgency metadata must not stop rendering the viewer.
-        return None
-    return hours.pop() if len(hours) == 1 else None
-
-
-def _config_lead_hours(provider_id: str) -> int | None:
-    """Lead window for `provider_id`, read from the validated config the planner gates on.
-
-    `DRAIN_LEAD_MAX_HOURS` predates per-limit `lead_seconds` and is only a shell default, so it
-    goes stale the moment config.json changes and the UI then draws a drain window the scout
-    will not honour. Returns None when the provider's limits disagree, for the same reason the
-    rotation strip refuses to name a lead the lanes do not share: no single number is true.
-    """
-    try:
-        c = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
-        hours = {int(lim.lead_seconds // 3600)
-                 for lim in c.limits if lim.provider_id == provider_id}
-    except Exception:  # noqa: BLE001
-        # Optional lead-window metadata must not stop rendering the viewer.
-        return None
-    return hours.pop() if len(hours) == 1 else None
-
-
-def _config_floor_params(provider_id: str) -> tuple[float, int] | None:
-    """Remaining-headroom floor for `provider_id`, if every limit agrees.
-
-    The bar's floor tick has to be the same number the planner gates on. A disagreement
-    across a provider's limits means no single tick is true, so we omit a shared rate.
-    """
-    try:
-        c = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
-        params = {
-            (float(lim.max_percent_per_window), int(lim.pacing_window_seconds))
-            for lim in c.limits if lim.provider_id == provider_id
-        }
-    except Exception:  # noqa: BLE001
-        # Optional floor metadata must not stop rendering the viewer.
-        return None
-    return params.pop() if len(params) == 1 else None
-
-
-def _card_floor_fields(provider_id: str) -> dict:
-    params = _config_floor_params(provider_id)
-    if params is None:
-        return {"floor_ppw": 0.5, "pacing_s": 3600}
-    return {"floor_ppw": params[0], "pacing_s": params[1]}
 
 
 UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
@@ -158,314 +77,54 @@ def configure_request_boundary() -> None:
     PREVIEW = viewer.get("preview") is True
 
 
-# ===========================================================================
 # Bonus-drain data access
-# ===========================================================================
 
-def _num(s: str):
-    try:
-        return int(s)
-    except ValueError:
-        try:
-            return float(s)
-        except ValueError:
-            return None
+_plan_cache: dict = {"t": 0, "val": None}
 
 
-def _grok_number(value) -> float | None:
-    """Finite Grok numeric field, excluding bool (a Python int subclass)."""
-    if isinstance(value, bool):
-        return None
-    try:
-        value = float(value)
-    except (TypeError, ValueError):
-        return None
-    return value if math.isfinite(value) else None
-
-
-def _normalize_usage(raw) -> dict | None:
-    """Validate the four-field Claude/Codex usage contract before it reaches the page."""
-    if not isinstance(raw, dict):
-        return None
-    values = {key: _grok_number(raw.get(key)) for key in ("u5", "r5", "u7", "r7")}
-    if any(values[key] is None or not 0 <= values[key] <= 100 for key in ("u5", "u7")):
-        return None
-    for key in ("r5", "r7"):
-        if values[key] is None or values[key] < 0 or not values[key].is_integer():
-            return None
-        values[key] = int(values[key])
-    if values["r7"] <= 0:
-        return None
-    return values
-
-
-def _provider_usage(provider_id: str) -> dict | None:
-    """Translate normalized graph cache into the established viewer's window shape."""
-
-    try:
-        cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
-        snapshots = graph_usage.read_all(cfg)
-    except (graph_config.ConfigError, graph_usage.UsageError, OSError, ValueError):
-        return None
-    candidates: list[tuple[int, int, float, int]] = []
-    for (provider, _account_id), snapshot in snapshots.items():
-        if provider != provider_id or not snapshot.fresh:
-            continue
-        for name, seconds in (("five_hour", 18000), ("seven_day", 604800)):
-            reading = snapshot.limits.get(name, {})
-            used, reset = reading.get("used_percent"), reading.get("resets_at")
-            if isinstance(used, (int, float)) and isinstance(reset, (int, float)):
-                candidates.append((snapshot.captured_at, seconds, float(used), int(reset)))
-    if not candidates:
-        return None
-    newest = max(item[0] for item in candidates)
-    windows = [item for item in candidates if item[0] == newest]
-    shortest = min(windows, key=lambda item: item[1])
-    longest = max(windows, key=lambda item: item[1])
-    return _normalize_usage({
-        "u5": shortest[2], "r5": shortest[3],
-        "u7": longest[2], "r7": longest[3],
-    })
-
-
-def get_usage() -> dict | None:
-    return _provider_usage("claude")
-
-
-def get_codex_usage() -> dict | None:
-    return _provider_usage("codex")
-
-
-def _normalize_grok_usage(raw) -> dict | None:
-    """Validate the provider-shaped response before it can become durable viewer data."""
-    if not isinstance(raw, dict):
-        return None
-    raw_percent = raw.get("weekly_percent", raw.get("usage_pct"))
-    weekly_percent = _grok_number(raw_percent)
-    if weekly_percent is not None and not 0 <= weekly_percent <= 100:
-        weekly_percent = None
-
-    raw_reset = raw.get("weekly_reset", raw.get("reset_epoch"))
-    weekly_reset = _grok_number(raw_reset)
-    if weekly_reset is not None and weekly_reset > 0 and weekly_reset.is_integer():
-        weekly_reset = int(weekly_reset)
-    else:
-        weekly_reset = None
-
-    tier = raw.get("tier")
-    if not isinstance(tier, str) or not tier.strip():
-        tier = None
-    source_ts = raw.get("source_ts")
-    if not isinstance(source_ts, str) or not source_ts.strip():
-        source_ts = None
-
-    # A partially-shaped response is not a safe replacement: it would turn a known last-good
-    # budget into an unknown card. Grok's weekly percentage and future integer reset are one
-    # coherent signal, so require both before persisting it.
-    if weekly_percent is None or weekly_reset is None or weekly_reset <= time.time():
-        return None
-    return {
-        "tier": tier,
-        "weekly_percent": weekly_percent,
-        "weekly_reset": weekly_reset,
-        "source_ts": source_ts,
-    }
-
-
-def get_grok_usage() -> dict | None:
-    usage = _provider_usage("grok")
-    if usage is None:
-        return None
-    return _normalize_grok_usage({
-        "weekly_percent": usage["u7"], "weekly_reset": usage["r7"],
-    })
-
-
-_gates_cache: dict = {"t": 0.0, "key": None, "val": None}
-
-
-def _preview_account_gates(cfg, gates: dict) -> None:
-    """Display the planner's original subscription readings independently."""
-    subscriptions = gates["subscriptions"]
-    for provider, field in (("claude", "acct"), ("codex", "codex_acct")):
-        limits = cfg.limits_for_provider(provider)
-        weekly_limit = max(limits, key=lambda limit: limit.window_seconds) if limits else None
-        accounts = []
-        for snapshot in subscriptions:
-            if snapshot.get("provider_id") != provider:
-                continue
-            readings = snapshot.get("limits", {}) if snapshot.get("fresh", True) else {}
-            weekly, short = readings.get("seven_day", {}), readings.get("five_hour", {})
-            account_id = snapshot["account_id"]
-            pacing = snapshot.get("pacing", {}).get(weekly_limit.id, {}) if weekly_limit else {}
-            accounts.append({
-                "label": account_id.removeprefix(provider + "-"), "account_id": account_id,
-                "ceiling": weekly_limit.ceiling_percent if weekly_limit else 100,
-                "u5": short.get("used_percent"), "u7": weekly.get("used_percent"),
-                "r7": weekly.get("resets_at"), "reserve": pacing.get("reserve"),
-                "surplus": pacing.get("surplus"),
-            })
-        gates[field] = accounts
-
-
-def get_gates(n_elig: int, n_codex: int, n_grok: int,
-              grok_usage: dict | None, codex_usage: dict | None = None) -> dict:
-    """Read-only planner view, keyed by the cached Codex and Grok provider snapshots."""
+def read_plan() -> dict:
+    """Cache the raw local planner response; failed refreshes close every pool."""
     now = time.time()
-    raw_percent = (grok_usage or {}).get("weekly_percent")
-    if (isinstance(raw_percent, (int, float)) and not isinstance(raw_percent, bool)
-            and math.isfinite(float(raw_percent)) and 0 <= float(raw_percent) <= 100):
-        weekly_percent = raw_percent
-    else:
-        weekly_percent = None
-    raw_reset = (grok_usage or {}).get("weekly_reset")
-    if (isinstance(raw_reset, (int, float)) and not isinstance(raw_reset, bool)
-            and math.isfinite(float(raw_reset)) and float(raw_reset).is_integer()
-            and int(raw_reset) > 0):
-        weekly_reset = int(raw_reset)
-    else:
-        weekly_reset = None
-    grok_json = json.dumps(
-        {"weekly_percent": weekly_percent, "weekly_reset": weekly_reset},
-        sort_keys=True, separators=(",", ":"), allow_nan=False,
-    )
-    normalized_codex = _normalize_usage(codex_usage)
-    codex_json = json.dumps(
-        normalized_codex or {}, sort_keys=True, separators=(",", ":"), allow_nan=False,
-    )
-    key = (n_elig, n_codex, n_grok, grok_json, codex_json)
-    if _gates_cache["val"] is not None and _gates_cache["key"] == key and now - _gates_cache["t"] < 60:
-        return _gates_cache["val"]
-    out: dict = {"acct": [], "codex_acct": [], "allocations": {}, "subscriptions": [], "provider_gates": {}}
+    if _plan_cache["val"] is not None and now - _plan_cache["t"] < 60:
+        return _plan_cache["val"]
+    plan = {"subscriptions": [], "gates": [], "allocations": [], "host_pressure": None}
     try:
-        cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
         result = subprocess.run(
             [sys.executable, "-m", "bonus_drain", "gates", "--json", "--local"],
             capture_output=True, text=True, timeout=25, check=False,
             env={**os.environ, "PYTHONPATH": str(BONUS_SKILL_DIR)},
         )
-        gate_payload = json.loads(result.stdout) if result.returncode == 0 else None
-        out["subscriptions"] = gate_payload.get("subscriptions", []) if gate_payload else []
-        _preview_account_gates(cfg, out)
-        for provider in ("claude", "codex"):
-            limits = cfg.limits_for_provider(provider)
-            prefix = "" if provider == "claude" else provider + "_"
-            if limits:
-                weekly = max(limits, key=lambda limit: limit.window_seconds)
-                out[prefix + "ceiling"] = weekly.ceiling_percent
-                out[prefix + "batch_n"] = weekly.batch_size
-                out[prefix + "lead_hours"] = weekly.lead_seconds // 3600
-                out[prefix + "pct_per_window"] = weekly.max_percent_per_window
-                out[prefix + "est_pct_per_job"] = weekly.estimated_percent_per_job
-                out["window_hours"] = weekly.pacing_window_seconds / 3600
-            out[prefix + "multi"] = int(len(out["acct" if provider == "claude" else "codex_acct"]) > 1)
-        # `gates --json` is the current planning boundary. These fields preserve the viewer's
-        # display metadata, while shimmer remains driven by durable in-flight runs below.
-        gates = gate_payload.get("gates", []) if gate_payload else []
-        provider_gates = {}
-        candidates = []
-        for gate in gates:
-            if not isinstance(gate, dict):
-                continue
-            provider_id = gate.get("provider_id")
-            if isinstance(provider_id, str) and provider_id:
-                provider_gates[provider_id] = gate
-            if not gate.get("open"):
-                continue
-            provider = gate.get("provider_id")
-            if provider not in RUN_ENGINES:
-                continue
-            batch = int(_f(gate.get("batch_size")))
-            out[f"{provider}_batch"] = max(int(_f(out.get(f"{provider}_batch"))), batch)
-            if batch > 0:
-                candidates.append(gate)
-        out["provider_gates"] = provider_gates
-        out["host_pressure"] = gate_payload.get("host_pressure") if gate_payload else None
-        if candidates:
-            next_gate = min(candidates, key=lambda gate: _f(gate.get("resets_at")) or float("inf"))
-            out["coordinator"] = next_gate["provider_id"]
-        planned: dict[str, str] = {}
-        raw_alloc = gate_payload.get("allocations") if gate_payload else None
-        if isinstance(raw_alloc, list):
-            for item in raw_alloc:
-                if not isinstance(item, dict):
-                    continue
-                task_id = item.get("task_id")
-                provider = item.get("provider_id")
-                if (
-                    isinstance(task_id, str) and task_id
-                    and provider in ("claude", "codex", "grok", "muse")
-                ):
-                    planned[task_id] = provider
-        out["allocations"] = planned
-    except Exception:  # noqa: BLE001, S110
-        # Gate reads are best effort; retain any parsed data if a later step fails.
+        if result.returncode == 0:
+            payload = json.loads(result.stdout)
+            if (isinstance(payload, dict)
+                    and all(isinstance(payload.get(key), list)
+                            for key in ("subscriptions", "gates", "allocations"))):
+                plan = payload
+    except (OSError, subprocess.TimeoutExpired, ValueError):
         pass
-    _gates_cache.update(t=now, key=key, val=out)
-    return out
+    _plan_cache.update(t=now, val=plan)
+    return plan
 
 
 def windows_until_reset(reset, lead_hours, window_hours) -> int:
-    """5h windows between now and `reset`, or 0 when the reset is past/absent or still further
-    out than the drain lead. Mirrors scout.sh's `windows_until_reset` (the shell function is
-    defined inside the scout, so it cannot be sourced without running a whole tick)."""
-    try:
-        reset, lead_hours, window_hours = int(reset), int(lead_hours), int(window_hours)
-    except (TypeError, ValueError):
-        return 0
+    """Display pacing windows remaining within the configured lead period."""
+    reset, lead_hours, window_hours = _f(reset), _f(lead_hours), _f(window_hours)
     secs = reset - time.time()
-    if secs <= 0 or secs > lead_hours * 3600:
+    if secs <= 0 or secs > lead_hours * 3600 or window_hours <= 0:
         return 0
-    win = window_hours * 3600
-    return int((secs + win - 1) // win)
+    return math.ceil(secs / (window_hours * 3600))
 
 
-def _claude_multi_active() -> bool:
-    """Read account count from the proxy inventory cache."""
-    try:
-        cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
-        return sum(account.provider_id == "claude" for account in graph_usage.read_accounts(cfg)) >= 2
-    except (graph_config.ConfigError, graph_usage.UsageError, OSError, ValueError):
-        return False
-
-
-def _canonical_cycle(now: float) -> int:
-    """Mirror accounts.sh's default Saturday 22:05 UTC anchor without invoking usage.sh."""
-    anchor_dow = int(os.environ.get("BONUS_WEEKLY_ANCHOR_DOW", "6"))
-    anchor_hhmm = os.environ.get("BONUS_WEEKLY_ANCHOR_HHMM", "2205")
-    try:
-        anchor_hour, anchor_minute = int(anchor_hhmm[:2]), int(anchor_hhmm[2:])
-        if not 0 <= anchor_dow <= 6 or not 0 <= anchor_hour <= 23 or not 0 <= anchor_minute <= 59:
-            raise ValueError
-    except (TypeError, ValueError):
-        anchor_dow, anchor_hour, anchor_minute = 6, 22, 5
-    utc = time.gmtime(now)
-    # Python's Monday=0 maps to accounts.sh's Sunday=0 date output with (weekday + 1) % 7.
-    today_dow = (utc.tm_wday + 1) % 7
-    midnight = _cal.timegm((utc.tm_year, utc.tm_mon, utc.tm_mday, 0, 0, 0))
-    candidate = midnight + ((anchor_dow - today_dow) % 7) * 86_400
-    candidate += anchor_hour * 3600 + anchor_minute * 60
-    if candidate <= now:
-        candidate += 7 * 86_400
-    return int((candidate + 1800) // 3600 * 3600)
-
-
-def current_cycle(usage: dict | None) -> int:
-    """Compute the scout-compatible cycle from cached usage and account inventory."""
-    now = time.time()
-    if _claude_multi_active():
-        return _canonical_cycle(now)
-    reset = (usage or {}).get("r7")
-    reset_number = _grok_number(reset)
-    if reset_number is not None and reset_number > 0 and reset_number.is_integer():
-        return int((reset_number + 1800) // 3600 * 3600)
+def current_cycle(plan: dict) -> int:
+    """Use the planner's exact anchor, falling back only when it is absent."""
+    if "cycle_anchor" in plan:
+        return plan["cycle_anchor"]
     try:
         with _db() as cx:
             row = cx.execute("SELECT MAX(cycle) FROM runs").fetchone()
-            if row and row[0]:
+            if row and row[0] is not None:
                 return int(row[0])
     except Exception:  # noqa: BLE001, S110
-        # Missing or unreadable cycle history keeps the viewer on its zero-cycle fallback.
         pass
     return 0
 
@@ -594,7 +253,6 @@ def _last_runs() -> dict[str, dict]:
             for r in rows:
                 out[r["task"]] = {"ts": r["ts"], "status": r["status"], "engine": r["engine"]}
     except Exception:  # noqa: BLE001, S110
-        # Run-history read failures must leave the rest of the viewer available.
         pass
     return out
 
@@ -610,17 +268,11 @@ def get_recent_runs(limit: int = 80) -> list[dict]:
             result.append(value)
         return result
     except Exception:  # noqa: BLE001
-        # Recent-run history is optional when the queue cannot be read.
         return []
 
 
 def get_inflight() -> list[dict]:
-    """Dispatched-and-not-yet-terminal runs: the jobs actually burning tokens right now.
-
-    Same predicate as `bonusdb.sh inflight` (a dispatch with no later done/skipped/failed/awaiting_human for
-    the same task), joined out to the title and cwd the run log does not carry. `branch` is in
-    the schema but is written empty by every dispatcher today, so the row shows the working
-    directory instead - it is the field that actually identifies where the job is working."""
+    """Read durable dispatches without a later terminal event, joined to task metadata."""
     try:
         with _db() as cx:
             rows = cx.execute(
@@ -635,27 +287,7 @@ def get_inflight() -> list[dict]:
             ).fetchall()
             return [dict(r) for r in rows]
     except Exception:  # noqa: BLE001
-        # Unavailable in-flight history must not prevent rendering the queue.
         return []
-
-
-def get_dispatch_times(cycle: int) -> list[float]:
-    """Epochs of this cycle's dispatch events, for the per-window pacing strip."""
-    out = []
-    try:
-        with _db() as cx:
-            rows = cx.execute(
-                "SELECT ts FROM runs WHERE status='dispatched' AND ((cycle+1800)/3600*3600)=? ",
-                (cycle,),
-            ).fetchall()
-    except Exception:  # noqa: BLE001
-        # Dispatch-history failures leave the optional pacing strip empty.
-        return out
-    for r in rows:
-        e = _iso_epoch(r["ts"])
-        if e:
-            out.append(e)
-    return out
 
 
 def _iso_epoch(iso) -> float | None:
@@ -666,12 +298,10 @@ def _iso_epoch(iso) -> float | None:
         t = time.strptime(str(iso).replace("Z", "").split(".")[0], "%Y-%m-%dT%H:%M:%S")
         return time.mktime(t) - time.timezone
     except Exception:  # noqa: BLE001
-        # Malformed log timestamps are omitted from the pacing strip.
         return None
 
 
 def get_disabled() -> list[dict]:
-    """Return disabled tasks so the UI can re-enable them without a shell."""
     try:
         with _db() as cx:
             rows = cx.execute(
@@ -680,7 +310,6 @@ def get_disabled() -> list[dict]:
             ).fetchall()
             return [dict(r) for r in rows]
     except Exception:  # noqa: BLE001
-        # Unavailable disabled-task history must not prevent rendering active work.
         return []
 
 
@@ -693,7 +322,6 @@ def set_task_active(task_id: str, active: bool) -> tuple[bool, str]:
             if cx.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone() is None:
                 return False, "task not found"
     except Exception:  # noqa: BLE001
-        # The mutation boundary must report every queue-read failure to the caller.
         return False, "could not read task"
     command = "activate" if active else "deactivate"
     try:
@@ -702,16 +330,10 @@ def set_task_active(task_id: str, active: bool) -> tuple[bool, str]:
             capture_output=True, text=True, timeout=10, check=False,
         )
     except Exception:  # noqa: BLE001
-        # The mutation boundary must report every command failure to the caller.
         return False, "could not update task"
     if result.returncode != 0:
         return False, result.stderr.strip() or "could not update task"
     return True, "enabled" if active else "disabled"
-
-
-def _last_line(text: str, fallback: str) -> str:
-    lines = [ln for ln in text.strip().splitlines() if ln.strip()]
-    return lines[-1] if lines else fallback
 
 
 RUN_ENGINES = ("claude", "codex", "grok", "muse", "auto")
@@ -773,11 +395,7 @@ def requeue_task(task_id: str) -> tuple[bool, str]:
 
 
 def finish_inflight_task(task_id: str, status: str) -> tuple[bool, str]:
-    """Record a terminal event for an in-flight job so it no longer holds a dispatch slot.
-
-    Same claim path as `bonus-drain record`. Does not stop the T3 provider worker. The worker may still run until it exits, and a later conflicting
-    terminal record is a reconciliation error rather than a second event.
-    """
+    """Record an operator terminal receipt through the shared claim path; workers keep running."""
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", task_id):
         return False, "invalid task id"
     if status not in {"done", "failed"}:
@@ -844,9 +462,7 @@ def finish_inflight_task(task_id: str, status: str) -> tuple[bool, str]:
     return True, status
 
 
-# ===========================================================================
 # Scheduled-timers data access (read-only)
-# ===========================================================================
 
 def _systemctl(*args: str) -> str:
     try:
@@ -854,7 +470,6 @@ def _systemctl(*args: str) -> str:
             ["systemctl", "--user", *args], capture_output=True, text=True, timeout=12, check=False
         ).stdout
     except Exception:  # noqa: BLE001
-        # Unavailable systemd data must not prevent rendering Bonus Drain work.
         return ""
 
 
@@ -863,7 +478,6 @@ def list_timers() -> list[dict]:
     try:
         rows = json.loads(raw) if raw.strip() else []
     except Exception:  # noqa: BLE001
-        # Unreadable timer output leaves the optional schedule list empty.
         rows = []
     out = []
     for r in rows:
@@ -899,7 +513,6 @@ def _read_unit_file(unit: str) -> str:
     try:
         return p.read_text()
     except Exception:  # noqa: BLE001
-        # Unreadable unit metadata is optional in the schedule view.
         return ""
 
 
@@ -911,7 +524,6 @@ def _show(unit: str, prop: str) -> str:
 
 
 def enrich(t: dict) -> dict:
-    """Add schedule (OnCalendar), description, and the command/prompt for a timer."""
     unit = t["unit"]
     svc = t["activates"] or unit.replace(".timer", ".service")
     timer_txt = _read_unit_file(unit)
@@ -945,11 +557,7 @@ def enrich(t: dict) -> dict:
     return t
 
 
-# --- how regularly does it run (cadence) --------------------------------------
-# systemd is the source of truth: ask `systemd-analyze calendar` for the next few
-# fire times and read the recurrence off the interval between them. DST/TZ-correct
-# because systemd does the calendar math, not us.
-
+# Let systemd calculate recurrence, including timezone and DST transitions.
 _WEEKDAYS = {"Mon": "Monday", "Tue": "Tuesday", "Wed": "Wednesday", "Thu": "Thursday",
              "Fri": "Friday", "Sat": "Saturday", "Sun": "Sunday"}
 _ELAPSE_RE = re.compile(r":\s+([A-Z][a-z]{2} \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) UTC")
@@ -979,7 +587,6 @@ def _calendar_iterations(expr: str, n: int) -> list[float]:
             capture_output=True, text=True, timeout=6, check=False,
         ).stdout
     except Exception:  # noqa: BLE001
-        # Calendar command failures leave the optional recurrence details empty.
         return []
     epochs = []
     for m in _ELAPSE_RE.finditer(out):
@@ -1024,8 +631,7 @@ def _grep(text: str, pattern: str) -> str:
 
 
 def _resolve_prompt(execstart: str, svc: str) -> str:
-    """bg-schedule jobs often read the prompt from a sibling .prompt file via
-    $(cat <path>). Surface that file's contents as the actual prompt."""
+    """Resolve bg-schedule prompts from sibling prompt files or the command arguments."""
     if not execstart:
         return ""
     m = re.search(r"cat\s+'?([^')]+\.prompt)'?", execstart)
@@ -1046,9 +652,6 @@ def _resolve_prompt(execstart: str, svc: str) -> str:
 
 
 def _result(svc: str) -> str:
-    """systemd's last-run Result for a service: 'success' when clean, else a
-    failure token ('exit-code', 'signal', 'timeout', ...). Used to badge archive
-    rows so a spent one-shot that died is visible."""
     return _show(svc, "Result")
 
 
@@ -1068,9 +671,7 @@ FAMILY_META = {
 FAMILY_ORDER = ["bg-schedule", "bonus-drain", "other"]
 
 
-# ===========================================================================
 # Shared render helpers
-# ===========================================================================
 
 def esc(s) -> str:
     return html.escape("" if s is None else str(s))
@@ -1090,17 +691,8 @@ def rel(epoch: float | None) -> str:
     if not epoch:
         return ""
     secs = epoch - time.time()
-    past = secs < 0
-    secs = abs(secs)
-    if secs < 90:
-        v = f"{int(secs)}s"
-    elif secs < 5400:
-        v = f"{int(secs/60)}m"
-    elif secs < 172800:
-        v = f"{int(secs/3600)}h"
-    else:
-        v = f"{int(secs/86400)}d"
-    return f"{v} ago" if past else f"in {v}"
+    return _humanize(secs, past=secs < 0)
+
 
 
 def rel_time(iso_or_none) -> str:
@@ -1113,11 +705,7 @@ def rel_time(iso_or_none) -> str:
 
 
 def dur(secs: float) -> str:
-    """Elapsed as the console's `4h 12m` / `18m 04s`, for in-flight jobs and window offsets.
-
-    Deliberately two-unit all the way up: this page is read to answer "how long until the drain
-    opens" and "how long has this job been running", and `rel()`'s single coarse unit ("4d")
-    loses the hours that decide whether to wait or force-dispatch."""
+    """Format elapsed time with two units, preserving useful hours and minutes."""
     secs = max(0, int(secs))
     if secs < 3600:
         return f"{secs // 60}m {secs % 60:02d}s"
@@ -1139,9 +727,7 @@ def _humanize(secs: float, past: bool) -> str:
     return f"{v} ago" if past else f"in {v}"
 
 
-# ===========================================================================
 # Bonus-drain tab
-# ===========================================================================
 
 STATUS_COLORS = {
     "done": "var(--ok)", "dispatched": "var(--acc)", "failed": "var(--warn)",
@@ -1151,17 +737,7 @@ SIZE_LEVEL = {"tiny": 1, "small": 2, "medium": 3, "large": 4, "huge": 5}
 PRI_TINT = {0: "var(--warn)", 1: "var(--acc)", 2: "var(--fg)", 3: "var(--dim)", 4: "var(--dim)"}
 
 
-# Engine marks, taken from the agent-viewer repo's own logo set rather than redrawn, so the two
-# tools label an engine identically; that set carries the real Claude and OpenAI Codex marks plus
-# the official Grok mark and an auto-route glyph. Emitted once as a <symbol> sprite and
-# referenced by <use>, because
-# the Claude path alone is ~2KB and this page draws an engine mark upward of forty times.
-#
-# Deliberately monochrome on currentColor rather than brand-coloured. Colour on this page means
-# STATE (amber active, warn spent, green clear, slate unknown), and the two brand hexes collide
-# with that vocabulary head-on: Claude's #d97757 sits directly on top of --warn, so a
-# brand-coloured mark would read as "this row is in trouble". The silhouettes carry the
-# distinction on their own.
+# Reuse monochrome engine marks as one sprite; colour denotes state.
 ICON_SPRITE = '<svg class="sprite" aria-hidden="true" focusable="false"><symbol id="i-claude" viewBox="0 0 24 24"><g transform="translate(1.92 1.92) scale(0.84)" fill="currentColor"><path d="m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z"/></g></symbol><symbol id="i-codex" viewBox="0 0 20 20"><g transform="translate(1.6 1.6) scale(0.84)" fill="currentColor"><path d="M11.248 18.25q-.825 0-1.568-.314a4.3 4.3 0 0 1-1.32-.874 4 4 0 0 1-1.304.214 4 4 0 0 1-2.046-.544 4.27 4.27 0 0 1-1.518-1.485 4 4 0 0 1-.56-2.095q0-.48.131-1.04A4.4 4.4 0 0 1 2.04 10.71a4.07 4.07 0 0 1 .017-3.4 4.2 4.2 0 0 1 1.056-1.418 3.8 3.8 0 0 1 1.6-.842 3.9 3.9 0 0 1 .76-1.683q.593-.759 1.451-1.188a4.04 4.04 0 0 1 1.832-.429q.825 0 1.567.313.742.314 1.32.875a4 4 0 0 1 1.304-.215q1.106 0 2.046.545a4.14 4.14 0 0 1 1.501 1.485q.578.941.578 2.095 0 .48-.132 1.04.66.61 1.023 1.419.363.792.363 1.666 0 .892-.38 1.717a4.3 4.3 0 0 1-1.072 1.435 3.8 3.8 0 0 1-1.584.825 3.8 3.8 0 0 1-.775 1.683 4.06 4.06 0 0 1-1.436 1.188 4.04 4.04 0 0 1-1.832.429m-4.076-2.062q.825 0 1.435-.347l3.103-1.782a.36.36 0 0 0 .164-.313v-1.42L7.881 14.62a.67.67 0 0 1-.726 0l-3.118-1.798a.5.5 0 0 1-.017.115v.198q0 .841.396 1.551.413.693 1.139 1.089a3.2 3.2 0 0 0 1.617.412m.165-2.69a.4.4 0 0 0 .181.05q.083 0 .165-.05l1.238-.71-3.977-2.31a.7.7 0 0 1-.363-.643v-3.58q-.825.362-1.32 1.122a2.9 2.9 0 0 0-.495 1.65q0 .809.413 1.55.412.743 1.072 1.123zm3.91 3.663q.875 0 1.585-.396a2.96 2.96 0 0 0 1.534-2.64v-3.564a.32.32 0 0 0-.165-.297l-1.254-.726v4.604a.7.7 0 0 1-.363.643l-3.119 1.799a3 3 0 0 0 1.783.577m.627-6.039V8.878L10.01 7.822 8.129 8.878v2.244l1.881 1.056zM7.057 5.859a.7.7 0 0 1 .363-.644l3.119-1.798a3 3 0 0 0-1.782-.578q-.874 0-1.584.396A2.96 2.96 0 0 0 6.05 4.324a3.07 3.07 0 0 0-.396 1.551v3.547q0 .199.165.314l1.237.726zm8.383 7.887q.825-.364 1.303-1.123.495-.758.495-1.65a3.15 3.15 0 0 0-.412-1.55q-.413-.743-1.073-1.123l-3.086-1.782q-.099-.065-.181-.049a.3.3 0 0 0-.165.05l-1.238.692 3.993 2.327a.6.6 0 0 1 .264.264.64.64 0 0 1 .1.363zm-3.317-8.382a.63.63 0 0 1 .726 0l3.135 1.831v-.297q0-.792-.396-1.501a2.86 2.86 0 0 0-1.105-1.155q-.71-.43-1.65-.43-.825 0-1.436.347L8.294 5.941a.36.36 0 0 0-.165.314v1.418z"/></g></symbol><symbol id="i-auto" viewBox="0 0 24 24"><g transform="translate(1.92 1.92) scale(0.84)" fill="currentColor"><path d="M10.5 2.2a1.5 1.5 0 1 0 3 0 1.5 1.5 0 1 0-3 0Z"/><path d="M11.25 2.2h1.5V6h-1.5Z"/><path fill-rule="evenodd" d="M7 5.5h10a4 4 0 0 1 4 4V16a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4V9.5a4 4 0 0 1 4-4ZM7 11.6a1.7 1.7 0 1 0 3.4 0 1.7 1.7 0 1 0-3.4 0ZM13.6 11.6a1.7 1.7 0 1 0 3.4 0 1.7 1.7 0 1 0-3.4 0ZM9.35 15.2h5.3a.95.95 0 0 1 0 1.9h-5.3a.95.95 0 0 1 0-1.9Z"/></g></symbol><symbol id="i-spin" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.4" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="19 34"></circle></symbol><symbol id="i-ban" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="8.4"></circle><path d="M6.1 6.1 17.9 17.9"></path></g></symbol><symbol id="i-check" viewBox="0 0 24 24"><path d="M5.6 12.4 10.2 17 18.4 7.4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"></path></symbol></svg>'
 _GROK_SYMBOL = (
     '<symbol id="i-grok" viewBox="0 0 24 24" fill="currentColor">'
@@ -1192,18 +768,12 @@ ICON_SPRITE = ICON_SPRITE.replace(
 
 
 def ico(name: str, cls: str = "") -> str:
-    """One engine mark, sized by the CSS class rather than by the symbol."""
     return (f'<svg class="ico{" " + cls if cls else ""}" aria-hidden="true" focusable="false">'
             f'<use href="#i-{esc(name)}"></use></svg>')
 
 
 def busy_button(inner: str) -> str:
-    """A button's glyph plus the spinner that replaces it while its request is in flight.
-
-    Both live in the DOM the whole time and CSS decides which shows. The handlers used to swap
-    button.textContent for the word "launching", which broke the moment the buttons became
-    icon-only: textContent on an icon button reads as empty, so restoring it after a FAILED
-    launch replaced the mark with nothing and left a blank square."""
+    """Keep both the button glyph and its CSS-controlled busy spinner in the DOM."""
     return inner + ico("spin", "spin")
 
 
@@ -1231,8 +801,7 @@ def size_badge(size: str | None) -> str:
 
 
 def _size_blocks(label: str) -> str:
-    """The five-block capacity mark on its own, so the row badge and the size filter chip
-    cannot drift apart."""
+    """Share the five-block capacity mark between row badges and filter chips."""
     level = SIZE_LEVEL.get(label, 0)
     blocks = "".join(f'<i class="{"on" if n <= level else ""}"></i>' for n in range(1, 6))
     return f'<span class="sizeblocks" aria-hidden="true">{blocks}</span>'
@@ -1328,15 +897,9 @@ def _work_meta(t: dict) -> str:
 
 
 def _run_buttons(t: dict) -> str:
-    """The force-dispatch buttons that replaced the old single "Run now".
-
-    An unavailable provider is rendered disabled rather than hidden: a missing button reads as
-    a rendering bug, while the reason makes the graph-backed routing constraint visible.
-    run-now.sh refuses the same case server-side, so this is a hint, not the guard.
-
-    Auto asks t3-thread which engine fits, then bonus-drain launches on it."""
+    """Show every provider with its authoritative readiness or eligibility reason."""
     tid = esc(t["id"])
-    providers = set(t.get("eligible_providers", _legacy_providers(t)))
+    providers = set(t.get("eligible_providers", ()))
     blocked = "Preview: execution disabled" if PREVIEW else (t.get("readiness", {}).get("reason", "Waiting") if not t.get("readiness", {}).get("ready", True) else "")
     if not blocked and "eligible_providers" in t and not providers:
         blocked = "No compatible provider configured"
@@ -1397,23 +960,14 @@ def _finish_buttons(job: dict) -> str:
             </span>"""
 
 
-def _legacy_providers(task: dict) -> list[str]:
-    """Keep direct renderer fixtures compatible with the pre-provider field shape."""
-    return ["claude", "codex", "grok"] if task.get("engine_class") in ("codex-ok", "grok-ok") else ["claude"]
-
-
 def _bar(pct, mark=None, cls="", style="", *, floor_mark=None) -> str:
-    """A usage bar with an optional threshold tick (the ceiling, or the 5h throttle line).
-    The tick is the whole point of this shape over a plain progress bar: it shows how much of
-    the distance to the gate has been spent, not just how much has been used."""
+    """Draw measured usage with ceiling and optional planner-floor ticks."""
     pct = max(0.0, min(100.0, _f(pct)))
     tick = ""
     if mark is not None:
         tick = f'<i class="mark" style="left:{max(0.0, min(100.0, _f(mark))):.1f}%"></i>'
-    floor = ""
-    if floor_mark is not None:
-        floor = (f'<span class="fl" style="left:{max(0.0, min(100.0, _f(floor_mark))):.1f}%" '
-                 f'title="floor"></span>')
+    floor = (f'<span class="fl" style="left:{max(0.0, min(100.0, _f(floor_mark))):.1f}%" '
+             f'title="floor"></span>') if floor_mark is not None else ""
     return (f'<div class="bar {cls}"{" " + style if style else ""}>'
             f'<i class="fill" style="width:{pct:.1f}%"></i>{tick}{floor}</div>')
 
@@ -1426,119 +980,44 @@ def _f(v, default: float = 0.0) -> float:
 
 
 def _card_name(engine: str, label: str) -> str:
-    """Both proxy pools use the same account labels, so with four cards up a bare "Personal" names
-    two different budgets. Prefix the engine, except on the single-budget fallback cards whose
-    label already IS the engine."""
     titled = engine[:1].upper() + engine[1:] if engine else engine
-    if not label or label == engine:
-        return titled
-    return f"{titled} · {label}"
-
-
-def _floor_rate(c: dict) -> tuple[float, float] | None:
-    """(max_percent_per_window, pacing_window_seconds). None if the floor is off."""
-    if "floor_ppw" in c:
-        rate = _f(c.get("floor_ppw"))
-        window = _f(c.get("pacing_s"), 3600)
-        if rate <= 0 or window <= 0:
-            return None
-        return rate, window
-    return 0.5, 3600.0
-
-
-def _reserve_points(c: dict) -> float:
-    """Weekly-percent points that must remain until reset. Matches planner._surplus_above_floor."""
-    if c.get("reserve") is not None:
-        return float(c["reserve"])
-    rate = _floor_rate(c)
-    if rate is None or not _f(c.get("r7")):
-        return 0.0
-    ppw, window = rate
-    remaining_s = max(0.0, _f(c["r7"]) - time.time())
-    return min(_f(c["ceiling"]), ppw * (remaining_s / window))
+    return f"{titled} · {label}" if label and label != engine else titled
 
 
 def _floor_usage(c: dict) -> float | None:
-    """Usage-bar position of the remaining-headroom floor."""
-    if _floor_rate(c) is None or not _f(c.get("r7")) > time.time():
+    """Place the floor tick using the planner's reserve, without recomputing it."""
+    if not c["floor_enabled"] or c["reserve"] is None or not _f(c["r7"]) > time.time():
         return None
-    return max(0.0, min(100.0, _f(c["ceiling"]) - _reserve_points(c)))
-
-
-def _card_surplus(c: dict) -> float | None:
-    if c.get("surplus") is not None:
-        return float(c["surplus"])
-    if c.get("u7") is None or not _f(c.get("r7")):
-        return None
-    remaining = max(0.0, _f(c["ceiling"]) - _f(c["u7"]))
-    return remaining - _reserve_points(c)
+    return max(0.0, min(100.0, _f(c["ceiling"]) - _f(c["reserve"])))
 
 
 def _card_state(c: dict) -> tuple[str, str]:
-    """The one-line verdict in a card's top-right, in the same precedence the gates apply:
-    drain window timing -> weekly ceiling. Each line names the rule
-    that is actually holding, so a stalled drain explains itself without opening the scout log."""
-    kind = "bonus drain" if c.get("urgent") else "async"
-    if c["batch"] > 0:
-        return f'{kind} · batch {c["batch"]}/{c["batch_n"]}', "acc"
-    # A pressured host holds every account regardless of budget.
-    if c.get("host_pressure"):
+    """Describe the shared pool gate while retaining durable running state."""
+    kind = "bonus drain" if c["urgent"] else "async"
+    if c["host_pressure"]:
         return "waiting · host pressure", "warn"
-    # Unknown is not zero. A missing reading must never render as a full budget.
-    if "pool_open" in c:
-        if c.get("pool_batch"):
-            return f"{kind} · pool running {c['pool_batch']}", "acc"
-        if not c["pool_open"]:
-            return "waiting · " + str(c.get("pool_reason") or "pool closed"), "dim"
-        if c.get("unmetered"):
-            return "async · unmetered pool", "acc"
-        return f"{kind} · pool mean {_f(c.get('pool_surplus')):g} pts surplus", "acc"
-    if c["u7"] is None:
-        return "unknown · no usage reading", "dim"
-    if _f(c["u7"]) >= 100:
-        return "spent · weekly exhausted", "warn"
-    if c["u7"] >= c["ceiling"]:
-        return "capped · ceiling reached", "warn"
-    if c.get("behind"):
-        return f'queued · behind {c["behind"]}', "dim"
-    if c.get("urgent"):
-        return "bonus drain · at floor", "dim"
-    if c["windows"] <= 0:
-        return ("closed · drain window" if c["opens_in"] is not None
-                else "closed · no reset signal"), "dim"
-    if c["eligible"] <= 0:
-        return "open · nothing eligible", "dim"
-    surplus = _card_surplus(c)
-    if surplus is not None and surplus <= 0:
-        return f"{kind} · at floor", "dim"
-    if surplus is not None:
-        return f"{kind} · {surplus:.0f} pts surplus", "acc"
-    return f"{kind} · {max(0, _f(c['ceiling']) - _f(c['u7'])):g} pts remaining", "acc"
+    if c["pool_batch"]:
+        return f"{kind} · pool running {c['pool_batch']}", "acc"
+    if not c["pool_open"]:
+        return "waiting · " + str(c["pool_reason"] or "pool closed"), "dim"
+    if c["unmetered"]:
+        return "async · unmetered pool", "acc"
+    return f"{kind} · pool mean {_f(c['pool_surplus']):g} pts surplus", "acc"
 
 
 def _week(c: dict) -> dict:
-    """How much of this account's week has gone, and how much budget is left.
-
-    Both are measured, not forecast. An earlier version projected a burn rate forward to say when
-    the account would run dry; that assumes spend is uniform across the week, and this box's is
-    not - it clusters Monday to Thursday. A linear projection is therefore wrong in a systematic
-    direction rather than a noisy one, claiming surplus every weekend that the actual pattern was
-    never going to spend. It is gone. The panel states what is true and leaves the judgement to
-    the reader, who is the only one who knows the shape of the week.
-
-    An unknown reading yields nothing here, for the same reason it yields no usage bar.
-    """
+    """Compare measured spend with week elapsed and the planner headroom."""
     out = {"known": False, "elapsed": None, "headroom": None, "floor": None}
-    if c["u7"] is None:
+    if c["u7"] is None or c["reserve"] is None or c["surplus"] is None:
         return out
     now = time.time()
-    reset = _f(c.get("r7"))
+    reset = _f(c["r7"])
     if not reset > now:
         return out
     week = 7 * 86400.0
     left = max(0.0, min(week, reset - now))
     out.update(known=True, elapsed=100.0 * (1.0 - left / week),
-               headroom=max(0.0, _f(c["ceiling"]) - _f(c["u7"])),
+               headroom=max(0.0, _f(c["reserve"]) + _f(c["surplus"])),
                floor=_floor_usage(c))
     return out
 
@@ -1548,27 +1027,7 @@ PACE_EASE = 0.6   # <1 builds colour faster near pace; see _pace_color()
 
 
 def _pace_color(c: dict, p: dict) -> str:
-    """Inline colour vars that tint an account's budget bar by how it is pacing.
-
-    Four bars of the same accent colour all look alike, so the one fact that decides whether
-    this account needs attention - is it ahead of or behind a straight-line week - was only
-    readable by subtracting two numbers in the caption underneath. Colour carries it instead:
-    over pace runs red, under pace runs green, and dead on pace desaturates to the neutral
-    grey the bars already used, so "on pace" is the absence of a signal rather than a third
-    colour to learn.
-
-    The ramp saturates at +/- PACE_SPAN points, past which the number no longer changes what
-    you would do about it. Lightness drops with distance from pace as chroma rises, so the
-    extremes read as deep red / deep green rather than as neon on a dark panel. Returns "" for
-    an unknown reading, which keeps its hatched bar and gets no colour it has not earned.
-
-    The ramp is eased rather than linear. A straight line spends most of its colour on deltas
-    this fleet does not produce: the accounts here sit inside about +/- 15 points, which on a
-    linear ramp to 30 is half saturation, so every bar came out a pale wash and the panel read
-    as though the colour were not moving at all. PACE_EASE < 1 front-loads the ramp, giving the
-    range that actually occurs most of the spectrum while leaving the endpoints exactly where
-    they belong - 0 is still neutral, +/- 30 is still fully deep.
-    """
+    """Tint measured spend relative to elapsed time with an eased colour ramp."""
     if not p["known"]:
         return ""
     t = max(-1.0, min(1.0, (_f(c["u7"]) - _f(p["elapsed"])) / PACE_SPAN))
@@ -1581,137 +1040,23 @@ def _pace_color(c: dict, p: dict) -> str:
 
 
 def _drain_order(cards: list[dict]) -> list[dict]:
-    """Sorted by what happens next, which is the ordering the proxy itself uses and the one
-    thing a grid of equal cards cannot express: only one account per engine drains per tick, so
-    these are a queue with a head, not four peers.
-
-    Dispatching first, then accounts whose window is open (nearest reset first, since that is how
-    the proxy picks between them), then closed accounts by how soon they open, then anything
-    with no reading at all - an account we cannot gate is not a candidate for anything.
-    """
+    """Order by open window/reset, then opening time, then unknown usage."""
     def key(c):
-        if c["batch"] > 0:
-            return (0, 0.0)
         if c["u7"] is None:
             return (3, 0.0)
         if c["windows"] > 0:
-            return (1, _f(c.get("r7")))
+            return (1, _f(c["r7"]))
         return (2, c["opens_in"] if c["opens_in"] is not None else float("inf"))
     return sorted(cards, key=key)
 
 
-def _rotation(cards: list[dict]) -> str:
-    """The next 7 days on one shared clock, one lane per account.
-
-    This is the element four independent cards structurally cannot be: each card can state its own
-    reset, but only a shared axis shows the STAGGER between them, and the stagger is the entire
-    point of running multiple accounts. It is also the only place the panel can warn that two
-    accounts have drifted onto the same cadence - drawn here as the span where their windows
-    overlap, during which one of them can only ever be queued behind the other.
-
-    It shows timing and nothing else. Budget lived here briefly as a projected runway and was
-    removed: putting spend on a wall-clock axis requires assuming a uniform burn rate, and this
-    box's spend clusters Monday to Thursday, so the projection was wrong in a systematic direction.
-    Budget is stated as measured numbers in the rows below instead.
-    """
-    now, week = time.time(), 7 * 86400.0
-
-    def pos(t):
-        return max(0.0, min(100.0, 100.0 * (t - now) / week))
-
-    # Only the 24h bonus-drain window is painted. Async Work is open all week, so a
-    # lead-length bar would fill every lane and say nothing.
-    spans = {}
-    for c in cards:
-        reset = _f(c.get("r7"))
-        urg_h = int(_f(c.get("urgency_h"))) or 24
-        spans[id(c)] = (max(now, reset - urg_h * 3600), reset) if reset > now else None
-
-    lanes = []
-    for c in cards:
-        span, bits = spans[id(c)], []
-        for x in (14.3, 28.6, 42.9, 57.1, 71.4, 85.7):
-            bits.append(f'<i class="gl" style="left:{x}%"></i>')
-        if span:
-            w0, w1 = pos(span[0]), pos(span[1])
-            ov = []
-            for other in cards:
-                o = spans[id(other)]
-                if other is c or o is None or other["engine"] != c["engine"]:
-                    continue
-                lo, hi = max(span[0], o[0]), min(span[1], o[1])
-                if hi > lo:
-                    ov.append(f'<i class="overlap" style="left:{pos(lo):.1f}%;'
-                              f'width:{pos(hi) - pos(lo):.1f}%"></i>')
-            cls = "win urgent" + (" live" if c["batch"] > 0 else "")
-            if c["u7"] is not None and _f(c["u7"]) >= 100:
-                cls += " spent"
-            elif c["u7"] is None:
-                cls += " unk"
-            urg_h = int(_f(c.get("urgency_h"))) or 24
-            card_reset = _f(c.get("r7"))
-            urg_start = card_reset - urg_h * 3600
-            if card_reset > now >= urg_start:
-                label = "bonus drain"
-            elif card_reset > now:
-                label = f'opens {dur(urg_start - now)}'
-            else:
-                label = ""
-            bits.append(f'<i class="{cls}" style="left:{w0:.1f}%;width:{max(0.0, w1 - w0):.1f}%">'
-                        + (f"<b>{esc(label)}</b>" if label else "") + "</i>")
-            bits.extend(ov)
-
-            spent = c["u7"] is not None and _f(c["u7"]) >= _f(c["ceiling"])
-            rcls = "reset" + (" warn" if spent else "")
-            note = f'reset {dur(_f(c["r7"]) - now)}' if c["windows"] > 0 else "reset"
-            bits.append(f'<i class="{rcls}" style="left:{w1:.1f}%"><em>{esc(note)}</em></i>')
-        bits.append('<i class="nowline"></i>')
-
-        lanes.append(f"""
-            <div class="lane">
-              <span class="lname{" active" if c.get("active") else ""}">{ico(c["engine"])}{esc(c["name"])}</span>
-              <span class="track">{"".join(bits)}</span>
-            </div>""")
-
-    days = "".join(f'<span style="left:{i * 100 / 7:.1f}%">'
-                   f'{"now" if i == 0 else f"+{i}d"}</span>' for i in range(7))
-    # Name the lead only when every engine agrees on it; with Claude and Codex on different
-    # leads there is no single number that describes the lanes.
-    seen = {int(_f(c.get("urgency_h"))) or 24 for c in cards}
-    urg = f"{seen.pop()}h " if len(seen) == 1 else ""
-    return f"""
-    <div class="tl mfold" data-fold="rotation">
-      <div class="tlhead mfold-sum"><span><i class="caret"></i>rotation &middot; next 7 days</span>
-        <span class="rt">{urg}bonus drain before each reset</span></div>
-      <div class="mfold-body">
-      <div class="tlgrid">
-        <div class="tldays">{days}</div>
-        {"".join(lanes)}
-      </div>
-      <div class="tlfoot">
-        <span><i class="sw w"></i>bonus drain</span>
-        <span><i class="sw r"></i>weekly reset</span>
-        <span><i class="sw u"></i>unknown reading</span>
-        <span class="wn"><i class="sw ov"></i>windows overlap, one waits</span>
-      </div>
-      </div>
-    </div>"""
-
-
 def _account_row(c: dict) -> str:
-    """One account as a row rather than a card. The state line moves from a 10px caption in the
-    corner to the headline, because it names the rule that is actually binding and is therefore
-    the answer to "why is nothing happening". The budget, the pace and the countdown sit beside it
-    on one scan line; the window counts fold away.
-
-    Everything that is identical across accounts - the eligible-task counts - has moved to the
-    section header. Printed per card it read as a per-account number, which it never was.
-    """
-    if c.get("unmetered"):
-        state, tone = _card_state(c)
+    """Render subscription usage, shared pool state and timing in the established row layout."""
+    state, tone = _card_state(c)
+    if c["unmetered"]:
         return f"""
           <details class="arow"><summary class="asum">
-            <i class="stripe{' on' if c.get('draining') else ''}"></i>
+            <i class="stripe{' on' if c['draining'] else ''}"></i>
             <span class="aname"><span class="n1">{ico(c['engine'])}{esc(c['name'])}{c['tag']}</span>
               <span class="n2 {tone}">{esc(state)}</span></span>
             <span class="abudget"><span class="fig"><b>unmetered</b> provider pool</span>
@@ -1721,22 +1066,17 @@ def _account_row(c: dict) -> str:
             <div class="adet"><div class="dgroup"><div class="dh">provider pool</div>
               <div class="dl"><span>subscriptions</span><b>{c['subscription_count']}</b></div>
             </div></div></details>"""
-    state, tone = _card_state(c)
     p = _week(c)
     known = c["u7"] is not None
     u7, ceiling = _f(c["u7"]), _f(c["ceiling"])
-    # when that account's usage is unknown. Drain windows span the week, so surplus
-    # or an open window must not reuse this gold.
-    stripe = "on" if c.get("active") else {"warn": "warn", "dim": ""}.get(tone, "")
-    if not known and not c.get("active"):
+    # Metered stripes show warning/unknown state; shimmer follows inflight below.
+    stripe = {"warn": "warn", "dim": ""}.get(tone, "")
+    if not known:
         stripe, tone = "unk", "unk"
 
-    # --- budget cell ---------------------------------------------------------------------
     if known:
         fig = f'<span class="fig"><b>{u7:g}%</b> of {ceiling:g} ceiling</span>'
-        # The stripe identifies the active subscription. Movement means this account owns the
-        # current drain window; a child job may have already finished between scout ticks.
-        bar = _bar(u7, ceiling, "lg" + (" draining" if c.get("draining") else " idle"),
+        bar = _bar(u7, ceiling, "lg" + (" draining" if c["draining"] else " idle"),
                    _pace_color(c, p), floor_mark=p.get("floor"))
     else:
         fig = '<span class="fig unk"><b>?</b> of ' + f'{ceiling:g} ceiling</span>'
@@ -1753,7 +1093,6 @@ def _account_row(c: dict) -> str:
                 f'{p["elapsed"]:.0f}% of week gone{floor_bit}</span>'
                 f'<b>{p["headroom"]:.0f} pts left</b></span>')
 
-    # --- when cell -----------------------------------------------------------------------
     if not known:
         when, wlabel, wtone = "n/a", "not eligible", "dimv"
     elif c["windows"] > 0:
@@ -1763,10 +1102,9 @@ def _account_row(c: dict) -> str:
     else:
         when, wlabel, wtone = "n/a", "no reset signal", "dimv"
 
-    # --- expanded detail -----------------------------------------------------------------
     wk = [("used", f"{u7:g}%" if known else "no reading", "" if known else "unk"),
           ("ceiling", f"{ceiling:g}%", ""),
-          ("headroom", f"{max(0.0, ceiling - u7):.1f}%" if known else "n/a", "")]
+          ("headroom", f"{p['headroom']:.1f}%" if p["known"] else "n/a", "")]
     if p["known"]:
         wk.append(("week elapsed", f'{p["elapsed"]:.1f}%', ""))
         if p.get("floor") is not None:
@@ -1781,8 +1119,6 @@ def _account_row(c: dict) -> str:
         win.append(("opens in", dur(c["opens_in"]), "acc"))
     else:
         win.append(("state", "closed, no reset signal", "dim"))
-    if c.get("behind"):
-        win.append(("queued behind", c["behind"], "dim"))
 
     def dls(rows):
         return "".join(
@@ -1810,294 +1146,50 @@ def _account_row(c: dict) -> str:
           </details>"""
 
 
-def _verdict(cards: list[dict], coord: str, lead_secs: int) -> tuple[str, str, str, str]:
-    """The panel's answer sentence, as (tone, label, text, sub).
-
-    The reader's first question is "is anything draining, and if not what is holding it", and
-    until now that answer existed only as an inference across every card. The header pill and this
-    line are both built from this one function so they can never disagree - the pill used to read
-    "holding - window open, weekly pacing" while every visible card said "closed - drain window".
-    """
-    if not cards:
-        return "idle", "no usage signal", "No account is reporting usage.", ""
-    def _chips(items: list[dict]) -> str:
-        return "".join(
-            f'<span class="dchip">{ico(c["engine"])}'
-            f'<span class="dname">{esc(c["name"])}</span>'
-            f'<span class="dbatch">{int(c["batch"])}/{int(c["batch_n"])}</span></span>'
-            for c in items
-        )
-
-    running = [c for c in cards if "pool_batch" not in c]
-    running_pools = {}
-    for card in cards:
-        if card.get("pool_batch"):
-            running_pools[card["engine"]] = {
-                **card, "batch": card["pool_batch"], "name": card["engine"].title(), "u7": None,
-            }
-    running.extend(running_pools.values())
-    bonus = [c for c in running if c.get("urgent") and c["batch"] > 0]
-    async_disp = [c for c in running if not c.get("urgent") and c["batch"] > 0]
-    if bonus or async_disp:
-        shown = bonus + async_disp
-        subs = []
-        for drain in shown:
-            kind = "bonus drain" if drain.get("urgent") else "async"
-            bit = f'{kind} · {drain["name"]} batch {int(drain["batch"])}/{int(drain["batch_n"])}'
-            if drain["u7"] is not None:
-                bit += f' · {_f(drain["u7"]):g}% of {_f(drain["ceiling"]):g}'
-            subs.append(bit)
-        sub = " · ".join(subs)
-        if len(shown) == 1:
-            drain = shown[0]
-            label = "bonus drain" if drain.get("urgent") else "draining"
-            return ("live", label,
-                    f'{ico(drain["engine"])}{esc(drain["name"])} is dispatching.', sub)
-        lines = []
-        if bonus:
-            lines.append(
-                f'<div class="vline"><span class="vlbl">bonus drain</span>'
-                f'<span class="dchips">{_chips(bonus)}</span></div>'
-            )
-        if async_disp:
-            lines.append(
-                f'<div class="vline"><span class="vlbl">async</span>'
-                f'<span class="dchips">{_chips(async_disp)}</span></div>'
-            )
-        return ("live", "dispatching", "".join(lines), sub)
-
-    open_pools = {card["engine"]: card for card in cards if card.get("pool_open")}
-    if open_pools:
-        names = ", ".join(engine.title() for engine in open_pools)
-        return "hold", "ready", esc(names) + " ready for the next scout.", "Provider pools have available capacity."
-    pool_cards = [card for card in cards if "pool_open" in card]
-    if pool_cards:
-        reasons = dict.fromkeys(str(card.get("pool_reason") or "pool closed") for card in pool_cards)
-        return "hold", "holding", "Provider pools are waiting.", esc("; ".join(reasons))
-
-    live = [c for c in cards if c["windows"] > 0 and c["u7"] is not None]
-    # Prefer an open account that still has budget: if one exists it is the account the next tick
-    # could actually dispatch on, so its gate is the interesting one. Falling back to a spent or
-    # capped account keeps the line honest when every open window is dead.
-    spendable = [
-        c for c in live
-        if _f(c["u7"]) < _f(c["ceiling"]) and (_card_surplus(c) or 0) > 0
-    ]
-    if live:
-        near = min(spendable or live, key=lambda c: _f(c.get("r7")) or float("inf"))
-        state, _ = _card_state(near)
-        if near.get("drainable", 0) > 0:
-            return ("hold", "ready",
-                    f'{ico(near["engine"])}{esc(near["name"])} is ready for the next scout.',
-                    f'{esc(state)} &middot; resets in {dur(_f(near["r7"]) - time.time())}')
-        return ("hold", "holding",
-                f'{ico(near["engine"])}{esc(near["name"])} has an open window; no active batch.',
-                f'{esc(state)} &middot; resets in {dur(_f(near["r7"]) - time.time())}')
-
-    opening = [c for c in cards if c["opens_in"] is not None]
-    if opening:
-        nxt = min(opening, key=lambda c: c["opens_in"])
-        return ("idle", "nothing draining",
-                "Every account is outside its drain window or spent.",
-                (f'next opens in {dur(nxt["opens_in"])} &middot; '
-                 f'{ico(nxt["engine"])}{esc(nxt["name"])}'))
-    return ("idle", "nothing draining", "No account has a usable drain window.", "")
-
-
-def _claude_cards(gates: dict, usage: dict | None, n_elig: int, coord: str, batch: int) -> list[dict]:
-    """One card per original subscription, sharing its provider pool gate."""
-    lead = _config_lead_hours("claude") or int(_f(gates.get("lead_hours"), DRAIN_LEAD_MAX_HOURS))
-    floor_fields = _card_floor_fields("claude")
-    win_h = int(_f(gates.get("window_hours"), 5))
-    hot = _f(gates.get("five_hour_max"), 75)
-    ppw = _f(gates.get("pct_per_window"), 2.5)
-    accounts = gates.get("acct") or []
-
-    pool_gate = _gate_for_card(gates, "claude")
-
+def _pool_cards(plan: dict, provider: str, eligible: int, live_batch: int,
+                *, config: graph_config.RuntimeConfig) -> list[dict]:
+    """Render original subscriptions with their shared provider gate."""
+    subscriptions = [row for row in plan["subscriptions"] if row["provider_id"] == provider]
+    pool = next((gate for gate in plan["gates"] if gate["provider_id"] == provider), {})
+    limits = config.limits_for_provider(provider)
+    # Empty unmetered pools still explain their planner gate without inventing usage.
+    unmetered = all(row.get("unmetered") for row in subscriptions) if subscriptions else not limits
+    if not subscriptions and (not pool or not unmetered):
+        return []
+    weekly = max(limits, key=lambda limit: limit.window_seconds) if limits else None
+    common = {
+        "engine": provider, "pool_batch": live_batch,
+        "draining": live_batch > 0,
+        "tag": '<span class="tag acc">pool running</span>' if live_batch > 0 else "",
+        "unmetered": unmetered, "urgent": bool(pool.get("urgent")),
+        "pool_open": bool(pool.get("open")), "pool_reason": pool.get("reason"),
+        "pool_surplus": pool.get("surplus"), "host_pressure": plan.get("host_pressure"),
+    }
+    if unmetered:
+        return [{**common, "name": provider.title(), "account_id": provider,
+                 "u7": None, "eligible": eligible, "batch_n": config.unmetered_max_inflight,
+                 "subscription_count": len(subscriptions)}]
     cards = []
-    for a in accounts:
-        windows = windows_until_reset(a.get("r7"), lead, win_h)
-        opens = None
-        if windows <= 0 and a.get("r7"):
-            ahead = _f(a["r7"]) - time.time() - lead * 3600
-            opens = ahead if ahead > 0 else None
-        pool_open = bool(pool_gate.get("open"))
-        account_id = a["account_id"]
-        draining = batch > 0
-        tag = ""
-        if draining:
-            tag = '<span class="tag acc">pool running</span>'
+    now = time.time()
+    for subscription in subscriptions:
+        account_id = subscription["account_id"]
+        readings = subscription.get("limits", {}) if subscription.get("fresh", True) else {}
+        reading = readings.get(limit_window(weekly), {}) if weekly else {}
+        pacing = subscription.get("pacing", {}).get(weekly.id, {}) if weekly else {}
+        reset = reading.get("resets_at")
+        lead_hours = weekly.lead_seconds / 3600 if weekly else 0
+        window_hours = weekly.pacing_window_seconds / 3600 if weekly else 0
+        windows = windows_until_reset(reset, lead_hours, window_hours)
+        ahead = _f(reset) - now - lead_hours * 3600 if reset is not None else 0
         cards.append({
-            "name": _card_name("claude", a["label"]), "account_id": account_id,
-            "tag": tag, "engine": "claude",
-            "u5": a.get("u5"), "u7": a.get("u7"), "ceiling": _f(a.get("ceiling"), 98),
-            "hot": hot, "r7": a.get("r7"), "windows": windows, "opens_in": opens,
-            "ppw": ppw, "batch": 0, "pool_batch": batch,
-            "batch_n": int(_f(gates.get("batch_n"), 3)),
-            "eligible": n_elig, "elig_label": "eligible", "lead_h": lead,
-            "active": False,
-            "live": pool_open or draining,
-            "draining": draining,
-            "behind": "",
-            "urgent": bool(pool_gate.get("urgent")),
-            "pool_open": pool_open, "pool_reason": pool_gate.get("reason"),
-            "pool_surplus": pool_gate.get("surplus"),
-            "reserve": a.get("reserve"), "surplus": a.get("surplus"),
-            "urgency_h": _config_urgency_hours("claude") or 0,
-            **floor_fields,
-        })
-    return cards
-
-
-def _codex_cards(gates: dict, cx: dict | None, n_codex: int, coord: str, batch: int) -> list[dict]:
-    """One card per original subscription, sharing its provider pool gate."""
-    lead = _config_lead_hours("codex") or int(_f(gates.get("codex_lead_hours"), DRAIN_LEAD_MAX_HOURS))
-    floor_fields = _card_floor_fields("codex")
-    win_h = int(_f(gates.get("window_hours"), 5))
-    accounts = gates.get("codex_acct") or []
-
-    pool_gate = _gate_for_card(gates, "codex")
-
-    cards = []
-    for a in accounts:
-        windows = windows_until_reset(a.get("r7"), lead, win_h)
-        opens = None
-        if windows <= 0 and a.get("r7"):
-            ahead = _f(a["r7"]) - time.time() - lead * 3600
-            opens = ahead if ahead > 0 else None
-        pool_open = bool(pool_gate.get("open"))
-        account_id = a["account_id"]
-        draining = batch > 0
-        if draining:
-            tag = '<span class="tag acc">pool running</span>'
-        else:
-            tag = ""
-        cards.append({
-            "name": _card_name("codex", a["label"]), "account_id": account_id,
-            "tag": tag, "engine": "codex",
-            # hot=None, deliberately, even where config carries a 5h knob: the ChatGPT plan has
-            # no 5h window, so there is no second budget and nothing to draw as one.
-            "u5": None, "hot": None,
-            "u7": a.get("u7"), "ceiling": _f(a.get("ceiling"), 98),
-            "r7": a.get("r7"), "windows": windows, "opens_in": opens,
-            "ppw": _f(gates.get("codex_pct_per_window"), 2.5),
-            "batch": 0, "pool_batch": batch,
-            "batch_n": int(_f(gates.get("codex_batch_n"), 3)),
-            "eligible": n_codex, "elig_label": "jobs", "lead_h": lead,
-            "active": False,
-            "live": pool_open or draining,
-            "draining": draining,
-            "behind": "",
-            "urgent": bool(pool_gate.get("urgent")),
-            "pool_open": pool_open, "pool_reason": pool_gate.get("reason"),
-            "pool_surplus": pool_gate.get("surplus"),
-            "reserve": a.get("reserve"), "surplus": a.get("surplus"),
-            "urgency_h": _config_urgency_hours("codex") or 0,
-            **floor_fields,
-        })
-    return cards
-
-
-def _metered_cards(gates: dict, provider: str, eligible: int, batch: int) -> list[dict]:
-    """Show each Grok or Muse subscription's normalized usage and pool pacing."""
-    pool = _gate_for_card(gates, provider)
-    try:
-        cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
-        limits = cfg.limits_for_provider(provider)
-        weekly = next((limit for limit in limits if limit.window_seconds == 604800), None)
-    except graph_config.ConfigError:
-        weekly = None
-    lead = weekly.lead_seconds / 3600 if weekly else 0
-    cards = []
-    for snapshot in gates.get("subscriptions", []):
-        if snapshot.get("provider_id") != provider:
-            continue
-        readings = snapshot.get("limits", {}) if snapshot.get("fresh", True) else {}
-        short, week = readings.get("five_hour", {}), readings.get("seven_day", {})
-        pacing = snapshot.get("pacing", {}).get(weekly.id, {}) if weekly else {}
-        reset = week.get("resets_at")
-        account_id = snapshot["account_id"]
-        cards.append({
-            "name": _card_name(provider, account_id.removeprefix(provider + "-")),
-            "account_id": account_id, "engine": provider,
-            "tag": '<span class="tag acc">pool running</span>' if batch else "",
-            "u5": short.get("used_percent"), "u7": week.get("used_percent"),
-            "hot": None, "ceiling": weekly.ceiling_percent if weekly else 100,
-            "r7": reset, "windows": windows_until_reset(reset, lead, 5),
-            "opens_in": max(0, reset - time.time() - lead * 3600) if reset else None,
-            "ppw": weekly.max_percent_per_window if weekly else 0,
-            "batch": 0, "pool_batch": batch, "batch_n": weekly.batch_size if weekly else 3,
-            "eligible": eligible, "elig_label": "jobs", "lead_h": lead,
-            "active": False, "live": bool(pool.get("open")) or batch > 0,
-            "draining": batch > 0, "behind": "", "urgent": bool(pool.get("urgent")),
-            "urgency_h": weekly.urgency_seconds / 3600 if weekly else 0,
-            "pool_open": bool(pool.get("open")), "pool_reason": pool.get("reason"),
-            "pool_surplus": pool.get("surplus"),
+            **common, "name": _card_name(provider, account_id.removeprefix(provider + "-")),
+            "account_id": account_id, "u7": reading.get("used_percent"), "r7": reset,
+            "ceiling": pacing.get("ceiling_percent", weekly.ceiling_percent if weekly else 100),
             "reserve": pacing.get("reserve"), "surplus": pacing.get("surplus"),
-            **_card_floor_fields(provider),
+            "floor_enabled": bool(weekly and weekly.max_percent_per_window > 0),
+            "windows": windows, "opens_in": ahead if windows <= 0 and ahead > 0 else None,
         })
     return cards
-
-
-def _grok_cards(gates: dict, grok: dict | None, n_grok: int, coord: str, batch: int) -> list[dict]:
-    return _metered_cards(gates, "grok", n_grok, batch)
-
-
-def _muse_cards(gates: dict, n_muse: int, batch: int) -> list[dict]:
-    return _metered_cards(gates, "muse", n_muse, batch)
-
-
-def _pacing_strip(anchor, gates: dict, dispatches: list[float], batch: int) -> str:
-    """The drain lead period cut into its 5h windows, each bar sized by how many jobs actually
-    launched in it. Weekly pacing's whole job is spreading headroom across these windows, so the shape
-    of the strip IS the pacing: front-loaded bars mean the taper failed, an empty run of them
-    means it held. The last window is dashed - it always drains, whatever the math says, because
-    unspent weekly tokens expire at the reset."""
-    lead = _config_lead_hours("claude") or int(_f(gates.get("lead_hours"), DRAIN_LEAD_MAX_HOURS))
-    win_h = int(_f(gates.get("window_hours"), 5))
-    if not anchor:
-        return ""
-    anchor, win, now = _f(anchor), win_h * 3600, time.time()
-    n = max(1, -(-lead * 3600 // win))  # ceil
-    start = anchor - n * win
-    counts = [0] * n
-    for e in dispatches:
-        i = int((e - start) // win)
-        if 0 <= i < n:
-            counts[i] += 1
-    peak = max(max(counts), batch, 1)
-    cur = int((now - start) // win)
-
-    cols = []
-    for i, cnt in enumerate(counts):
-        final = i == n - 1
-        if i < cur:
-            cls, label = ("ran", f"ran {cnt}") if cnt else ("held", "held")
-        elif i == cur:
-            cls, label = "now", f"now {cnt}"
-            if batch:
-                label = f"now {cnt} · +{batch}"
-        else:
-            cls, label = "next", f"w{n - i}"
-        if final:
-            cls += " final"
-            label = "final · drains all" if i != cur else label
-        h = 10 + int(46 * (cnt / peak)) if cnt else (10 if i < cur else 22)
-        if i == cur and batch:
-            h = max(h, 10 + int(46 * (batch / peak)))
-        sweep = '<i class="sweep"></i>' if i == cur and cnt else ""
-        cols.append(f'<div class="pcol{" wide" if final else ""}">'
-                    f'<div class="pbar {cls}" style="height:{h}px">{sweep}</div>'
-                    f'<div class="plbl">{esc(label)}</div></div>')
-    opens_in = anchor - lead * 3600 - now
-    note = "drain window open" if opens_in <= 0 else f"opens in {dur(opens_in)}"
-    return f"""
-    <div class="card pace">
-      <div class="crow tiny"><span>pacing · {win_h}h windows to the {ico("claude")}claude reset</span>
-        <span>{esc(note)} · batch tapers with headroom</span></div>
-      <div class="pgrid">{"".join(cols)}</div>
-    </div>"""
 
 
 QUEUE_FILTER_GROUPS = ("kind", "provider", "priority", "size", "state", "workgroup")
@@ -2115,28 +1207,15 @@ def _facet_size(t: dict) -> str:
 
 
 def _facet_providers(t: dict) -> list[str]:
-    """Providers the queue filter matches, independent of current readiness.
-
-    Scout-eligible IDs are the run-now constraint. The facet should keep a waiting
-    or cooling-down task under every provider that can run it, the same way
-    priority, size, kind, and work group ignore readiness.
-    """
+    """Filter by compatible providers independently of current readiness."""
     have = t.get("compatible_providers")
     if have is None:
-        have = t.get("eligible_providers", _legacy_providers(t))
+        have = t.get("eligible_providers", ())
     return [p for p in PROVIDER_LABELS if p in set(have or ())]
 
 
 def _queue_filters(remaining: list[dict]) -> str:
-    """Facet chips above the queue, applied client-side.
-
-    Only values actually present in this cycle's queue get a chip: a zero-count chip filters to
-    an empty list, which reads as a broken control rather than an empty facet. Every group is
-    multi-select, OR within a group and AND across them, and an empty group means no constraint
-    - which is what the leading `all` chip sets, so "all" stays a visible state rather than
-    only the absence of a selection. The filter is client-side because the page reloads itself
-    every 60s: a server-side filter would have to carry its state on the URL to survive that,
-    where localStorage survives it for free."""
+    """Show nonempty client-side facets; OR within groups and AND across groups."""
     if not remaining:
         return ""
 
@@ -2155,31 +1234,20 @@ def _queue_filters(remaining: list[dict]) -> str:
             bump("provider", provider)
 
     size_order = list(SIZE_LEVEL) + ["unknown"]
-    # (value, glyph, spoken name). The glyph carries the whole chip: with four facets on one
-    # row there is no width for words, and every mark here is already the row vocabulary - the
-    # engine marks, the five-block size gauge - so the chip reads as "filter by this thing you
-    # can see in the rows". The spoken name is the title and the aria-label, never visible.
+    # Chip glyphs match row marks; names remain accessible.
     groups: list[tuple[str, str, list[tuple[str, str, str]]]] = [
-        ("kind", "type", [
-            (v, ico("arrow" if v == "oneoff" else "cycle"),
-             "one-off" if v == "oneoff" else "recurring")
-            for v in ("oneoff", "recurring") if v in counts["kind"]
-        ]),
-        ("provider", "supported by", [
-            (v, ico(v), PROVIDER_LABELS[v])
-            for v in PROVIDER_LABELS if v in counts["provider"]
-        ]),
-        ("priority", "priority", [
-            (v, "P" + v, "priority " + v) for v in sorted(counts["priority"], key=int)
-        ]),
-        ("size", "size", [
-            (v, _size_blocks(v), v + " size") for v in size_order if v in counts["size"]
-        ]),
+        ("kind", "type", [(v, ico("arrow" if v == "oneoff" else "cycle"),
+                           "one-off" if v == "oneoff" else "recurring")
+                          for v in ("oneoff", "recurring") if v in counts["kind"]]),
+        ("provider", "supported by", [(v, ico(v), PROVIDER_LABELS[v])
+                                      for v in PROVIDER_LABELS if v in counts["provider"]]),
+        ("priority", "priority", [(v, "P" + v, "priority " + v)
+                                  for v in sorted(counts["priority"], key=int)]),
+        ("size", "size", [(v, _size_blocks(v), v + " size")
+                          for v in size_order if v in counts["size"]]),
     ]
 
-    # Keep the stable queue facets together. Readiness and grouping are newer, secondary ways
-    # to narrow work, so they deliberately form their own line below rather than extending the
-    # primary row until it wraps unpredictably.
+    # Keep readiness and grouping on the secondary filter line.
     secondary_groups = [
         (g, label, [(v, esc(READINESS_LABELS.get(v, v.title())), READINESS_LABELS.get(v, v.title()))
                     for v in sorted(counts[g])])
@@ -2202,9 +1270,7 @@ def _queue_filters(remaining: list[dict]) -> str:
                     + ' aria-label="' + esc(name) + '" title="' + esc(name) + '">'
                     + glyph + "<i>" + str(counts[group][value]) + "</i></button>"
                 )
-            # The group name is spoken, not printed. Printing four labels cost ~200px, which is
-            # exactly what the fourth group needed to stay on one row, and the marks are the same
-            # ones the rows below carry - the label was naming what you can already see.
+            # Speak group names without widening the visible row.
             rendered.append(
                 '<div class="fgrp" role="group" aria-label="filter by ' + esc(label) + '">'
                 + "".join(chips) + "</div>"
@@ -2226,49 +1292,35 @@ def _queue_filters(remaining: list[dict]) -> str:
 
 
 def render_bonus_body() -> str:
-    usage = get_usage()
-    codex = get_codex_usage()
-    grok = get_grok_usage()
-    cycle = current_cycle(usage)
+    plan = read_plan()
+    cycle = current_cycle(plan)
     remaining = get_remaining(cycle)
     runs = get_recent_runs()
     disabled = get_disabled()
     inflight = get_inflight()
 
-    n_claude = sum("claude" in set(r.get("eligible_providers", _legacy_providers(r))) for r in remaining)
-    n_codex = sum("codex" in set(r.get("eligible_providers", _legacy_providers(r))) for r in remaining)
-    n_grok = sum("grok" in set(r.get("eligible_providers", _legacy_providers(r))) for r in remaining)
-    n_muse = sum("muse" in set(r.get("eligible_providers", _legacy_providers(r))) for r in remaining)
-    n_weekly = sum(
-        1 for r in remaining
-        if r.get("kind") == "recurring" and r.get("cadence") == "weekly"
-    )
-    n_oneoff = sum(1 for r in remaining if r.get("kind") == "oneoff")
-    gates = get_gates(len(remaining), n_codex, n_grok, grok, codex)
-    # Only in-flight jobs count as a live batch. The scout plan's batch_size is what the
-    # *next* tick may launch; mixing it in made idle accounts look like 6/6 running.
-    live_batches = {
-        engine: sum(1 for job in inflight if job.get("engine") == engine)
-        for engine in RUN_ENGINES
-    }
-    live_engines = [engine for engine, count in live_batches.items() if count]
-    coord = live_engines[0] if live_engines else gates.get("coordinator", "none")
-    c_batch = live_batches.get("claude", 0)
-    x_batch = live_batches.get("codex", 0)
-    g_batch = live_batches.get("grok", 0)
-
-    # --- header + live status pill -------------------------------------------------
-    cards = _claude_cards(gates, usage, len(remaining), coord, c_batch)
-    cards.extend(_codex_cards(gates, codex, n_codex, coord, x_batch))
-    cards.extend(_grok_cards(gates, grok, n_grok, coord, g_batch))
-    cards.extend(_muse_cards(gates, n_muse, live_batches.get("muse", 0)))
-    if gates.get("host_pressure"):
-        for card in cards:
-            card["host_pressure"] = gates["host_pressure"]
+    providers = ("claude", "codex", "grok", "muse")
+    eligible = {provider: sum(provider in row.get("eligible_providers", ()) for row in remaining)
+                for provider in providers}
+    n_claude, n_codex, n_grok, n_muse = (eligible[provider] for provider in providers)
+    n_weekly = sum(row.get("kind") == "recurring" and row.get("cadence") == "weekly"
+                   for row in remaining)
+    n_oneoff = sum(row.get("kind") == "oneoff" for row in remaining)
+    gates = {gate["provider_id"]: gate for gate in plan["gates"]}
+    live_batches = {provider: sum(job.get("engine") == provider for job in inflight)
+                    for provider in providers}
+    try:
+        config = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
+    except (graph_config.ConfigError, OSError, ValueError):
+        cards = []
+    else:
+        cards = [card for provider in providers
+                 for card in _pool_cards(plan, provider, eligible[provider], live_batches[provider],
+                                         config=config)]
     scout_at = next_scout()
     when = f"async scheduler {rel(scout_at)}" if scout_at else "async scheduler timing unavailable"
     nxt = " ".join(
-        f'<span class="nxt">{ico(engine)}{int(_f(gates.get(f"{engine}_batch")))}</span>'
+        f'<span class="nxt">{ico(engine)}{int(_f(gates.get(engine, {}).get("batch_size")))}</span>'
         for engine in ("claude", "codex", "grok", "muse")
     )
 
@@ -2278,7 +1330,6 @@ def render_bonus_body() -> str:
         "plan → queue → run → review", f"{n_weekly} weekly", f"{n_oneoff} one-offs",
     ])
 
-    # --- in flight ------------------------------------------------------------------
     if inflight:
         frows = []
         for j in inflight:
@@ -2302,8 +1353,7 @@ def render_bonus_body() -> str:
     else:
         flight = ""
 
-    # --- remaining queue ------------------------------------------------------------
-    planned = gates.get("allocations") if isinstance(gates.get("allocations"), dict) else {}
+    planned = {item["task_id"]: item["provider_id"] for item in plan["allocations"]}
     if remaining:
         band_counts: dict = {}
         for t in remaining:
@@ -2345,7 +1395,6 @@ def render_bonus_body() -> str:
     else:
         queue = '<p class="empty">No queued work. Add a task from a planning thread.</p>'
 
-    # --- run log --------------------------------------------------------------------
     this_cycle = sum(1 for r in runs if r.get("cycle") == cycle)
     if runs:
         lrows = []
@@ -2384,7 +1433,6 @@ def render_bonus_body() -> str:
     else:
         runlog = '<p class="empty">no runs recorded yet.</p>'
 
-    # --- disabled -------------------------------------------------------------------
     if disabled:
         drows = []
         for t in disabled:
@@ -2404,11 +1452,7 @@ def render_bonus_body() -> str:
                       >{busy_button(ico("check"))}</button>
             </div>
           </div>""")
-        # Collapsed by default, like the schedule tab's Archive. This list is the largest block
-        # on the page - currently 91 rows against a 37-row queue - and it is reference material,
-        # not something you act on: a disabled job is excluded from every pick, so it cannot be
-        # what the drain does next. Expanded it buried the run log under a screen-height of
-        # scroll. The count stays in the summary so it is still visible without opening it.
+        # Keep the disabled reference list collapsed, like the schedule archive.
         disabled_sec = f"""
       <details class="sec fold">
         <summary class="sech"><span><i class="caret"></i>disabled · {len(disabled)}</span>
@@ -2417,10 +1461,6 @@ def render_bonus_body() -> str:
       </details>"""
     else:
         disabled_sec = ""
-
-    _anchor = min((c["r7"] for c in cards
-                  if c["engine"] == "claude" and c.get("r7") and _f(c["r7"]) > time.time()),
-                 default=None)
 
     return f"""
     <div class="mfold mfold-wrap" data-fold="header">
@@ -2433,7 +1473,6 @@ def render_bonus_body() -> str:
     </div>
     </div>
     {'<div class="preview-banner">PREVIEW · copied queue and usage snapshot · execution disabled</div>' if PREVIEW else ''}
-    {_rotation(cards)}
     <div class="rows mfold" data-fold="drain">
       <div class="rowhd mfold-sum"><span><i class="caret"></i>usage · provider capacity</span>
         <span class="rowplan">{esc(when)} · next {nxt}</span></div>
@@ -2470,14 +1509,11 @@ def render_bonus_body() -> str:
     """
 
 
-# ===========================================================================
 # Scheduled-jobs tab
-# ===========================================================================
 
 def render_schedule_body() -> str:
     timers = [enrich(t) for t in list_timers()]
-    # spent one-shots (already run, no future fire) go to the collapsed archive;
-    # everything with a scheduled next fire stays in the live family sections.
+    # Archive spent one-shots; keep future timers in their live families.
     active = [t for t in timers if t["next"] is not None]
     archived = [t for t in timers if t["next"] is None]
 
@@ -2596,15 +1632,10 @@ def _arow(t: dict) -> str:
       </tr>{detail}"""
 
 
-# ===========================================================================
 # Page shell
-# ===========================================================================
 
-# The "console" skin: a dark instrument panel, monospace throughout, square corners, and a
-# single amber accent reserved for LIVE things (what is draining now, what the next tick will
-# spend). Everything static is greyscale, so a glance at the page finds the moving parts. Colors
-# are declared once as tokens here and referenced by name everywhere else, including from the
-# Python (STATUS_COLORS / PRI_TINT emit var(--...)).
+# Console skin tokens are shared with Python render helpers.
+
 CSS = """
 :root{
   color-scheme:dark;
@@ -3419,8 +2450,8 @@ class Handler(BaseHTTPRequestHandler):
                                    schedule="").encode()
             self._send(HTTPStatus.OK, body)
         elif self.path == "/api/bonus":
-            usage = get_usage()
-            cycle = current_cycle(usage)
+            plan = read_plan()
+            cycle = current_cycle(plan)
             try:
                 remaining = get_remaining(cycle)
             except RuntimeError as exc:
@@ -3429,14 +2460,7 @@ class Handler(BaseHTTPRequestHandler):
                     json.dumps({"error": str(exc)}).encode(), "application/json",
                 )
                 return
-            codex, grok = get_codex_usage(), get_grok_usage()
-            gates = get_gates(
-                len(remaining),
-                sum("codex" in set(row.get("eligible_providers", ())) for row in remaining),
-                sum("grok" in set(row.get("eligible_providers", ())) for row in remaining),
-                grok, codex,
-            )
-            payload = {"usage": gates["subscriptions"], "cycle": cycle, "remaining": remaining,
+            payload = {"usage": plan["subscriptions"], "cycle": cycle, "remaining": remaining,
                        "disabled": get_disabled(), "recent": get_recent_runs()}
             self._send(HTTPStatus.OK, json.dumps(payload).encode(), "application/json")
         elif self.path == "/api/schedule":

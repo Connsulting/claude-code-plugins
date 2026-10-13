@@ -184,7 +184,10 @@ From the skill directory, install a version and the five self-owned unit templat
 ~/.local/bin/bonus-drain doctor --json
 ```
 
-Reinstalling changed source under an existing version is refused. Choose a new install version.
+Reinstalling changed source under an existing version is refused. Use
+`./install.sh --install-version VERSION` to choose a publication version. For an approved
+Git publication, use `0.3.15+main.MERGED_SHA`, replacing `MERGED_SHA` with the merged commit
+SHA. Combine `--install-version` and `--home DIR` in either order for a selected home.
 Doctor compares the installed payload with its recorded source checkout while that checkout
 exists. If the source checkout is gone, this drift check is unavailable; installation ownership
 and payload checks still run.
@@ -277,20 +280,7 @@ The source and installed wrappers start Python in isolated mode and insert only 
 runtime path. Requests have bounded response sizes and timeouts, and management redirects
 are refused so credentials cannot follow a redirect.
 
-## Migration and removal
-
-There are two separate operations:
-
-1. `bonus-drain import-legacy --backlog FILE --runs FILE` imports the old markdown/jsonl
-  queue format into a selected DB. The deprecated `migrate.py` delegates only to this
-  importer and never controls units.
-1. `bonus-drain migrate --from-db FILE --from-units DIR --destination DIR --dry-run`
-  inspects an old DB/unit installation and emits a manual cutover report. Code refuses
-  apply and rollback.
-
-Read [MIGRATION.md](MIGRATION.md) for the required stop/mask, writer proof, backup,
-manual apply, viewer-profile inventory, verification, and rollback sequence. Do not run old
-and new writers against one queue.
+## Removal
 
 To remove runtime-owned files while preserving config, DB, cache, and operator state:
 

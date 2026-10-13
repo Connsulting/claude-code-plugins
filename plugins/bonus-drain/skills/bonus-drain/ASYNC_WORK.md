@@ -178,7 +178,7 @@ characters or fewer so the queue filter stays compact. Use title case; the soak-
 group is `Soak Obs`.
 
 The viewer shows readiness, work group, source reference, and prerequisite progress, with
-filters for each workflow facet. Rotation and provider usage remain visible above the queue.
+filters for each workflow facet. Provider usage remains visible above the queue.
 In flight rows have Mark done and Mark failed buttons. Each action records a structured operator
 outcome against the exact attempt and frees the dispatch slot. Mark done is an explicit operator
 receipt that confirms the done condition and can unblock dependents. Mark failed records that

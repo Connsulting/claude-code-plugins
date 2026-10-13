@@ -527,8 +527,6 @@ to resolve the child start branch; historical commit OIDs and receipts are optio
   of every launch check, plus `ready_for_launch` and a summary count. It stores nothing, so use it
   to decide which legacy tasks to review, then add the review through `edit`.
 1. Install/status/doctor/removal: see `README.md`.
-1. DB/unit cutover and rollback: dry-run report plus the manual procedure in `MIGRATION.md`.
-1. Legacy markdown/jsonl: separate `bonus-drain import-legacy` only.
 
-Never install, enable, expose, apply a cutover, roll back, or delete state merely because this
+Never install, enable, expose, roll back, or delete state merely because this
 skill was invoked. Those are separate operator-authorized actions.

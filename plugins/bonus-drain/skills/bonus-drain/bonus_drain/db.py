@@ -1310,8 +1310,8 @@ class QueueDB:
     def _insert_task(self, connection: sqlite3.Connection, values: Mapping[str, Any]) -> Task:
         """Validate and insert within the caller's transaction (including goal decisions).
 
-        No readiness review is required here: goal acceptance governs goal-owned turn tasks,
-        and legacy import migrates rows that predate reviews.  ``add_task`` requires one.
+        No readiness review is required here: goal acceptance governs goal-owned turn tasks.
+        ``add_task`` requires one.
         """
         item_id = str(values.get("id") or "")
         _require_task_id(item_id)

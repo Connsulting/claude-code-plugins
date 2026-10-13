@@ -254,7 +254,7 @@ consumed turns and prior evidence remain. Workers cannot extend their own author
 ## Packaging and proof
 
 The plugin contains the `long-horizon` skill beside `async-work` and `bonus-drain`.
-Its runtime is staged by the existing installer. Installation and live cutover remain
+Its runtime is staged by the existing installer. Installation and service activation remain
 separate operator actions. Retire any older standalone Long Horizon skill from local
 discovery when installing this version; preserve old run artifacts and ownership.
 Do not version-bump or reinstall the live runtime for each source iteration.

@@ -372,18 +372,16 @@ class AsyncViewerTests(unittest.TestCase):
     def test_preview_usage_comes_from_normalized_subscriptions_without_rereading_cache(self):
         plan = viewer_tests._plan(
             viewer_tests._subscription('claude', 'Personal', used=42),
-            viewer_tests._subscription('codex', 'Business', used=57),
+            viewer_tests._subscription('beta', 'Business', used=57),
+            config=self.fixture.config,
         )
-        with (
-            mock.patch.object(self.viewer.graph_config, 'load_config', return_value=viewer_tests._viewer_config()),
-            mock.patch.object(usage, 'read_all') as read,
-        ):
-            claude = self.viewer._pool_cards(plan, 'claude', 2, 0)
-            codex = self.viewer._pool_cards(plan, 'codex', 2, 0)
+        with mock.patch.object(usage, 'read_all') as read:
+            claude = self.viewer._pool_cards(plan, 'claude', 2, 0, config=self.fixture.config)
+            beta = self.viewer._pool_cards(plan, 'beta', 2, 0, config=self.fixture.config)
         read.assert_not_called()
         self.assertEqual(claude[0]['u7'], 42)
-        self.assertEqual(codex[0]['u7'], 57)
-        self.assertEqual(codex[0]['r7'], viewer_tests.NOW + 36000)
+        self.assertEqual(beta[0]['u7'], 57)
+        self.assertEqual(beta[0]['r7'], viewer_tests.NOW + 36000)
 
     def test_failed_and_valid_planner_reads_keep_queue_visible_on_page_and_api(self):
         plan = viewer_tests._plan(

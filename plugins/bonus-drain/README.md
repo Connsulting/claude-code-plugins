@@ -7,8 +7,9 @@ CLIProxyAPI supplies subscription inventory and owns credential selection. The p
 
 Installing this marketplace plugin only makes its skill available. It does not switch a
 live Bonus Drain installation, enable a systemd unit, migrate a database, change a thread launcher,
-or configure Tailscale Serve. Runtime installation also stages files without enabling or
-starting services. Cutover remains an explicit manual operation.
+or configure Tailscale Serve. Runtime installation updates an existing queue schema and
+stages files without enabling or starting services. Service activation remains an explicit
+operator action.
 
 ## Dependencies
 
@@ -56,7 +57,8 @@ cd skills/bonus-drain
 The helper copies a versioned runtime under `${HOME}/.local/lib/bonus-drain`, creates a
 stable `${HOME}/.local/bin/bonus-drain` wrapper, and installs owned unit templates. It does
 not enable or start a service or timer. Use `./install.sh --home /temporary/home` for a
-disposable staging test.
+disposable staging test. `./install.sh --install-version VERSION` selects a publication
+version and may be combined with `--home DIR` in either order.
 
 ## Generic configuration
 
@@ -226,27 +228,8 @@ real HTTP handler; HTTP contracts separately prove exact Host/HTTPS Origin, JSON
 mutations, body limits, and T3 thread delegation. These do not prove systemd, product TLS,
 or Tailscale. For a credential-free smoke test, set `HOME`
 and every XDG directory to a new temporary directory, install with `--home`, use fixture
-adapters, run `doctor`, `plan`, migration `--dry-run`, and the loopback viewer, then
+adapters, run `doctor`, `plan`, and the loopback viewer, then
 uninstall from that same temporary home.
-
-## Manual cutover
-
-Read `skills/bonus-drain/MIGRATION.md` completely before touching an existing installation.
-The safe order is:
-
-1. inventory the old DB, writer services, timers, viewer profile/HTTPS proxy mapping, stable
-   paths, and unit state;
-2. run `bonus-drain migrate --from-db FILE --from-units DIR --destination DIR --dry-run`;
-3. stop and mask every old writer, then prove no process holds the DB, WAL, or SHM open;
-4. after quiescence, re-count the queue so late-added jobs are included, then create and read
-   back the authoritative backup before selecting the new DB;
-5. install and validate the new config, run `doctor`, `refresh`, `gates`, and `plan`;
-6. enable only the refresh timer, observe it, then enable the scout timer and path unit; enable the remote
-   viewer only after its tailnet-only trusted-proxy profile has been reviewed;
-7. keep the old writers masked through at least one observed scheduling cycle.
-
-Never run old and new writers against one queue. `migrate --dry-run` is report-only and
-refuses apply or rollback. Markdown/jsonl import is a separate `import-legacy` operation.
 
 ## Database backup
 
@@ -261,7 +244,7 @@ not treat an unread backup as a rollback point.
 
 Disable, stop, and mask the new scout path unit (`bonus-drain-scout.path`), scout and refresh
 timers, and their services, and stop the viewer. Prove no new
-writer holds the DB files. Preserve the failed-cutover DB and logs, restore the verified
+writer holds the DB files. Preserve the failed installation's DB and logs, restore the verified
 DB/config/unit backup with recorded modes and prior unit state, run the old read-only
 checks, then unmask and start only the previously active writers. Prove that exactly one
 writer topology is active before resuming work.
@@ -286,9 +269,8 @@ the Claude or Codex marketplace plugin separately only after no runtime process 
 the marketplace cache path.
 
 For the runtime contracts and command reference, see
-[`skills/bonus-drain/README.md`](skills/bonus-drain/README.md),
-[`skills/bonus-drain/SECURITY.md`](skills/bonus-drain/SECURITY.md), and
-[`skills/bonus-drain/MIGRATION.md`](skills/bonus-drain/MIGRATION.md).
+[`skills/bonus-drain/README.md`](skills/bonus-drain/README.md) and
+[`skills/bonus-drain/SECURITY.md`](skills/bonus-drain/SECURITY.md).
 
 ## Async work and dependencies
 

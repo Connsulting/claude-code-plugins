@@ -9,7 +9,4 @@ if [ "$subcommand" = status ]; then
   shift
   exec "$BONUS_DRAIN_BIN" queue-status "$@"
 fi
-if [ "$subcommand" = migrate ] && [ "$#" -eq 3 ]; then
-  exec "$BONUS_DRAIN_BIN" import-legacy --backlog "$2" --runs "$3"
-fi
 exec "$BONUS_DRAIN_BIN" "$@"

@@ -3,7 +3,6 @@
   "include": [
     "ASYNC_WORK.md",
     "GOALS.md",
-    "MIGRATION.md",
     "README.md",
     "SECURITY.md",
     "SKILL.md",
@@ -14,7 +13,6 @@
     "bonus_drain/checks.py",
     "bonus_drain/cli.py",
     "bonus_drain/config.py",
-    "bonus_drain/cutover.py",
     "bonus_drain/db.py",
     "bonus_drain/dispatcher.py",
     "bonus_drain/factory_terminal.py",
@@ -37,7 +35,6 @@
     "dispatch.sh",
     "distribution-manifest.json",
     "install.sh",
-    "migrate.py",
     "run-now.sh",
     "schema.sql",
     "scout.sh",

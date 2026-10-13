@@ -725,6 +725,7 @@ def _command(args: argparse.Namespace) -> int:
         _cfg, _queue_obj, tick = _tick(args)
         _json({
             "generated_at": tick.plan.generated_at,
+            "cycle_anchor": tick.cycle_anchor,
             "gates": [gate.to_dict() for gate in tick.plan.gates],
             "subscriptions": [dict(subscription) for subscription in tick.plan.subscriptions],
             "host_pressure": tick.host_pressure,
@@ -996,23 +997,6 @@ def _command(args: argparse.Namespace) -> int:
         finally:
             sys.argv = previous_argv
         return 0
-    if command == "migrate":
-        from . import cutover
-        cfg = _load_config(args, graph_required=False)
-        destination = args.destination or cfg.state_dir
-        report = cutover.migrate(
-            from_db=args.from_db, from_units=args.from_units,
-            destination=destination, dry_run=args.dry_run,
-        )
-        _json(report) if args.json else [print(step) for step in report.steps]
-        return 0
-    if command == "import-legacy":
-        from . import cutover
-        _cfg, queue = _queue(args)
-        queue.initialize()
-        report = cutover.import_legacy(args.backlog, args.runs, queue)
-        _json(report) if args.json else print(f"imported: tasks={report.tasks} runs={report.runs}")
-        return 0
     raise CLIError(f"unknown subcommand: {command}")
 
 
@@ -1181,8 +1165,6 @@ def build_parser() -> argparse.ArgumentParser:
     uninstall = sub.add_parser("uninstall"); uninstall.add_argument("--home", type=Path); _add_json(uninstall)
     status = sub.add_parser("status"); status.add_argument("--home", type=Path); _add_json(status)
     viewer = sub.add_parser("viewer"); _add_common(viewer); viewer.add_argument("--port", type=int, default=8766); viewer.add_argument("--remote", action="store_true")
-    migrate = sub.add_parser("migrate"); _add_common(migrate); _add_json(migrate); migrate.add_argument("--from-db", required=True); migrate.add_argument("--from-units", nargs="?", const=True); migrate.add_argument("--destination"); migrate.add_argument("--dry-run", action="store_true", required=True)
-    importer = sub.add_parser("import-legacy"); _add_common(importer); _add_json(importer); importer.add_argument("--backlog", required=True); importer.add_argument("--runs", required=True)
     return parser
 
 
