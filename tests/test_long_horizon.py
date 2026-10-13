@@ -1,19 +1,20 @@
 """Goal coordination on the real SQLite queue; provider execution is a separate proof."""
-import json
 import hashlib
 import sqlite3
 import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
-from dataclasses import replace
+
 from tests.readiness_fixture import rereviewed, reviewed
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'plugins/bonus-drain/skills/bonus-drain'))
-from bonus_drain import db, goals, dispatcher, scout, usage
+from bonus_drain import db, dispatcher, goals, scout, usage
+
 from tests import test_bonus_drain_kick as kick_tests
 
 NOW = 2_000_000_000
@@ -82,8 +83,8 @@ class GoalTests(unittest.TestCase):
         return task, goal['revision']
 
     def job(self, task_id, **changes):
-        value = dict(id=task_id, title=task_id, cwd=self.tmp.name, goal='Prove the example',
-                     size='small', done_when='Evidence retained', use_implement=True)
+        value = {'id': task_id, 'title': task_id, 'cwd': self.tmp.name, 'goal': 'Prove the example',
+                     'size': 'small', 'done_when': 'Evidence retained', 'use_implement': True}
         value.update(changes)
         return {'task': value, 'role': 'implementation'}
 
@@ -103,13 +104,13 @@ class GoalTests(unittest.TestCase):
         self.assertNotEqual(goals._contract_hash(selected), old_hash)
 
     def advance(self, turn, revision, **changes):
-        value = dict(expected_revision=revision, action='wait', summary='Ready for jobs',
-                     tasks=[], wait_for=[], candidate=CANDIDATE)
+        value = {'expected_revision': revision, 'action': 'wait', 'summary': 'Ready for jobs',
+                     'tasks': [], 'wait_for': [], 'candidate': CANDIDATE}
         value.update(changes)
         return self.store.advance('release', turn, value, now=NOW)
 
     def test_create_is_queue_only_and_does_not_adopt_group_by_title(self):
-        self.queue.add_task(reviewed(dict(id='unrelated', title='release', work_group='Example', cwd=self.tmp.name)))
+        self.queue.add_task(reviewed({'id': 'unrelated', 'title': 'release', 'work_group': 'Example', 'cwd': self.tmp.name}))
         self.create()
         self.assertEqual(self.queue.runs(), [])
         self.assertEqual(self.store.show('release')['members'], [])
@@ -151,7 +152,7 @@ class GoalTests(unittest.TestCase):
     def test_decision_retry_is_idempotent_but_stale_conflicting_write_fails(self):
         self.create()
         turn, revision = self.start_turn()
-        kwargs = dict(tasks=[self.job('a')], wait_for=['a'])
+        kwargs = {'tasks': [self.job('a')], 'wait_for': ['a']}
         first = self.advance(turn, revision, **kwargs)
         self.assertEqual(self.advance(turn, revision, **kwargs), first)
         with self.assertRaisesRegex(db.QueueError, 'conflict'):
@@ -208,7 +209,7 @@ class GoalTests(unittest.TestCase):
         turn, revision = self.start_turn()
         self.advance(turn, revision, tasks=[self.job('a')], wait_for=['a'])
         self.finish(turn)
-        self.queue.add_task(reviewed(dict(id='other', title='Other', cwd=self.tmp.name)))
+        self.queue.add_task(reviewed({'id': 'other', 'title': 'Other', 'cwd': self.tmp.name}))
         self.store.tick(now=NOW + 3601)
         self.assertFalse(self.queue.claim('a', 'account/manual/2000000000', 'alpha', 'account', provider_capabilities=IMPLEMENT))
         self.assertTrue(self.queue.claim('other', 'account/manual/2000000000', 'alpha', 'account', provider_capabilities=IMPLEMENT))
@@ -224,8 +225,8 @@ class GoalTests(unittest.TestCase):
         self.assertEqual(sum(result is not None for result in results), 1)
 
     def test_explicit_membership_does_not_rewrite_existing_contract(self):
-        self.queue.add_task(reviewed(dict(id='existing', title='Existing', cwd=self.tmp.name,
-                                 constraints='Do not merge', use_implement=False)))
+        self.queue.add_task(reviewed({'id': 'existing', 'title': 'Existing', 'cwd': self.tmp.name,
+                                 'constraints': 'Do not merge', 'use_implement': False}))
         before = self.queue.task('existing')
         self.create(task_ids=['existing'])
         self.assertEqual(self.queue.task('existing'), before)
@@ -307,7 +308,7 @@ class GoalTests(unittest.TestCase):
     def test_cannot_rearm_already_settled_join_and_burn_turns(self):
         self.create()
         turn, revision = self.start_turn()
-        self.queue.add_task(reviewed(dict(id='old', title='Old', cwd=self.tmp.name)))
+        self.queue.add_task(reviewed({'id': 'old', 'title': 'Old', 'cwd': self.tmp.name}))
         self.finish('old')
         with self.assertRaises(db.QueueError):
             self.advance(turn, revision, task_ids=['old'], wait_for=['old'])
@@ -345,8 +346,8 @@ class GoalTests(unittest.TestCase):
         fixture = kick_tests.KickContractTests()
         fixture.setUp()
         self.addCleanup(fixture.tearDown)
-        from dataclasses import replace
         import shlex
+        from dataclasses import replace
         config = replace(fixture.config, database=self.queue.path)
         self.create()
         turn, _ = self.start_turn()
@@ -519,10 +520,10 @@ class GoalScoutTests(unittest.TestCase):
                          providers=tuple(replace(p, capabilities=p.capabilities | set(IMPLEMENT))
                                          for p in fixture.config.providers))
         store = goals.GoalStore(queue)
-        store.create(dict(id='goal', title='Goal', cwd=str(fixture.root), outcome='Assembled proof',
-                          authority='Fixture only', acceptance=[{'id': 'check', 'proof': 'Exercise the fixture'}],
-                          merge_policy='stack', max_turns=5, max_inflight=2, deadline=NOW+3600,
-                          coordinator={'model': 'gpt-6-astra'}), now=NOW)
+        store.create({'id': 'goal', 'title': 'Goal', 'cwd': str(fixture.root), 'outcome': 'Assembled proof',
+                          'authority': 'Fixture only', 'acceptance': [{'id': 'check', 'proof': 'Exercise the fixture'}],
+                          'merge_policy': 'stack', 'max_turns': 5, 'max_inflight': 2, 'deadline': NOW+3600,
+                          'coordinator': {'model': 'gpt-6-astra'}}, now=NOW)
         snapshots = {(provider, provider+'-account'): usage.UsageSnapshot(provider, provider+'-account', NOW,
                      {provider+'-weekly': {'used_percent': 20, 'resets_at': NOW+1000}}) for provider in ('alpha', 'beta')}
         calls = []
@@ -548,11 +549,11 @@ class GoalScoutTests(unittest.TestCase):
             self.assertEqual(len(initial.dispatched), 1)
             turn = initial.dispatched[0].task_id
             goal = store.show('goal')
-            tasks = [{'role': 'implementation', 'task': dict(id=x, title=x, cwd=str(fixture.root),
-                       goal='Exercise the fixture', size='small', done_when='Fixture outcome', use_implement=True)}
+            tasks = [{'role': 'implementation', 'task': {'id': x, 'title': x, 'cwd': str(fixture.root),
+                       'goal': 'Exercise the fixture', 'size': 'small', 'done_when': 'Fixture outcome', 'use_implement': True}}
                      for x in ('a', 'b')]
-            store.advance('goal', turn, dict(expected_revision=goal['revision'], action='wait',
-                          summary='Wait for both roots', tasks=tasks, wait_for=['a', 'b']), now=NOW)
+            store.advance('goal', turn, {'expected_revision': goal['revision'], 'action': 'wait',
+                          'summary': 'Wait for both roots', 'tasks': tasks, 'wait_for': ['a', 'b']}, now=NOW)
             finish(turn)
             roots = tick()
             self.assertEqual({x.task_id for x in roots.dispatched}, {'a', 'b'})
