@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.readiness_fixture import reviewed
+from tests.readiness_fixture import proxy_fixture, reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
@@ -42,53 +42,26 @@ class ExclusivePriorityTests(unittest.TestCase):
             queue.add_task(reviewed(_task("portable-p1", 1)))
             queue.add_task(reviewed(_task("portable-p2", 2)))
             queue.add_task(reviewed(_task("claude-only-p3", 3, claude_only=True)))
-            router = config_module.AdapterConfig("router", "t3-thread", ("/bin/true",))
-            config = config_module.RuntimeConfig(
-                schema_version=1,
-                source_path=None,
-                database=queue.path,
-                record_command=("/bin/true",),
-                secret_refs=(),
-                adapters=(router,),
-                providers=(
-                    config_module.ProviderConfig(
-                        "claude", config_module.DispatchBinding("router", "claude"),
-                        frozenset({"legacy-exclusive"}), "single",
-                    ),
-                    config_module.ProviderConfig(
-                        "codex", config_module.DispatchBinding("router", "codex"),
-                        frozenset(), "single",
-                    ),
-                ),
-                plans=(
-                    config_module.PlanConfig("claude-plan", "claude"),
-                    config_module.PlanConfig("codex-plan", "codex"),
-                ),
-                accounts=(
-                    config_module.AccountConfig("claude-account", "claude", "claude-plan"),
-                    config_module.AccountConfig("codex-account", "codex", "codex-plan"),
-                ),
-                limits=(
+            router = config_module.AdapterConfig("router", "agent-router", ("/bin/true",))
+            config = proxy_fixture(config_module.RuntimeConfig(schema_version=1, source_path=None, database=queue.path, record_command=("/bin/true",), secret_refs=(), adapters=(router,), providers=(
+                    config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), frozenset({"legacy-exclusive"})),
+                    config_module.ProviderConfig("codex", config_module.DispatchBinding("router", "codex"), frozenset()),
+                ), limits=(
                     config_module.LimitConfig(
-                        "claude-weekly", "claude-plan", 604800, 95, 20000, 1,
+                        "claude-weekly", "claude", 604800, 95, 20000, 1,
                     ),
                     config_module.LimitConfig(
-                        "codex-weekly", "codex-plan", 604800, 95, 20000, 1,
+                        "codex-weekly", "codex", 604800, 95, 20000, 1,
                     ),
-                ),
-                viewer={},
-                pr_exceptions=(),
-                usage_max_age_seconds=3600,
-                cache_dir=root / "cache",
-            )
+                ), viewer={}, pr_exceptions=(), usage_max_age_seconds=3600, cache_dir=root / "cache", proxy_secret_ref=None), (("claude", "claude-account"), ("codex", "codex-account"),))
             snapshots = {
                 ("codex", "codex-account"): usage.UsageSnapshot(
                     "codex", "codex-account", NOW,
-                    {"codex-weekly": {"used_percent": 20, "resets_at": NOW + 1000}},
+                    {"seven_day": {"used_percent": 20, "resets_at": NOW + 1000}},
                 ),
                 ("claude", "claude-account"): usage.UsageSnapshot(
                     "claude", "claude-account", NOW,
-                    {"claude-weekly": {"used_percent": 20, "resets_at": NOW + 2000}},
+                    {"seven_day": {"used_percent": 20, "resets_at": NOW + 2000}},
                 ),
             }
 

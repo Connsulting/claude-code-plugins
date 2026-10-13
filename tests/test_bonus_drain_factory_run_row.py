@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-from tests.readiness_fixture import reviewed
+from tests.readiness_fixture import proxy_fixture, reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
@@ -43,29 +43,11 @@ def _config(root: Path) -> config_module.RuntimeConfig:
         "router", "t3-thread", (str(root / "bin" / "t3-thread"),),
         timeout_seconds=0.2, max_output_bytes=1024,
     )
-    return config_module.RuntimeConfig(
-        schema_version=1,
-        source_path=root / "config.json",
-        database=root / "queue.db",
-        record_command=("/bin/true",),
-        secret_refs=(),
-        adapters=(router,),
-        providers=(
-            config_module.ProviderConfig(
-                "claude", config_module.DispatchBinding("router", "claude"),
-                frozenset({"legacy-exclusive", "implement"}), "single",
-            ),
-        ),
-        plans=(config_module.PlanConfig("claude-plan", "claude"),),
-        accounts=(config_module.AccountConfig("claude-account", "claude", "claude-plan"),),
-        limits=(
-            config_module.LimitConfig("claude-weekly", "claude-plan", 604800, 95, 20000, 1),
-        ),
-        viewer={},
-        pr_exceptions=(),
-        usage_max_age_seconds=3600,
-        cache_dir=root / "cache",
-    )
+    return proxy_fixture(config_module.RuntimeConfig(schema_version=1, source_path=root / "config.json", database=root / "queue.db", record_command=("/bin/true",), secret_refs=(), adapters=(router,), providers=(
+            config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), frozenset({"legacy-exclusive", "implement"})),
+        ), limits=(
+            config_module.LimitConfig("claude-weekly", "claude", 604800, 95, 20000, 1),
+        ), viewer={}, pr_exceptions=(), usage_max_age_seconds=3600, cache_dir=root / "cache", proxy_secret_ref=None), (("claude", "claude-account"),))
 
 
 def _router_response(job_id: str = "job-1", log_id: Any = 4242) -> dict[str, Any]:

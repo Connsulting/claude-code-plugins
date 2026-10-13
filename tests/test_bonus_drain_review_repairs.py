@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from tests.readiness_fixture import reviewed
+from tests.readiness_fixture import proxy_fixture, reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
@@ -51,34 +51,17 @@ def task(
 
 
 def runtime(database: Path, *, router_path: str = "/bin/true") -> config_module.RuntimeConfig:
-    router = config_module.AdapterConfig("router", "t3-thread", (router_path,))
-    return config_module.RuntimeConfig(
-        schema_version=1,
-        source_path=None,
-        database=database,
-        record_command=("/bin/true",),
-        secret_refs=(),
-        adapters=(router,),
-        providers=(
-            config_module.ProviderConfig(
-                "alpha", config_module.DispatchBinding("router", "alpha"), frozenset(), "single",
-            ),
-        ),
-        plans=(config_module.PlanConfig("alpha-plan", "alpha"),),
-        accounts=(config_module.AccountConfig("alpha-account", "alpha", "alpha-plan"),),
-        limits=(config_module.LimitConfig("alpha-weekly", "alpha-plan", 604_800, 95, 20_000, 6),),
-        viewer={},
-        pr_exceptions=(),
-        usage_max_age_seconds=3_600,
-        cache_dir=database.parent / "cache",
-    )
+    router = config_module.AdapterConfig("router", "agent-router", (router_path,))
+    return proxy_fixture(config_module.RuntimeConfig(schema_version=1, source_path=None, database=database, record_command=("/bin/true",), secret_refs=(), adapters=(router,), providers=(
+            config_module.ProviderConfig("alpha", config_module.DispatchBinding("router", "alpha"), frozenset()),
+        ), limits=(config_module.LimitConfig("alpha-weekly", "alpha", 604_800, 95, 20_000, 6),), viewer={}, pr_exceptions=(), usage_max_age_seconds=3_600, cache_dir=database.parent / "cache", proxy_secret_ref=None), (("alpha", "alpha-account"),))
 
 
 def snapshots() -> dict[tuple[str, str], usage.UsageSnapshot]:
     return {
         ("alpha", "alpha-account"): usage.UsageSnapshot(
             "alpha", "alpha-account", NOW,
-            {"alpha-weekly": {"used_percent": 20, "resets_at": RESET}},
+            {"seven_day": {"used_percent": 20, "resets_at": RESET}},
         ),
     }
 

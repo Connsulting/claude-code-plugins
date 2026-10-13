@@ -179,8 +179,8 @@ Do not delete attempts with `requeue`. An ordinary queued implementation child b
 by an obsolete failed parent may receive an explicit, authorized dependency correction.
 Acceptance contracts are frozen: replace an obsolete verifier rather than editing it.
 Within the goal's authority, first `deactivate` that verifier to close future admission.
-Then inspect its claims and leases in `queue --json`, followed by `runs --task ID --json`.
-Only if both checks show no claim, lease or run may the coordinator use the existing
+Then inspect its claims in `queue --json`, followed by `runs --task ID --json`.
+Only if both checks show no claim or run may the coordinator use the existing
 `record --task ID --kind oneoff --cycle EPOCH --status skipped --summary REASON` path
 to retire it. The reason names the obsolete candidate and replacement; preserve the
 original contract and skipped event. No provider is claimed for this unlaunched work.

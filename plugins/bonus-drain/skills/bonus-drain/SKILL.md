@@ -20,10 +20,10 @@ source private helper functions or invent a second DB path.
 
 ## Invariants
 
-1. Provider, plan, account, limit, usage, activation, and dispatch behavior comes from the
-   validated JSON graph. Do not branch on a familiar provider name. A task that invokes the
-   implement skill runs only on providers declaring the reserved `implement` capability.
-2. The refresher alone calls usage adapters. Scout, plan, viewers, and consumers read cache.
+1. Providers, pacing limits, and dispatch behavior come from the validated configuration.
+   Enabled accounts come from the proxy auth-file cache. A task that invokes the implement
+   skill runs only on providers declaring the reserved `implement` capability.
+2. The refresher alone calls CLIProxyAPI management. Scout, plan, and viewers read cache.
 3. Missing, stale, malformed, or resetless cache closes only that account. No data is not
    zero usage.
 4. Every accounted launch goes through the configured `t3-thread` adapter. Direct provider
@@ -33,12 +33,9 @@ source private helper functions or invent a second DB path.
    `set-providers TASK auto` clears the provider pin; it stores an empty allowlist.
 6. Classifier uncertainty is pre-claim and retry-safe because `t3-thread --dry-run` is
    non-launching. Claiming creates a unique immutable attempt alongside
-   `(task_id, eligibility_key)` before concrete activation/routing. Known-not-launched failure
-   records that attempt as aborted and releases it; a post-launch ambiguity records the exact
-   attempt as ambiguous and holds the claim and any activation lease fail-closed for
-   reconciliation. Never claim activation releases immediately after ambiguity.
-   A configured launch-scoped activation releases only after a concrete job identity and its
-   dispatched record exist; run-scoped activation remains held through the terminal event.
+   `(task_id, eligibility_key)` before routing. Known-not-launched failure records that attempt
+   as aborted and frees its claim; post-launch ambiguity retains the exact claim and attempt
+   until reconciliation.
 7. Use the resolved executable record command embedded in the dispatched prompt. It must
    point to the stable CLI and the JSON graph's database, bind the exact attempt, and use its
    protected structured outcome-evidence path. Do not reconstruct uncertain CLI flags.
@@ -50,7 +47,7 @@ source private helper functions or invent a second DB path.
    failed attempt, or skipped attempt is not completion evidence. A `merged` dependency edge
    additionally requires the parent's recorded branch to be merged into the child's base.
 10. Recovery keeps the original task ID and prior attempts. It cannot weaken authority,
-    dependency, activation, calendar, GoalStore, or frozen-candidate gates.
+    dependency, calendar, GoalStore, or frozen-candidate gates.
 
 ## Before any mode
 
@@ -68,11 +65,11 @@ or lifecycle ownership is unsafe. Do not repair live state implicitly.
 
 An item is eligible for this queue only when all are true:
 
-- independently executable from a concrete cwd and goal;
-- completion can be demonstrated;
-- ambiguity can be resolved conservatively without expanding authority;
-- required credentials/tools are references already present in the environment;
-- no user decision is required during execution.
+1. independently executable from a concrete cwd and goal;
+1. completion can be demonstrated;
+1. ambiguity can be resolved conservatively without expanding authority;
+1. required credentials/tools are references already present in the environment;
+1. no user decision is required during execution.
 
 The task must be independently executable with clear authority. Redirect interactive design,
 unclear publishing authority, and work that requires a person's response during execution.
@@ -172,7 +169,7 @@ decision, or click is not resolved: the task is not queued until that decision e
 
 A grant records a decision Brian already made, in writing, before the task is queued. It is
 passed with a repeatable `--grant` and names an `id` (lowercase letters, digits, `.`, `_`, `-`),
-a `kind` (`merge`, `release`, `sacred_path`, `contract_change`, `external_infra`, `credential`,
+a `kind` (`merge`, `publication`, `sacred_path`, `contract_change`, `external_infra`, `credential`,
 `scope`, `other`), and a `scope` stating exactly what is allowed:
 
 ```sh
@@ -227,7 +224,7 @@ worker has its own worktree and rebases if the other lands first; use an explici
 edge when the order matters. If none of those applies,
 leave the precondition empty. Do not invent a checkout check so the task looks guarded. When
 `start_ref` is unset, repository dependencies choose the branch from their recorded metadata.
-Translate every precondition a machine can check into `checks` at queue time, and keep the free-text precondition only for judgment the worker must make. Check types: `base_ref_exists` (`ref`), `issue_open` (`repo`, `number`), `issue_in_milestone` (`repo`, `number`, `milestone`), `pr_merged` (`repo` and `pr` or `head`, optional `base`), `release_exists` (`repo`, `tag`), `file_matches` (`repo`, `ref`, `path`, `pattern`, optional `present`), and three launch-blocker probes: `mcp_authenticated` (`provider` `claude` or `codex`, `server`; the claude probe runs `claude mcp get` in the task's cwd, the codex probe reads `codex mcp list --json`), `k8s_resource_exists` (`context`, `kind`, `name`, optional `namespace`; `context` is always required, there is no current-context form), and `openrouter_credit` (`min_usd`, plus exactly one of `key_env`, an environment variable name, or `key_file`, an absolute path; optional `balance_key_env` or `balance_key_file` (at most one) names a management key; curl reads every key itself, so none appears in a command, a stored spec, or a result detail). It passes only when the funded account balance is at least `min_usd` and, if the key has its own spend limit, that remaining allowance is too. The balance is read through the key when it is a management key, otherwise through the balance key; a regular key with no balance key stays held as unknown. Add each with a repeatable `--check '{"type":"issue_open","repo":"owner/repo","number":123}'`, or edit `checks`. The queue also checks automatically that a set `start_ref` exists on origin and that an issue named by `source_ref` (an issue URL or `owner/repo#N`) is still open. `add` and `edit` evaluate every one of the task's checks synchronously, before anything is stored and even while the task would still wait on a prerequisite, print each result, then print the task's readiness; `--json` output carries them as `checks` and `readiness`. A failing or unverifiable check is printed prominently on stderr (`CHECK FAILED` or `CHECK UNVERIFIED`). A check that fails now refuses the add, storing nothing, unless the task has `depends_on` naming a queued prerequisite expected to make it pass; then it is accepted and waits. A check that cannot be evaluated now (rate limit, network, tool error) always refuses with `retry the add`. An edit that changes the reviewed contract or its review is a re-admission under the same rule; a title, priority, size, or work-group edit evaluates and reports the checks but is not refused. After admission the scout re-evaluates failing and unverifiable checks every 10 minutes, and the task becomes ready on its own once they pass. The scout retries them only for tasks that can launch: while a task waits on a prerequisite or is paused, its stored result is kept, and the tick that unblocks the task re-evaluates it before planning any launch. A failing check leaves the task waiting with its reason and spends no attempt; a check that cannot be evaluated because of a network or tool error waits at most one hour, then the launch proceeds and the worker is told to verify it, except the three probes above: the worker cannot verify those itself, so an unevaluable probe keeps the task held, still without consuming an attempt, and never auto-proceeds as unverified. Readiness reads "Not checked yet" for a check never evaluated, "Check failed" for a failing one, "Check could not be verified yet" for a tool or network error, and "Waiting for preflight check re-evaluation" for a result that has lapsed. Write `start_ref` as a branch name such as `main`, never `origin/main`. When a prerequisite's pull request must land first, use a `merged` dependency edge instead of a precondition.
+Translate every precondition a machine can check into `checks` at queue time, and keep the free-text precondition only for judgment the worker must make. Check types: `base_ref_exists` (`ref`), `issue_open` (`repo`, `number`), `issue_in_milestone` (`repo`, `number`, `milestone`), `pr_merged` (`repo` and `pr` or `head`, optional `base`), `publication_exists` (`repo`, `tag`), `file_matches` (`repo`, `ref`, `path`, `pattern`, optional `present`), and three launch-blocker probes: `mcp_authenticated` (`provider` `claude` or `codex`, `server`; the claude probe runs `claude mcp get` in the task's cwd, the codex probe reads `codex mcp list --json`), `k8s_resource_exists` (`context`, `kind`, `name`, optional `namespace`; `context` is always required, there is no current-context form), and `openrouter_credit` (`min_usd`, plus exactly one of `key_env`, an environment variable name, or `key_file`, an absolute path; optional `balance_key_env` or `balance_key_file` (at most one) names a management key; curl reads every key itself, so none appears in a command, a stored spec, or a result detail). It passes only when the funded account balance is at least `min_usd` and, if the key has its own spend limit, that remaining allowance is too. The balance is read through the key when it is a management key, otherwise through the balance key; a regular key with no balance key stays held as unknown. Add each with a repeatable `--check '{"type":"issue_open","repo":"owner/repo","number":123}'`, or edit `checks`. The queue also checks automatically that a set `start_ref` exists on origin and that an issue named by `source_ref` (an issue URL or `owner/repo#N`) is still open. `add` and `edit` evaluate every one of the task's checks synchronously, before anything is stored and even while the task would still wait on a prerequisite, print each result, then print the task's readiness; `--json` output carries them as `checks` and `readiness`. A failing or unverifiable check is printed prominently on stderr (`CHECK FAILED` or `CHECK UNVERIFIED`). A check that fails now refuses the add, storing nothing, unless the task has `depends_on` naming a queued prerequisite expected to make it pass; then it is accepted and waits. A check that cannot be evaluated now (rate limit, network, tool error) always refuses with `retry the add`. An edit that changes the reviewed contract or its review is a re-admission under the same rule; a title, priority, size, or work-group edit evaluates and reports the checks but is not refused. After admission the scout re-evaluates failing and unverifiable checks every 10 minutes, and the task becomes ready on its own once they pass. The scout retries them only for tasks that can launch: while a task waits on a prerequisite or is paused, its stored result is kept, and the tick that unblocks the task re-evaluates it before planning any launch. A failing check leaves the task waiting with its reason and spends no attempt; a check that cannot be evaluated because of a network or tool error waits at most one hour, then the launch proceeds and the worker is told to verify it, except the three probes above: the worker cannot verify those itself, so an unevaluable probe keeps the task held, still without consuming an attempt, and never auto-proceeds as unverified. Readiness reads "Not checked yet" for a check never evaluated, "Check failed" for a failing one, "Check could not be verified yet" for a tool or network error, and "Waiting for preflight check re-evaluation" for a result that has lapsed. Write `start_ref` as a branch name such as `main`, never `origin/main`. When a prerequisite's pull request must land first, use a `merged` dependency edge instead of a precondition.
 Work groups are optional display and navigation labels. They do not affect scheduling or
 limit concurrency. Use them only for a meaningful cross-task cluster and keep each at 15
 characters or fewer. Use title case; the soak-observation
@@ -236,11 +233,11 @@ Before choosing a work group, inspect the groups already used by active tasks an
 existing label for the same cluster instead of creating a spelling or version variant.
 Estimate size before previewing or adding the task:
 
-- `tiny`: one deterministic action or edit plus one quick proof; roughly under 15 minutes.
-- `small`: a few bounded edits/checks or narrow research; roughly under 1 hour.
-- `medium`: multi-file work or several evidence paths; roughly 1–3 hours.
-- `large`: cross-module, integration/E2E, or substantial research; roughly 3–8 hours.
-- `huge`: broader than one workday or highly uncertain; split it when possible, and reject it
+1. `tiny`: one deterministic action or edit plus one quick proof; roughly under 15 minutes.
+1. `small`: a few bounded edits/checks or narrow research; roughly under 1 hour.
+1. `medium`: multi-file work or several evidence paths; roughly 1–3 hours.
+1. `large`: cross-module, integration/E2E, or substantial research; roughly 3–8 hours.
+1. `huge`: broader than one workday or highly uncertain; split it when possible, and reject it
   when it cannot remain one autonomous job (safely skippable when using Bonus).
 
 When between sizes, choose the larger. `unknown` is display-only for legacy/null rows and is
@@ -319,7 +316,7 @@ failed/skipped parent eligible for the bounded recovery policy described below. 
 cycles, missing IDs, and recurring prerequisites are rejected. Both automatic and explicit
 launches enforce dependencies. Each edge is `done` or `merged` (`--depends-on parent-id:merged,other-id:done`); an unsuffixed edge defaults to `merged` when the parent runs in a repository configured to open pull requests, and to `done` otherwise. A `merged` edge is satisfied only when the parent is verified done and its recorded branch is merged into the child's base, so a pull request that is open or green does not count as dependency completion. Readiness names the root blocker of a waiting chain, and `bonus-drain held-report --json` lists held authority-required and verification-needed work, and work held for a stale readiness review, with its blocked dependents and a `queue_time_knowable` measurement, read-only (see Terminal contract). Nothing re-examines a hold, so `held-report --observe` also checks each listed task's issue checks and recorded handoff branch live, storing nothing, and adds a `cleared` list naming a closed issue or a merged handoff pull request; it releases nothing, so recover-complete, requeue, or deactivate stays Brian's call. Deactivating a hold retires it from `held-report` once nothing waits on it; while unfinished dependents still wait, it stays listed once with their count.
 
-Provider and account failures hold the account, not the task. A proved account-activation failure or a Codex launcher startup failure deletes the never-launched attempt, spends nothing on the task, and backs off that provider account for 30 minutes, doubling to a 4 hour cap, while the scout uses a sibling account. Tasks that share the same `source_ref` issue run one at a time; goal-managed tasks use the goal's own concurrency bound. Work groups are display labels and do not limit concurrency. Installing a release migrates an existing queue database before the new release becomes current.
+Provider and account failures hold the account, not the task. A proved Codex launcher startup failure deletes the never-launched attempt, spends nothing on the task, and backs off that provider account for 30 minutes, doubling to a 4 hour cap, while the scout uses a sibling account. Tasks that share the same `source_ref` issue run one at a time; goal-managed tasks use the goal's own concurrency bound. Work groups are display labels and do not limit concurrency. Installing a release migrates an existing queue database before the new release becomes current.
 
 Use `bonus-drain readiness TASK_ID --json` to explain readiness and
 `bonus-drain edit TASK_ID --changes '{"depends_on":["PARENT_ID"],"readiness_review":{...}}' --json`
@@ -339,7 +336,7 @@ An explicit request to run a queued task uses `run-now TASK_ID`, not a scout tic
 3. Fail closed per affected account; do not close healthy siblings.
 4. Order open batches by nearest exact reset.
 5. Pick only tasks compatible with the concrete provider.
-6. Claim before activation and routing.
+6. Claim before routing.
 7. Activate the selected account only when configured.
 8. Route once and record the concrete provider/account/job identity.
 
@@ -362,7 +359,7 @@ Ambiguous claims still require operator reconciliation and are never cleared aut
 ## Mode: explicit acceleration
 
 An explicit acceleration is a one-task bypass of capacity pacing, not of queue safety. Keep normal
-eligibility, compatibility, atomic claim, concrete router launch, activation-lease, and
+eligibility, compatibility, atomic claim, concrete router launch, and
 terminal-record contracts. CLI `auto` may classify immediately before its one concrete launch;
 the viewer never accepts `auto`. Do not loop or retry ambiguous launches.
 
@@ -380,8 +377,7 @@ its prompt. The prompt includes the stable task ID, immutable attempt ID, kind, 
 concrete provider and account, DB/config identity, precondition, constraints, done-when, and a
 protected path for structured outcome evidence. Use that command exactly.
 
-A background task must not exit blocked or waiting for input while its claim and activation
-lease remain live. Keep working or waiting while checks and authorized merges are in progress;
+A background task must not exit blocked or waiting for input while its claim remains live. Keep working or waiting while checks and authorized merges are in progress;
 neither opening a PR nor a running check watcher permits recording `done`.
 A green pull request that waits only on human review or merge is `done`. Automation and CI diffs are committed into the pull request, which is the review gate, and a bounded decision takes the recommended option and documents it there. A genuinely external blocker that the queue-time review could not have caught records `failed` with reason `authority_required` and a `resume_when` list of checks; the scout resumes the task when those checks pass, and a blocker with no checkable condition notifies Brian once. `record` refuses `awaiting_human`; historical rows stay readable.
 
@@ -389,7 +385,7 @@ Replaying the same terminal status and evidence for the same attempt is idempote
 different attempt ID cannot release its claim, and a conflicting replay is a reconciliation
 error. Prior attempts stay immutable.
 
-- `done`: done-when is explicitly verified with supported evidence. Normal PR work requires all
+1. `done`: done-when is explicitly verified with supported evidence. Normal PR work requires all
   checks passing for the current head. Epic Forge work also requires a confirmed merge into the
   exact authorized epic branch. Pending or failing checks and an unmerged epic PR are not done.
   Record `completion.mechanism: artifact` with evidence of the PR, passing checks, and any required
@@ -399,7 +395,7 @@ error. Prior attempts stay immutable.
   citing the merge commit, never `failed` for the external merge alone.
   Its outcome uses reason code `done_when_verified`, `completion.verified: true`,
   one of `command`, `artifact`, `operator_receipt`, or `goal_acceptance`, and nonempty evidence.
-- `skipped`: the work is already complete, or a genuine precondition is false. That means
+1. `skipped`: the work is already complete, or a genuine precondition is false. That means
   missing authority, a prerequisite the worker cannot create, an unavailable provider or
   required service, a frozen contract, or a validation gate that setup cannot remove.
   Another active task changing the same files is not a reason to skip; the worker does the
@@ -408,9 +404,9 @@ error. Prior attempts stay immutable.
   missing local dependency is setup: create an isolated worktree from the named remote
   base, bind private ports, and install dependencies without cleaning another owner's
   checkout. Include the structured reason.
-- `failed`: work was attempted and did not satisfy done-when; record a structured reason that
+1. `failed`: work was attempted and did not satisfy done-when; record a structured reason that
   distinguishes retryable, verification-needed, authority, permanent, and unknown-launch cases.
-- Historical `awaiting_human` rows remain visible in readiness, runs, and the viewer, and operator `requeue` or `recover-complete` still continues them. New records refuse the status.
+1. Historical `awaiting_human` rows remain visible in readiness, runs, and the viewer, and operator `requeue` or `recover-complete` still continues them. New records refuse the status.
 
 Follow the exact `OUTCOME_SCHEMA` printed in the prompt. A repository-producing verified success
 has this shape; omit `repository` when the task does not produce one:
@@ -432,7 +428,7 @@ Optional audit fields may include `target_base_oid`, `head_oid`, and `merge_rece
 `failed` or `skipped`, omit `completion` and use a reason code of
 `retryable`, `verification_needed`, `authority_required`, `permanent`, or `unknown_launch`, with
 nonempty detail and a stable non-secret signature. Accepted completion mechanisms are `command`,
-`artifact`, `operator_receipt`, and `goal_acceptance`. A `failed` outcome with reason `authority_required` may add `resume_when`, a list of check objects using the check types above. A `release_exists` entry for the task's own repository (from `source_ref`, else the outcome's `repository.remote`) is refused unless the task declared that same release check at queue time: the record is rewritten to `verification_needed` with signature `verification_needed:own_release_resume_refused` and no `resume_when`, because work on an unreleased line feeds that release and the hold would never clear.
+`artifact`, `operator_receipt`, and `goal_acceptance`. A `failed` outcome with reason `authority_required` may add `resume_when`, a list of check objects using the check types above. A `publication_exists` entry for the task's own repository (from `source_ref`, else the outcome's `repository.remote`) is refused unless the task declared that same release check at queue time: the record is rewritten to `verification_needed` with signature `verification_needed:own_publication_resume_refused` and no `resume_when`, because work on an unreleased line feeds that release and the hold would never clear.
 
 `authority_required` and `verification_needed` reasons also carry boolean `reason.queue_time_knowable`:
 `true` when the blocker already existed and could have been found before launch from the task
@@ -504,27 +500,27 @@ to resolve the child start branch; historical commit OIDs and receipts are optio
 
 ## Operations
 
-- Ten-minute cache refresh: `bonus-drain-refresh.timer`.
-- Ten-minute scout: `bonus-drain-scout.timer`, plus `bonus-drain-scout.path`, which triggers an
+1. Ten-minute cache refresh: `bonus-drain-refresh.timer`.
+1. Ten-minute scout: `bonus-drain-scout.timer`, plus `bonus-drain-scout.path`, which triggers an
   extra tick when a job frees its slot (see README "Scout cadence and host load gate").
-- Optional viewer: the established two-tab background-jobs UI. Run now is manual and delegates
+1. Optional viewer: the established two-tab background-jobs UI. Run now is manual and delegates
   only to the shared `kick_task` to `t3-thread` path. In-flight Mark done / Mark failed
   records a terminal event through the same `record` path as the CLI and frees the dispatch
   slot; it does not stop the provider worker. Tailscale Serve is the sole access
   boundary; there is no application login. Exact Host/HTTPS Origin and JSON-only checks
   protect browser mutations; see `SECURITY.md` before remote use.
-- The read only `--local` queue and gates view shows the selected start branch and uses the
+1. The read only `--local` queue and gates view shows the selected start branch and uses the
   same readiness result as dispatch. It has no pending verification state.
-- Tasks queued before readiness reviews existed and still launchable are held as
+1. Tasks queued before readiness reviews existed and still launchable are held as
   `review_missing`, and tasks whose review predates `implementable-ticket/v1` as `review_stale`,
   until reviewed. `bonus-drain readiness-backfill [--json]` is read-only:
   for each task a launch could still start (active, unclaimed, not done; one-offs with no attempt)
   it reports `review` as `valid`, `missing`, `stale`, or `invalid`, the problems, and live results
   of every launch check, plus `ready_for_launch` and a summary count. It stores nothing, so use it
   to decide which legacy tasks to review, then add the review through `edit`.
-- Install/status/doctor/removal: see `README.md`.
-- DB/unit cutover and rollback: dry-run report plus the manual procedure in `MIGRATION.md`.
-- Legacy markdown/jsonl: separate `bonus-drain import-legacy` only.
+1. Install/status/doctor/removal: see `README.md`.
+1. DB/unit cutover and rollback: dry-run report plus the manual procedure in `MIGRATION.md`.
+1. Legacy markdown/jsonl: separate `bonus-drain import-legacy` only.
 
 Never install, enable, expose, apply a cutover, roll back, or delete state merely because this
 skill was invoked. Those are separate operator-authorized actions.

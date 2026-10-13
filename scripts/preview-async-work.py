@@ -40,30 +40,18 @@ def main():
     if source.cache_dir.is_dir():
         shutil.copytree(source.cache_dir, destination / 'cache', ignore=shutil.ignore_patterns('*.lock'))
     data['record_command'] = [str(SKILL / 'bin/bonus-drain'), 'record']
-    data['secret_refs'] = []
+    data['secret_refs'] = [{'id': 'preview-proxy', 'source': 'file', 'path': str(destination / 'proxy-disabled.env')}]
+    data['proxy_secret_ref'] = 'preview-proxy'
     data['pr_exceptions'] = []
     bindir = destination / 'bin'
     bindir.mkdir()
-    for name in ('t3-thread', 'bonus-drain-account-activation', 'usage-disabled'):
-        path = bindir / name
-        path.write_text('#!/bin/sh\necho "Preview: external execution disabled" >&2\nexit 1\n')
-        path.chmod(0o700)
+    path = bindir / 't3-thread'
+    path.write_text('#!/bin/sh\necho "Preview: external execution disabled" >&2\nexit 1\n')
+    path.chmod(0o700)
     for adapter in data['adapters']:
-        if adapter['kind'] == 't3-thread':
-            adapter['argv'] = [str(bindir / 't3-thread')]
-        elif adapter['kind'] == 'usage':
-            adapter['argv'] = [str(bindir / 'usage-disabled')]
-        else:
-            argv = adapter['argv']
-            argv[0] = str(bindir / 'bonus-drain-account-activation')
-            provider = next(account['provider_id'] for account in data['accounts'] if account.get('activation_adapter_id') == adapter['id'])
-            for option, value in (('--pin-file', str(destination / provider / 'PIN')), ('--active-path', str(destination / provider / 'active')), ('--rotate', '/usr/bin/false')):
-                if option in argv:
-                    argv[argv.index(option) + 1] = value
+        adapter['argv'] = [str(path)]
         adapter['env_allowlist'] = []
         adapter.pop('secret_refs', None)
-    for account in data['accounts']:
-        account.pop('secret_refs', None)
     data['viewer'] = {'bind': '127.0.0.1', 'mutations_enabled': True, 'preview': True,
                       'remote': {'trusted_loopback_proxy': True, 'allowed_hosts': [args.host],
                                  'allowed_origins': ['https://' + args.host]}}

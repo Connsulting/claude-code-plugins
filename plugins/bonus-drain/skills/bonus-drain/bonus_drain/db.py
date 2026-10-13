@@ -47,7 +47,7 @@ RECOVERY_STATES = frozenset({"scheduled", "backoff", "consumed", "held", "exhaus
 # A recovery in one of these states already owns the task's next attempt.
 PENDING_RECOVERY_STATES = ("scheduled", "backoff", "consumed")
 # A proved account or launcher failure holds the account, never the task.
-ACCOUNT_HOLD_CAUSES = frozenset({"activation_unswitched", "codex_daemon_start"})
+ACCOUNT_HOLD_CAUSES = frozenset({"account_unavailable", "codex_daemon_start"})
 BACKOFF_INITIAL_SECONDS = 1800
 BACKOFF_MAX_SECONDS = 14400
 TRANSIENT_RECOVERY_HOLDS = frozenset({
@@ -134,15 +134,15 @@ def _outcome_repo(source_ref: str | None, outcome: Mapping[str, Any]) -> str | N
     return match.group(1).lower() if match else None
 
 
-def refuse_own_release_resume(
+def refuse_own_publication_resume(
     outcome: dict[str, Any], source_ref: str | None, checks_json: str | None,
 ) -> dict[str, Any]:
-    """Turn a failure that waits on the task's own repository release into verification_needed.
+    """Turn a failure that waits on the task's own repository publication into verification_needed.
 
-    A worker on an unreleased line (Curie's ``next``) must not park its task until that line's
-    release exists: the release waits on the work, so the hold never ends. Its pre-release
-    artifacts are the evidence to use. A release the task was queued against (a declared
-    ``release_exists`` check) stays a valid resume condition, as does another repository's.
+    A worker on an unpublished line (Curie's ``next``) must not park its task until that line's
+    publication exists: the publication waits on the work, so the hold never ends. Its pre-publication
+    artifacts are the evidence to use. A publication the task was queued against (a declared
+    ``publication_exists`` check) stays a valid resume condition, as does another repository's.
     """
 
     resume = outcome.get("resume_when")
@@ -158,11 +158,11 @@ def refuse_own_release_resume(
     allowed = {
         (str(item.get("repo", "")).lower(), str(item.get("tag", "")))
         for item in declared
-        if isinstance(item, Mapping) and item.get("type") == "release_exists"
+        if isinstance(item, Mapping) and item.get("type") == "publication_exists"
     }
     circular = [
         f"{item.get('repo')}@{item.get('tag')}" for item in resume
-        if isinstance(item, Mapping) and item.get("type") == "release_exists"
+        if isinstance(item, Mapping) and item.get("type") == "publication_exists"
         and str(item.get("repo", "")).lower() == repo
         and (repo, str(item.get("tag", ""))) not in allowed
     ]
@@ -170,15 +170,15 @@ def refuse_own_release_resume(
         return outcome
     reason = outcome["reason"]
     detail = (
-        f"Refused resume on own release {', '.join(circular)}: the task's work feeds that "
-        "release, so waiting for it never ends. Verify with the branch's pre-release artifacts "
+        f"Refused resume on own publication {', '.join(circular)}: the task's work feeds that "
+        "publication, so waiting for it never ends. Verify with the branch's pre-publication artifacts "
         f"or name the real blocker. Worker detail: {reason['detail']}"
     )[:2000]
     rewritten = {key: value for key, value in outcome.items() if key != "resume_when"}
     rewritten["reason"] = {
         "code": "verification_needed",
         "detail": detail,
-        "signature": "verification_needed:own_release_resume_refused",
+        "signature": "verification_needed:own_publication_resume_refused",
         "queue_time_knowable": reason.get("queue_time_knowable"),
     }
     return validate_outcome("failed", rewritten)
@@ -587,18 +587,6 @@ class Claim:
         return asdict(self)
 
 
-@dataclass(frozen=True)
-class ActivationLease:
-    task_id: str
-    eligibility_key: str
-    provider_id: str
-    account_id: str
-    state: str
-    acquired_at: str
-    attempt_id: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -809,6 +797,7 @@ class QueueDB:
         with self._connect() as connection:
             connection.executescript(schema)
             self._additive_migrations(connection)
+            self._proxy_migration(connection)
             connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, ?)",
                 (utc_now(),),
@@ -821,6 +810,81 @@ class QueueDB:
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(4, ?)",
                 (utc_now(),),
             )
+
+    @staticmethod
+    def _proxy_migration(connection: sqlite3.Connection) -> None:
+        def drop_old_names(value: Any) -> Any:
+            if isinstance(value, list):
+                return [drop_old_names(item) for item in value]
+            if isinstance(value, dict):
+                result = {key: drop_old_names(item) for key, item in value.items()}
+                if result.get("type") == "release_exists":  # drop old check type
+                    result["type"] = "publication_exists"
+                if result.get("kind") == "release":  # drop old grant kind
+                    result["kind"] = "publication"
+                return result
+            return value
+
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            if connection.execute("SELECT 1 FROM schema_migrations WHERE version=5").fetchone():
+                connection.commit()
+                return
+            connection.execute("drop TABLE IF EXISTS activation_leases")
+            connection.execute("ALTER TABLE account_backoff RENAME TO account_backoff_before_proxy")
+            connection.execute("""CREATE TABLE account_backoff (
+                provider_id TEXT NOT NULL, account_id TEXT NOT NULL,
+                cause TEXT NOT NULL CHECK (cause IN ('account_unavailable','codex_daemon_start')),
+                failures INTEGER NOT NULL CHECK (failures >= 1), not_before TEXT NOT NULL,
+                detail TEXT, updated_at TEXT NOT NULL,
+                PRIMARY KEY(provider_id, account_id))""")
+            connection.execute("""INSERT INTO account_backoff
+                SELECT provider_id,account_id,
+                       CASE WHEN cause='codex_daemon_start' THEN cause ELSE 'account_unavailable' END,
+                       failures,not_before,detail,updated_at FROM account_backoff_before_proxy""")
+            connection.execute("drop TABLE account_backoff_before_proxy")
+            old_hashes = {
+                row["id"]: _contract_hash(QueueDB._task_from_row(row))
+                for row in connection.execute("SELECT * FROM tasks")
+            }
+            for table, columns in {
+                "tasks": ("checks_json", "grants_json", "readiness_review_json"),
+                "runs": ("outcome_json",),
+                "task_attempts": ("outcome_json",),
+                "check_results": ("spec_json", "context_json"),
+                "task_recovery": ("resume_when_json",),
+                "goals": ("contract_json",),
+                "goal_members": ("candidate_json",),
+            }.items():
+                existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+                for column in columns:
+                    if column not in existing:
+                        continue
+                    for row in connection.execute(f"SELECT rowid,{column} FROM {table} WHERE {column} IS NOT NULL").fetchall():
+                        try:
+                            original = json.loads(row[1])
+                        except (ValueError, TypeError):
+                            continue
+                        migrated = drop_old_names(original)
+                        if migrated != original:
+                            connection.execute(f"UPDATE {table} SET {column}=? WHERE rowid=?",
+                                               (json.dumps(migrated, separators=(",", ":")), row[0]))
+            # Preserve CAS ownership when only the names of otherwise identical contracts change.
+            for row in connection.execute("SELECT * FROM tasks").fetchall():
+                old_hash = old_hashes[row["id"]]
+                new_hash = _contract_hash(QueueDB._task_from_row(row))
+                if old_hash == new_hash:
+                    continue
+                for table in ("task_attempts", "task_recovery", "goal_members", "goal_turns"):
+                    existing = {item[1] for item in connection.execute(f"PRAGMA table_info({table})")}
+                    if {"task_id", "contract_hash"} <= existing:
+                        connection.execute(f"UPDATE {table} SET contract_hash=? WHERE task_id=? AND contract_hash=?",
+                                           (new_hash, row["id"], old_hash))
+            connection.execute("INSERT INTO schema_migrations(version,applied_at) VALUES(5,?)", (utc_now(),))
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
 
     def reserve_scout_notice(
         self, *, stuck: bool, kinds: list[str], tasks: list[str], now_epoch: int,
@@ -967,7 +1031,6 @@ class QueueDB:
                     connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
         ownership_columns = {
             "dispatch_claims": {"attempt_id": "TEXT"},
-            "activation_leases": {"attempt_id": "TEXT"},
         }
         for table, columns in ownership_columns.items():
             if not connection.execute(
@@ -992,18 +1055,6 @@ class QueueDB:
               PRIMARY KEY(task_id, eligibility_key),
               FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
             );
-            CREATE TABLE IF NOT EXISTS activation_leases (
-              task_id TEXT NOT NULL,
-              eligibility_key TEXT NOT NULL,
-              provider_id TEXT NOT NULL,
-              account_id TEXT NOT NULL,
-              state TEXT NOT NULL CHECK (state IN ('activating','active','releasing')),
-              acquired_at TEXT NOT NULL,
-              attempt_id TEXT,
-              PRIMARY KEY(task_id, eligibility_key),
-              FOREIGN KEY(task_id, eligibility_key)
-                REFERENCES dispatch_claims(task_id, eligibility_key) ON DELETE CASCADE
-            );
             CREATE TABLE IF NOT EXISTS schema_migrations (
               version INTEGER PRIMARY KEY,
               applied_at TEXT NOT NULL
@@ -1021,8 +1072,6 @@ class QueueDB:
               ON usage_history(account_id, limit_id, ts);
             CREATE INDEX IF NOT EXISTS idx_runs_eligibility ON runs(task, eligibility_key);
             CREATE INDEX IF NOT EXISTS idx_claims_task ON dispatch_claims(task_id);
-            CREATE INDEX IF NOT EXISTS idx_activation_provider_account
-              ON activation_leases(provider_id, account_id);
             CREATE TABLE IF NOT EXISTS task_attempts (
               id TEXT PRIMARY KEY,
               task_id TEXT NOT NULL REFERENCES tasks(id),
@@ -2442,178 +2491,10 @@ class QueueDB:
         except sqlite3.IntegrityError:
             return None
 
-    def acquire_activation(
-        self,
-        task_id: str,
-        eligibility_key: str,
-        provider_id: str,
-        account_id: str,
-        activate: Callable[[], None],
-        *,
-        attempt_id: str | None = None,
-    ) -> bool:
-        """Acquire one durable claim-scoped activation lease with a two-phase transition."""
 
-        self.initialize()
-        deadline = time.monotonic() + self.timeout_seconds
-        while True:
-            wait_for_activation = False
-            try:
-                with self._transaction() as connection:
-                    claim = connection.execute(
-                        """SELECT provider_id,account_id,attempt_id FROM dispatch_claims
-                             WHERE task_id=? AND eligibility_key=?""",
-                        (task_id, eligibility_key),
-                    ).fetchone()
-                    if claim is None or claim["provider_id"] != provider_id or claim["account_id"] != account_id:
-                        raise QueueError("activation lease requires the matching dispatch claim")
-                    resolved_attempt_id = claim["attempt_id"]
-                    if attempt_id is not None and resolved_attempt_id != attempt_id:
-                        raise QueueError("activation lease attempt no longer owns the claim")
-                    existing = connection.execute(
-                        """SELECT account_id,state FROM activation_leases
-                             WHERE provider_id=? ORDER BY acquired_at,task_id""",
-                        (provider_id,),
-                    ).fetchall()
-                    if any(row["account_id"] != account_id for row in existing):
-                        raise QueueError(
-                            f"provider {provider_id} is leased to a different account"
-                        )
-                    if any(row["state"] != "active" for row in existing):
-                        # A same-account peer may be completing the committed activating phase.
-                        # Wait briefly for it rather than failing a concurrent compatible launch.
-                        wait_for_activation = all(row["state"] == "activating" for row in existing)
-                        if not wait_for_activation:
-                            raise QueueError(f"provider {provider_id} activation is incomplete")
-                    else:
-                        state = "active" if existing else "activating"
-                        connection.execute(
-                            """INSERT INTO activation_leases(
-                                 task_id,eligibility_key,provider_id,account_id,state,acquired_at,attempt_id
-                               ) VALUES(?,?,?,?,?,?,?)""",
-                            (
-                                task_id, eligibility_key, provider_id, account_id, state,
-                                utc_now(), resolved_attempt_id,
-                            ),
-                        )
-                        needs_activation = not existing
-            except sqlite3.IntegrityError as exc:
-                raise QueueError("activation lease already exists") from exc
-            if not wait_for_activation:
-                break
-            if time.monotonic() >= deadline:
-                raise QueueError(f"provider {provider_id} activation is incomplete")
-            time.sleep(0.02)
-        if not needs_activation:
-            return False
 
-        # The incomplete state commits before the external effect. A crash, adapter failure, or
-        # later DB failure therefore leaves durable evidence that blocks all provider dispatches
-        # until an operator reconciles the account state.
-        activate()
-        with self._transaction() as connection:
-            cursor = connection.execute(
-                """UPDATE activation_leases SET state='active'
-                     WHERE task_id=? AND eligibility_key=? AND state='activating'
-                       AND attempt_id IS ?""",
-                (task_id, eligibility_key, resolved_attempt_id),
-            )
-            if cursor.rowcount != 1:
-                raise QueueError("activation transition requires reconciliation")
-        return True
 
-    def activation_leases(self, *, provider_id: str | None = None) -> list[ActivationLease]:
-        self.initialize()
-        where = "" if provider_id is None else " WHERE provider_id=?"
-        parameters: tuple[Any, ...] = () if provider_id is None else (provider_id,)
-        with self._connect() as connection:
-            rows = connection.execute(
-                f"SELECT * FROM activation_leases{where} ORDER BY acquired_at,task_id",
-                parameters,
-            ).fetchall()
-        return [ActivationLease(**dict(row)) for row in rows]
-
-    def release_activation_after_dispatch(
-        self,
-        task_id: str,
-        eligibility_key: str,
-        release: Callable[[], None],
-        *,
-        attempt_id: str | None = None,
-    ) -> bool:
-        """Release a launch-scoped lease after its router launch is durably recorded.
-
-        The claim and dispatched run remain live.  Only the activation lease is removed, so
-        providers that can safely rotate credentials between calls do not stay pinned for the
-        full background run.  The last holder performs the external release through the same
-        committed ``releasing`` transition used by terminal bookkeeping.
-        """
-
-        self.initialize()
-        needs_release = False
-        with self._transaction() as connection:
-            lease = connection.execute(
-                """SELECT provider_id,account_id,state,attempt_id FROM activation_leases
-                     WHERE task_id=? AND eligibility_key=?""",
-                (task_id, eligibility_key),
-            ).fetchone()
-            if lease is None:
-                return False
-            if lease["state"] != "active":
-                raise QueueError("launch-scoped activation lease requires reconciliation")
-            resolved_attempt_id = lease["attempt_id"]
-            if attempt_id is not None and resolved_attempt_id != attempt_id:
-                raise QueueError("activation release attempt no longer owns the lease")
-            dispatched = connection.execute(
-                """SELECT 1 FROM runs
-                     WHERE task=? AND eligibility_key=? AND status='dispatched'
-                       AND provider_id=? AND account_id=? AND attempt_id IS ?""",
-                (
-                    task_id, eligibility_key, lease["provider_id"], lease["account_id"],
-                    resolved_attempt_id,
-                ),
-            ).fetchone()
-            if dispatched is None:
-                raise QueueError("activation cannot release before a proven dispatch")
-            holders = int(connection.execute(
-                """SELECT COUNT(*) FROM activation_leases
-                     WHERE provider_id=? AND account_id=?""",
-                (lease["provider_id"], lease["account_id"]),
-            ).fetchone()[0])
-            if holders > 1:
-                cursor = connection.execute(
-                    """DELETE FROM activation_leases
-                         WHERE task_id=? AND eligibility_key=? AND state='active'
-                           AND attempt_id IS ?""",
-                    (task_id, eligibility_key, resolved_attempt_id),
-                )
-                if cursor.rowcount != 1:
-                    raise QueueError("launch-scoped activation release requires reconciliation")
-                return False
-            cursor = connection.execute(
-                """UPDATE activation_leases SET state='releasing'
-                     WHERE task_id=? AND eligibility_key=? AND state='active'
-                       AND attempt_id IS ?""",
-                (task_id, eligibility_key, resolved_attempt_id),
-            )
-            if cursor.rowcount != 1:
-                raise QueueError("launch-scoped activation release requires reconciliation")
-            needs_release = True
-
-        if needs_release:
-            release()
-            with self._transaction() as connection:
-                cursor = connection.execute(
-                    """DELETE FROM activation_leases
-                         WHERE task_id=? AND eligibility_key=? AND state='releasing'
-                           AND attempt_id IS ?""",
-                    (task_id, eligibility_key, resolved_attempt_id),
-                )
-                if cursor.rowcount != 1:
-                    raise QueueError("launch-scoped activation release requires reconciliation")
-        return needs_release
-
-    def release_claim(self, task_id: str, eligibility_key: str, *, reason: str | None = None) -> bool:
+    def free_claim(self, task_id: str, eligibility_key: str, *, reason: str | None = None) -> bool:
         self.initialize()
         with self._connect() as connection:
             claim = connection.execute(
@@ -2623,14 +2504,9 @@ class QueueDB:
         if claim is not None and claim["attempt_id"] is not None:
             return self.abort_unlaunched_attempt(
                 task_id, eligibility_key, claim["attempt_id"],
-                reason or "claim released before launch",
+                reason or "claim freed before launch",
             )
         with self._transaction() as connection:
-            if connection.execute(
-                "SELECT 1 FROM activation_leases WHERE task_id=? AND eligibility_key=?",
-                (task_id, eligibility_key),
-            ).fetchone():
-                raise QueueError("cannot release a claim while its activation lease is held")
             cursor = connection.execute(
                 "DELETE FROM dispatch_claims WHERE task_id=? AND eligibility_key=?", (task_id, eligibility_key),
             )
@@ -2643,10 +2519,9 @@ class QueueDB:
         attempt_id: str,
         reason: str,
         *,
-        release_activation: Callable[[], None] | None = None,
         account_hold: AccountHold | None = None,
     ) -> bool:
-        """Atomically retain a proved-unlaunched attempt and release only its ownership.
+        """Atomically retain a proved-unlaunched attempt and publication only its ownership.
 
         With ``account_hold`` the failure belongs to the account, not the task: the
         never-launched claimed attempt is deleted instead of aborted, and the account's
@@ -2681,29 +2556,6 @@ class QueueDB:
             ).fetchone()
             if claim is None:
                 raise QueueError("attempt no longer owns the dispatch claim")
-            lease = connection.execute(
-                "SELECT * FROM activation_leases WHERE task_id=? AND eligibility_key=? AND attempt_id=?",
-                (task_id, eligibility_key, attempt_id),
-            ).fetchone()
-            if lease is not None and lease["state"] == "activating":
-                raise QueueError(
-                    "unproven activation requires reconciliation before abort"
-                )
-            if lease is not None and lease["state"] in {"active", "releasing"}:
-                holders = int(connection.execute(
-                    """SELECT COUNT(*) FROM activation_leases
-                         WHERE provider_id=? AND account_id=?""",
-                    (lease["provider_id"], lease["account_id"]),
-                ).fetchone()[0])
-                if holders == 1:
-                    if release_activation is None:
-                        raise QueueError("active activation release requires a verified callback")
-                    release_activation()
-            if lease is not None:
-                connection.execute(
-                    "DELETE FROM activation_leases WHERE task_id=? AND eligibility_key=? AND attempt_id=?",
-                    (task_id, eligibility_key, attempt_id),
-                )
             if account_hold is None:
                 cursor = connection.execute(
                     """UPDATE task_attempts
@@ -2761,21 +2613,6 @@ class QueueDB:
             ),
         )
 
-    def abandon_unproven_activation(self, task_id: str, eligibility_key: str) -> bool:
-        """Drop an unproven ``activating`` lease after a known failed switch.
-
-        Only ``activating`` is removable. ``active`` and ``releasing`` stay fail-closed
-        for operator reconciliation because the external pin may already have moved.
-        """
-
-        self.initialize()
-        with self._transaction() as connection:
-            cursor = connection.execute(
-                """DELETE FROM activation_leases
-                     WHERE task_id=? AND eligibility_key=? AND state='activating'""",
-                (task_id, eligibility_key),
-            )
-            return cursor.rowcount == 1
 
     def mark_ambiguous(self, task_id: str, eligibility_key: str, *, detail: str) -> None:
         self.initialize()
@@ -2803,8 +2640,6 @@ class QueueDB:
         eligibility_key: str,
         attempt_id: str,
         reason: str,
-        *,
-        release_activation: Callable[[], None] | None = None,
     ) -> None:
         """Hold one exact claimed/dispatched attempt when launch ownership is unknown."""
 
@@ -2836,16 +2671,6 @@ class QueueDB:
             ).fetchone()
             if claim is None or claim["attempt_id"] != attempt_id:
                 raise QueueError("attempt no longer owns the dispatch claim")
-            lease = connection.execute(
-                "SELECT state FROM activation_leases WHERE task_id=? AND eligibility_key=? AND attempt_id=?",
-                (task_id, eligibility_key, attempt_id),
-            ).fetchone()
-            if lease is not None and release_activation is not None and lease["state"] == "active":
-                release_activation()
-                connection.execute(
-                    "DELETE FROM activation_leases WHERE task_id=? AND eligibility_key=? AND attempt_id=?",
-                    (task_id, eligibility_key, attempt_id),
-                )
             cursor = connection.execute(
                 """UPDATE task_attempts
                      SET state='ambiguous',reason_code='unknown_launch',reason_signature=?,terminal_at=?
@@ -2893,7 +2718,6 @@ class QueueDB:
         summary: str | None = None, router_job_id: str | None = None,
         timestamp: str | None = None, trigger: str | None = None,
         surface: str | None = None,
-        release_activation: Callable[[], None] | None = None,
         now_epoch: float | None = None,
     ) -> RunEvent:
         if trigger not in {None, "manual", "bonus", "scheduled", "continuation"}:
@@ -2974,65 +2798,10 @@ class QueueDB:
             attempt_id is not None and status in TERMINAL_STATUSES
         )
         if canonical is not None:
-            canonical = refuse_own_release_resume(
+            canonical = refuse_own_publication_resume(
                 canonical, task_row["source_ref"], task_row["checks_json"],
             )
         canonical_json = _canonical_json(canonical) if canonical is not None else None
-
-        # Preserve the established two-phase activation release. A failed external
-        # release leaves a durable `releasing` lease and does not append a terminal row.
-        prepared_release = False
-        if (
-            attempt_id is not None and status in TERMINAL_STATUSES and
-            eligibility_key is not None and release_activation is not None
-        ):
-            with self._transaction() as connection:
-                prior = connection.execute(
-                    """SELECT 1 FROM runs WHERE task=? AND attempt_id=?
-                         AND status IN ('done','skipped','failed','awaiting_human') LIMIT 1""",
-                    (task_id, attempt_id),
-                ).fetchone()
-                if prior is None:
-                    live_attempt = connection.execute(
-                        "SELECT state FROM task_attempts WHERE id=? AND task_id=?",
-                        (attempt_id, task_id),
-                    ).fetchone()
-                    owner = connection.execute(
-                        """SELECT 1 FROM dispatch_claims
-                             WHERE task_id=? AND eligibility_key=? AND attempt_id=?""",
-                        (task_id, eligibility_key, attempt_id),
-                    ).fetchone()
-                    if (
-                        live_attempt is None
-                        or live_attempt["state"] not in {"claimed", "dispatched", "ambiguous"}
-                        or owner is None
-                    ):
-                        raise QueueError(
-                            "activation release requires the exact live attempt owner"
-                        )
-                lease = connection.execute(
-                    """SELECT * FROM activation_leases
-                         WHERE task_id=? AND eligibility_key=? AND attempt_id=?""",
-                    (task_id, eligibility_key, attempt_id),
-                ).fetchone()
-                if prior is None and lease is not None and lease["state"] == "active":
-                    holders = int(connection.execute(
-                        """SELECT COUNT(*) FROM activation_leases
-                             WHERE provider_id=? AND account_id=?""",
-                        (lease["provider_id"], lease["account_id"]),
-                    ).fetchone()[0])
-                    if holders == 1:
-                        cursor = connection.execute(
-                            """UPDATE activation_leases SET state='releasing'
-                                 WHERE task_id=? AND eligibility_key=? AND attempt_id=?
-                                   AND state='active'""",
-                            (task_id, eligibility_key, attempt_id),
-                        )
-                        if cursor.rowcount != 1:
-                            raise QueueError("activation release transition requires reconciliation")
-                        prepared_release = True
-            if prepared_release:
-                release_activation()
 
         with self._transaction() as connection:
             task_row = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
@@ -3096,30 +2865,6 @@ class QueueDB:
                     raise QueueError("attempt eligibility key no longer owns the claim")
                 provider_id = provider_id or claim["provider_id"]
                 account_id = account_id or claim["account_id"]
-                if status in TERMINAL_STATUSES:
-                    lease = connection.execute(
-                        """SELECT * FROM activation_leases
-                             WHERE task_id=? AND eligibility_key=? AND attempt_id=?""",
-                        (task_id, eligibility_key, attempt_id),
-                    ).fetchone()
-                    if lease is not None:
-                        if lease["state"] == "releasing" and prepared_release:
-                            pass
-                        elif lease["state"] != "active":
-                            raise QueueError("incomplete activation lease requires reconciliation")
-                        else:
-                            holders = int(connection.execute(
-                                """SELECT COUNT(*) FROM activation_leases
-                                     WHERE provider_id=? AND account_id=?""",
-                                (lease["provider_id"], lease["account_id"]),
-                            ).fetchone()[0])
-                            if holders == 1:
-                                raise QueueError("last activation lease requires a verified release callback")
-                        connection.execute(
-                            """DELETE FROM activation_leases
-                                 WHERE task_id=? AND eligibility_key=? AND attempt_id=?""",
-                            (task_id, eligibility_key, attempt_id),
-                        )
                 cursor = connection.execute(
                     """INSERT INTO runs(
                          task,kind,cycle,eligibility_key,status,ts,received_at,branch,summary,engine,
@@ -3179,7 +2924,7 @@ class QueueDB:
                 return self._run_from_row(row)
 
             # NULL-attempt operations are a bounded compatibility path. They can never
-            # terminalize or release a claim owned by the new runtime.
+            # terminalize or publication a claim owned by the new runtime.
             nonnull_owner = connection.execute(
                 "SELECT attempt_id FROM dispatch_claims WHERE task_id=? AND attempt_id IS NOT NULL",
                 (task_id,),
@@ -3243,19 +2988,6 @@ class QueueDB:
                 ),
             )
             if status in TERMINAL_STATUSES and legacy_claim is not None:
-                if connection.execute(
-                    """SELECT 1 FROM activation_leases
-                         WHERE task_id=? AND eligibility_key=? AND attempt_id IS NULL""",
-                    (task_id, eligibility_key),
-                ).fetchone():
-                    if release_activation is None:
-                        raise QueueError("legacy activation release requires a verified callback")
-                    release_activation()
-                    connection.execute(
-                        """DELETE FROM activation_leases
-                             WHERE task_id=? AND eligibility_key=? AND attempt_id IS NULL""",
-                        (task_id, eligibility_key),
-                    )
                 connection.execute(
                     """DELETE FROM dispatch_claims
                          WHERE task_id=? AND eligibility_key=? AND attempt_id IS NULL""",
@@ -4029,8 +3761,6 @@ class QueueDB:
             )
             if connection.execute(
                 "SELECT 1 FROM dispatch_claims WHERE task_id=?", (task_id,),
-            ).fetchone() or connection.execute(
-                "SELECT 1 FROM activation_leases WHERE task_id=?", (task_id,),
             ).fetchone():
                 successor = self._latest_effective_attempt(connection, task_id)
                 successor_id = successor["id"] if successor is not None else "unknown"
@@ -4218,10 +3948,6 @@ class QueueDB:
                     return payload(owner, run, idempotent=True)
                 successor = claim["attempt_id"] or "unknown"
                 raise QueueError(f"successor attempt {successor} owns the task")
-            if connection.execute(
-                "SELECT 1 FROM activation_leases WHERE task_id=?", (task_id,),
-            ).fetchone():
-                raise QueueError("successor attempt unknown owns the task")
             latest = self._latest_effective_attempt(connection, task_id)
             if latest is None or latest["id"] != expected_attempt_id:
                 successor = latest["id"] if latest is not None else "none"
@@ -4472,7 +4198,6 @@ class QueueDB:
             "database": str(self.path), "cycle": int(cycle),
             "tasks": [task.to_dict() for task in tasks],
             "claims": [claim.to_dict() for claim in self.claims()],
-            "activation_leases": [lease.to_dict() for lease in self.activation_leases()],
             "runs": [event.to_dict() for event in self.runs(limit=run_limit)],
             "attempts": [attempt.to_dict() for attempt in self.attempts()],
             "recoveries": [recovery.to_dict() for recovery in self.recoveries()],
@@ -5261,7 +4986,7 @@ class QueueDB:
         Nothing re-examines a hold once it is held or paused, so its source issue can close
         or its handed-off PR can merge unseen. Lists, per task, a closed source or declared
         issue (issue_open fail) or a merged handoff PR (pr_merged pass) for Brian to complete,
-        requeue, or retire. It releases nothing.
+        requeue, or retire. It frees nothing.
         """
 
         from . import checks
@@ -5363,31 +5088,11 @@ def doctor(queue: QueueDB) -> DoctorReport:
         queue.initialize()
         ambiguous_claims = tuple(queue.claims(state="ambiguous"))
         ambiguous = tuple(claim.task_id for claim in ambiguous_claims)
-        leases = queue.activation_leases()
-        dispatched = {
-            (event.task, event.eligibility_key, event.attempt_id)
-            for event in queue.inflight()
-            if event.eligibility_key is not None
-        }
-        incomplete_leases = tuple(lease for lease in leases if lease.state != "active")
-        active_orphan_leases = tuple(
-            lease for lease in leases
-            if lease.state == "active"
-            and (lease.task_id, lease.eligibility_key, lease.attempt_id) not in dispatched
-        )
     except (OSError, sqlite3.Error, QueueError) as exc:
         return DoctorReport(False, (), (f"database unavailable: {exc}",))
-    incomplete = tuple(lease.task_id for lease in incomplete_leases)
-    active_orphan = tuple(lease.task_id for lease in active_orphan_leases)
-    reconciliation = tuple(dict.fromkeys((*ambiguous, *incomplete, *active_orphan)))
-    provider_holds = tuple(dict.fromkeys((
-        *(claim.provider_id for claim in ambiguous_claims),
-        *(lease.provider_id for lease in incomplete_leases),
-        *(lease.provider_id for lease in active_orphan_leases),
-    )))
-    diagnostics = (
-        "ambiguous router outcomes or incomplete activation transitions require explicit reconciliation",
-    ) if reconciliation else ()
+    reconciliation = ambiguous
+    provider_holds = tuple(dict.fromkeys(claim.provider_id for claim in ambiguous_claims))
+    diagnostics = ("ambiguous router outcomes require explicit reconciliation",) if reconciliation else ()
     return DoctorReport(
         not reconciliation, reconciliation, diagnostics, provider_holds,
     )

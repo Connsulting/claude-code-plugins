@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
-from tests.readiness_fixture import reviewed
+from tests.readiness_fixture import isolated_cli, reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
@@ -73,25 +73,12 @@ def _calm() -> scout.HostLoad:
 
 
 def _raw_config(root: Path, **top: object) -> dict[str, object]:
-    raw: dict[str, object] = {
-        "schema_version": 1,
-        "database": str(root / "state" / "queue.db"),
-        "cache_dir": str(root / "cache"),
-        "record_command": ["/bin/true"],
-        "adapters": [{"id": "router", "kind": "t3-thread", "argv": ["/bin/true"]}],
-        "providers": [{
-            "id": "alpha", "account_mode": "single",
-            "dispatch": {"adapter_id": "router", "provider": "alpha-engine"},
-        }],
-        "plans": [{"id": "alpha-plan", "provider_id": "alpha"}],
-        "accounts": [{"id": "alpha-account", "provider_id": "alpha", "plan_id": "alpha-plan"}],
-        "limits": [{
-            "id": "alpha-weekly", "plan_id": "alpha-plan", "window_seconds": 604800,
+    raw: dict[str, object] = {"schema_version": 1, "database": str(root / "state" / "queue.db"), "cache_dir": str(root / "cache"), "record_command": ["/bin/true"], "adapters": [{"id": "router", "kind": "t3-thread", "argv": ["/bin/true"]}], "providers": [{
+            "id": "alpha", "dispatch": {"adapter_id": "router", "provider": "alpha-engine"},
+        }], "limits": [{
+            "id": "alpha-weekly", "provider_id": "alpha", "window_seconds": 604800,
             "ceiling_percent": 95, "lead_seconds": 20000, "batch_size": 1,
-        }],
-        "viewer": {},
-        "pr_exceptions": [],
-    }
+        }], "viewer": {}, "pr_exceptions": [], "secret_refs": [{"id": "proxy", "source": "file", "path": "/unused/proxy.env"}], "proxy_secret_ref": "proxy"}
     raw.update(top)
     return raw
 
@@ -552,7 +539,7 @@ class TickLockTests(ScoutTickCase):
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             with _capture_cli_json() as payloads:
-                code = cli.main(["scout", "--config", str(config_path), "--json"])
+                code = isolated_cli(["scout", "--config", str(config_path), "--json"])
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)

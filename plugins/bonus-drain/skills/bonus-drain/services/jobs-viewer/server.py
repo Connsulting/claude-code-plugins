@@ -80,9 +80,8 @@ def _gate_for_card(gates: dict, account_id: str, engine: str, label: str) -> dic
 def _config_urgency_hours(provider_id: str) -> int | None:
     try:
         c = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
-        plan_provider = {p.id: p.provider_id for p in c.plans}
         hours = {int(lim.urgency_seconds // 3600)
-                 for lim in c.limits if plan_provider.get(lim.plan_id) == provider_id
+                 for lim in c.limits if lim.provider_id == provider_id
                  and getattr(lim, "urgency_seconds", 0)}
     except Exception:  # noqa: BLE001
         # Optional urgency metadata must not stop rendering the viewer.
@@ -100,9 +99,8 @@ def _config_lead_hours(provider_id: str) -> int | None:
     """
     try:
         c = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
-        plan_provider = {p.id: p.provider_id for p in c.plans}
         hours = {int(lim.lead_seconds // 3600)
-                 for lim in c.limits if plan_provider.get(lim.plan_id) == provider_id}
+                 for lim in c.limits if lim.provider_id == provider_id}
     except Exception:  # noqa: BLE001
         # Optional lead-window metadata must not stop rendering the viewer.
         return None
@@ -117,10 +115,9 @@ def _config_floor_params(provider_id: str) -> tuple[float, int] | None:
     """
     try:
         c = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
-        plan_provider = {p.id: p.provider_id for p in c.plans}
         params = {
             (float(lim.max_percent_per_window), int(lim.pacing_window_seconds))
-            for lim in c.limits if plan_provider.get(lim.plan_id) == provider_id
+            for lim in c.limits if lim.provider_id == provider_id
         }
     except Exception:  # noqa: BLE001
         # Optional floor metadata must not stop rendering the viewer.
@@ -134,9 +131,6 @@ def _card_floor_fields(provider_id: str) -> dict:
         return {"floor_ppw": 0.5, "pacing_s": 3600}
     return {"floor_ppw": params[0], "pacing_s": params[1]}
 
-CLAUDE_ACCOUNTS_STORE = Path(os.environ.get(
-    "BONUS_ACCOUNTS_STORE", str(Path.home() / ".config" / "bonus-drain" / "accounts" / "claude")
-))
 
 UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
 ALLOWED_HOSTS: tuple[str, ...] = ("127.0.0.1", "localhost")
@@ -224,17 +218,14 @@ def _provider_usage(provider_id: str) -> dict | None:
     except (graph_config.ConfigError, OSError, ValueError):
         return None
     candidates: list[tuple[int, int, float, int]] = []
-    for account in cfg.accounts_for_provider(provider_id):
-        snapshot = snapshots.get((provider_id, account.id))
-        if snapshot is None or not snapshot.fresh:
+    for (provider, _account_id), snapshot in snapshots.items():
+        if provider != provider_id or not snapshot.fresh:
             continue
-        for limit in cfg.limits_for_plan(account.plan_id):
-            reading = snapshot.limits.get(limit.id)
-            if not reading:
-                continue
+        for name, seconds in (("five_hour", 18000), ("seven_day", 604800)):
+            reading = snapshot.limits.get(name, {})
             used, reset = reading.get("used_percent"), reading.get("resets_at")
             if isinstance(used, (int, float)) and isinstance(reset, (int, float)):
-                candidates.append((snapshot.captured_at, limit.window_seconds, float(used), int(reset)))
+                candidates.append((snapshot.captured_at, seconds, float(used), int(reset)))
     if not candidates:
         return None
     newest = max(item[0] for item in candidates)
@@ -300,129 +291,24 @@ def get_grok_usage() -> dict | None:
     })
 
 
-# The read-only half of one scout tick, expressed purely as calls into the skill's own
-# functions: config.sh for every knob, accounts.sh for the per-account ceilings/usage and the
-# drain selection, bonusdb.sh `plan` for the batch sizes and coordinator. The viewer must not
-# grow its own copy of any of that - a second implementation of the gates is a second thing to
-# drift. Emits `key=value` lines; `acct=` repeats once per bootstrapped account.
-_GATES_SH = r"""
-source "$BD/config.sh"; source "$BD/accounts.sh"
-# `bonus_account_usage` normally refreshes a stale per-account snapshot over OAuth. The viewer's
-# planner is read-only: it must show the last disk reading instead of ever doing provider I/O in
-# a request thread. Rebind it before either the display loop or selection helper uses it.
-viewer_account_usage() {
-  local label="${1:?label required}" store="${2:-${BONUS_ACCOUNTS_STORE:-}}" snapshot
-  snapshot="$store/$label.usage.json"
-  if [ -r "$snapshot" ]; then
-    _bonus_usage_fields_from_json "$(cat "$snapshot")"
-  else
-    echo "  "
-  fi
-}
-bonus_account_usage() { viewer_account_usage "$@"; }
-now="${6:-$(date +%s)}"
-emit() { printf '%s=%s\n' "$1" "$2"; }
-emit lead_hours "${DRAIN_LEAD_MAX_HOURS}";          emit window_hours "${WINDOW_HOURS}"
-emit ceiling "${DRAIN_UNTIL_PCT}";                  emit five_hour_max "${FIVE_HOUR_START_MAX}"
-emit pct_per_window "${PCT_PER_WINDOW}";            emit est_pct_per_job "${EST_PCT_PER_JOB}"
-emit batch_n "${BATCH_N}"
-emit codex_lead_hours "${CODEX_DRAIN_LEAD_MAX_HOURS}"
-emit codex_ceiling "${CODEX_WEEKLY_CEIL}"
-emit codex_pct_per_window "${CODEX_PCT_PER_WINDOW}";emit codex_est_pct_per_job "${CODEX_EST_PCT_PER_JOB}"
-emit grok_lead_hours "${GROK_DRAIN_LEAD_MAX_HOURS:-${DRAIN_LEAD_MAX_HOURS:-30}}"
-emit grok_ceiling "${GROK_WEEKLY_CEIL:-98}"
-emit grok_pct_per_window "${GROK_PCT_PER_WINDOW:-2.5}"
-emit grok_est_pct_per_job "${GROK_EST_PCT_PER_JOB:-0.75}"
-if bonus_multi_active; then
-  emit multi 1
-  emit active "$(cat "$BONUS_ACCOUNTS_STORE/active" 2>/dev/null)"
-  while IFS= read -r label; do
-    [ -n "$label" ] || continue
-    read -r five weekly reset < <(bonus_account_usage "$label" "$BONUS_ACCOUNTS_STORE") || true
-    emit acct "$label|$(bonus_account_ceiling "$label")|${five:-}|${weekly:-}|${reset:-}"
-  done < <(bonus_account_labels "$BONUS_ACCOUNTS_STORE")
-else
-  emit multi 0
-fi
-# The Codex rotator's accounts, for display only. Ceilings come from the SAME
-# bonus_account_ceiling resolver as the Claude side, because the rotator enforces
-# WEEKLY_CEIL_<label> per label regardless of provider - a Codex-only second number
-# would drift from the line the rotator actually stops at.
-if bonus_codex_multi_active; then
-  emit codex_multi 1
-  emit codex_active "$(cat "$BONUS_CODEX_ACCOUNTS_STORE/active" 2>/dev/null)"
-  while IFS= read -r label; do
-    [ -n "$label" ] || continue
-    read -r weekly reset < <(bonus_codex_account_usage "$label") || true
-    emit codex_acct "$label|$(bonus_account_ceiling "$label")|${weekly:-}|${reset:-}"
-  done < <(bonus_codex_account_labels)
-  # Mirror the scout's own Codex selection: the account whose window is open now, if any.
-  read -r XSL XSR XS7 < <(bonus_codex_select_drain_account "$BONUS_CODEX_ACCOUNTS_STORE" "$now")
-  [ -n "${XSL:-}" ] && emit codex_selected "$XSL"
-else
-  emit codex_multi 0
-fi
-# Mirror the scout's own selection: the account whose window is open now, if any. Its ceiling
-# rebinds DRAIN_UNTIL_PCT for `plan`, exactly as scout.sh does, so the batch we show is the
-# batch that tick would size.
-read -r SL SR S5 S7 < <(bonus_select_drain_account "$BONUS_ACCOUNTS_STORE" "$now")
-U5c=0; U7c=100; WLC=0
-if [ -n "${SL:-}" ]; then
-  emit selected "$SL"
-  U5c="$S5"; U7c="$S7"
-  export DRAIN_UNTIL_PCT="$(bonus_account_ceiling "$SL")"
-  WLC=$(( ( (SR - now) + WINDOW_HOURS*3600 - 1 ) / (WINDOW_HOURS*3600) ))
-fi
-# The leading 5h field is consumed and discarded: Codex has no 5h window, so nothing gates on it.
-# Its value comes from the viewer's background snapshot, never a provider/rollout reader invoked
-# by a page request.
-CODEX_JSON="${5:-null}"
-U7x="$(jq -r 'if ((.u7 | type) == "number") and .u7 >= 0 and .u7 <= 100 then .u7 else 100 end' <<<"$CODEX_JSON" 2>/dev/null)" || U7x=100
-R7x="$(jq -r 'if ((.r7 | type) == "number") and .r7 > 0 and (.r7 | floor) == .r7 then (.r7 | floor | tostring) else empty end' <<<"$CODEX_JSON" 2>/dev/null)" || R7x=""
-WLX=0
-case "${R7x:-}" in ''|*[!0-9]*) U7x=100 ;; *)
-  if [ "$R7x" -gt "$now" ] && [ $(( R7x - now )) -le $(( CODEX_DRAIN_LEAD_MAX_HOURS*3600 )) ]; then
-    WLX=$(( ( (R7x - now) + WINDOW_HOURS*3600 - 1 ) / (WINDOW_HOURS*3600) ))
-  fi ;;
-esac
-GROK_JSON="${4:-null}"
-U7g="$(jq -r 'if ((.weekly_percent | type) == "number") and .weekly_percent >= 0 and .weekly_percent <= 100 then .weekly_percent else "unknown" end' <<<"$GROK_JSON" 2>/dev/null)" || U7g=unknown
-R7g="$(jq -r 'if ((.weekly_reset | type) == "number") and .weekly_reset > 0 and (.weekly_reset | floor) == .weekly_reset then (.weekly_reset | floor | tostring) else empty end' <<<"$GROK_JSON" 2>/dev/null)" || R7g=""
-WLG=0
-case "$R7g" in ''|*[!0-9]*) ;; *)
-  GROK_LEAD="${GROK_DRAIN_LEAD_MAX_HOURS:-${DRAIN_LEAD_MAX_HOURS:-30}}"
-  if [ "$R7g" -gt "$now" ] && [ $(( R7g - now )) -le $(( GROK_LEAD*3600 )) ]; then
-    WLG=$(( ( (R7g - now) + WINDOW_HOURS*3600 - 1 ) / (WINDOW_HOURS*3600) ))
-  fi ;;
-esac
-emit windows_left_claude "$WLC"; emit windows_left_codex "$WLX"; emit windows_left_grok "$WLG"
-# The positional planner protocol was retired with the graph-backed CLI. Keep the shell
-# half above for account-display snapshots, but ask the owning CLI for its gates.
-"$BONUSDB" gates --json --local
-"""
-
 _gates_cache: dict = {"t": 0.0, "key": None, "val": None}
 
 
 def _preview_account_gates(cfg, gates: dict) -> None:
-    """Display copied normalized readings without copying any rotator credentials.
-
-    Live views retain their account-store display. A preview has only the normalized usage
-    cache, including its last captured readings; it never refreshes or activates an account.
-    """
+    """Display account windows from the normalized proxy cache."""
     snapshots = graph_usage.read_all(cfg)
     for provider, field in (("claude", "acct"), ("codex", "codex_acct")):
+        limits = cfg.limits_for_provider(provider)
+        ceiling = max((limit.ceiling_percent for limit in limits), default=100)
         accounts = []
-        for account in cfg.accounts_for_provider(provider):
-            limits = [limit for limit in cfg.limits if limit.plan_id == account.plan_id]
-            if not limits:
+        for (provider_id, account_id), snapshot in snapshots.items():
+            if provider_id != provider:
                 continue
-            weekly = max(limits, key=lambda limit: limit.window_seconds)
-            snapshot = snapshots.get((provider, account.id))
-            reading = snapshot.limits.get(weekly.id, {}) if snapshot else {}
-            accounts.append({"label": account.id, "ceiling": weekly.ceiling_percent,
-                             "u5": None, "u7": reading.get("used_percent"),
-                             "r7": reading.get("resets_at")})
+            weekly = snapshot.limits.get("seven_day", {}) if snapshot.fresh else {}
+            short = snapshot.limits.get("five_hour", {}) if snapshot.fresh else {}
+            accounts.append({"label": account_id, "ceiling": ceiling,
+                             "u5": short.get("used_percent"), "u7": weekly.get("used_percent"),
+                             "r7": weekly.get("resets_at")})
         gates[field] = accounts
 
 
@@ -456,43 +342,25 @@ def get_gates(n_elig: int, n_codex: int, n_grok: int,
         return _gates_cache["val"]
     out: dict = {"acct": [], "codex_acct": [], "allocations": {}}
     try:
-        graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
+        cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
         result = subprocess.run(
-            ["bash", "-c", _GATES_SH, "gates", str(n_elig), str(n_codex),
-             str(n_grok), grok_json, codex_json, str(int(now))],
+            [sys.executable, "-m", "bonus_drain", "gates", "--json", "--local"],
             capture_output=True, text=True, timeout=25, check=False,
-            env={**os.environ, "BD": str(BONUS_SKILL_DIR)},
+            env={**os.environ, "PYTHONPATH": str(BONUS_SKILL_DIR)},
         )
-        raw = result.stdout
-        gate_payload: dict | None = None
-        for line in raw.splitlines():
-            if line.startswith("{"):
-                try:
-                    parsed = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(parsed, dict):
-                    gate_payload = parsed
-                continue
-            if "=" not in line:
-                continue
-            k, v = line.split("=", 1)
-            if k == "acct":
-                f = v.split("|")
-                if len(f) == 5:
-                    out["acct"].append({
-                        "label": f[0], "ceiling": _num(f[1]),
-                        "u5": _num(f[2]), "u7": _num(f[3]), "r7": _num(f[4]),
-                    })
-            elif k == "codex_acct":
-                f = v.split("|")
-                if len(f) == 4:
-                    out["codex_acct"].append({
-                        "label": f[0], "ceiling": _num(f[1]),
-                        "u7": _num(f[2]), "r7": _num(f[3]),
-                    })
-            else:
-                out[k] = v
+        gate_payload = json.loads(result.stdout) if result.returncode == 0 else None
+        _preview_account_gates(cfg, out)
+        for provider in ("claude", "codex"):
+            limits = cfg.limits_for_provider(provider)
+            prefix = "" if provider == "claude" else provider + "_"
+            if limits:
+                weekly = max(limits, key=lambda limit: limit.window_seconds)
+                out[prefix + "ceiling"] = weekly.ceiling_percent
+                out[prefix + "lead_hours"] = weekly.lead_seconds // 3600
+                out[prefix + "pct_per_window"] = weekly.max_percent_per_window
+                out[prefix + "est_pct_per_job"] = weekly.estimated_percent_per_job
+                out["window_hours"] = weekly.pacing_window_seconds / 3600
+            out[prefix + "multi"] = int(len(out["acct" if provider == "claude" else "codex_acct"]) > 1)
         # `gates --json` is the current planning boundary. These fields preserve the viewer's
         # display metadata, while shimmer remains driven by durable in-flight runs below.
         gates = gate_payload.get("gates", []) if gate_payload else []
@@ -535,8 +403,6 @@ def get_gates(n_elig: int, n_codex: int, n_grok: int,
     except Exception:  # noqa: BLE001, S110
         # Gate reads are best effort; retain any parsed data if a later step fails.
         pass
-    if PREVIEW:
-        _preview_account_gates(graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG")), out)
     _gates_cache.update(t=now, key=key, val=out)
     return out
 
@@ -557,14 +423,11 @@ def windows_until_reset(reset, lead_hours, window_hours) -> int:
 
 
 def _claude_multi_active() -> bool:
-    """The accounts.sh multi-account predicate, evaluated from disk without sourcing it."""
+    """Read account count from the proxy inventory cache."""
     try:
-        labels = [
-            path for path in CLAUDE_ACCOUNTS_STORE.glob("*.json")
-            if path.name != "mcp.json" and not path.name.endswith(".usage.json")
-        ]
-        return len(labels) >= 2
-    except OSError:
+        cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
+        return sum(account.provider_id == "claude" for account in graph_usage.read_accounts(cfg)) >= 2
+    except (graph_config.ConfigError, OSError, ValueError):
         return False
 
 
@@ -590,7 +453,7 @@ def _canonical_cycle(now: float) -> int:
 
 
 def current_cycle(usage: dict | None) -> int:
-    """Compute the scout-compatible cycle from cached usage and the on-disk account layout."""
+    """Compute the scout-compatible cycle from cached usage and account inventory."""
     now = time.time()
     if _claude_multi_active():
         return _canonical_cycle(now)
@@ -914,8 +777,7 @@ def requeue_task(task_id: str) -> tuple[bool, str]:
 def finish_inflight_task(task_id: str, status: str) -> tuple[bool, str]:
     """Record a terminal event for an in-flight job so it no longer holds a dispatch slot.
 
-    Same claim/lease path as `bonus-drain record`. Does not stop the provider worker; t3-thread
-    has no job-cancel command. The worker may still run until it exits, and a later conflicting
+    Same claim path as `bonus-drain record`. Does not stop the T3 provider worker. The worker may still run until it exits, and a later conflicting
     terminal record is a reconciliation error rather than a second event.
     """
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", task_id):
@@ -934,17 +796,6 @@ def finish_inflight_task(task_id: str, status: str) -> tuple[bool, str]:
         return False, "multiple in-flight runs; reconcile before finishing"
     run = matches[0]
     key = run.eligibility_key or f"legacy/{run.cycle}"
-    account = None
-    if run.account_id:
-        try:
-            account = cfg.account(run.account_id)
-        except graph_config.ConfigError:
-            account = None
-    release_activation = None
-    if account is not None and account.activation_adapter_id:
-        release_activation = lambda: graph_dispatcher._activation(
-            cfg, account, "release", None,
-        )
     if status == "done":
         outcome = {
             "reason": {
@@ -987,7 +838,6 @@ def finish_inflight_task(task_id: str, status: str) -> tuple[bool, str]:
             router_job_id=run.router_job_id,
             summary=f"operator marked {status} from the jobs viewer",
             outcome=outcome,
-            release_activation=release_activation,
         )
     except (QueueError, graph_dispatcher.DispatchError) as exc:
         return False, str(exc)[:500] or "could not finish this job"
@@ -1071,7 +921,6 @@ def enrich(t: dict) -> dict:
 
     oncal = _grep(timer_txt, r"^\s*OnCalendar\s*=\s*(.+)$")
     if not oncal:
-        # interval timers (rotator, some system units) use On*Sec instead of OnCalendar
         interval = _grep(timer_txt, r"^\s*OnUnitActiveSec\s*=\s*(.+)$")
         if interval:
             oncal = f"every {interval}"
@@ -1208,8 +1057,6 @@ def _result(svc: str) -> str:
 def _family(unit: str) -> str:
     if unit.startswith(("cc-bonus-scout", "cc-weekly-anchor")):
         return "bonus-drain"
-    if unit.startswith("cc-token-rotator"):
-        return "rotator"
     if unit.startswith("cc-bg-"):
         return "bg-schedule"
     return "other"
@@ -1218,10 +1065,9 @@ def _family(unit: str) -> str:
 FAMILY_META = {
     "bg-schedule": ("Background jobs", "Ad-hoc + recurring bg-schedule jobs (automatic routing, explicit Claude, or Codex app server threads)", "var(--acc)"),
     "bonus-drain": ("Bonus-drain infrastructure", "Ten-minute scout + slot-freed trigger + weekly usage-window anchor", "var(--ok)"),
-    "rotator": ("Token rotator", "Multi-account credential rotation", "var(--warn)"),
     "other": ("Other timers", "Unrelated system timers", "var(--dim2)"),
 }
-FAMILY_ORDER = ["bg-schedule", "bonus-drain", "rotator", "other"]
+FAMILY_ORDER = ["bg-schedule", "bonus-drain", "other"]
 
 
 # ===========================================================================
@@ -1579,7 +1425,7 @@ def _f(v, default: float = 0.0) -> float:
 
 
 def _card_name(engine: str, label: str) -> str:
-    """Both rotators use the same account labels, so with four cards up a bare "Personal" names
+    """Both proxy pools use the same account labels, so with four cards up a bare "Personal" names
     two different budgets. Prefix the engine, except on the single-budget fallback cards whose
     label already IS the engine."""
     titled = engine[:1].upper() + engine[1:] if engine else engine
@@ -1739,12 +1585,12 @@ def _pace_color(c: dict, p: dict) -> str:
 
 
 def _drain_order(cards: list[dict]) -> list[dict]:
-    """Sorted by what happens next, which is the ordering the rotator itself uses and the one
+    """Sorted by what happens next, which is the ordering the proxy itself uses and the one
     thing a grid of equal cards cannot express: only one account per engine drains per tick, so
     these are a queue with a head, not four peers.
 
     Dispatching first, then accounts whose window is open (nearest reset first, since that is how
-    the rotator picks between them), then closed accounts by how soon they open, then anything
+    the proxy picks between them), then closed accounts by how soon they open, then anything
     with no reading at all - an account we cannot gate is not a candidate for anything.
     """
     def key(c):
@@ -1869,7 +1715,6 @@ def _account_row(c: dict) -> str:
     p = _week(c)
     known = c["u7"] is not None
     u7, ceiling = _f(c["u7"]), _f(c["ceiling"])
-    # The stripe is which subscription the token rotator currently has active, even
     # when that account's usage is unknown. Drain windows span the week, so surplus
     # or an open window must not reuse this gold.
     stripe = "on" if c.get("active") else {"warn": "warn", "dim": ""}.get(tone, "")
@@ -2033,7 +1878,7 @@ def _verdict(cards: list[dict], coord: str, lead_secs: int) -> tuple[str, str, s
 
 
 def _claude_cards(gates: dict, usage: dict | None, n_elig: int, coord: str, batch: int) -> list[dict]:
-    """One card per Claude account when the rotator holds 2+ (each has its own reset, its own
+    """One card per Claude account when the proxy holds 2+ (each has its own reset, its own
     ceiling, and therefore its own end-of-week drain window - collapsing them into a single
     "claude" number would show a weekly percentage that belongs to neither). One card from
     usage.sh otherwise."""
@@ -2053,7 +1898,6 @@ def _claude_cards(gates: dict, usage: dict | None, n_elig: int, coord: str, batc
                      "u5": usage.get("u5"), "u7": usage.get("u7"), "r7": usage.get("r7")}]
         active = "claude"
         # With one account there is nowhere else the drain could be landing, so when the
-        # coordinator names this engine the single card IS the selected account. The rotator
         # store has no `selected` label to match against in this shape, and without this the
         # card never carries the batch: it would render "did not dispatch" mid-dispatch.
         if coord == "claude" or batch > 0:
@@ -2073,7 +1917,6 @@ def _claude_cards(gates: dict, usage: dict | None, n_elig: int, coord: str, batc
             gates, account_id, "claude", a["label"],
             selected=is_sel, coord=coord, inflight=batch,
         )
-        # At most ONE tag: "draining" already implies the rotator is pinned here, so stacking
         # "active" beside it only wraps the header row and knocks the cards out of alignment.
         tag = ""
         if draining:
@@ -2100,10 +1943,10 @@ def _claude_cards(gates: dict, usage: dict | None, n_elig: int, coord: str, batc
 
 
 def _codex_cards(gates: dict, cx: dict | None, n_codex: int, coord: str, batch: int) -> list[dict]:
-    """One card per Codex account when the rotator holds 2+ - each ChatGPT subscription has its
+    """One card per Codex account when the proxy holds 2+ - each ChatGPT subscription has its
     own weekly allowance, its own reset, and its own ceiling, so a single collapsed "codex"
     number would belong to neither. Falls back to the one card from codex-usage.sh (rollout-file
-    scraping) when the rotator store is absent or holds a single account.
+    scraping) when the proxy store is absent or holds a single account.
 
     Only the ACTIVE account can carry a batch: bonus-drain dispatches Codex through whatever
     the provider credential store holds, which is the account the configured activator selected.
@@ -2141,7 +1984,6 @@ def _codex_cards(gates: dict, cx: dict | None, n_codex: int, coord: str, batch: 
             selected=is_sel, coord=coord, inflight=batch,
         )
         # At most ONE tag, same rule as the Claude cards: "draining" already implies the
-        # rotator is pinned here, so stacking "active" beside it wraps the header row.
         if draining:
             tag = '<span class="tag acc">draining</span>'
         elif is_active and len(accounts) > 1:

@@ -9,22 +9,37 @@
     "record_command",
     "adapters",
     "providers",
-    "plans",
-    "accounts",
-    "limits"
+    "limits",
+    "proxy_secret_ref"
   ],
   "properties": {
-    "schema_version": {"const": 1},
-    "database": {"type": "string", "minLength": 1},
-    "cache_dir": {"type": "string", "minLength": 1},
+    "schema_version": {
+      "const": 1
+    },
+    "database": {
+      "type": "string",
+      "minLength": 1
+    },
+    "cache_dir": {
+      "type": "string",
+      "minLength": 1
+    },
     "scout_ntfy_url": {
-      "type": ["string", "null"],
+      "type": [
+        "string",
+        "null"
+      ],
       "minLength": 1,
       "maxLength": 2048,
       "description": "Absolute HTTP or HTTPS ntfy topic URL without credentials, query, or fragment. Omitted or null disables scout failure and recovery notifications."
     },
-    "record_command": {"$ref": "#/$defs/argv"},
-    "usage_max_age_seconds": {"type": "integer", "minimum": 1},
+    "record_command": {
+      "$ref": "#/$defs/argv"
+    },
+    "usage_max_age_seconds": {
+      "type": "integer",
+      "minimum": 1
+    },
     "max_jobs": {
       "type": "integer",
       "minimum": 1,
@@ -35,65 +50,104 @@
       "additionalProperties": false,
       "description": "Host thresholds past which a scout tick launches nothing. CPU uses PSI some avg60 and falls back to load per CPU when PSI is unreadable; an unreadable source gives no verdict.",
       "properties": {
-        "enabled": {"type": "boolean", "default": true},
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
         "cpu_some_avg60_max": {
-          "type": "number", "minimum": 0, "maximum": 100, "default": 40,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 40,
           "description": "Block when /proc/pressure/cpu some avg60 exceeds this percent."
         },
         "mem_available_min_gib": {
-          "type": "number", "minimum": 0, "default": 4,
+          "type": "number",
+          "minimum": 0,
+          "default": 4,
           "description": "Block when MemAvailable falls below this many GiB."
         },
         "load_per_cpu_max": {
-          "type": "number", "exclusiveMinimum": 0, "default": 1.5,
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "default": 1.5,
           "description": "Fallback when PSI is unreadable: block when the 1-minute load average per CPU exceeds this."
         },
         "disk_free_min_gib": {
-          "type": "number", "minimum": 0, "default": 30,
+          "type": "number",
+          "minimum": 0,
+          "default": 30,
           "description": "Block when free space on the queue database's filesystem falls below this many GiB."
         }
       }
     },
     "secret_refs": {
       "type": "array",
-      "items": {"$ref": "#/$defs/secretRef"}
+      "items": {
+        "$ref": "#/$defs/secretRef"
+      }
     },
     "adapters": {
       "type": "array",
-      "items": {"$ref": "#/$defs/adapter"}
+      "items": {
+        "$ref": "#/$defs/adapter"
+      }
     },
     "providers": {
       "type": "array",
-      "items": {"$ref": "#/$defs/provider"}
-    },
-    "plans": {
-      "type": "array",
-      "items": {"$ref": "#/$defs/plan"}
-    },
-    "accounts": {
-      "type": "array",
-      "items": {"$ref": "#/$defs/account"}
+      "items": {
+        "$ref": "#/$defs/provider"
+      }
     },
     "limits": {
       "type": "array",
-      "items": {"$ref": "#/$defs/limit"}
+      "items": {
+        "$ref": "#/$defs/limit"
+      }
     },
     "viewer": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "bind": {"type": "string", "default": "127.0.0.1"},
-        "mutations_enabled": {"type": "boolean", "default": false},
-        "preview": {"type": "boolean", "default": false},
+        "bind": {
+          "type": "string",
+          "default": "127.0.0.1"
+        },
+        "mutations_enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "preview": {
+          "type": "boolean",
+          "default": false
+        },
         "remote": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["trusted_loopback_proxy", "allowed_hosts", "allowed_origins"],
+          "required": [
+            "trusted_loopback_proxy",
+            "allowed_hosts",
+            "allowed_origins"
+          ],
           "properties": {
-            "trusted_loopback_proxy": {"const": true},
-            "allowed_hosts": {"type": "array", "items": {"type": "string"}},
-            "allowed_origins": {"type": "array", "items": {"type": "string"}},
-            "https_terminated": {"type": "boolean"}
+            "trusted_loopback_proxy": {
+              "const": true
+            },
+            "allowed_hosts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "allowed_origins": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "https_terminated": {
+              "type": "boolean"
+            }
           }
         }
       }
@@ -103,108 +157,200 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["path"],
+        "required": [
+          "path"
+        ],
         "properties": {
-          "path": {"type": "string", "minLength": 1},
-          "allow_push": {"type": "boolean"},
-          "allow_pr": {"type": "boolean"}
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "allow_push": {
+            "type": "boolean"
+          },
+          "allow_pr": {
+            "type": "boolean"
+          }
         }
       }
+    },
+    "proxy_secret_ref": {
+      "$ref": "#/$defs/id",
+      "description": "File secret ref containing CPA_BASE_URL and CPA_MGMT_KEY in dotenv format."
+    },
+    "unmetered_max_inflight": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 2
+    },
+    "recurrence_timezone": {
+      "type": "string",
+      "default": "America/New_York"
     }
   },
   "$defs": {
-    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
     "argv": {
       "type": "array",
       "minItems": 1,
-      "items": {"type": "string", "minLength": 1}
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
     },
     "secretRef": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "source"],
+      "required": [
+        "id",
+        "source"
+      ],
       "properties": {
-        "id": {"$ref": "#/$defs/id"},
-        "source": {"enum": ["env", "file"]},
-        "name": {"type": "string"},
-        "path": {"type": "string"}
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "source": {
+          "enum": [
+            "env",
+            "file"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
       },
       "oneOf": [
-        {"required": ["name"]},
-        {"required": ["path"]}
+        {
+          "required": [
+            "name"
+          ]
+        },
+        {
+          "required": [
+            "path"
+          ]
+        }
       ]
     },
     "adapter": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "kind", "argv"],
+      "required": [
+        "id",
+        "kind",
+        "argv"
+      ],
       "properties": {
-        "id": {"$ref": "#/$defs/id"},
-        "kind": {"enum": ["t3-thread", "usage", "reset", "activation"]},
-        "argv": {"$ref": "#/$defs/argv"},
-        "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600},
-        "max_output_bytes": {"type": "integer", "minimum": 1},
-        "env_allowlist": {"type": "array", "items": {"type": "string"}},
-        "secret_refs": {"type": "object", "additionalProperties": {"$ref": "#/$defs/id"}}
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "enum": [
+            "agent-router",
+            "t3-thread"
+          ]
+        },
+        "argv": {
+          "$ref": "#/$defs/argv"
+        },
+        "timeout_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 3600
+        },
+        "max_output_bytes": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "env_allowlist": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "secret_refs": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/id"
+          }
+        }
       }
     },
     "provider": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "dispatch"],
+      "required": [
+        "id",
+        "dispatch"
+      ],
       "properties": {
-        "id": {"$ref": "#/$defs/id"},
+        "id": {
+          "$ref": "#/$defs/id"
+        },
         "dispatch": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["adapter_id", "provider"],
+          "required": [
+            "adapter_id",
+            "provider"
+          ],
           "properties": {
-            "adapter_id": {"$ref": "#/$defs/id"},
-            "provider": {"type": "string", "minLength": 1}
+            "adapter_id": {
+              "$ref": "#/$defs/id"
+            },
+            "provider": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         },
         "capabilities": {
-          "type": "array", "items": {"$ref": "#/$defs/id"},
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/id"
+          },
           "description": "Capabilities this provider offers. Reserved: legacy-exclusive runs migrated claude_only and legacy-exclusive model rows; implement means the provider can drive the implement skill, and a task that invokes it (use_implement, or a /implement, $implement, or implement skill reference in its prompt text) runs only on providers declaring it. Omit implement on providers that cannot drive the skill."
-        },
-        "account_mode": {"type": "string", "enum": ["single", "multi"], "default": "multi"}
-      }
-    },
-    "plan": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["id", "provider_id"],
-      "properties": {
-        "id": {"$ref": "#/$defs/id"},
-        "provider_id": {"$ref": "#/$defs/id"}
-      }
-    },
-    "account": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["id", "provider_id", "plan_id"],
-      "properties": {
-        "id": {"$ref": "#/$defs/id"},
-        "provider_id": {"$ref": "#/$defs/id"},
-        "plan_id": {"$ref": "#/$defs/id"},
-        "usage_adapter_id": {"$ref": "#/$defs/id"},
-        "reset_adapter_id": {"$ref": "#/$defs/id"},
-        "activation_adapter_id": {"$ref": "#/$defs/id"},
-        "activation_scope": {"type": "string", "enum": ["launch", "run"], "default": "run"},
-        "secret_refs": {"type": "object", "additionalProperties": {"$ref": "#/$defs/id"}}
+        }
       }
     },
     "limit": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "plan_id", "window_seconds", "ceiling_percent", "lead_seconds", "batch_size"],
+      "required": [
+        "id",
+        "provider_id",
+        "window_seconds",
+        "ceiling_percent",
+        "lead_seconds",
+        "batch_size"
+      ],
       "properties": {
-        "id": {"$ref": "#/$defs/id"},
-        "plan_id": {"$ref": "#/$defs/id"},
-        "window_seconds": {"type": "integer", "minimum": 1},
-        "ceiling_percent": {"type": "number", "minimum": 0, "maximum": 100},
-        "lead_seconds": {"type": "integer", "minimum": 1},
-        "batch_size": {"type": "integer", "minimum": 1},
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "window_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "ceiling_percent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "lead_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "batch_size": {
+          "type": "integer",
+          "minimum": 1
+        },
         "max_percent_per_window": {
           "type": "number",
           "minimum": 0,
@@ -216,11 +362,17 @@
           "exclusiveMinimum": 0,
           "maximum": 100
         },
-        "pacing_window_seconds": {"type": "integer", "minimum": 1},
+        "pacing_window_seconds": {
+          "type": "integer",
+          "minimum": 1
+        },
         "urgency_seconds": {
           "type": "integer",
           "minimum": 0,
           "description": "Last-N-seconds same-provider pin (bonus drain). Zero disables. Must not exceed window_seconds."
+        },
+        "provider_id": {
+          "$ref": "#/$defs/id"
         }
       }
     }

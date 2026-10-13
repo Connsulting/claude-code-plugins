@@ -23,7 +23,7 @@ sys.path.insert(
 from bonus_drain import cli, config, db, notifications, scout
 from bonus_drain.planner import PlanResult
 
-from tests.readiness_fixture import reviewed
+from tests.readiness_fixture import isolated_cli, reviewed
 from tests.test_bonus_drain_review_repairs import ELIGIBILITY_KEY, NOW, runtime, task
 from tests.test_bonus_drain_scout_host_gate import SKILL_ROOT, _raw_config
 
@@ -131,7 +131,7 @@ class ScoutNotificationTests(unittest.TestCase):
             with mock.patch.object(cli, "_queue", return_value=(self.cfg, self.queue)), \
                  mock.patch.object(scout, "_run_locked", return_value=report), \
                  mock.patch.object(cli, "_json") as output:
-                result = cli.main(["scout", "--json", "--now", str(NOW)])
+                result = isolated_cli(["scout", "--json", "--now", str(NOW)])
             self.assertEqual(result, expected)
             self.assertEqual(output.call_args.args[0], report.to_dict())
         self.assertEqual(len(self.bodies), 1)
@@ -144,7 +144,7 @@ class ScoutNotificationTests(unittest.TestCase):
         with mock.patch.object(cli, "_queue", return_value=(self.cfg, self.queue)), \
              mock.patch.object(scout, "_run_locked", side_effect=RuntimeError("secret exception")), \
              mock.patch.object(cli, "_json"):
-            self.assertEqual(cli.main(["scout", "--json"]), 1)
+            self.assertEqual(isolated_cli(["scout", "--json"]), 1)
         self.assertEqual(len(self.bodies), 1)
         self.assertIn("scout_failure", self.bodies[0])
         self.assertNotIn("secret", self.bodies[0])

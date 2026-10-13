@@ -525,7 +525,7 @@ class GoalScoutTests(unittest.TestCase):
                           'merge_policy': 'stack', 'max_turns': 5, 'max_inflight': 2, 'deadline': NOW+3600,
                           'coordinator': {'model': 'gpt-6-astra'}}, now=NOW)
         snapshots = {(provider, provider+'-account'): usage.UsageSnapshot(provider, provider+'-account', NOW,
-                     {provider+'-weekly': {'used_percent': 20, 'resets_at': NOW+1000}}) for provider in ('alpha', 'beta')}
+                     {"seven_day": {'used_percent': 20, 'resets_at': NOW+1000}}) for provider in ('alpha', 'beta')}
         calls = []
 
         def router(argv, **kwargs):

@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.readiness_fixture import rereviewed, review_json, reviewed
+from tests.readiness_fixture import isolated_cli, rereviewed, review_json, reviewed
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'plugins/bonus-drain/skills/bonus-drain'))
@@ -60,7 +60,7 @@ class AsyncWorkTests(unittest.TestCase):
 
     def test_cli_new_work_has_no_execution_mode_contract(self):
         with mock.patch.object(cli, '_json'):
-            self.assertEqual(cli.main(['add', '--database', str(self.queue.path), '--id', 'new', '--title', 'New', '--kind', 'oneoff', '--size', 'small', '--cwd', '/tmp', '--goal', 'proof', '--readiness-review', review_json(goal='proof'), '--json']), 0)
+            self.assertEqual(isolated_cli(['add', '--database', str(self.queue.path), '--id', 'new', '--title', 'New', '--kind', 'oneoff', '--size', 'small', '--cwd', '/tmp', '--goal', 'proof', '--readiness-review', review_json(goal='proof'), '--json']), 0)
         self.assertNotIn('execution_mode', self.queue.task('new').to_dict())
 
     def test_all_dependencies_must_succeed_before_claim(self):
@@ -137,14 +137,14 @@ class AsyncWorkTests(unittest.TestCase):
         runner_patch.start()
         self.addCleanup(runner_patch.stop)
         with mock.patch.object(cli, '_json') as output:
-            self.assertEqual(cli.main(['add', '--database', str(self.queue.path), '--id', 'cli-start',
+            self.assertEqual(isolated_cli(['add', '--database', str(self.queue.path), '--id', 'cli-start',
                 '--title', 'CLI start', '--kind', 'oneoff', '--size', 'small', '--cwd', '/tmp',
                 '--goal', 'proof', '--start-ref', 'epic/next',
                 '--readiness-review', review_json(goal='proof'), '--json']), 0)
         self.assertEqual(self.queue.task('cli-start').start_ref, 'refs/heads/epic/next')
         self.assertEqual(output.call_args.args[0]['task']['start_ref'], 'refs/heads/epic/next')
         with mock.patch.object(cli, '_json'):
-            self.assertEqual(cli.main(['edit', '--database', str(self.queue.path), 'cli-start',
+            self.assertEqual(isolated_cli(['edit', '--database', str(self.queue.path), 'cli-start',
                 '--changes', json.dumps(rereviewed(self.queue.task('cli-start'), {'start_ref': 'next'})), '--json']), 0)
         self.assertEqual(self.queue.task('cli-start').start_ref, 'refs/heads/next')
         self.assertEqual(fake.unexpected, [])
@@ -214,7 +214,7 @@ class DispatchReadinessTests(unittest.TestCase):
         f.queue.add_task(reviewed({'id': 'child', 'title': 'child', 'cwd': '/tmp', 'goal': 'proof', 'depends_on': ['portable']}))
         router, activation = mock.Mock(), mock.Mock()
         with self.assertRaises(dispatcher.AlreadyClaimed):
-            dispatcher.dispatch(f.config, f.queue, task_id='child', eligibility_key='alpha-account/manual/2000000000', requested_provider='auto', router_call=router, activation_call=activation)
+            dispatcher.dispatch(f.config, f.queue, task_id='child', eligibility_key='alpha-account/manual/2000000000', requested_provider='auto', router_call=router)
         router.assert_not_called()
         activation.assert_not_called()
 
@@ -244,7 +244,7 @@ class ScoutWorkflowTests(unittest.TestCase):
         self.assertEqual({task.id for task in queue.eligible_tasks(0, automatic=True)}, {'portable', 'other-ready'})
         config = replace(fixture.config, adapters=(replace(fixture.config.adapters[0], argv=('/bin/true',)),))
         snapshots = {(provider, provider+'-account'): usage.UsageSnapshot(provider, provider+'-account', kick_tests.NOW,
-            {provider+'-weekly': {'used_percent': 20, 'resets_at': kick_tests.NOW+1000}}) for provider in ('alpha', 'beta')}
+            {"seven_day": {'used_percent': 20, 'resets_at': kick_tests.NOW+1000}}) for provider in ('alpha', 'beta')}
         with mock.patch.object(scout, 'read_all', return_value=snapshots):
             report = scout.run_once(config, queue, now_epoch=kick_tests.NOW, router_call=fixture._router)
         self.assertEqual({result.task_id for result in report.dispatched}, {'portable', 'other-ready'})

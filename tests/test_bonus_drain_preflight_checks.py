@@ -165,7 +165,7 @@ class FakeRunner:
 ISSUE_OPEN_2855 = {"type": "issue_open", "repo": REPO, "number": 2855}
 ISSUE_OPEN_3815 = {"type": "issue_open", "repo": REPO, "number": 3815}
 PR_2994_INTO_EPIC = {"type": "pr_merged", "repo": REPO, "pr": 2994, "base": "epic/aws-secrets"}
-RELEASE_V0_11_1 = {"type": "release_exists", "repo": REPO, "tag": "v0.11.1"}
+RELEASE_V0_11_1 = {"type": "publication_exists", "repo": REPO, "tag": "v0.11.1"}
 
 
 def handoff(state: str = "unmerged", remote: str = "git@github.com:owner/repo.git") -> dict[str, str]:
@@ -351,7 +351,7 @@ class CheckSpecTests(PreflightCase):
         self.assertEqual([json.loads(item) for item in twice], [ISSUE_OPEN_2855, RELEASE_V0_11_1])
         self.assertEqual(set(checks.CHECK_FIELDS), {
             "base_ref_exists", "issue_open", "issue_in_milestone",
-            "pr_merged", "release_exists", "file_matches",
+            "pr_merged", "publication_exists", "file_matches",
             "mcp_authenticated", "k8s_resource_exists", "openrouter_credit",
         })
 
@@ -477,10 +477,10 @@ class CheckEvaluateTests(PreflightCase):
         }
         self.assertVerdict(self.evaluate(RELEASE_V0_11_1, responses)[0], "pass")
         self.assertVerdict(self.evaluate(
-            {"type": "release_exists", "repo": REPO, "tag": "v99.99.99"}, responses,
+            {"type": "publication_exists", "repo": REPO, "tag": "v99.99.99"}, responses,
         )[0], "fail")
         self.assertVerdict(self.evaluate(
-            {"type": "release_exists", "repo": REPO, "tag": "v0.12.0-rc1"}, responses,
+            {"type": "publication_exists", "repo": REPO, "tag": "v0.12.0-rc1"}, responses,
         )[0], "fail", "draft")
 
     def test_file_contents_shapes(self) -> None:
@@ -654,7 +654,7 @@ class CheckGatingTests(PreflightCase):
         status = self.ready("member")
         self.assertEqual(
             [(item["origin"], item["type"]) for item in status["checks"]],
-            [("declared", "release_exists")],
+            [("declared", "publication_exists")],
         )
         fake = self.runner({gh_release("v0.11.1"): ok(RELEASE_0_11_1)})
         self.refresh(fake)
@@ -670,7 +670,7 @@ class CheckGatingTests(PreflightCase):
         listed = self.ready("both")["checks"]
         self.assertEqual(
             sorted((item["origin"], item["type"]) for item in listed),
-            [("builtin", "issue_open"), ("declared", "release_exists")],
+            [("builtin", "issue_open"), ("declared", "publication_exists")],
         )
         for item in listed:
             self.assertEqual(item["status"], "unchecked")
@@ -1592,7 +1592,7 @@ class CollisionTests(PreflightCase):
 
 
 class AccountBackoffStoreTests(PreflightCase):
-    def hold(self, cause: str = "activation_unswitched") -> db.AccountHold:
+    def hold(self, cause: str = "account_unavailable") -> db.AccountHold:
         return db.AccountHold("alpha", "alpha-account", cause, "requested account did not become active")
 
     def backoff_rows(self) -> list[dict[str, Any]]:
@@ -1612,7 +1612,7 @@ class AccountBackoffStoreTests(PreflightCase):
         stored = self.backoff_rows()
         self.assertEqual(
             [(row["provider_id"], row["account_id"], row["cause"], row["failures"]) for row in stored],
-            [("alpha", "alpha-account", "activation_unswitched", 1)],
+            [("alpha", "alpha-account", "account_unavailable", 1)],
         )
         self.assertEqual(db._timestamp_epoch(stored[0]["not_before"]), NOW + 1_800)
         self.assertEqual(len(self.queue.account_backoffs(now_epoch=NOW + 1)), 1)
@@ -1709,7 +1709,7 @@ class ResumeWhenTests(PreflightCase):
                 db.validate_outcome(status, outcome)
 
 
-OWN_RELEASE = {"type": "release_exists", "repo": REPO, "tag": "v0.13.0"}
+OWN_RELEASE = {"type": "publication_exists", "repo": REPO, "tag": "v0.13.0"}
 
 
 class OwnReleaseResumeTests(PreflightCase):
@@ -1738,7 +1738,7 @@ class OwnReleaseResumeTests(PreflightCase):
         stored = self.stored(attempt)
         self.assertNotIn("resume_when", stored)
         self.assertEqual(stored["reason"]["code"], "verification_needed")
-        self.assertEqual(stored["reason"]["signature"], "verification_needed:own_release_resume_refused")
+        self.assertEqual(stored["reason"]["signature"], "verification_needed:own_publication_resume_refused")
         self.assertIn(f"{REPO}@v0.13.0", stored["reason"]["detail"])
         self.assertIn("required v0.13.0 images unavailable", stored["reason"]["detail"])
 
@@ -1755,7 +1755,7 @@ class OwnReleaseResumeTests(PreflightCase):
         ))
         self.assertEqual(declared["resume_when"], [OWN_RELEASE])
 
-        upstream = {"type": "release_exists", "repo": "astral-sh/uv", "tag": "0.9.0"}
+        upstream = {"type": "publication_exists", "repo": "astral-sh/uv", "tag": "0.9.0"}
         other = self.stored(self.fail(
             "upstream", authority(resume_when=[upstream]), source_ref=f"{REPO}#4500",
         ))

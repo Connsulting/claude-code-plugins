@@ -12,6 +12,8 @@ from types import SimpleNamespace
 from typing import ClassVar
 from unittest import mock
 
+from tests.readiness_fixture import isolated_cli
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
@@ -260,7 +262,7 @@ class ViewerTests(AwaitingHumanCase):
             mock.patch.object(cli, "_queue", return_value=(cfg, self.queue)),
             captured_json() as payloads,
         ):
-            code = cli.main(["queue", "0", "--json", "--now", str(NOW + 10)])
+            code = isolated_cli(["queue", "0", "--json", "--now", str(NOW + 10)])
         self.assertEqual(code, 0)
         payload = payloads[0]
         self.assertNotIn("parked", payload["eligible_task_ids"])

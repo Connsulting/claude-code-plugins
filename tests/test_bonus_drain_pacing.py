@@ -12,7 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
 
-from bonus_drain.config import LimitConfig, RuntimeConfig
+from bonus_drain.config import LimitConfig
 from bonus_drain.planner import _limit_admission, build_plan
 
 NOW = 2_000_000_000
@@ -108,215 +108,24 @@ class RemainingHeadroomFloorTests(unittest.TestCase):
         self.assertEqual(reason, "at ceiling for limit weekly")
 
 
-def _two_account_config() -> RuntimeConfig:
-    from bonus_drain import config as config_module
+class SameProviderPoolTests(unittest.TestCase):
+    def test_shared_threshold_contains_failure_to_one_account(self):
+        import tempfile
 
-    router = config_module.AdapterConfig("router", "t3-thread", ("/bin/true",))
-    return config_module.RuntimeConfig(
-        schema_version=1,
-        source_path=None,
-        database=Path("/tmp/unused.db"),
-        record_command=("/bin/true",),
-        secret_refs=(),
-        adapters=(router,),
-        providers=(
-            config_module.ProviderConfig(
-                "claude", config_module.DispatchBinding("router", "claude"),
-                frozenset(), "multi",
-            ),
-        ),
-        plans=(
-            config_module.PlanConfig("claude-personal-plan", "claude"),
-            config_module.PlanConfig("claude-business-plan", "claude"),
-        ),
-        accounts=(
-            config_module.AccountConfig("claude-personal", "claude", "claude-personal-plan"),
-            config_module.AccountConfig("claude-business", "claude", "claude-business-plan"),
-        ),
-        limits=(
-            config_module.LimitConfig(
-                "claude-personal-weekly", "claude-personal-plan", 604_800, 95, 604_800, 6,
-                max_percent_per_window=0.5, estimated_percent_per_job=1.0,
-                pacing_window_seconds=HOUR, urgency_seconds=24 * HOUR,
-            ),
-            config_module.LimitConfig(
-                "claude-business-weekly", "claude-business-plan", 604_800, 99, 604_800, 6,
-                max_percent_per_window=0.5, estimated_percent_per_job=1.0,
-                pacing_window_seconds=HOUR, urgency_seconds=24 * HOUR,
-            ),
-        ),
-        viewer={},
-        pr_exceptions=(),
-        usage_max_age_seconds=3600,
-        cache_dir=Path("/tmp"),
-    )
+        from bonus_drain import db, planner
 
-
-class SameProviderAccountSelectionTests(unittest.TestCase):
-    def test_closed_sibling_keeps_its_own_capacity_reason(self) -> None:
-        from bonus_drain.usage import UsageSnapshot
-
-        config = _two_account_config()
-        snapshots = {
-            ("claude", "claude-personal"): UsageSnapshot(
-                "claude", "claude-personal", NOW,
-                {"claude-personal-weekly": {"used_percent": 80, "resets_at": NOW + 40 * HOUR}},
-            ),
-            ("claude", "claude-business"): UsageSnapshot(
-                "claude", "claude-business", NOW,
-                {"claude-business-weekly": {"used_percent": 70, "resets_at": NOW + 40 * HOUR}},
-            ),
-        }
-        # personal remaining 15, floor 20 → closed. business remaining 29, floor 20 → 9 surplus.
-        plan = build_plan(
-            config, snapshots,
-            eligible_count={("claude", "claude-personal"): 4, ("claude", "claude-business"): 4},
-            now_epoch=NOW,
+        from tests.test_bonus_drain_scout_inflight import (
+            _multi_account_config,
+            _multi_snapshots,
         )
-        self.assertEqual([batch.account_id for batch in plan.batches], ["claude-business"])
-        self.assertEqual(plan.batches[0].batch_size, 4)
-        self.assertEqual(
-            plan.closed[("claude", "claude-personal")],
-            "at reserve target for limit claude-personal-weekly",
-        )
-
-    def test_capacity_plan_keeps_both_drainable_siblings_open(self) -> None:
-        from bonus_drain.usage import UsageSnapshot
-
-        config = _two_account_config()
-        snapshots = {
-            ("claude", "claude-personal"): UsageSnapshot(
-                "claude", "claude-personal", NOW,
-                {"claude-personal-weekly": {"used_percent": 70, "resets_at": NOW + 40 * HOUR}},
-            ),
-            ("claude", "claude-business"): UsageSnapshot(
-                "claude", "claude-business", NOW,
-                {"claude-business-weekly": {"used_percent": 60, "resets_at": NOW + 40 * HOUR}},
-            ),
-        }
-        # personal remaining 25-20=5; business remaining 39-20=19.
-        plan = build_plan(
-            config, snapshots,
-            eligible_count={("claude", "claude-personal"): 6, ("claude", "claude-business"): 6},
-            now_epoch=NOW,
-        )
-        self.assertEqual(
-            [batch.account_id for batch in plan.batches],
-            ["claude-personal", "claude-business"],
-        )
-        self.assertEqual([batch.batch_size for batch in plan.batches], [5, 6])
-        self.assertNotIn(("claude", "claude-personal"), plan.closed)
-        self.assertNotIn(("claude", "claude-business"), plan.closed)
-
-    def test_capacity_plan_keeps_urgent_and_nonurgent_siblings_open(self) -> None:
-        from bonus_drain.usage import UsageSnapshot
-
-        config = _two_account_config()
-        snapshots = {
-            ("claude", "claude-personal"): UsageSnapshot(
-                "claude", "claude-personal", NOW,
-                {"claude-personal-weekly": {"used_percent": 70, "resets_at": NOW + 29 * HOUR}},
-            ),
-            ("claude", "claude-business"): UsageSnapshot(
-                "claude", "claude-business", NOW,
-                {"claude-business-weekly": {"used_percent": 85, "resets_at": NOW + 20 * HOUR}},
-            ),
-        }
-        plan = build_plan(
-            config, snapshots,
-            eligible_count={("claude", "claude-personal"): 6, ("claude", "claude-business"): 6},
-            now_epoch=NOW,
-        )
-        self.assertEqual(
-            [batch.account_id for batch in plan.batches],
-            ["claude-business", "claude-personal"],
-        )
-        self.assertNotIn(("claude", "claude-personal"), plan.closed)
-        self.assertNotIn(("claude", "claude-business"), plan.closed)
-
-    def test_urgent_sibling_at_floor_does_not_block_a_drainable_sibling(self) -> None:
-        from bonus_drain.usage import UsageSnapshot
-
-        config = _two_account_config()
-        snapshots = {
-            ("claude", "claude-personal"): UsageSnapshot(
-                "claude", "claude-personal", NOW,
-                {"claude-personal-weekly": {"used_percent": 70, "resets_at": NOW + 29 * HOUR}},
-            ),
-            ("claude", "claude-business"): UsageSnapshot(
-                "claude", "claude-business", NOW,
-                {"claude-business-weekly": {"used_percent": 89, "resets_at": NOW + 20 * HOUR}},
-            ),
-        }
-        # business remaining 10, floor 10 → at floor but still in last 24h.
-        plan = build_plan(
-            config, snapshots,
-            eligible_count={("claude", "claude-personal"): 6, ("claude", "claude-business"): 6},
-            now_epoch=NOW,
-        )
-        self.assertEqual([batch.account_id for batch in plan.batches], ["claude-personal"])
-        self.assertEqual(
-            plan.closed[("claude", "claude-business")],
-            "at reserve target for limit claude-business-weekly",
-        )
-
-    def test_capacity_plan_does_not_preselect_an_urgent_sibling(self) -> None:
-        from bonus_drain.usage import UsageSnapshot
-
-        config = _two_account_config()
-        snapshots = {
-            ("claude", "claude-business"): UsageSnapshot(
-                "claude", "claude-business", NOW,
-                {"claude-business-weekly": {"used_percent": 0, "resets_at": NOW + 168 * HOUR}},
-            ),
-            ("claude", "claude-personal"): UsageSnapshot(
-                "claude", "claude-personal", NOW,
-                {"claude-personal-weekly": {"used_percent": 80, "resets_at": NOW + 9 * HOUR}},
-            ),
-        }
-        plan = build_plan(
-            config, snapshots,
-            eligible_count={("claude", "claude-personal"): 6, ("claude", "claude-business"): 6},
-            now_epoch=NOW,
-        )
-        self.assertEqual(
-            [batch.account_id for batch in plan.batches],
-            ["claude-personal", "claude-business"],
-        )
-        self.assertNotIn(("claude", "claude-personal"), plan.closed)
-        self.assertNotIn(("claude", "claude-business"), plan.closed)
-
-    def test_neither_sibling_above_floor_yields_no_provider_batch(self) -> None:
-        from bonus_drain.usage import UsageSnapshot
-
-        config = _two_account_config()
-        snapshots = {
-            ("claude", "claude-personal"): UsageSnapshot(
-                "claude", "claude-personal", NOW,
-                {"claude-personal-weekly": {"used_percent": 75, "resets_at": NOW + 40 * HOUR}},
-            ),
-            ("claude", "claude-business"): UsageSnapshot(
-                "claude", "claude-business", NOW,
-                {"claude-business-weekly": {"used_percent": 79, "resets_at": NOW + 40 * HOUR}},
-            ),
-        }
-
-        plan = build_plan(
-            config, snapshots,
-            eligible_count={("claude", "claude-personal"): 6, ("claude", "claude-business"): 6},
-            now_epoch=NOW,
-        )
-
-        self.assertEqual(plan.batches, ())
-        self.assertEqual(
-            plan.closed,
-            {
-                ("claude", "claude-personal"):
-                    "at reserve target for limit claude-personal-weekly",
-                ("claude", "claude-business"):
-                    "at reserve target for limit claude-business-weekly",
-            },
-        )
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            config = _multi_account_config(db.QueueDB(root / "queue.db"), root / "cache", root / "unused")
+            result = build_plan(config, _multi_snapshots(80, 70), eligible_count=4, now_epoch=NOW)
+            self.assertEqual([batch.account_id for batch in result.batches], ["alpha-business"])
+            self.assertEqual(result.closed[("alpha", "alpha-personal")], "at reserve target for limit alpha-weekly")
+            final = planner.finalize_plan(config, result, eligible_count=4)
+            self.assertEqual(final.batches[0].batch_size, 4)
 
 
 class RecurringCycleEligibilityTests(unittest.TestCase):

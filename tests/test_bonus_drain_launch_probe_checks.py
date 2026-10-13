@@ -23,7 +23,7 @@ sys.path.insert(
 
 from bonus_drain import checks, cli
 
-from tests.readiness_fixture import review_json
+from tests.readiness_fixture import isolated_cli, review_json
 from tests.test_bonus_dependency_recovery import NOW, captured_json, rows, runtime
 from tests.test_bonus_drain_preflight_checks import (
     GH_OFFLINE_STDERR,
@@ -678,7 +678,7 @@ class ProbeCliTests(HermeticEnvironment, ProbeCase):
                     contextlib.redirect_stderr(stderr),
                     captured_json() as payloads,
                 ):
-                    code = cli.main([
+                    code = isolated_cli([
                         "add", "--database", str(self.queue.path), "--id", "bad-mcp", "--title", "bad-mcp",
                         "--kind", "oneoff", "--size", "small", "--cwd", str(self.root),
                         "--goal", "complete bad-mcp", "--readiness-review", review_json(goal="complete bad-mcp"),
@@ -700,7 +700,7 @@ class ProbeCliTests(HermeticEnvironment, ProbeCase):
             contextlib.redirect_stderr(stderr),
             captured_json() as payloads,
         ):
-            code = cli.main([
+            code = isolated_cli([
                 "add", "--database", str(self.queue.path), "--id", "needs-svc", "--title", "needs-svc",
                 "--kind", "oneoff", "--size", "small", "--cwd", str(self.root),
                 "--goal", "complete needs-svc", "--readiness-review", review_json(goal="complete needs-svc"),

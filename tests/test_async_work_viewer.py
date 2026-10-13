@@ -52,7 +52,7 @@ class AsyncViewerTests(unittest.TestCase):
         with self.assertRaisesRegex(dispatcher.InvalidRoute, 'Preview'):
             dispatcher.dispatch(replace(self.fixture.config, viewer={'preview': True}), self.fixture.queue,
                 task_id='portable', eligibility_key='alpha-account/manual/2000000000',
-                requested_provider='auto', router_call=callback, activation_call=callback)
+                requested_provider='auto', router_call=callback)
         callback.assert_not_called()
 
     def test_waiting_tasks_are_visible_even_without_eligible_provider_ids(self):
@@ -380,9 +380,8 @@ class AsyncViewerTests(unittest.TestCase):
 
     def test_preview_usage_comes_from_copied_cache_without_account_credentials(self):
         cfg = mock.Mock()
-        cfg.accounts_for_provider.side_effect = lambda provider: [SimpleNamespace(id=provider+'-account', plan_id=provider+'-plan')]
-        cfg.limits = [SimpleNamespace(id=p+'-weekly', plan_id=p+'-plan', window_seconds=604800, ceiling_percent=95) for p in ('claude','codex')]
-        snapshots = {(p,p+'-account'): SimpleNamespace(limits={p+'-weekly': {'used_percent':42,'resets_at':2000000000}}) for p in ('claude','codex')}
+        cfg.limits_for_provider.return_value = [SimpleNamespace(ceiling_percent=95)]
+        snapshots = {(p,p+'-account'): SimpleNamespace(fresh=True, limits={'seven_day': {'used_percent':42,'resets_at':2000000000}}) for p in ('claude','codex')}
         gates = {}
         with mock.patch.object(self.viewer.graph_usage, 'read_all', return_value=snapshots) as read:
             self.viewer._preview_account_gates(cfg, gates)

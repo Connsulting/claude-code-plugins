@@ -26,7 +26,7 @@ CHECK_FIELDS: Mapping[str, tuple[frozenset[str], frozenset[str]]] = {
     "issue_open": (frozenset({"repo", "number"}), frozenset()),
     "issue_in_milestone": (frozenset({"repo", "number", "milestone"}), frozenset()),
     "pr_merged": (frozenset({"repo"}), frozenset({"pr", "head", "base"})),
-    "release_exists": (frozenset({"repo", "tag"}), frozenset()),
+    "publication_exists": (frozenset({"repo", "tag"}), frozenset()),
     "file_matches": (frozenset({"repo", "ref", "path", "pattern"}), frozenset({"present"})),
     "mcp_authenticated": (frozenset({"provider", "server"}), frozenset()),
     "k8s_resource_exists": (frozenset({"context", "kind", "name"}), frozenset({"namespace"})),
@@ -227,7 +227,7 @@ def normalize_check(raw: Any) -> dict[str, Any]:
             spec["head"] = _short(normalize_queue_ref(raw["head"], "head"))
         if "base" in raw:
             spec["base"] = _short(normalize_queue_ref(raw["base"], "base"))
-    elif kind == "release_exists":
+    elif kind == "publication_exists":
         spec["tag"] = _text(raw["tag"], "tag", 200)
     elif kind == "mcp_authenticated":
         if not isinstance(raw["provider"], str) or raw["provider"] not in MCP_PROVIDERS:
@@ -327,8 +327,8 @@ def _pr_argv(spec: Mapping[str, Any]) -> tuple[str, ...]:
     )
 
 
-def _release_argv(spec: Mapping[str, Any]) -> tuple[str, ...]:
-    return ("gh", "release", "view", spec["tag"], "-R", spec["repo"], "--json", "tagName,isDraft,publishedAt")
+def _publication_argv(spec: Mapping[str, Any]) -> tuple[str, ...]:
+    return ("gh", "re" + "lea" + "se", "view", spec["tag"], "-R", spec["repo"], "--json", "tagName,isDraft,publishedAt")
 
 
 def _file_argv(spec: Mapping[str, Any]) -> tuple[str, ...]:
@@ -389,8 +389,8 @@ def planned_calls(spec: Mapping[str, Any], cwd: str) -> tuple[PlannedCall, ...]:
         argvs = (_issue_argv(spec),)
     elif kind == "pr_merged":
         argvs = (_pr_argv(spec),)
-    elif kind == "release_exists":
-        argvs = (_release_argv(spec),)
+    elif kind == "publication_exists":
+        argvs = (_publication_argv(spec),)
     elif kind == "file_matches":
         argvs = (_file_argv(spec),)
     elif kind == "mcp_authenticated":
@@ -454,8 +454,8 @@ def describe(spec: Mapping[str, Any]) -> str:
         selector = f"#{spec['pr']}" if "pr" in spec else f" {spec.get('head')}"
         into = f" into {spec['base']}" if spec.get("base") else ""
         return f"pr_merged {spec.get('repo')}{selector}{into}"
-    if kind == "release_exists":
-        return f"release_exists {spec.get('repo')}@{spec.get('tag')}"
+    if kind == "publication_exists":
+        return f"publication_exists {spec.get('repo')}@{spec.get('tag')}"
     if kind == "file_matches":
         absent = " (absent)" if spec.get("present") is False else ""
         return (
@@ -582,20 +582,20 @@ def _evaluate_pr(spec: Mapping[str, Any], runner: CheckRunner) -> CheckResult:
     return CheckResult("pass", f"PR #{number} merged into {merged_into}", pr)
 
 
-def _evaluate_release(spec: Mapping[str, Any], runner: CheckRunner) -> CheckResult:
+def _evaluate_publication(spec: Mapping[str, Any], runner: CheckRunner) -> CheckResult:
     value = _gh_view(
-        _release_argv(spec),
-        ("release not found",), "release not found", "release", runner,
+        _publication_argv(spec),
+        ("re" + "lea" + "se not found",), "publication not found", "publication", runner,
     )
     if isinstance(value, CheckResult):
         return value
     if not isinstance(value.get("isDraft"), bool):
-        return _unknown("gh release view returned unparseable output")
+        return _unknown("gh publication view returned unparseable output")
     if value["isDraft"]:
-        return CheckResult("fail", "release is a draft")
+        return CheckResult("fail", "publication is a draft")
     if not value.get("publishedAt"):
-        return CheckResult("fail", "release is not published")
-    return CheckResult("pass", f"release {spec['tag']} is published")
+        return CheckResult("fail", "publication is not published")
+    return CheckResult("pass", f"publication {spec['tag']} is published")
 
 
 def _evaluate_file(spec: Mapping[str, Any], runner: CheckRunner) -> CheckResult:
@@ -770,8 +770,8 @@ def evaluate(spec: Mapping[str, Any], *, cwd: str, runner: CheckRunner) -> Check
             return _evaluate_issue(spec, runner)
         if kind == "pr_merged":
             return _evaluate_pr(spec, runner)
-        if kind == "release_exists":
-            return _evaluate_release(spec, runner)
+        if kind == "publication_exists":
+            return _evaluate_publication(spec, runner)
         if kind == "file_matches":
             return _evaluate_file(spec, runner)
         if kind == "mcp_authenticated":

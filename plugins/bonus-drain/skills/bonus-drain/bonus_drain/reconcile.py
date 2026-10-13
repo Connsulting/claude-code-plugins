@@ -11,7 +11,7 @@ from typing import Any
 from .adapters import AdapterError
 from .config import ConfigError, RuntimeConfig
 from .db import QueueDB, QueueError
-from .dispatcher import DispatchError, _activation
+from .dispatcher import DispatchError
 from .t3_state import TERMINAL_RUN_STATUSES, T3StateError, T3Thread, lookup_thread
 
 _ABANDONED_TURN_IDLE_SECONDS = 900
@@ -122,7 +122,6 @@ def _normalize_observation(raw: Any, thread_id: str, *, provider_name: str, now_
 
 def reconcile_inflight(
     config: RuntimeConfig, queue: QueueDB, *, dry_run: bool = False,
-    activation_call: Callable[[str, str], Any] | None = None,
     now_epoch: int | None = None,
     thread_lookup: Callable[[str], T3Thread | None] | None = None,
     state_path: Path | None = None,
@@ -194,7 +193,6 @@ def reconcile_inflight(
             if not any(item.rowid_pk == run.rowid_pk for item in queue.inflight()):
                 report["action"] = "already_recorded"
                 continue
-            account = config.account(run.account_id) if run.account_id else None
             event = queue.record(
                 run.task, run.eligibility_key, attempt_id=run.attempt_id,
                 status="failed", kind=run.kind,
@@ -215,9 +213,9 @@ def reconcile_inflight(
                     if now_epoch is not None else None
                 ),
                 now_epoch=now_epoch,
-                release_activation=lambda account=account: _activation(config, account, "release", activation_call),
             )
             report.update(action="failed", terminal_rowid=event.rowid_pk)
         except (ConfigError, QueueError, DispatchError) as exc:
+            # record() rejects conflicting terminal results atomically. Preserve the winner.
             report["reason"] = str(exc)
     return tuple(reports)

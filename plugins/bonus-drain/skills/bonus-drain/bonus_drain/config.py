@@ -1,7 +1,7 @@
 """Strict, stdlib-only configuration for Bonus Drain.
 
-The configuration graph is intentionally expressed in terms of ids and adapters.  Provider
-names are data; none of them have semantic meaning to this module or to the planner.
+Providers and pacing limits use configured ids. Account inventory and usage are supplied
+by the proxy cache, with no configured account graph.
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ _SECRET_KEY_RE = re.compile(
 )
 _REFERENCE_KEYS = {
     "secret_ref",
+    "proxy_secret_ref",
     "secret_refs",
 }
 
@@ -131,31 +132,12 @@ class ProviderConfig:
     id: str
     dispatch: DispatchBinding
     capabilities: frozenset[str] = frozenset()
-    account_mode: str = "multi"
-
-
-@dataclass(frozen=True)
-class PlanConfig:
-    id: str
-    provider_id: str
-
-
-@dataclass(frozen=True)
-class AccountConfig:
-    id: str
-    provider_id: str
-    plan_id: str
-    usage_adapter_id: str | None = None
-    activation_adapter_id: str | None = None
-    activation_scope: str = "run"
-    secret_refs: Mapping[str, str] = field(default_factory=dict)
-    reset_adapter_id: str | None = None
 
 
 @dataclass(frozen=True)
 class LimitConfig:
     id: str
-    plan_id: str
+    provider_id: str
     window_seconds: int
     ceiling_percent: float
     lead_seconds: int
@@ -186,8 +168,7 @@ class RuntimeConfig:
     secret_refs: tuple[SecretRef, ...]
     adapters: tuple[AdapterConfig, ...]
     providers: tuple[ProviderConfig, ...]
-    plans: tuple[PlanConfig, ...]
-    accounts: tuple[AccountConfig, ...]
+    proxy_secret_ref: str | None
     limits: tuple[LimitConfig, ...]
     viewer: Mapping[str, Any]
     pr_exceptions: tuple[Mapping[str, Any], ...]
@@ -195,6 +176,7 @@ class RuntimeConfig:
     usage_max_age_seconds: int = 3_600
     cache_dir: Path = Path(".")
     max_jobs: int | None = None
+    unmetered_max_inflight: int = 2
     host_load_gate: HostLoadGateConfig = field(default_factory=HostLoadGateConfig)
     scout_ntfy_url: str | None = None
 
@@ -212,17 +194,8 @@ class RuntimeConfig:
     def provider(self, provider_id: str) -> ProviderConfig:
         return _lookup(self.providers, provider_id, "provider")
 
-    def plan(self, plan_id: str) -> PlanConfig:
-        return _lookup(self.plans, plan_id, "plan")
-
-    def account(self, account_id: str) -> AccountConfig:
-        return _lookup(self.accounts, account_id, "account")
-
-    def limits_for_plan(self, plan_id: str) -> tuple[LimitConfig, ...]:
-        return tuple(limit for limit in self.limits if limit.plan_id == plan_id)
-
-    def accounts_for_provider(self, provider_id: str) -> tuple[AccountConfig, ...]:
-        return tuple(account for account in self.accounts if account.provider_id == provider_id)
+    def limits_for_provider(self, provider_id: str) -> tuple[LimitConfig, ...]:
+        return tuple(limit for limit in self.limits if limit.provider_id == provider_id)
 
 
 def _lookup(items: Iterable[Any], item_id: str, label: str) -> Any:
@@ -413,8 +386,8 @@ def validate_config(
     data = _require_mapping(raw, "config")
     _reject_unknown(data, {
         "schema_version", "database", "cache_dir", "record_command",
-        "usage_max_age_seconds", "max_jobs", "recurrence_timezone", "secret_refs", "adapters", "providers", "plans",
-        "accounts", "limits", "viewer", "pr_exceptions", "host_load_gate", "scout_ntfy_url",
+        "usage_max_age_seconds", "max_jobs", "recurrence_timezone", "secret_refs", "adapters", "providers", "proxy_secret_ref",
+        "unmetered_max_inflight", "limits", "viewer", "pr_exceptions", "host_load_gate", "scout_ntfy_url",
     }, "config")
     _reject_inline_secrets(data)
     env = os.environ if environ is None else environ
@@ -434,15 +407,11 @@ def validate_config(
     secret_rows = [_require_mapping(row, f"secret_refs[{i}]") for i, row in enumerate(_require_list(data.get("secret_refs", []), "secret_refs"))]
     adapter_rows = [_require_mapping(row, f"adapters[{i}]") for i, row in enumerate(_require_list(data.get("adapters", []), "adapters"))]
     provider_rows = [_require_mapping(row, f"providers[{i}]") for i, row in enumerate(_require_list(data.get("providers", []), "providers"))]
-    plan_rows = [_require_mapping(row, f"plans[{i}]") for i, row in enumerate(_require_list(data.get("plans", []), "plans"))]
-    account_rows = [_require_mapping(row, f"accounts[{i}]") for i, row in enumerate(_require_list(data.get("accounts", []), "accounts"))]
     limit_rows = [_require_mapping(row, f"limits[{i}]") for i, row in enumerate(_require_list(data.get("limits", []), "limits"))]
     for label, rows in (
         ("secret_refs", secret_rows),
         ("adapters", adapter_rows),
         ("providers", provider_rows),
-        ("plans", plan_rows),
-        ("accounts", account_rows),
         ("limits", limit_rows),
     ):
         _unique(rows, label)
@@ -466,7 +435,7 @@ def validate_config(
     secret_ids = {item.id for item in secrets}
 
     adapters: list[AdapterConfig] = []
-    allowed_kinds = {"t3-thread", "usage", "reset", "activation"}
+    allowed_kinds = {"agent-router", "t3-thread"}
     for index, row in enumerate(adapter_rows):
         _reject_unknown(row, {
             "id", "kind", "argv", "timeout_seconds", "max_output_bytes",
@@ -498,28 +467,10 @@ def validate_config(
             )
         )
     adapter_by_id = {adapter.id: adapter for adapter in adapters}
-    activation_identity_options = (
-        "--action", "--account", "--expected-account", "--label",
-        "--pin-file", "--active-path",
-    )
-    for adapter in adapters:
-        if adapter.kind != "activation":
-            continue
-        for token in adapter.argv:
-            option = token.split("=", 1)[0]
-            if (
-                option.startswith("--")
-                and option not in activation_identity_options
-                and any(identity.startswith(option) for identity in activation_identity_options)
-            ):
-                raise ConfigError(
-                    f"activation adapter {adapter.id} has abbreviated identity option {option}"
-                )
-
     providers: list[ProviderConfig] = []
     for index, row in enumerate(provider_rows):
         _reject_unknown(
-            row, {"id", "dispatch", "capabilities", "account_mode"},
+            row, {"id", "dispatch", "capabilities"},
             f"providers[{index}]",
         )
         item_id = _identifier(row.get("id"), f"providers[{index}].id")
@@ -527,201 +478,36 @@ def validate_config(
         _reject_unknown(dispatch, {"adapter_id", "provider"}, f"providers[{index}].dispatch")
         adapter_id = _identifier(dispatch.get("adapter_id"), f"providers[{index}].dispatch.adapter_id")
         adapter = adapter_by_id.get(adapter_id)
-        if adapter is None or adapter.kind != "t3-thread":
+        if adapter is None or adapter.kind not in allowed_kinds:
             raise ConfigError(f"provider {item_id} dispatch must reference an t3-thread adapter")
         router_provider = _string(dispatch.get("provider", item_id), f"providers[{index}].dispatch.provider")
         capabilities_raw = _require_list(row.get("capabilities", []), f"providers[{index}].capabilities")
         capabilities = frozenset(_identifier(value, f"providers[{index}].capabilities") for value in capabilities_raw)
-        account_mode = _string(row.get("account_mode", "multi"), f"providers[{index}].account_mode")
-        if account_mode not in {"single", "multi"}:
-            raise ConfigError(f"providers[{index}].account_mode must be single or multi")
         providers.append(ProviderConfig(
-            item_id, DispatchBinding(adapter_id, router_provider), capabilities, account_mode,
+            item_id, DispatchBinding(adapter_id, router_provider), capabilities,
         ))
     provider_ids = {provider.id for provider in providers}
 
-    plans: list[PlanConfig] = []
-    for index, row in enumerate(plan_rows):
-        _reject_unknown(row, {"id", "provider_id"}, f"plans[{index}]")
-        item_id = _identifier(row.get("id"), f"plans[{index}].id")
-        provider_id = _identifier(row.get("provider_id"), f"plans[{index}].provider_id")
-        if provider_id not in provider_ids:
-            raise ConfigError(f"plan {item_id} references missing provider {provider_id}")
-        plans.append(PlanConfig(item_id, provider_id))
-    plan_by_id = {plan.id: plan for plan in plans}
-
-    accounts: list[AccountConfig] = []
-    for index, row in enumerate(account_rows):
-        _reject_unknown(row, {
-            "id", "provider_id", "plan_id", "usage_adapter_id", "reset_adapter_id",
-            "activation_adapter_id", "activation_scope", "secret_refs",
-        }, f"accounts[{index}]")
-        item_id = _identifier(row.get("id"), f"accounts[{index}].id")
-        provider_id = _identifier(row.get("provider_id"), f"accounts[{index}].provider_id")
-        plan_id = _identifier(row.get("plan_id"), f"accounts[{index}].plan_id")
-        plan = plan_by_id.get(plan_id)
-        if provider_id not in provider_ids:
-            raise ConfigError(f"account {item_id} references missing provider {provider_id}")
-        if plan is None or plan.provider_id != provider_id:
-            raise ConfigError(f"account {item_id} has a missing or cross-provider plan {plan_id}")
-        usage_adapter_id = row.get("usage_adapter_id")
-        reset_adapter_id = row.get("reset_adapter_id")
-        activation_adapter_id = row.get("activation_adapter_id")
-        activation_scope = _string(
-            row.get("activation_scope", "run"),
-            f"accounts[{index}].activation_scope",
-        )
-        if activation_scope not in {"launch", "run"}:
-            raise ConfigError(f"accounts[{index}].activation_scope must be launch or run")
-        if usage_adapter_id is not None:
-            usage_adapter_id = _identifier(usage_adapter_id, f"accounts[{index}].usage_adapter_id")
-            adapter = adapter_by_id.get(usage_adapter_id)
-            if adapter is None or adapter.kind != "usage":
-                raise ConfigError(f"account {item_id} usage adapter is missing or not kind usage")
-        if reset_adapter_id is not None:
-            reset_adapter_id = _identifier(reset_adapter_id, f"accounts[{index}].reset_adapter_id")
-            adapter = adapter_by_id.get(reset_adapter_id)
-            if adapter is None or adapter.kind != "reset":
-                raise ConfigError(f"account {item_id} reset adapter is missing or not kind reset")
-        if activation_adapter_id is not None:
-            activation_adapter_id = _identifier(activation_adapter_id, f"accounts[{index}].activation_adapter_id")
-            adapter = adapter_by_id.get(activation_adapter_id)
-            if adapter is None or adapter.kind != "activation":
-                raise ConfigError(f"account {item_id} activation adapter is missing or not kind activation")
-        elif activation_scope != "run":
-            raise ConfigError(
-                f"account {item_id} activation_scope requires an activation adapter"
-            )
-        accounts.append(
-            AccountConfig(
-                item_id,
-                provider_id,
-                plan_id,
-                usage_adapter_id=usage_adapter_id,
-                reset_adapter_id=reset_adapter_id,
-                activation_adapter_id=activation_adapter_id,
-                activation_scope=activation_scope,
-                secret_refs=_ref_map(row.get("secret_refs"), f"accounts[{index}].secret_refs", secret_ids),
-            )
-        )
-
-    accounts_by_provider: dict[str, list[AccountConfig]] = {}
-    for account in accounts:
-        accounts_by_provider.setdefault(account.provider_id, []).append(account)
-
-    def adapter_option(adapter: AdapterConfig, option: str) -> str | None:
-        if any(token.startswith(f"{option}=") for token in adapter.argv):
-            raise ConfigError(
-                f"activation adapter {adapter.id} must use a separate value for {option}"
-            )
-        indexes = [index for index, token in enumerate(adapter.argv) if token == option]
-        if len(indexes) > 1:
-            raise ConfigError(
-                f"activation adapter {adapter.id} repeats identity option {option}"
-            )
-        if not indexes:
-            return None
-        index = indexes[0]
-        if index + 1 >= len(adapter.argv) or adapter.argv[index + 1].startswith("--"):
-            raise ConfigError(
-                f"activation adapter {adapter.id} is missing a value for {option}"
-            )
-        return adapter.argv[index + 1]
-
-    for provider_id, provider_accounts in accounts_by_provider.items():
-        provider = next(item for item in providers if item.id == provider_id)
-        if provider.account_mode == "single" and len(provider_accounts) != 1:
-            raise ConfigError(f"single-account provider {provider_id} requires exactly one configured account identity")
-        if len(provider_accounts) < 2:
-            continue
-        activation_domains: set[tuple[str | None, str | None, str | None]] = set()
-        activation_scopes: set[str] = set()
-        activation_labels: set[str] = set()
-        for account in provider_accounts:
-            if not account.activation_adapter_id:
-                raise ConfigError(
-                    f"multi-account provider {provider_id} requires activation for every account"
-                )
-            adapter = adapter_by_id[account.activation_adapter_id]
-            identity_options = (
-                "--action", "--account", "--expected-account", "--label",
-                "--pin-file", "--active-path",
-            )
-            identity = {
-                option: adapter_option(adapter, option)
-                for option in identity_options
-            }
-            verified = (
-                Path(adapter.argv[0]).name == "bonus-drain-account-activation"
-                and identity["--action"] == "{action}"
-                and identity["--account"] == "{account_id}"
-                and identity["--expected-account"] == account.id
-                and identity["--label"] is not None
-                and identity["--pin-file"] is not None
-                and identity["--active-path"] is not None
-                and Path(identity["--pin-file"]).is_absolute()
-                and Path(identity["--active-path"]).is_absolute()
-            )
-            if not verified:
-                raise ConfigError(
-                    f"multi-account provider {provider_id} account {account.id} requires a verified activation adapter with active-account proof"
-                )
-            label = identity["--label"]
-            assert label is not None
-            if label in activation_labels:
-                raise ConfigError(
-                    f"multi-account provider {provider_id} activation label is duplicated"
-                )
-            activation_labels.add(label)
-            activation_domains.add((
-                adapter_option(adapter, "--pin-file"),
-                adapter_option(adapter, "--active-path"),
-                adapter_option(adapter, "--rotate"),
-            ))
-            activation_scopes.add(account.activation_scope)
-        if len(activation_domains) != 1:
-            raise ConfigError(
-                f"multi-account provider {provider_id} activation adapters must share one PIN, active proof, and rotator domain"
-            )
-        if len(activation_scopes) != 1:
-            raise ConfigError(
-                f"multi-account provider {provider_id} accounts must share one activation_scope"
-            )
-
-    direct_grok_providers: set[str] = set()
-    for account in accounts:
-        if not account.usage_adapter_id:
-            continue
-        adapter = adapter_by_id[account.usage_adapter_id]
-        if Path(adapter.argv[0]).name == "bonus-drain-grok-usage":
-            direct_grok_providers.add(account.provider_id)
-            nested_timeout = adapter_option(adapter, "--timeout")
-            try:
-                nested_seconds = float(nested_timeout) if nested_timeout is not None else None
-            except ValueError as exc:
-                raise ConfigError(f"direct Grok adapter {adapter.id} has an invalid nested timeout") from exc
-            if nested_seconds is None or nested_seconds >= adapter.timeout_seconds:
-                raise ConfigError(
-                    f"direct Grok adapter {adapter.id} nested timeout must be shorter than its outer adapter timeout"
-                )
-    for provider_id in direct_grok_providers:
-        provider = next(item for item in providers if item.id == provider_id)
-        if provider.account_mode != "single" or len(accounts_by_provider.get(provider_id, ())) != 1:
-            raise ConfigError(
-                f"direct Grok provider {provider_id} must declare single account mode and exactly one configured account identity"
-            )
+    proxy_ref = data.get("proxy_secret_ref")
+    if proxy_ref is not None:
+        proxy_ref = _identifier(proxy_ref, "proxy_secret_ref")
+        ref = next((item for item in secrets if item.id == proxy_ref), None)
+        if ref is None or ref.source != "file":
+            raise ConfigError("proxy_secret_ref must reference a file secret")
+    elif providers:
+        raise ConfigError("proxy_secret_ref is required with providers")
 
     limits: list[LimitConfig] = []
     for index, row in enumerate(limit_rows):
         _reject_unknown(row, {
-            "id", "plan_id", "window_seconds", "ceiling_percent", "lead_seconds",
+            "id", "provider_id", "window_seconds", "ceiling_percent", "lead_seconds",
             "batch_size", "max_percent_per_window", "estimated_percent_per_job",
             "pacing_window_seconds", "urgency_seconds",
         }, f"limits[{index}]")
         item_id = _identifier(row.get("id"), f"limits[{index}].id")
-        plan_id = _identifier(row.get("plan_id"), f"limits[{index}].plan_id")
-        if plan_id not in plan_by_id:
-            raise ConfigError(f"limit {item_id} references missing plan {plan_id}")
+        provider_id = _identifier(row.get("provider_id"), f"limits[{index}].provider_id")
+        if provider_id not in provider_ids:
+            raise ConfigError(f"limit {item_id} references missing provider {provider_id}")
         estimate_raw = row.get("estimated_percent_per_job")
         estimate = None if estimate_raw is None else _number(
             estimate_raw, f"limits[{index}].estimated_percent_per_job",
@@ -738,7 +524,7 @@ def validate_config(
         limits.append(
             LimitConfig(
                 item_id,
-                plan_id,
+                provider_id,
                 window_seconds,
                 _number(row.get("ceiling_percent"), f"limits[{index}].ceiling_percent", minimum=0, maximum=100),
                 _integer(row.get("lead_seconds"), f"limits[{index}].lead_seconds", minimum=1),
@@ -843,14 +629,14 @@ def validate_config(
         secret_refs=tuple(secrets),
         adapters=tuple(adapters),
         providers=tuple(providers),
-        plans=tuple(plans),
-        accounts=tuple(accounts),
+        proxy_secret_ref=proxy_ref,
         limits=tuple(limits),
         viewer=viewer,
         pr_exceptions=tuple(pr_exceptions),
         recurrence_timezone=recurrence_timezone,
         usage_max_age_seconds=_integer(data.get("usage_max_age_seconds", 3_600), "usage_max_age_seconds", minimum=1),
         cache_dir=cache_dir,
+        unmetered_max_inflight=_integer(data.get("unmetered_max_inflight", 2), "unmetered_max_inflight", minimum=1),
         max_jobs=(
             None if data.get("max_jobs") is None
             else _integer(data.get("max_jobs"), "max_jobs", minimum=1)
@@ -909,8 +695,7 @@ def minimal_config(
         secret_refs=(),
         adapters=(),
         providers=(),
-        plans=(),
-        accounts=(),
+        proxy_secret_ref=None,
         limits=(),
         viewer={"bind": "127.0.0.1", "mutations_enabled": False},
         pr_exceptions=(),

@@ -26,7 +26,7 @@ from . import (
     usage,
 )
 from . import config as config_module
-from .kick import kick_task, resolve_active_accounts
+from .kick import kick_task
 
 
 class CLIError(RuntimeError):
@@ -386,7 +386,7 @@ def _account_records(cfg: config_module.RuntimeConfig, args: argparse.Namespace)
     now = _now(args)
     records = usage.read_all(cfg, now_epoch=now)
     result = []
-    for account in cfg.accounts:
+    for account in usage.read_accounts(cfg, now_epoch=now):
         if getattr(args, "provider", None) and account.provider_id != args.provider:
             continue
         if getattr(args, "account", None) and account.id != args.account:
@@ -487,23 +487,12 @@ def _command(args: argparse.Namespace) -> int:
             args.attempt_id is None or claim.attempt_id == args.attempt_id
         )
         account_id = args.account_id or (claim.account_id if exact_claim else None)
-        release_activation = None
-        if args.status in db.TERMINAL_STATUSES and account_id:
-            try:
-                account = cfg.account(account_id)
-            except config_module.ConfigError:
-                account = None
-            if account is not None and account.activation_adapter_id:
-                release_activation = lambda: dispatcher._activation(
-                    cfg, account, "release", None,
-                )
         outcome, outcome_path = _outcome(args, cfg)
         event = queue.record(
             args.task, key, attempt_id=args.attempt_id, status=args.status,
             outcome=outcome, provider_id=args.provider_id or args.engine,
             account_id=account_id, kind=args.kind, cycle=args.cycle, ts=args.ts,
             branch=args.branch, summary=args.summary, router_job_id=args.router_job_id,
-            release_activation=release_activation,
         )
         if outcome_path is not None and args.status == "done":
             dispatcher.remove_outcome_file(outcome_path)
@@ -747,8 +736,10 @@ def _command(args: argparse.Namespace) -> int:
         })
         return 0
     if command == "plan":
-        _cfg, _queue_obj, result = _plan(args)
-        _json(result.to_dict())
+        cfg, _queue_obj, result = _plan(args)
+        payload = result.to_dict()
+        payload["accounts"] = [record.to_dict() for record in usage.read_all(cfg, now_epoch=_now(args)).values()]
+        _json(payload)
         return 0
     if command == "usage":
         cfg = _load_config(args, graph_required=True)
@@ -761,12 +752,7 @@ def _command(args: argparse.Namespace) -> int:
             if len(records) != 1:
                 raise CLIError("legacy JSON usage output requires exactly one selected account")
             record = records[0]
-            account = cfg.account(record.account_id)
-            configured_limits = sorted(
-                cfg.limits_for_plan(account.plan_id), key=lambda item: (item.window_seconds, item.id)
-            )
-            longest = configured_limits[-1] if configured_limits else None
-            reading = record.limits.get(longest.id, {}) if longest else {}
+            reading = record.limits.get("seven_day", {})
             _json({
                 "provider_id": record.provider_id,
                 "account_id": record.account_id,
@@ -927,7 +913,7 @@ def _command(args: argparse.Namespace) -> int:
                 print(f"held: no readiness review: {missing}")
             for item in report:
                 for entry in item.get("cleared", ()):
-                    print(f"blocker may have cleared, re-examine (nothing released): {item['task_id']}: {entry['check']}: {entry['detail']}")
+                    print(f"blocker may have cleared, re-examine (nothing freed): {item['task_id']}: {entry['check']}: {entry['detail']}")
         return 0
     if command == "readiness-backfill":
         _cfg, queue = _queue(args)
@@ -1037,7 +1023,7 @@ def _accounts_command(
     queue: db.QueueDB | None,
 ) -> int:
     action = args.accounts_command
-    accounts = list(cfg.accounts)
+    accounts = list(usage.read_accounts(cfg, now_epoch=_now(args)))
     if action == "labels":
         for account in accounts:
             print(account.id)
@@ -1056,7 +1042,9 @@ def _accounts_command(
         print(anchor + cycles * period)
         return 0
     if action == "usage":
-        account = cfg.account(args.account)
+        account = next((item for item in accounts if item.id == args.account), None)
+        if account is None:
+            raise CLIError("unknown proxy account")
         record = usage.read_all(cfg, now_epoch=_now(args))[(account.provider_id, account.id)]
         print(usage.legacy_window_line(cfg, record))
         return 0 if record.fresh else 1
@@ -1064,14 +1052,11 @@ def _accounts_command(
         if queue is None:
             raise CLIError("accounts select requires the authoritative queue")
         now = _now(args)
-        active_account_ids, identity_failures = resolve_active_accounts(cfg, queue)
         records = usage.read_all(cfg, now_epoch=now)
         result = planner.build_plan(cfg, records, eligible_count=1, now_epoch=now)
-        result = planner.close_providers(result, identity_failures)
         result = planner.finalize_plan(
             cfg,
             result,
-            active_account_ids=active_account_ids,
             eligible_count=1,
         )
         if result.batches:

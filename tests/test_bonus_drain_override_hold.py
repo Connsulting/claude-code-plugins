@@ -13,9 +13,9 @@ sys.path.insert(
     str(Path(__file__).resolve().parents[1] / "plugins" / "bonus-drain" / "skills" / "bonus-drain"),
 )
 
-from bonus_drain import cli, db, goals
+from bonus_drain import db, goals
 
-from tests.readiness_fixture import rereviewed
+from tests.readiness_fixture import isolated_cli, rereviewed
 from tests.test_bonus_dependency_recovery import (
     NOW,
     RecoveryCase,
@@ -31,7 +31,7 @@ from tests.test_bonus_dependency_recovery import (
 class OverrideHoldCase(RecoveryCase):
     def requeue_cli(self, task_id: str, *extra: str, now: int = NOW + 10) -> tuple[int, list[object]]:
         with captured_json() as payloads:
-            code = cli.main([
+            code = isolated_cli([
                 "requeue", "--database", str(self.queue.path), task_id,
                 "--json", "--now", str(now), *extra,
             ])

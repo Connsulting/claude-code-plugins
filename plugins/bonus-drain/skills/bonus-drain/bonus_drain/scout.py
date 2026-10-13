@@ -20,15 +20,14 @@ from .db import (
     task_requires_legacy_exclusive,
 )
 from .dispatcher import (
-    ActivationUnavailable,
     AmbiguousDispatch,
     DispatchResult,
     ProviderLaunchUnavailable,
     dispatch,
 )
-from .kick import resolve_active_accounts
 from .planner import (
     PlanResult,
+    accounts_from_snapshots,
     build_plan,
     close_providers,
     finalize_plan,
@@ -268,7 +267,7 @@ def _initialized_queue_reader(queue: Any) -> Any:
 
 def _cycle_anchor(config: RuntimeConfig, snapshots: Mapping[Any, Any], now_epoch: int) -> int:
     resets: list[int] = []
-    for account in config.accounts:
+    for account in accounts_from_snapshots(config, snapshots):
         snapshot = snapshots.get((account.provider_id, account.id))
         if snapshot is None:
             continue
@@ -355,11 +354,9 @@ def _apply_inflight_caps(
     """Subtract already-running jobs from this tick, per provider.
 
     A running job tightens that provider's cap; it does not block other providers.
-    Running work on a sibling account of the same provider blocks a switch so a
-    shared credential is not moved under live jobs.
     """
 
-    by_provider, by_account = _inflight_index(queue, now_epoch)
+    by_provider, _by_account = _inflight_index(queue, now_epoch)
     held_providers = set(provider_holds) | {
         claim.provider_id for claim in queue.claims(state="ambiguous")
     }
@@ -372,21 +369,6 @@ def _apply_inflight_caps(
         key = (batch.provider_id, batch.account_id)
         if batch.provider_id in held_providers:
             reason = "provider lifecycle requires reconciliation"
-            closed[key] = reason
-            gates_by_key[key] = replace(
-                gates_by_key[key], open=False, reason=reason, batch_size=0,
-            )
-            continue
-        sibling = next(
-            (
-                account_id
-                for (provider_id, account_id), count in by_account.items()
-                if provider_id == batch.provider_id and account_id != batch.account_id and count > 0
-            ),
-            None,
-        )
-        if sibling is not None:
-            reason = f"provider inflight on {sibling}"
             closed[key] = reason
             gates_by_key[key] = replace(
                 gates_by_key[key], open=False, reason=reason, batch_size=0,
@@ -443,50 +425,14 @@ def _apply_account_backoff(
     return PlanResult(tuple(kept), closed, gates, plan.generated_at)
 
 
-UNREPORTED_PROBE_SPENT = "weekly usage still unreported after this period's probe run"
 
 
-def _apply_unreported_probe(
-    plan: PlanResult, snapshots: Mapping[Any, Any], queue: Any,
-) -> PlanResult:
-    """Close an account whose unreported period already received its one probe dispatch.
-
-    An ``unreported_since`` reading means the provider has not reported this period's
-    percent. The planner admits one job on it; any claim or run on the account since the
-    period started spends that probe, and the account stays closed until the provider
-    reports a real percent or the period resets.
-    """
-
-    closed = dict(plan.closed)
-    gates_by_key = {(gate.provider_id, gate.account_id): gate for gate in plan.gates}
-    kept = []
-    for batch in plan.batches:
-        key = (batch.provider_id, batch.account_id)
-        snapshot = snapshots.get(key)
-        limits = getattr(snapshot, "limits", None) or {}
-        starts = [
-            int(reading["unreported_since"])
-            for reading in limits.values()
-            if isinstance(reading, Mapping) and "unreported_since" in reading
-        ]
-        if not starts or not queue.dispatched_since(
-            batch.provider_id, batch.account_id, since_epoch=min(starts),
-        ):
-            kept.append(batch)
-            continue
-        closed[key] = UNREPORTED_PROBE_SPENT
-        gates_by_key[key] = replace(
-            gates_by_key[key], open=False, reason=UNREPORTED_PROBE_SPENT, batch_size=0,
-        )
-    gates = tuple(gates_by_key[(gate.provider_id, gate.account_id)] for gate in plan.gates)
-    return PlanResult(tuple(kept), closed, gates, plan.generated_at)
 
 
 def _apply_global_cap(
     plan: PlanResult,
     queue: QueueDB,
     config: RuntimeConfig,
-    active_account_ids: Mapping[str, str],
     *,
     now_epoch: int,
 ) -> PlanResult:
@@ -502,7 +448,7 @@ def _apply_global_cap(
     remaining = max(0, config.max_jobs - sum(by_provider.values()))
     closed = dict(plan.closed)
     gates_by_key = {(gate.provider_id, gate.account_id): gate for gate in plan.gates}
-    preferred = preferred_provider_batches(config, plan, active_account_ids)
+    preferred = preferred_provider_batches(config, plan)
     ranked = sorted(
         preferred,
         key=lambda batch: (
@@ -583,7 +529,7 @@ def plan_tick(
     # Per provider lacking the implement capability: dependency-ready implement-skill tasks
     # that would be eligible there with that capability and are not eligible without it.
     implement_only: dict[str, tuple[Any, ...]] = {}
-    for account in config.accounts:
+    for account in accounts_from_snapshots(config, snapshots):
         provider = config.provider(account.provider_id)
         eligible = reader.eligible_tasks(
             anchor,
@@ -605,7 +551,6 @@ def plan_tick(
             if task.id not in eligible_ids and task_invokes_implement(task)
             and dependency_ready(task)
         )
-    active_account_ids, identity_failures = resolve_active_accounts(config, reader)
     account_backoffs = reader.account_backoffs(now_epoch=now)
     if provider_holds is None:
         provider_holds = db.doctor(queue).provider_holds
@@ -618,19 +563,16 @@ def plan_tick(
         """Apply every gate closure to one availability map; reads only."""
 
         result = build_plan(config, snapshots, eligible_count=eligible_count, now_epoch=now)
-        result = close_providers(result, identity_failures)
         result = _apply_account_backoff(result, account_backoffs)
-        result = _apply_unreported_probe(result, snapshots, reader)
         result = _apply_inflight_caps(
             result, queue, now_epoch=now, provider_holds=provider_holds,
         )
         result = _apply_global_cap(
-            result, queue, config, active_account_ids, now_epoch=now,
+            result, queue, config, now_epoch=now,
         )
         result = finalize_plan(
             config,
             result,
-            active_account_ids=active_account_ids,
             eligible_count=eligible_count,
         )
         if blocker is not None:
@@ -810,13 +752,12 @@ def run_once(
     now_epoch: int | None = None,
     dry_run: bool = False,
     router_call: Callable[..., Any] | None = None,
-    activation_call: Callable[[str, str], Any] | None = None,
     host_load_reader: Callable[[], HostLoad] | None = None,
     check_runner: checks.CheckRunner | None = None,
 ) -> ScoutReport:
     """Plan and dispatch one tick using cache only.
 
-    The scout never invokes a usage adapter.  ``refresh`` is the sole usage producer.
+    The scout reads only the proxy usage cache.  ``refresh`` is the sole usage producer.
     A tick that finds another tick holding the lock returns a skipped report untouched.
     """
 
@@ -840,7 +781,7 @@ def run_once(
         try:
             report = _run_locked(
                 config, queue, cache_root, now=now, dry_run=dry_run,
-                router_call=router_call, activation_call=activation_call,
+                router_call=router_call,
                 host_load_reader=host_load_reader, check_runner=check_runner,
             )
         except Exception:
@@ -857,7 +798,7 @@ def run_once(
         )
         return report
     finally:
-        # Closing the descriptor releases the flock.
+        # Closing the descriptor frees the flock.
         os.close(fd)
 
 
@@ -869,7 +810,6 @@ def _run_locked(
     now: int,
     dry_run: bool,
     router_call: Callable[..., Any] | None,
-    activation_call: Callable[[str, str], Any] | None,
     host_load_reader: Callable[[], HostLoad] | None,
     check_runner: checks.CheckRunner | None = None,
 ) -> ScoutReport:
@@ -895,7 +835,7 @@ def _run_locked(
         },)
 
     reconciliation = reconcile_inflight(
-        config, queue, dry_run=dry_run, activation_call=activation_call,
+        config, queue, dry_run=dry_run,
         now_epoch=now,
     )
     goal_updates = tuple(goals.GoalStore(queue).tick(now=now, dry_run=dry_run))
@@ -972,9 +912,9 @@ def _run_locked(
                         requested_provider=batch.provider_id,
                         trigger="bonus",
                         now_epoch=now,
-                        router_call=router_call, activation_call=activation_call,
+                        router_call=router_call,
                     ))
-                except (ActivationUnavailable, ProviderLaunchUnavailable) as exc:
+                except ProviderLaunchUnavailable as exc:
                     hold = exc.account_hold
                     if hold is not None:
                         # A managed account hold is not a scout failure: reporting it as an
@@ -989,7 +929,7 @@ def _run_locked(
                     break
                 except AmbiguousDispatch as exc:
                     errors.append({"task_id": task.id, "kind": "ambiguous", "message": str(exc)})
-                    # The claim and durable activation lease remain fail-closed because the job may
+                    # The claim remains fail-closed because the job may
                     # exist. Continue with compatible work on the same account only; doctor requires
                     # explicit reconciliation before an account switch.
                 except Exception as exc:  # noqa: BLE001

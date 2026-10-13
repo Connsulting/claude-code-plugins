@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from tests.readiness_fixture import rereviewed, reviewed
+from tests.readiness_fixture import isolated_cli, proxy_fixture, rereviewed, reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
@@ -25,8 +25,6 @@ sys.path.insert(0, str(SKILL_ROOT))
 
 from bonus_drain import cli, db, dispatcher, goals, scout, usage
 from bonus_drain import config as config_module
-
-from tests.test_bonus_drain_scout_inflight import _open_snapshots, _two_provider_config
 
 NOW = 2_000_000_000
 KEY = "alpha-account/alpha-weekly/2000001000"
@@ -131,45 +129,15 @@ def runtime(
     router: Path | str = "/bin/true",
     *,
     source_path: Path | None = None,
-    activation_scope: str = "run",
-    activation: bool = False,
 ) -> config_module.RuntimeConfig:
-    adapters = [config_module.AdapterConfig("router", "t3-thread", (str(router),))]
-    activation_id = None
-    if activation:
-        activation_id = "activation"
-        adapters.append(config_module.AdapterConfig("activation", "activation", ("/bin/true",)))
-    return config_module.RuntimeConfig(
-        schema_version=1,
-        source_path=source_path,
-        database=database,
-        record_command=(str(CLI), "record"),
-        secret_refs=(),
-        adapters=tuple(adapters),
-        providers=(
-            config_module.ProviderConfig(
-                "alpha", config_module.DispatchBinding("router", "alpha"),
-                frozenset({db.IMPLEMENT_CAPABILITY}), "single",
-            ),
-        ),
-        plans=(config_module.PlanConfig("alpha-plan", "alpha"),),
-        accounts=(
-            config_module.AccountConfig(
-                "alpha-account", "alpha", "alpha-plan",
-                activation_adapter_id=activation_id,
-                activation_scope=activation_scope,
-            ),
-        ),
-        limits=(
+    adapters = [config_module.AdapterConfig("router", "agent-router", (str(router),))]
+    return proxy_fixture(config_module.RuntimeConfig(schema_version=1, source_path=source_path, database=database, record_command=(str(CLI), "record"), secret_refs=(), adapters=tuple(adapters), providers=(
+            config_module.ProviderConfig("alpha", config_module.DispatchBinding("router", "alpha"), frozenset({db.IMPLEMENT_CAPABILITY})),
+        ), limits=(
             config_module.LimitConfig(
-                "alpha-weekly", "alpha-plan", 604_800, 95, 20_000, 6,
+                "alpha-weekly", "alpha", 604_800, 95, 20_000, 6,
             ),
-        ),
-        viewer={},
-        pr_exceptions=(),
-        usage_max_age_seconds=3_600,
-        cache_dir=database.parent / "cache",
-    )
+        ), viewer={}, pr_exceptions=(), usage_max_age_seconds=3_600, cache_dir=database.parent / "cache", proxy_secret_ref=None), (("alpha", "alpha-account"),))
 
 
 @contextlib.contextmanager
@@ -247,7 +215,7 @@ class AttemptAndLegacyContracts(RecoveryCase):
         self.add("kind-child", depends_on=["kind-parent"])
 
         with captured_json() as payloads:
-            code = cli.main([
+            code = isolated_cli([
                 "record", "--database", str(self.queue.path), "--task", "kind-parent",
                 "--kind", "recurring", "--cycle", "0", "--status", "done", "--json",
             ])
@@ -269,7 +237,7 @@ class AttemptAndLegacyContracts(RecoveryCase):
         self.assertNotEqual(self.queue.readiness("kind-parent", now_epoch=NOW)["state"], "done")
         self.assertFalse(self.queue.readiness("kind-child", now_epoch=NOW)["ready"])
 
-    def test_public_release_claim_refuses_a_dispatched_attempt_and_preserves_ownership(self) -> None:
+    def test_public_free_claim_refuses_a_dispatched_attempt_and_preserves_ownership(self) -> None:
         self.add("dispatched-owner")
         attempt = self.claim("dispatched-owner")
         self.queue.record(
@@ -279,7 +247,7 @@ class AttemptAndLegacyContracts(RecoveryCase):
         )
 
         with self.assertRaisesRegex(db.QueueError, "dispatch|launch|abort"):
-            self.queue.release_claim("dispatched-owner", KEY, reason="unsafe public release")
+            self.queue.free_claim("dispatched-owner", KEY, reason="unsafe public release")
 
         claim = self.queue.claim_for("dispatched-owner", KEY)
         self.assertEqual(claim.attempt_id, attempt.id)
@@ -293,10 +261,6 @@ class AttemptAndLegacyContracts(RecoveryCase):
     def test_exact_worker_terminal_resolves_its_ambiguous_attempt_and_lease(self) -> None:
         self.add("ambiguous-worker")
         attempt = self.claim("ambiguous-worker")
-        self.queue.acquire_activation(
-            "ambiguous-worker", KEY, "alpha", "alpha-account", lambda: None,
-            attempt_id=attempt.id,
-        )
         self.queue.record(
             "ambiguous-worker", KEY, attempt_id=attempt.id, status="dispatched",
             provider_id="alpha", account_id="alpha-account", router_job_id="job-unknown",
@@ -305,18 +269,14 @@ class AttemptAndLegacyContracts(RecoveryCase):
         self.queue.mark_attempt_ambiguous(
             "ambiguous-worker", KEY, attempt.id, "router response was lost",
         )
-        release = mock.Mock()
 
         completed = self.queue.record(
             "ambiguous-worker", KEY, attempt_id=attempt.id, status="done",
-            outcome=verified(), provider_id="alpha", account_id="alpha-account",
-            release_activation=release, timestamp=iso(NOW + 1), now_epoch=NOW + 1,
+            outcome=verified(), provider_id="alpha", account_id="alpha-account", timestamp=iso(NOW + 1), now_epoch=NOW + 1,
         )
 
         self.assertEqual(completed.attempt_id, attempt.id)
-        release.assert_called_once_with()
         self.assertEqual(self.queue.claims(), [])
-        self.assertEqual(self.queue.activation_leases(), [])
         self.assertEqual(self.queue.inflight(), [])
         self.assertEqual(self.queue.attempts(task_id="ambiguous-worker")[0].state, "done")
 
@@ -329,9 +289,6 @@ class AttemptAndLegacyContracts(RecoveryCase):
         )
         self.assertEqual(as_dict(decision)["state"], "scheduled")
         second = self.claim("parent", key=KEY, now=NOW)
-        self.queue.acquire_activation(
-            "parent", KEY, "alpha", "alpha-account", lambda: None,
-        )
         self.queue.record(
             "parent", KEY, attempt_id=second.id, status="dispatched",
             provider_id="alpha", account_id="alpha-account", router_job_id="job-2",
@@ -346,7 +303,6 @@ class AttemptAndLegacyContracts(RecoveryCase):
 
         self.assertEqual(replay.attempt_id, first.id)
         self.assertEqual(self.queue.claim_for("parent", KEY).attempt_id, second.id)
-        self.assertEqual(self.queue.activation_leases()[0].attempt_id, second.id)
         self.assertEqual(self.queue.inflight()[0].attempt_id, second.id)
         with self.assertRaisesRegex(db.QueueError, "conflict|already recorded"):
             self.queue.record(
@@ -511,7 +467,7 @@ class AutomaticRecoveryContracts(RecoveryCase):
             ) as readiness,
             captured_json() as payloads,
         ):
-            code = cli.main(["queue", "0", "--json", "--now", str(NOW)])
+            code = isolated_cli(["queue", "0", "--json", "--now", str(NOW)])
 
         self.assertEqual(code, 0)
         self.assertEqual(readiness.call_count, 2)
@@ -597,7 +553,7 @@ class AutomaticRecoveryContracts(RecoveryCase):
         outcome_path.write_text(json.dumps(reason(signature="retryable:backdated")), encoding="utf-8")
 
         with mock.patch.object(db.time, "time", return_value=NOW), captured_json() as payloads:
-            code = cli.main([
+            code = isolated_cli([
                 "record", "--database", str(self.queue.path), "--task", "backdated",
                 "--eligibility-key", KEY, "--attempt-id", attempt.id,
                 "--kind", "oneoff", "--cycle", "0", "--status", "failed",
@@ -646,7 +602,7 @@ class AutomaticRecoveryContracts(RecoveryCase):
         snapshots = {
             ("alpha", "alpha-account"): usage.UsageSnapshot(
                 "alpha", "alpha-account", NOW + 2_101,
-                {"alpha-weekly": {"used_percent": 95, "resets_at": NOW + 10_000}},
+                {"seven_day": {"used_percent": 95, "resets_at": NOW + 10_000}},
             ),
         }
         with (
@@ -819,7 +775,6 @@ class RecoverCompleteContracts(RecoveryCase):
         ])
         self.assertEqual(len(self.queue.runs(task_id="parent")), len(before_runs) + 1)
         self.assertEqual(self.queue.claims(), [])
-        self.assertEqual(self.queue.activation_leases(), [])
         self.assertEqual(self.queue.inflight(), [])
         self.assertEqual(rows(self.queue, "SELECT * FROM task_recovery WHERE task_id='parent'"), [])
         self.assertTrue(self.queue.readiness("parent-child", now_epoch=NOW + 10)["ready"])
@@ -980,7 +935,6 @@ class DependencyPreflightTransactionContracts(RecoveryCase):
         )
         self.assertEqual(self.queue.claims(), [])
         self.assertEqual(self.queue.inflight(), [])
-        self.assertEqual(self.queue.activation_leases(), [])
         self.assertEqual(rows(
             self.queue, "SELECT * FROM task_attempts WHERE task_id='claim-child'",
         ), [])
@@ -1069,7 +1023,7 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
         self.assert_prompt_defines_structured_outcome(prompt)
         self.assertNotIn("recover-complete", prompt)
 
-    def _dispatch(self, task_id: str, response: object, *, cfg=None, activation_call=None):
+    def _dispatch(self, task_id: str, response: object, *, cfg=None):
         cfg = cfg or runtime(self.queue.path)
         self.add(task_id)
         if isinstance(response, BaseException):
@@ -1080,7 +1034,6 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
             dispatcher.dispatch(
                 cfg, self.queue, task_id=task_id, eligibility_key=f"manual/{task_id}",
                 requested_provider="alpha", router_call=callback,
-                activation_call=activation_call,
             )
         return callback
 
@@ -1113,80 +1066,19 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
         recovery = rows(self.queue, "SELECT * FROM task_recovery WHERE task_id='retry'")[0]
         self.assertEqual((recovery["state"], recovery["consumed_by_attempt_id"]), ("scheduled", None))
         self.assertEqual(self.queue.claims(), [])
-        self.assertEqual(self.queue.activation_leases(), [])
         self.assertEqual([run.status for run in self.queue.runs(task_id="retry")], ["failed"])
         self.assertTrue(self.queue.readiness("retry", now_epoch=NOW + 300)["ready"])
 
-    def test_prelaunch_activation_failure_and_known_router_rejection_are_immediately_eligible(self) -> None:
-        cfg = runtime(self.queue.path, activation=True)
-        self.add("activation-failed")
-        router = mock.Mock()
-        with self.assertRaises(dispatcher.DispatchError):
-            dispatcher.dispatch(
-                cfg, self.queue, task_id="activation-failed", eligibility_key="manual/activation",
-                requested_provider="alpha", router_call=router,
-                activation_call=mock.Mock(side_effect=dispatcher.ActivationUnavailable(
-                    "requested account did not become active", known_not_switched=True,
-                )),
-            )
-        router.assert_not_called()
-        # A proven-unswitched account holds the account, not the task: no attempt remains.
-        self.assertEqual(rows(
-            self.queue, "SELECT state FROM task_attempts WHERE task_id='activation-failed'",
-        ), [])
-        self.assertEqual(
-            [
-                (row["provider_id"], row["account_id"], row["cause"], row["failures"])
-                for row in rows(self.queue, "SELECT * FROM account_backoff")
-            ],
-            [("alpha", "alpha-account", "activation_unswitched", 1)],
-        )
-        self.assertTrue(self.queue.readiness("activation-failed", now_epoch=NOW)["ready"])
 
-        self._dispatch(
-            "router-rejected", {"dispatch": {"launched": False}, "error": "no slot"},
-        )
-        self.assertEqual(rows(
-            self.queue, "SELECT state FROM task_attempts WHERE task_id='router-rejected'",
-        ), [{"state": "aborted"}])
-        self.assertTrue(self.queue.readiness("router-rejected", now_epoch=NOW)["ready"])
 
-    def test_unknown_not_switched_back_text_keeps_exact_ambiguous_ownership(self) -> None:
-        cfg = runtime(self.queue.path, activation=True)
-        self.add("activation-unknown")
-        router = mock.Mock()
-        activation = mock.Mock(
-            side_effect=RuntimeError("account not switched back; state unknown"),
-        )
-
-        with self.assertRaises(dispatcher.AmbiguousDispatch):
-            dispatcher.dispatch(
-                cfg, self.queue, task_id="activation-unknown",
-                eligibility_key="manual/activation-unknown", requested_provider="alpha",
-                router_call=router, activation_call=activation,
-            )
-
-        router.assert_not_called()
-        activation.assert_called_once_with("activate", "alpha-account")
-        attempt = self.queue.attempts(task_id="activation-unknown")[0]
-        self.assertEqual(attempt.state, "ambiguous")
-        claim = self.queue.claim_for("activation-unknown", "manual/activation-unknown")
-        self.assertEqual((claim.state, claim.attempt_id), ("ambiguous", attempt.id))
-        self.assertFalse(self.queue.readiness("activation-unknown", now_epoch=NOW)["ready"])
-
-    def test_invalid_done_evidence_keeps_activation_owned_until_valid_correction(self) -> None:
+    def test_invalid_done_evidence_keeps_claim_owned_until_valid_correction(self) -> None:
         self.add("evidence-owner")
         attempt = self.claim("evidence-owner")
-        self.queue.acquire_activation(
-            "evidence-owner", KEY, "alpha", "alpha-account", lambda: None,
-            attempt_id=attempt.id,
-        )
         self.queue.record(
             "evidence-owner", KEY, attempt_id=attempt.id, status="dispatched",
             provider_id="alpha", account_id="alpha-account", router_job_id="job-evidence",
             timestamp=iso(NOW), now_epoch=NOW,
         )
-        release = mock.Mock()
         invalid = verified()
         invalid["completion"] = {
             "verified": False, "mechanism": "command", "evidence": ["fixture://invalid"],
@@ -1195,13 +1087,11 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
         with self.assertRaisesRegex(db.QueueError, "verified"):
             self.queue.record(
                 "evidence-owner", KEY, attempt_id=attempt.id, status="done",
-                outcome=invalid, release_activation=release,
+                outcome=invalid,
                 timestamp=iso(NOW + 1), now_epoch=NOW + 1,
             )
 
-        release.assert_not_called()
         self.assertEqual(self.queue.claim_for("evidence-owner", KEY).attempt_id, attempt.id)
-        self.assertEqual(self.queue.activation_leases()[0].state, "active")
         self.assertEqual(self.queue.inflight()[0].attempt_id, attempt.id)
         self.assertEqual(
             [event.status for event in self.queue.runs(task_id="evidence-owner")],
@@ -1210,66 +1100,12 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
 
         corrected = self.queue.record(
             "evidence-owner", KEY, attempt_id=attempt.id, status="done",
-            outcome=verified(evidence="fixture://valid-correction"),
-            release_activation=release, timestamp=iso(NOW + 2), now_epoch=NOW + 2,
+            outcome=verified(evidence="fixture://valid-correction"), timestamp=iso(NOW + 2), now_epoch=NOW + 2,
         )
         self.assertEqual(corrected.attempt_id, attempt.id)
-        release.assert_called_once_with()
         self.assertEqual(self.queue.claims(), [])
-        self.assertEqual(self.queue.activation_leases(), [])
         self.assertEqual(self.queue.inflight(), [])
 
-    def test_incomplete_and_orphan_leases_close_only_the_owning_provider(self) -> None:
-        for lease_state in ("activating", "active", "releasing", "orphan"):
-            with self.subTest(lease_state=lease_state):
-                queue = db.QueueDB(self.root / f"lease-{lease_state}.db")
-                queue.initialize()
-                queue.add_task(reviewed(task(
-                    "lease-owner", self.root, allowed_providers=["alpha"],
-                )))
-                queue.add_task(reviewed(task(
-                    "alpha-ready", self.root, allowed_providers=["alpha"],
-                )))
-                queue.add_task(reviewed(task(
-                    "beta-ready", self.root, allowed_providers=["beta"],
-                )))
-                key = f"alpha-account/manual/{lease_state}"
-                attempt_id = None
-                stored_state = "active" if lease_state == "orphan" else lease_state
-                if lease_state != "orphan":
-                    attempt = queue.claim(
-                        "lease-owner", key, "alpha", "alpha-account", now_epoch=NOW,
-                    )
-                    self.assertIsNotNone(attempt)
-                    attempt_id = attempt.id
-                with sqlite3.connect(queue.path) as connection:
-                    connection.execute(
-                        "INSERT INTO activation_leases("
-                        "task_id,eligibility_key,provider_id,account_id,state,acquired_at,attempt_id"
-                        ") VALUES(?,?,?,?,?,?,?)",
-                        (
-                            "lease-owner", key, "alpha", "alpha-account", stored_state,
-                            iso(NOW), attempt_id,
-                        ),
-                    )
-
-                health = db.doctor(queue)
-                self.assertFalse(health.ok)
-                self.assertIn("alpha", health.provider_holds)
-                self.assertNotIn("beta", health.provider_holds)
-                self.assertEqual(queue.runs(task_id="lease-owner"), [])
-                with (
-                    mock.patch.object(scout, "read_all", return_value=_open_snapshots()),
-                    mock.patch.object(scout, "dispatch") as dispatch_mock,
-                ):
-                    report = scout.run_once(
-                        _two_provider_config(queue, self.root / f"cache-{lease_state}"),
-                        queue, now_epoch=NOW,
-                    )
-
-                launched = [call.kwargs["task_id"] for call in dispatch_mock.call_args_list]
-                self.assertEqual(launched, ["beta-ready"])
-                self.assertIn(("alpha", "alpha-account"), report.plan.closed)
 
     def test_every_uncertain_router_identity_retains_one_ambiguous_owner_and_capacity_hold(self) -> None:
         cases: dict[str, object] = {
@@ -1297,54 +1133,7 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
                     )
                 self.assertEqual(callback.call_count, 1)
 
-    def test_launch_scope_cleanup_uncertainty_keeps_dispatched_row_and_exact_owner(self) -> None:
-        cfg = runtime(self.queue.path, activation=True, activation_scope="launch")
-        self.add("cleanup")
 
-        def activation(_cfg, _account, action, _callback):
-            if action == "release":
-                raise RuntimeError("release state unknown")
-
-        with (
-            mock.patch.object(dispatcher, "_activation", side_effect=activation),
-            self.assertRaises(dispatcher.AmbiguousDispatch),
-        ):
-            dispatcher.dispatch(
-                cfg, self.queue, task_id="cleanup", eligibility_key="manual/cleanup",
-                requested_provider="alpha",
-                router_call=lambda *_args, **_kwargs: {
-                    "dispatch": {"job_id": "job-cleanup", "launched": True},
-                },
-            )
-        attempt = rows(self.queue, "SELECT * FROM task_attempts WHERE task_id='cleanup'")[0]
-        self.assertEqual(attempt["state"], "ambiguous")
-        self.assertEqual(self.queue.claim_for("cleanup").attempt_id, attempt["id"])
-        self.assertEqual(self.queue.inflight()[0].attempt_id, attempt["id"])
-        self.assertEqual(len(self.queue.activation_leases()), 1)
-
-    def test_known_nonlaunch_with_uncertain_injected_activation_cleanup_is_ambiguous(self) -> None:
-        cfg = runtime(self.queue.path, activation=True)
-        self.add("cleanup-unknown")
-
-        def activation(action: str, _account: str) -> None:
-            if action == "release":
-                raise RuntimeError("cannot prove credentials were restored")
-
-        with self.assertRaises(dispatcher.AmbiguousDispatch):
-            dispatcher.dispatch(
-                cfg, self.queue, task_id="cleanup-unknown",
-                eligibility_key="manual/cleanup-unknown", requested_provider="alpha",
-                activation_call=activation,
-                router_call=lambda *_args, **_kwargs: {
-                    "dispatch": {"launched": False}, "error": "rejected before spawn",
-                },
-            )
-        attempt = rows(
-            self.queue, "SELECT * FROM task_attempts WHERE task_id='cleanup-unknown'",
-        )[0]
-        self.assertEqual(attempt["state"], "ambiguous")
-        self.assertEqual(self.queue.claim_for("cleanup-unknown").attempt_id, attempt["id"])
-        self.assertFalse(self.queue.readiness("cleanup-unknown", now_epoch=NOW)["ready"])
 
     def test_outcome_file_is_private_validated_bounded_and_removed_only_after_commit(self) -> None:
         self.add("outcome")
@@ -1378,7 +1167,7 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
             path.write_text(json.dumps(value), encoding="utf-8")
             path.chmod(mode)
             with captured_json() as failures:
-                code = cli.main([
+                code = isolated_cli([
                     "record", "--database", str(self.queue.path), "--task", "outcome",
                     "--eligibility-key", "manual/outcome", "--attempt-id", attempt_id,
                     "--status", "done", "--outcome-file", str(path), "--json",
@@ -1392,7 +1181,7 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
         symlink = outcome_path.parent / "symlink.json"
         symlink.symlink_to(target)
         with captured_json() as failures:
-            self.assertEqual(cli.main([
+            self.assertEqual(isolated_cli([
                 "record", "--database", str(self.queue.path), "--task", "outcome",
                 "--eligibility-key", "manual/outcome", "--attempt-id", attempt_id,
                 "--status", "done", "--outcome-file", str(symlink), "--json",
@@ -1415,7 +1204,7 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
             mock.patch.object(Path, "lstat", autospec=True, side_effect=lstat_with_foreign_file),
             captured_json() as failures,
         ):
-            self.assertEqual(cli.main([
+            self.assertEqual(isolated_cli([
                 "record", "--database", str(self.queue.path), "--task", "outcome",
                 "--eligibility-key", "manual/outcome", "--attempt-id", attempt_id,
                 "--status", "done", "--outcome-file", str(wrong_owner), "--json",
@@ -1426,7 +1215,7 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
         outcome_path.write_text(json.dumps(verified()), encoding="utf-8")
         outcome_path.chmod(0o600)
         with captured_json() as payloads:
-            self.assertEqual(cli.main([
+            self.assertEqual(isolated_cli([
                 "record", "--database", str(self.queue.path), "--task", "outcome",
                 "--eligibility-key", "manual/outcome", "--attempt-id", attempt_id,
                 "--status", "done", "--outcome-file", str(outcome_path), "--json",
@@ -1524,7 +1313,7 @@ class GoalRecoveryContracts(RecoveryCase):
         ]
 
         with captured_json() as rejected:
-            rejected_code = cli.main([*arguments, "--now", str(worker_now)])
+            rejected_code = isolated_cli([*arguments, "--now", str(worker_now)])
         self.assertEqual(rejected_code, 2)
         self.assertIn("--now", rejected[0]["error"])
         self.assertTrue(outcome_path.exists())
@@ -1538,7 +1327,7 @@ class GoalRecoveryContracts(RecoveryCase):
             mock.patch.object(db.time, "time", return_value=server_now),
             captured_json() as payloads,
         ):
-            code = cli.main(arguments)
+            code = isolated_cli(arguments)
 
         self.assertEqual(code, 0, payloads)
         self.assertFalse(outcome_path.exists())

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from tests.readiness_fixture import reviewed
+from tests.readiness_fixture import isolated_cli, proxy_fixture, reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
@@ -387,7 +387,7 @@ class TerminalUpsertTests(unittest.TestCase):
         self.assertEqual(self._row(run_id)["status"], "dispatched")
 
         with mock.patch.object(cli, "_json"):
-            code = cli.main([
+            code = isolated_cli([
                 "record", "--database", str(self.queue.path), "--task", "via-cli",
                 "--eligibility-key", "manual/via-cli", "--status", "failed",
                 "--attempt-id", result.attempt_id, "--summary", "Router lost the worker. No PR.",
@@ -449,29 +449,11 @@ def _config(root: Path, database: Path):
         "router", "t3-thread", (str(root / "bin" / "t3-thread"),),
         timeout_seconds=0.2, max_output_bytes=1024,
     )
-    return config_module.RuntimeConfig(
-        schema_version=1,
-        source_path=root / "config.json",
-        database=database,
-        record_command=("/bin/true",),
-        secret_refs=(),
-        adapters=(router,),
-        providers=(
-            config_module.ProviderConfig(
-                "claude", config_module.DispatchBinding("router", "claude"),
-                frozenset({"legacy-exclusive", "implement"}), "single",
-            ),
-        ),
-        plans=(config_module.PlanConfig("claude-plan", "claude"),),
-        accounts=(config_module.AccountConfig("claude-account", "claude", "claude-plan"),),
-        limits=(
-            config_module.LimitConfig("claude-weekly", "claude-plan", 604800, 95, 20000, 1),
-        ),
-        viewer={},
-        pr_exceptions=(),
-        usage_max_age_seconds=3600,
-        cache_dir=root / "cache",
-    )
+    return proxy_fixture(config_module.RuntimeConfig(schema_version=1, source_path=root / "config.json", database=database, record_command=("/bin/true",), secret_refs=(), adapters=(router,), providers=(
+            config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), frozenset({"legacy-exclusive", "implement"})),
+        ), limits=(
+            config_module.LimitConfig("claude-weekly", "claude", 604800, 95, 20000, 1),
+        ), viewer={}, pr_exceptions=(), usage_max_age_seconds=3600, cache_dir=root / "cache", proxy_secret_ref=None), (("claude", "claude-account"),))
 
 
 if __name__ == "__main__":

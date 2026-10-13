@@ -31,7 +31,7 @@ from bonus_drain import checks, cli, db, dispatcher
 from bonus_drain import review as review_module
 
 from tests import test_bonus_drain_package as package_tests
-from tests.readiness_fixture import minimal_review, rereviewed, reviewed
+from tests.readiness_fixture import isolated_cli, minimal_review, rereviewed, reviewed
 from tests.test_bonus_dependency_recovery import (
     KEY,
     NOW,
@@ -187,7 +187,7 @@ class CliAddReviewTests(HermeticEnvironment, ReviewCase):
             contextlib.redirect_stderr(stderr),
             captured_json() as payloads,
         ):
-            code = cli.main(list(argv))
+            code = isolated_cli(list(argv))
         return code, payloads, stdout.getvalue(), stderr.getvalue()
 
     def add_argv(self, task_id: str, *extra: str) -> list[str]:
@@ -455,7 +455,7 @@ class ImplementableContractTests(ReviewCase):
             contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr),
             captured_json() as payloads,
         ):
-            code = cli.main([
+            code = isolated_cli([
                 "add", "--database", str(self.queue.path), "--id", "cli-no", "--title", "cli-no",
                 "--kind", "oneoff", "--size", "small", "--cwd", str(self.root), "--goal", "complete cli-no",
                 "--readiness-review", json.dumps(unstartable(minimal_review(goal="complete cli-no"))), "--json",
@@ -579,7 +579,7 @@ class StaleContractHoldTests(HermeticEnvironment, ReviewCase):
 
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout), captured_json():
-            code = cli.main(["held-report", "--database", str(self.queue.path)])
+            code = isolated_cli(["held-report", "--database", str(self.queue.path)])
         self.assertEqual(code, 0)
         out = stdout.getvalue()
         self.assertIn("old\t", out)
@@ -592,7 +592,7 @@ class StaleContractHoldTests(HermeticEnvironment, ReviewCase):
             mock.patch.object(checks, "subprocess_runner", self.runner()),
             captured_json() as payloads,
         ):
-            code = cli.main(["readiness-backfill", "--database", str(self.queue.path), "--json"])
+            code = isolated_cli(["readiness-backfill", "--database", str(self.queue.path), "--json"])
         self.assertEqual(code, 0, payloads)
         tasks = {item["task_id"]: item for item in payloads[0]["tasks"]}
         self.assertEqual(tasks["old"]["review"], "stale")
@@ -717,9 +717,9 @@ class EditReviewTests(ReviewCase):
             mock.patch.object(checks, "subprocess_runner", self.runner()),
             captured_json() as payloads,
         ):
-            refused = cli.main(["edit", "--database", str(self.queue.path), "cli-edit",
+            refused = isolated_cli(["edit", "--database", str(self.queue.path), "cli-edit",
                                 "--changes", json.dumps({"goal": "cli corrected goal"})])
-            accepted = cli.main(["edit", "--database", str(self.queue.path), "cli-edit",
+            accepted = isolated_cli(["edit", "--database", str(self.queue.path), "cli-edit",
                                  "--changes", json.dumps(changes)])
         self.assertEqual(refused, 2, payloads)
         self.assertIn(REVIEW_REQUIRED, payloads[0]["error"])
@@ -871,7 +871,7 @@ PR_POLICY = (
 ARTIFACT_POLICY = "Produce a branch and committed artifact only; do not push, publish, merge, or delete unrelated files."
 GRANT_OVERRIDE = (
     "Queue-time grants listed in this prompt are explicit exceptions to this default: within each "
-    "grant's stated scope, perform the granted action (including a merge, push, release, or "
+    "grant's stated scope, perform the granted action (including a merge, push, publication, or "
     "infrastructure change it names) and do not stop or record authority_required for it."
 )
 GRANTS_HEADER = (
@@ -883,7 +883,7 @@ MERGE_GRANT = {
     "scope": "Merge the PR for this task into main once all required checks pass",
 }
 PUBLISH_GRANT = {
-    "id": "publish-notes", "kind": "release",
+    "id": "publish-notes", "kind": "publication",
     "scope": "Push the branch to origin and publish the v0.13.0 release notes",
 }
 CONTRACT_HEADER = "Execute this authorized asynchronous task within its stated contract."
@@ -1108,7 +1108,7 @@ class HeldReportMeasurementTests(HermeticEnvironment, ReviewCase):
     def run_report(self, *extra: str) -> tuple[int, list[object], str]:
         stdout = io.StringIO()
         with contextlib.redirect_stdout(stdout), captured_json() as payloads:
-            code = cli.main(["held-report", "--database", str(self.queue.path), *extra])
+            code = isolated_cli(["held-report", "--database", str(self.queue.path), *extra])
         return code, payloads, stdout.getvalue()
 
     def test_report_items_carry_reason_code_and_knowable(self) -> None:
@@ -1218,7 +1218,7 @@ class BackfillTests(HermeticEnvironment, ReviewCase):
             contextlib.redirect_stdout(stdout),
             captured_json() as payloads,
         ):
-            code = cli.main(["readiness-backfill", "--database", str(self.queue.path), *extra])
+            code = isolated_cli(["readiness-backfill", "--database", str(self.queue.path), *extra])
         return code, payloads, stdout.getvalue(), fake
 
     def snapshot(self) -> tuple[object, ...]:

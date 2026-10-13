@@ -36,25 +36,13 @@ also consume a later provider slot, while exclusive work remains available to a 
 with the required capability. Legacy-exclusive tasks drain before portable tasks regardless
 of provider batch order; normal queue priority remains authoritative within each class.
 
-Scout evaluates every account through the complete drainability gates before choosing a
-provider winner. When both accounts can drain, it chooses the active account. When only the
-active account can drain, it uses that account. When only an inactive account can drain, it
-attempts verified activation before launch. Scout launches nothing when the active identity
-or the switch cannot be proven.
+Accounts come from CLIProxyAPI's enabled auth files. A metered provider pool opens when
+at least one account passes its provider pacing limits, and its reset is the earliest reset
+among accounts with headroom. Unmetered pools follow metered pools and admit at most
+`unmetered_max_inflight` concurrent runs per provider, defaulting to 2.
 
-Manual dispatch without an explicit account reuses an account already leased by the selected
-provider; if no lease exists, it selects the single account whose configured active account
-marker matches. This permits compatible concurrent launches without switching credentials
-beneath running jobs. If a provider with multiple accounts has neither an active marker nor a
-lease, manual dispatch fails closed. An explicit account hint does not bypass missing active
-identity proof and fails closed on a conflict.
-
-Account activation defaults to `activation_scope: "run"`, which holds the selected credential
-through the terminal event. Providers that safely reread switched credentials between calls may
-instead configure every account in that provider with `activation_scope: "launch"`. That scope
-releases the external pin only after the router job identity and dispatched row are durable, so
-an independent token rotator can apply its own five-hour threshold while the job continues. The
-recorded account is the launch account; later handoffs belong to the rotator's decision log.
+Manual dispatch records an account from the proxy inventory when available. CLIProxyAPI owns
+credential selection for provider requests; the planner's account is a capacity observation.
 
 Async Work runs all week: `lead_seconds` equals the weekly window, and admission is
 the remaining-headroom floor (`max_percent_per_window` points per
@@ -67,32 +55,21 @@ cross-provider ceiling including in-flight work; omit it for no global cap. Opti
 as T3 Code threads through `t3-thread run --surface t3`; Claude MCP scopes are dropped on
 t3 and the dropped scope is noted on the dispatched run. Bonus Drain is
 the last `urgency_seconds` (24 hours) and uses the same floor. For a provider with multiple
-accounts, Scout applies the complete gates to each account and prefers the proven active
-account among those that can drain. It attempts verified activation only when the inactive
-account is the sole drainable choice. Recurring tasks still cool down, and each weekly reset
-key may run only once.
+accounts, Scout applies the complete gates to each account and chooses the earliest reset
+with headroom. Recurring tasks still cool down, and each weekly reset key may run only once.
 
 ## Requirements
 
-- Python 3.10 or newer with the standard `sqlite3` module.
-- An executable `t3-thread` configured as the dispatch adapter.
-- One executable usage adapter for each account. The shipped stdlib-only
-  `bonus-drain-account-usage` reads one explicitly named account snapshot and can map one or
-  more source windows to configured limit IDs. `bonus-drain-grok-usage` invokes the shipped
-  Grok collector in direct-collection mode and normalizes one configured weekly limit.
-- The optional Grok collector requires Bash, `jq`, `curl`, and GNU `date`/`tac`. The historical
-  shell wrappers remain compatibility assets, but configured calls require explicit provider
-  and account IDs; positional account selection is not supported by the standalone runtime.
-- Optional activation adapters for installations that switch among accounts.
-- `ai-token-rotator` is not required; when used, configure it as an activation adapter and
-  let `doctor` report whether its executable is present.
-- systemd user services only if the ten-minute scout timer, slot-freed path trigger, and ten-minute refresh timer are wanted.
-- Tailnet-only Tailscale Serve if the viewer is used remotely. Tailscale is the viewer's only
+1. Python 3.10 or newer with the standard `sqlite3` module.
+1. An executable `t3-thread` configured as the dispatch adapter.
+1. CLIProxyAPI management access through a private dotenv file containing `CPA_BASE_URL`
+  and `CPA_MGMT_KEY`. Configure its file secret ref with `proxy_secret_ref`.
+1. systemd user services only if the ten-minute scout timer, slot-freed path trigger, and ten-minute refresh timer are wanted.
+1. Tailnet-only Tailscale Serve if the viewer is used remotely. Tailscale is the viewer's only
   access boundary; Bonus Drain adds no password or identity session.
 
 There is no runtime dependency on `uv`, `bg-schedule`, `codex-bg-thread`, a provider CLI,
-or a shell evaluator. Provider-specific readers may have their own documented external
-dependencies, but they are adapters rather than Bonus Drain internals.
+or a shell evaluator. Usage acquisition uses the Python standard library and the proxy management API.
 
 ## Paths
 
@@ -126,23 +103,25 @@ BONUS_DRAIN_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/bonus-drain/config.json" \
 
 The configuration graph is versioned and uses IDs for all relationships:
 
-- `recurrence_timezone` is the IANA timezone used for weekly boundaries. The default and
+1. `recurrence_timezone` is the IANA timezone used for weekly boundaries. The default and
   example use `America/New_York`: weeks start Saturday at midnight, and Saturday through Sunday is the
   automatic dispatch window.
-- `adapters[]` declares argv arrays for `t3-thread`, usage, optional separate reset,
-  and optional activation adapters.
-- `providers[]` binds a provider ID to the router adapter and its router-facing name;
-  `account_mode: single` explicitly constrains providers backed by one global identity.
-- `plans[]`, `accounts[]`, and `limits[]` describe independent capacity windows.
-- `secret_refs[]` names externally injected values. Credential-shaped inline fields,
+1. `adapters[]` declares argv arrays for `t3-thread` and `agent-router`.
+1. `providers[]` binds a provider ID to the router adapter and its router-facing name;
+  The proxy inventory supplies enabled account identities.
+1. `limits[]` binds pacing thresholds to `provider_id`. Weekly windows use `seven_day` and
+  five-hour windows use `five_hour` in the normalized cache.
+1. `proxy_secret_ref` names the dotenv file secret ref; `unmetered_max_inflight` caps each
+  unmetered provider pool. Accounts and plans are not configured.
+1. `secret_refs[]` names externally injected values. Credential-shaped inline fields,
   shell interpolation, dangling references, duplicate IDs, and direct-provider dispatch
   are rejected.
-- `pr_exceptions[]` grants ordinary task repository-specific push/PR behavior.
+1. `pr_exceptions[]` grants ordinary task repository-specific push/PR behavior.
   An explicitly authorized Long Horizon goal with `merge_policy: merge` additionally
   grants its registered, unchanged coordinator permission to merge verified PRs within
   the recorded authority. Task drivers retain their own restrictions; goal membership
   or task prose alone does not grant that exception. See [GOALS.md](GOALS.md).
-- `viewer` binds to loopback. Remote access requires a secretless trusted loopback proxy,
+1. `viewer` binds to loopback. Remote access requires a secretless trusted loopback proxy,
   exact Host/HTTPS Origin values, and an explicit mutations flag. See
   [SECURITY.md](SECURITY.md).
 
@@ -153,15 +132,13 @@ There is no application-auth configuration or login flow.
 After installation, expand the operator home and replace every illustrative
 `/ABSOLUTE/PATH/TO` prefix in `config.example.json`. Adapter executables should use the
 stable `.../.local/lib/bonus-drain/current` path, never a marketplace cache path. The
-`t3-thread` and account-store paths are host-owned dependencies and must also be absolute.
+`t3-thread` and proxy dotenv paths are host-owned dependencies and must also be absolute.
 
-The example shows four plans across three provider labels, account snapshots for personal
-and business plans, direct Grok collection, and optional rotator-backed activation. These
-labels are examples only. Add one usage adapter per account so its snapshot path, source
-label, source-window mapping, provider ID, account ID, and limit IDs are all literal or safe
-`{provider_id}`/`{account_id}` substitutions. The snapshot adapter requires a fresh
-`captured_at`, validates any embedded provider/account/source label, and emits all mapped
-limits atomically; omitted, null, stale, or mismatched data fails that account closed.
+The example configures Claude and Codex weekly pacing, plus unmetered xAI and Meta pools.
+Refresh obtains enabled accounts from `GET /v0/management/auth-files` and reads Claude or
+Codex windows through `POST /v0/management/api-call`. Only the two provider usage URLs
+specified in `proxy_usage.py` are allowed. Disabled accounts are removed from inventory.
+Unknown configured providers are unmetered and receive no usage request.
 
 Providers that are allowed to run migrated `claude_only` tasks or legacy-exclusive model
 rows must explicitly declare the reserved `legacy-exclusive` capability. The name is a
@@ -175,41 +152,21 @@ drive the skill, such as Grok, omits it. When the only open gate lacks it, the s
 a `provider_capability` blocker naming the task. Auto classification that lands on an
 incapable provider falls through to the first compatible provider, before any claim.
 
-The optional `bonus-drain-account-activation` adapter takes a literal expected account ID,
-rotator label, absolute PIN path, optional rotator executable, and optional active-label
-file. It atomically writes a mode-0600 pin, runs the rotator without a shell or inherited
-credential environment, verifies the active label when configured, rolls back a failed
-switch, and releases only its own matching label.
-
-Every account of a provider with more than one configured account must use the shipped,
-verified activation adapter form with a literal expected account and one shared PIN,
-active-label, rotator domain, and activation scope. Dispatch claims acquire durable SQLite activation leases.
-Committed `activating` and `releasing` states bracket external PIN changes. Concurrent
-launches on one account share the proven activation; a different account is blocked until
-every run-scoped holder is terminal or every launch-scoped holder has a proven dispatch. Ambiguous
-router outcomes retain both claim and lease. The last holder commits a `releasing` marker before
-removing the PIN and commits the lease deletion afterward; an interruption leaves durable
-reconciliation evidence. An ambiguous outcome never relinquishes its activation lease immediately.
-
-CLI `auto` is a non-launching, pre-claim `t3-thread --dry-run`; its uncertainty is
+CLI `auto` is a non-launching, pre-claim `agent-router --dry-run`; its uncertainty is
 retry-safe. After a concrete router launch has been attempted, any uncertainty is
-post-launch ambiguity: the claim and activation lease remain fail-closed until explicit
+post-launch ambiguity: the claim remains fail-closed until explicit
 reconciliation and no caller retries automatically.
 
 Normalized usage always includes explicit `provider_id`, `account_id`, and `captured_at`.
-The shipped direct Grok collector is bound to one configured account adapter. If Grok omits
-its utilization percentage, capacity stays unknown and the account closes; omission is never
-converted to zero usage. Grok leaves the percent unset at the start of each weekly period and
-first reports it as an integer step of 1, so a closed account cannot drain the use that would
-make Grok report it. Adding `--unreported-percent-probe` to the `bonus-drain-grok-usage` argv
-reports an unset percent in a started, exactly one-week provider period as 1 with
-`unreported_since` set to the period start. The planner admits one job on such a reading, and
-the scout closes the account with "weekly usage still unreported after this period's probe
-run" once any claim or run on it is recorded after the period start.
+Claude snapshots keep `five_hour`, `seven_day`, and available per-model `seven_day_*`
+windows. Codex snapshots keep the primary five-hour and secondary weekly windows; an
+explicit window duration determines the mapping when supplied. Missing or invalid metered
+usage closes that account. Per-account request failures are cached as unavailable without
+storing response bodies or credential data.
 
 File-backed secret references must be current-user-owned, non-symlink regular files with
 mode `0600` and size at most 65536 bytes. `doctor` validates those properties without printing
-the value. Activation adapters do not inherit account usage-secret bindings.
+the value.
 
 Do not put a credential value in JSON, a unit file, an argv, or a repository. Supply the
 named external secret to the service environment or credential manager at runtime. Config
@@ -249,7 +206,7 @@ systemctl --user enable --now bonus-drain-refresh.timer bonus-drain-scout.timer 
 systemctl --user list-timers 'bonus-drain-*'
 ```
 
-The refresher is the only component that runs configured usage adapters. Scout, `gates`,
+The refresher is the only component that calls the proxy management reader. Scout, `gates`,
 `plan`, and viewer requests read normalized cache and SQLite only. The viewer's gated,
 nearest-reset drain summary represents this tick's paced scout allocation. Its remaining
 queue is the complete eligible provider/capability inventory, so stale or closed cache gates
@@ -297,33 +254,31 @@ JSON-only mutations, body limits, and router-only delegation. A disposable Chrom
 the frozen frontend through the real handler and proves the controls render without a login;
 it does not exercise systemd, product TLS, or Tailscale.
 
-Provider adapter integration should use fixture executables and a disposable DB/cache.
-Proof must include a failed sibling refresh retaining its last good cache, a stale account
+Proxy integration should use a local HTTP fixture and a disposable DB/cache.
+Proof must include a failed sibling refresh closing only that account, a stale account
 closing independently, one atomic claim under a race, and no adapter call from a viewer or
 scout request path.
 
-The normalized usage adapter contract is:
+The normalized usage cache contract is:
 
 ```json
-{"provider_id":"provider-a","account_id":"account-a","captured_at":1800000000,"limits":{"plan-a-weekly":{"used_percent":42.5,"resets_at":1800007200}}}
+{"provider_id":"provider-a","account_id":"account-a","captured_at":1800000000,"limits":{"seven_day":{"used_percent":42.5,"resets_at":1800007200}}}
 ```
 
-Every limit configured for the account plan must be present in one coherent response. The
-refresh service is the only intended caller; viewer requests never execute these adapters.
-
-The source and installed wrappers start Python in isolated mode, insert only their owned
-runtime path, and ignore caller `PYTHONPATH` and cwd packages. Collector and rotator timeouts
-terminate their isolated process groups so descendants cannot survive a failed refresh or
-activation.
+The refresher stores only normalized account identity, capture time and window values.
+`plan --json` includes an `accounts` array so readers can display the same cached windows.
+The source and installed wrappers start Python in isolated mode and insert only their owned
+runtime path. Requests have bounded response sizes and timeouts, and management redirects
+are refused so credentials cannot follow a redirect.
 
 ## Migration and removal
 
 There are two separate operations:
 
-- `bonus-drain import-legacy --backlog FILE --runs FILE` imports the old markdown/jsonl
+1. `bonus-drain import-legacy --backlog FILE --runs FILE` imports the old markdown/jsonl
   queue format into a selected DB. The deprecated `migrate.py` delegates only to this
   importer and never controls units.
-- `bonus-drain migrate --from-db FILE --from-units DIR --destination DIR --dry-run`
+1. `bonus-drain migrate --from-db FILE --from-units DIR --destination DIR --dry-run`
   inspects an old DB/unit installation and emits a manual cutover report. Code refuses
   apply and rollback.
 

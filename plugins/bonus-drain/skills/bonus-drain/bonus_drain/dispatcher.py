@@ -19,7 +19,6 @@ from typing import Any
 
 from . import checks
 from .config import (
-    AccountConfig,
     AdapterConfig,
     ConfigError,
     ProviderConfig,
@@ -77,34 +76,12 @@ class AmbiguousDispatch(DispatchError):
     """The router response cannot prove whether a launch occurred."""
 
 
-class ActivationUnavailable(DispatchError):
-    """Another durable account lease currently owns this provider."""
-
-    # Set by dispatch when a managed account hold is recorded; the scout reports it.
-    account_hold: AccountHold | None = None
-
-    def __init__(self, message: str, *, known_not_switched: bool = False):
-        super().__init__(message)
-        self.known_not_switched = known_not_switched
 
 
-_PROVEN_UNSWITCHED_ACTIVATION = "requested account did not become active"
 
 
-def _trusted_unswitched_activation(exc: Exception, adapter_id: str) -> bool:
-    if isinstance(exc, ActivationUnavailable) and exc.known_not_switched:
-        return True
-    expected = (
-        f"account activation activate failed: adapter {adapter_id} exited 1: "
-        f"bonus-drain-account-activation: {_PROVEN_UNSWITCHED_ACTIVATION}"
-    )
-    return str(exc) == expected
 
 
-def _account_activation_failed(exc: Exception) -> bool:
-    """Whether an activation refusal proved the requested account never became active."""
-
-    return _PROVEN_UNSWITCHED_ACTIVATION in str(exc)
 
 
 _MCP_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -540,7 +517,7 @@ DEFAULT_WORKER_GRANT = (
 # policy of an ungranted task stays byte-identical.
 GRANT_POLICY_OVERRIDE = (
     "Queue-time grants listed in this prompt are explicit exceptions to this default: within each "
-    "grant's stated scope, perform the granted action (including a merge, push, release, or "
+    "grant's stated scope, perform the granted action (including a merge, push, publication, or "
     "infrastructure change it names) and do not stop or record authority_required for it."
 )
 QUEUE_TIME_KNOWABLE_RULE = (
@@ -688,7 +665,7 @@ def render_prompt(
         [
             "Never leave this background run blocked, waiting for input, or otherwise non-terminal.",
             "Opening or updating a pull request is not done. Normal PR work is done only after all PR checks pass for the current head. Epic Forge work, or a task whose contract requires an epic merge, is done only after all PR checks pass and the PR is confirmed merged into the exact authorized epic branch. Follow /implement's check watcher and epic merge procedure when applicable. Pending or failing checks, a running check watcher, and an unmerged epic PR must never be recorded as done. Keep working or waiting while progress remains possible. Record done with completion.mechanism=artifact and evidence of the PR URL, passing checks, and the required merge. Pending human review or merge alone does not block normal PR completion once checks pass.",
-            "There is no awaiting_human status. Commit automation, CI, and workflow diffs into the branch and pull request; the pull request is the review gate. On a bounded decision, choose the recommended option, document the choice and the alternatives in the pull request, and continue. A pull request whose checks pass and that waits only on human review or merge is done. Record failed with reason.code=authority_required only for a genuinely external blocker you cannot remove, such as missing credentials or access, an external decision, or an unmerged prerequisite. Include resume_when: a list of CHECK_TYPES checks that become true when the blocker clears, so the queue resumes this task automatically. Never name a release of this task's own repository that the task was not queued against: on an unreleased line the release waits on this work, so verify with that line's pre-release artifacts (such as per-commit image tags) instead; the queue rewrites such a hold to verification_needed. Omit resume_when only when no such check exists; Brian is then notified once.",
+            "There is no awaiting_human status. Commit automation, CI, and workflow diffs into the branch and pull request; the pull request is the review gate. On a bounded decision, choose the recommended option, document the choice and the alternatives in the pull request, and continue. A pull request whose checks pass and that waits only on human review or merge is done. Record failed with reason.code=authority_required only for a genuinely external blocker you cannot remove, such as missing credentials or access, an external decision, or an unmerged prerequisite. Include resume_when: a list of CHECK_TYPES checks that become true when the blocker clears, so the queue resumes this task automatically. Never name a publication of this task's own repository that the task was not queued against: on an unpublished line the publication waits on this work, so verify with that line's pre-publication artifacts (such as per-commit image tags) instead; the queue rewrites such a hold to verification_needed. Omit resume_when only when no such check exists; Brian is then notified once.",
             "A done_when clause that the PR is not merged forbids this run from merging; it is not an outcome to preserve. If someone else merges the PR during the run, verify every other criterion against the merged head and record done citing the merge commit; never record failed only because of an external merge.",
             "If the work itself cannot be completed, record failed with the blocker before exiting; do not request input or set a blocked status.",
             "Failed or skipped results require the structured reason and must not claim verified completion.",
@@ -698,11 +675,6 @@ def render_prompt(
             "Do not replace the task id, eligibility key, or attempt id and do not stop an idle background session.",
         ]
     )
-    if account_id and config.account(account_id).activation_scope == "launch":
-        contract.insert(
-            -3,
-            f"The recorded account {account_id} is the launch account, not a run-long account pin; later credential rotation is permitted.",
-        )
     if attempt is not None and outcome_path is not None:
         contract.extend([
             (
@@ -1470,60 +1442,8 @@ def _provider(config: RuntimeConfig, provider_id: str) -> ProviderConfig:
         raise InvalidRoute(f"unknown provider: {provider_id}") from None
 
 
-def _account_for(
-    config: RuntimeConfig,
-    provider: ProviderConfig,
-    eligibility_key: str,
-    leased_account_ids: tuple[str, ...] = (),
-) -> AccountConfig | None:
-    account_hint = eligibility_key.split("/", 1)[0]
-    accounts = config.accounts_for_provider(provider.id)
-    for account in accounts:
-        if account.id == account_hint:
-            return account
-    if len(accounts) > 1:
-        return None
-    leased = set(leased_account_ids)
-    configured_ids = {account.id for account in accounts}
-    if leased and not leased <= configured_ids:
-        raise InvalidRoute(
-            f"provider {provider.id} activation lease names an unknown configured account"
-        )
-    if len(leased) > 1:
-        raise InvalidRoute(
-            f"provider {provider.id} has multiple conflicting activation leases"
-        )
-    for account in accounts:
-        if account.id in leased:
-            return account
-    return accounts[0] if accounts else None
 
 
-def _activation(
-    config: RuntimeConfig,
-    account: AccountConfig | None,
-    action: str,
-    callback: Callable[[str, str], Any] | None,
-) -> None:
-    if account is None:
-        return
-    if callback is not None:
-        callback(action, account.id)
-        return
-    if not account.activation_adapter_id:
-        return
-    adapter = config.adapter(account.activation_adapter_id)
-    try:
-        from .adapters import AdapterError, execute_adapter
-
-        execute_adapter(
-            adapter,
-            {"action": action, "account_id": account.id, "provider_id": account.provider_id},
-            config=config,
-            expect_json=False,
-        )
-    except (AdapterError, ConfigError) as exc:
-        raise DispatchError(f"account activation {action} failed: {exc}") from exc
 
 
 def _no_usage_gate(gate: Any) -> bool:
@@ -1589,14 +1509,13 @@ def dispatch(
     eligibility_key: str,
     requested_provider: str,
     router_call: Callable[..., Any] | None = None,
-    activation_call: Callable[[str, str], Any] | None = None,
     telemetry_call: Callable[[list[str], dict[str, Any]], Any] | None = None,
     trigger: str = "manual",
     now_epoch: int | None = None,
     check_runner: checks.CheckRunner | None = None,
     retry_sleep: Callable[[float], None] | None = None,
 ) -> DispatchResult:
-    """Classify if requested, claim, activate, and launch through t3-thread once.
+    """Select a provider, claim, and launch through the configured adapter.
 
     ``telemetry_call`` is a test seam for the factory run row; runtime callers leave it
     unset so the row is written through ``factory-telemetry.py``.
@@ -1637,24 +1556,13 @@ def dispatch(
     if adapter.kind != "t3-thread":
         raise InvalidRoute(f"launch adapter {adapter.id} must be kind t3-thread")
 
-    account = _account_for(
-        config,
-        provider,
-        eligibility_key,
-        tuple(
-            lease.account_id
-            for lease in queue.activation_leases(provider_id=provider.id)
-        ),
-    )
-    provider_accounts = config.accounts_for_provider(provider.id)
-    if len(provider_accounts) > 1:
-        from .kick import resolve_active_account_id
-
-        active_account_id = resolve_active_account_id(config, queue, provider.id)
-        if account is None:
-            account = config.account(active_account_id)
-    elif account is None and provider_accounts:
-        account = provider_accounts[0]
+    from .usage import read_accounts
+    accounts = tuple(item for item in read_accounts(config, now_epoch=now_epoch)
+                     if item.provider_id == provider.id)
+    hint = eligibility_key.split("/", 1)[0]
+    account = next((item for item in accounts if item.id == hint), None)
+    if account is None and accounts:
+        account = accounts[0]
     account_id = account.id if account else None
     attempt = queue.claim(
         task.id, eligibility_key, provider.id, account_id,
@@ -1664,46 +1572,15 @@ def dispatch(
     if attempt is None:
         raise AlreadyClaimed(f"task is no longer eligible: {task.id}")
 
-    activated = False
     outcome_path: Path | None = None
-    lease_managed = bool(
-        account is not None
-        and account.activation_adapter_id is not None
-        and activation_call is None
-    )
-
-    def release_lease() -> None:
-        _activation(config, account, "release", None)
 
     def abort_known_nonlaunch(reason: str, account_hold: AccountHold | None = None) -> None:
-        release_activation: Callable[[], None] | None = None
-        if activated:
-            if lease_managed:
-                release_activation = release_lease
-            elif activation_call is not None:
-                # Injected callbacks have no durable activation lease for QueueDB
-                # to inspect. Prove their cleanup before releasing the exact claim;
-                # a failed cleanup retains ambiguous ownership.
-                try:
-                    _activation(config, account, "release", activation_call)
-                except Exception as cleanup_exc:
-                    queue.mark_attempt_ambiguous(
-                        task.id,
-                        eligibility_key,
-                        attempt.id,
-                        "known-not-launched activation cleanup requires reconciliation: "
-                        f"{str(cleanup_exc)[:500]}",
-                    )
-                    raise AmbiguousDispatch(
-                        "launch did not occur, but account activation cleanup requires reconciliation"
-                    ) from cleanup_exc
         try:
             changed = queue.abort_unlaunched_attempt(
                 task.id,
                 eligibility_key,
                 attempt.id,
                 reason,
-                release_activation=release_activation,
                 account_hold=account_hold,
             )
             if not changed and queue.claim_for(task.id, eligibility_key) is not None:
@@ -1723,104 +1600,6 @@ def dispatch(
 
     try:
         outcome_path = materialize_outcome_file(config, attempt.id)
-        if lease_managed:
-            assert account is not None
-            from .kick import active_marker_for_account
-
-            try:
-                marker_before_activation = active_marker_for_account(config, account.id)
-            except InvalidRoute as exc:
-                if (
-                    len(provider_accounts) == 1
-                    and isinstance(exc.__cause__, FileNotFoundError)
-                ):
-                    marker_before_activation = None
-                else:
-                    raise
-            try:
-                queue.acquire_activation(
-                    task.id,
-                    eligibility_key,
-                    provider.id,
-                    account.id,
-                    lambda: _activation(config, account, "activate", None),
-                    attempt_id=attempt.id,
-                )
-            except Exception as exc:
-                incomplete = any(
-                    lease.task_id == task.id and lease.eligibility_key == eligibility_key
-                    for lease in queue.activation_leases(provider_id=provider.id)
-                )
-                assert account.activation_adapter_id is not None
-                marker_unchanged = False
-                try:
-                    marker_after_activation = active_marker_for_account(config, account.id)
-                    marker_unchanged = (
-                        marker_before_activation is not None
-                        and marker_after_activation == marker_before_activation
-                    )
-                except InvalidRoute:
-                    pass
-                if (
-                    incomplete
-                    and marker_unchanged
-                    and _trusted_unswitched_activation(exc, account.activation_adapter_id)
-                ):
-                    # The adapter verified the active account never moved and rolled
-                    # the pin back. That is known-not-launched, not post-launch
-                    # ambiguity; dropping the unproven lease unblocks the provider.
-                    try:
-                        abandoned = queue.abandon_unproven_activation(
-                            task.id, eligibility_key,
-                        )
-                    except Exception as cleanup_exc:
-                        queue.mark_attempt_ambiguous(
-                            task.id,
-                            eligibility_key,
-                            attempt.id,
-                            "known-not-launched activation cleanup requires reconciliation: "
-                            f"{str(cleanup_exc)[:500]}",
-                        )
-                        raise AmbiguousDispatch(
-                            "account activation cleanup requires reconciliation"
-                        ) from cleanup_exc
-                    if abandoned:
-                        raise ActivationUnavailable(
-                            str(exc), known_not_switched=True,
-                        ) from exc
-                if incomplete:
-                    queue.mark_attempt_ambiguous(
-                        task.id, eligibility_key, attempt.id,
-                        f"account activation requires reconciliation: {str(exc)[:500]}",
-                    )
-                    raise AmbiguousDispatch(
-                        "account activation outcome is incomplete and requires reconciliation"
-                    ) from exc
-                raise ActivationUnavailable(
-                    str(exc), known_not_switched=True,
-                ) from exc
-            activated = True
-        else:
-            try:
-                _activation(config, account, "activate", activation_call)
-            except Exception as exc:
-                if (
-                    isinstance(exc, ActivationUnavailable)
-                    and exc.known_not_switched
-                ):
-                    raise ActivationUnavailable(
-                        str(exc), known_not_switched=True,
-                    ) from exc
-                queue.mark_attempt_ambiguous(
-                    task.id,
-                    eligibility_key,
-                    attempt.id,
-                    f"account activation requires reconciliation: {str(exc)[:500]}",
-                )
-                raise AmbiguousDispatch(
-                    "account activation outcome is incomplete and requires reconciliation"
-                ) from exc
-            activated = account is not None and activation_call is not None
         try:
             rechecked_dependency_base = queue.dependency_base(task.id)
         except QueueError as exc:
@@ -1905,19 +1684,6 @@ def dispatch(
             )
             if placeholder_written:
                 replay_factory_terminal(queue, task, attempt.id)
-        if account is not None and account.activation_scope == "launch" and activated:
-            try:
-                if lease_managed:
-                    queue.release_activation_after_dispatch(
-                        task.id, eligibility_key, release_lease, attempt_id=attempt.id,
-                    )
-                else:
-                    _activation(config, account, "release", activation_call)
-                activated = False
-            except Exception as exc:
-                raise AmbiguousDispatch(
-                    "router launched but launch-scoped activation cleanup requires reconciliation"
-                ) from exc
         return DispatchResult(
             task_id=task.id,
             eligibility_key=eligibility_key,
@@ -1936,29 +1702,10 @@ def dispatch(
             queue.mark_attempt_ambiguous(
                 task.id, eligibility_key, attempt.id, str(exc),
             )
-        # Runtime adapter leases remain durable after an ambiguous launch: the task stays
-        # non-dispatchable and the active account cannot be switched out from under a job that
-        # may exist. Injected test/operator callbacks retain their historical eager release.
-        if activation_call is not None and activated:
-            try:
-                _activation(config, account, "release", activation_call)
-            except Exception:  # noqa: BLE001, S110
-                # Cleanup failures must preserve the original classification failure.
-                pass
         raise
     except LaunchNotCreated as exc:
         abort_known_nonlaunch(f"t3-thread exited 6 before creating a thread: {str(exc)[:300]}")
         raise KnownDispatchFailure(str(exc)) from exc
-    except ActivationUnavailable as exc:
-        hold = (
-            AccountHold(provider.id, account_id or "*", "activation_unswitched", str(exc)[:500])
-            if _account_activation_failed(exc) else None
-        )
-        abort_known_nonlaunch(f"activation unavailable: {str(exc)[:500]}", hold)
-        if hold is not None:
-            # The scout reports a managed hold separately from scout failures.
-            exc.account_hold = hold
-        raise
     except ProviderLaunchUnavailable as exc:
         hold = AccountHold(provider.id, account_id or "*", "codex_daemon_start", str(exc)[:500])
         abort_known_nonlaunch(f"provider launcher unavailable: {str(exc)[:500]}", hold)
@@ -1977,7 +1724,6 @@ def dispatch_batch(
     eligibility_key: str,
     provider_id: str,
     router_call: Callable[..., Any] | None = None,
-    activation_call: Callable[[str, str], Any] | None = None,
     now_epoch: int | None = None,
 ) -> tuple[DispatchResult, ...]:
     results: list[DispatchResult] = []
@@ -1986,7 +1732,6 @@ def dispatch_batch(
             results.append(dispatch(
                 config, queue, task_id=task_id, eligibility_key=eligibility_key,
                 requested_provider=provider_id, router_call=router_call,
-                activation_call=activation_call,
                 now_epoch=now_epoch,
             ))
         except (AlreadyClaimed, KnownDispatchFailure):

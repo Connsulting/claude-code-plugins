@@ -1,164 +1,99 @@
 {
   "schema_version": 1,
   "recurrence_timezone": "America/New_York",
-  "record_command": ["/ABSOLUTE/PATH/TO/.local/bin/bonus-drain", "record"],
+  "record_command": [
+    "/ABSOLUTE/PATH/TO/.local/bin/bonus-drain",
+    "record"
+  ],
   "usage_max_age_seconds": 3600,
   "scout_ntfy_url": null,
   "host_load_gate": {
-    "enabled": true, "cpu_some_avg60_max": 40, "mem_available_min_gib": 4,
-    "load_per_cpu_max": 1.5, "disk_free_min_gib": 30
+    "enabled": true,
+    "cpu_some_avg60_max": 40,
+    "mem_available_min_gib": 4,
+    "load_per_cpu_max": 1.5,
+    "disk_free_min_gib": 30
   },
-  "secret_refs": [],
+  "secret_refs": [
+    {
+      "id": "proxy-dotenv",
+      "source": "file",
+      "path": "/ABSOLUTE/PATH/TO/proxy.env"
+    }
+  ],
   "adapters": [
     {
-      "id": "router", "kind": "t3-thread",
-      "argv": ["/ABSOLUTE/PATH/TO/.local/bin/t3-thread"],
-      "timeout_seconds": 90, "max_output_bytes": 1048576, "env_allowlist": []
-    },
-    {
-      "id": "claude-personal-usage", "kind": "usage",
+      "id": "router",
+      "kind": "t3-thread",
       "argv": [
-        "/ABSOLUTE/PATH/TO/.local/lib/bonus-drain/current/bin/bonus-drain-account-usage",
-        "--provider", "{provider_id}", "--account", "{account_id}",
-        "--snapshot", "/ABSOLUTE/PATH/TO/account-store/claude/Personal.usage.json",
-        "--source-label", "Personal", "--max-age", "3600",
-        "--map", "seven_day=claude-personal-weekly"
+        "/ABSOLUTE/PATH/TO/.local/bin/t3-thread"
       ],
-      "timeout_seconds": 10, "max_output_bytes": 65536, "env_allowlist": []
-    },
-    {
-      "id": "claude-business-usage", "kind": "usage",
-      "argv": [
-        "/ABSOLUTE/PATH/TO/.local/lib/bonus-drain/current/bin/bonus-drain-account-usage",
-        "--provider", "{provider_id}", "--account", "{account_id}",
-        "--snapshot", "/ABSOLUTE/PATH/TO/account-store/claude/Business.usage.json",
-        "--source-label", "Business", "--max-age", "3600",
-        "--map", "seven_day=claude-business-weekly"
-      ],
-      "timeout_seconds": 10, "max_output_bytes": 65536, "env_allowlist": []
-    },
-    {
-      "id": "codex-personal-usage", "kind": "usage",
-      "argv": [
-        "/ABSOLUTE/PATH/TO/.local/lib/bonus-drain/current/bin/bonus-drain-account-usage",
-        "--provider", "{provider_id}", "--account", "{account_id}",
-        "--snapshot", "/ABSOLUTE/PATH/TO/account-store/codex/Personal.usage.json",
-        "--source-label", "Personal", "--max-age", "3600",
-        "--map", "seven_day=codex-personal-weekly"
-      ],
-      "timeout_seconds": 10, "max_output_bytes": 65536, "env_allowlist": []
-    },
-    {
-      "id": "grok-personal-usage", "kind": "usage",
-      "argv": [
-        "/ABSOLUTE/PATH/TO/.local/lib/bonus-drain/current/bin/bonus-drain-grok-usage",
-        "--provider", "{provider_id}", "--account", "{account_id}",
-        "--collector", "/ABSOLUTE/PATH/TO/.local/lib/bonus-drain/current/grok-usage.sh",
-        "--limit", "grok-personal-weekly", "--max-age", "3600", "--timeout", "15"
-      ],
-      "timeout_seconds": 20, "max_output_bytes": 65536, "env_allowlist": []
-    },
-    {
-      "id": "claude-personal-activation", "kind": "activation",
-      "argv": [
-        "/ABSOLUTE/PATH/TO/.local/lib/bonus-drain/current/bin/bonus-drain-account-activation",
-        "--action", "{action}", "--account", "{account_id}",
-        "--expected-account", "claude-personal", "--label", "Personal",
-        "--pin-file", "/ABSOLUTE/PATH/TO/account-store/claude/PIN",
-        "--rotate", "/ABSOLUTE/PATH/TO/ai-token-rotator",
-        "--active-path", "/ABSOLUTE/PATH/TO/account-store/claude/active"
-      ],
-      "timeout_seconds": 45, "max_output_bytes": 4096, "env_allowlist": []
-    },
-    {
-      "id": "claude-business-activation", "kind": "activation",
-      "argv": [
-        "/ABSOLUTE/PATH/TO/.local/lib/bonus-drain/current/bin/bonus-drain-account-activation",
-        "--action", "{action}", "--account", "{account_id}",
-        "--expected-account", "claude-business", "--label", "Business",
-        "--pin-file", "/ABSOLUTE/PATH/TO/account-store/claude/PIN",
-        "--rotate", "/ABSOLUTE/PATH/TO/ai-token-rotator",
-        "--active-path", "/ABSOLUTE/PATH/TO/account-store/claude/active"
-      ],
-      "timeout_seconds": 45, "max_output_bytes": 4096, "env_allowlist": []
-    },
-    {
-      "id": "codex-personal-activation", "kind": "activation",
-      "argv": [
-        "/ABSOLUTE/PATH/TO/.local/lib/bonus-drain/current/bin/bonus-drain-account-activation",
-        "--action", "{action}", "--account", "{account_id}",
-        "--expected-account", "codex-personal", "--label", "Personal",
-        "--pin-file", "/ABSOLUTE/PATH/TO/account-store/codex/PIN",
-        "--rotate", "/ABSOLUTE/PATH/TO/ai-token-rotator",
-        "--active-path", "/ABSOLUTE/PATH/TO/account-store/codex/active"
-      ],
-      "timeout_seconds": 45, "max_output_bytes": 4096, "env_allowlist": []
+      "timeout_seconds": 90,
+      "max_output_bytes": 1048576,
+      "env_allowlist": []
     }
   ],
   "providers": [
     {
       "id": "claude",
-      "dispatch": {"adapter_id": "router", "provider": "claude"},
-      "capabilities": ["legacy-exclusive", "implement"]
-    },
-    {"id": "codex", "dispatch": {"adapter_id": "router", "provider": "codex"}, "capabilities": ["implement"]},
-    {"id": "grok", "account_mode": "single", "dispatch": {"adapter_id": "router", "provider": "grok"}}
-  ],
-  "plans": [
-    {"id": "claude-personal-plan", "provider_id": "claude"},
-    {"id": "claude-business-plan", "provider_id": "claude"},
-    {"id": "codex-personal-plan", "provider_id": "codex"},
-    {"id": "grok-personal-plan", "provider_id": "grok"}
-  ],
-  "accounts": [
-    {
-      "id": "claude-personal", "provider_id": "claude",
-      "plan_id": "claude-personal-plan", "usage_adapter_id": "claude-personal-usage",
-      "activation_adapter_id": "claude-personal-activation", "activation_scope": "launch"
+      "dispatch": {
+        "adapter_id": "router",
+        "provider": "claude"
+      },
+      "capabilities": [
+        "legacy-exclusive",
+        "implement"
+      ]
     },
     {
-      "id": "claude-business", "provider_id": "claude",
-      "plan_id": "claude-business-plan", "usage_adapter_id": "claude-business-usage",
-      "activation_adapter_id": "claude-business-activation", "activation_scope": "launch"
+      "id": "codex",
+      "dispatch": {
+        "adapter_id": "router",
+        "provider": "codex"
+      },
+      "capabilities": [
+        "implement"
+      ]
     },
     {
-      "id": "codex-personal", "provider_id": "codex",
-      "plan_id": "codex-personal-plan", "usage_adapter_id": "codex-personal-usage",
-      "activation_adapter_id": "codex-personal-activation"
+      "id": "xai",
+      "dispatch": {
+        "adapter_id": "router",
+        "provider": "grok"
+      }
     },
     {
-      "id": "grok-personal", "provider_id": "grok",
-      "plan_id": "grok-personal-plan", "usage_adapter_id": "grok-personal-usage"
+      "id": "meta",
+      "dispatch": {
+        "adapter_id": "router",
+        "provider": "meta"
+      }
     }
   ],
   "limits": [
     {
-      "id": "claude-personal-weekly", "plan_id": "claude-personal-plan",
-      "window_seconds": 604800, "ceiling_percent": 98, "lead_seconds": 604800,
-      "batch_size": 3, "max_percent_per_window": 0.5,
-      "estimated_percent_per_job": 1, "pacing_window_seconds": 3600,
-      "urgency_seconds": 86400
+      "id": "claude-weekly",
+      "window_seconds": 604800,
+      "ceiling_percent": 98,
+      "lead_seconds": 604800,
+      "batch_size": 3,
+      "max_percent_per_window": 0.5,
+      "estimated_percent_per_job": 1,
+      "pacing_window_seconds": 3600,
+      "urgency_seconds": 86400,
+      "provider_id": "claude"
     },
     {
-      "id": "claude-business-weekly", "plan_id": "claude-business-plan",
-      "window_seconds": 604800, "ceiling_percent": 98, "lead_seconds": 604800,
-      "batch_size": 3, "max_percent_per_window": 0.5,
-      "estimated_percent_per_job": 1, "pacing_window_seconds": 3600,
-      "urgency_seconds": 86400
-    },
-    {
-      "id": "codex-personal-weekly", "plan_id": "codex-personal-plan",
-      "window_seconds": 604800, "ceiling_percent": 98, "lead_seconds": 604800,
-      "batch_size": 3, "max_percent_per_window": 0.5,
-      "estimated_percent_per_job": 1, "pacing_window_seconds": 3600,
-      "urgency_seconds": 86400
-    },
-    {
-      "id": "grok-personal-weekly", "plan_id": "grok-personal-plan",
-      "window_seconds": 604800, "ceiling_percent": 98, "lead_seconds": 604800,
-      "batch_size": 3, "max_percent_per_window": 0.5,
-      "estimated_percent_per_job": 1, "pacing_window_seconds": 3600,
-      "urgency_seconds": 86400
+      "id": "codex-weekly",
+      "window_seconds": 604800,
+      "ceiling_percent": 98,
+      "lead_seconds": 604800,
+      "batch_size": 3,
+      "max_percent_per_window": 0.5,
+      "estimated_percent_per_job": 1,
+      "pacing_window_seconds": 3600,
+      "urgency_seconds": 86400,
+      "provider_id": "codex"
     }
   ],
   "viewer": {
@@ -166,9 +101,15 @@
     "mutations_enabled": true,
     "remote": {
       "trusted_loopback_proxy": true,
-      "allowed_hosts": ["bonus-drain-node.example.ts.net:8766"],
-      "allowed_origins": ["https://bonus-drain-node.example.ts.net:8766"]
+      "allowed_hosts": [
+        "bonus-drain-node.example.ts.net:8766"
+      ],
+      "allowed_origins": [
+        "https://bonus-drain-node.example.ts.net:8766"
+      ]
     }
   },
-  "pr_exceptions": []
+  "pr_exceptions": [],
+  "proxy_secret_ref": "proxy-dotenv",
+  "unmetered_max_inflight": 2
 }

@@ -18,13 +18,13 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
-from tests.readiness_fixture import reviewed
+from tests.readiness_fixture import isolated_cli, proxy_fixture, reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
 
-from bonus_drain import adapters, cli, db, dispatcher, usage
+from bonus_drain import adapters, cli, db, dispatcher
 from bonus_drain import config as config_module
 
 NOW = 2_000_000_000
@@ -65,40 +65,13 @@ class KickContractTests(unittest.TestCase):
             "router", "t3-thread", (str(self.root / "bin" / "t3-thread"),),
             timeout_seconds=0.2, max_output_bytes=1024,
         )
-        self.config = config_module.RuntimeConfig(
-            schema_version=1,
-            source_path=self.root / "config.json",
-            database=self.root / "state" / "queue.db",
-            record_command=("/bin/true",),
-            secret_refs=(),
-            adapters=(router,),
-            providers=(
-                config_module.ProviderConfig(
-                    "alpha", config_module.DispatchBinding("router", "alpha-engine"),
-                    frozenset({"legacy-exclusive", "cpu"}), "single",
-                ),
-                config_module.ProviderConfig(
-                    "beta", config_module.DispatchBinding("router", "beta-engine"),
-                    frozenset(), "single",
-                ),
-            ),
-            plans=(
-                config_module.PlanConfig("alpha-plan", "alpha"),
-                config_module.PlanConfig("beta-plan", "beta"),
-            ),
-            accounts=(
-                config_module.AccountConfig("alpha-account", "alpha", "alpha-plan"),
-                config_module.AccountConfig("beta-account", "beta", "beta-plan"),
-            ),
-            limits=(
-                config_module.LimitConfig("alpha-weekly", "alpha-plan", 604800, 95, 20000, 1),
-                config_module.LimitConfig("beta-weekly", "beta-plan", 604800, 95, 20000, 1),
-            ),
-            viewer={},
-            pr_exceptions=(),
-            usage_max_age_seconds=3600,
-            cache_dir=self.root / "cache",
-        )
+        self.config = proxy_fixture(config_module.RuntimeConfig(schema_version=1, source_path=self.root / "config.json", database=self.root / "state" / "queue.db", record_command=("/bin/true",), secret_refs=(), adapters=(router,), providers=(
+                config_module.ProviderConfig("alpha", config_module.DispatchBinding("router", "alpha-engine"), frozenset({"legacy-exclusive", "cpu"})),
+                config_module.ProviderConfig("beta", config_module.DispatchBinding("router", "beta-engine"), frozenset()),
+            ), limits=(
+                config_module.LimitConfig("alpha-weekly", "alpha", 604800, 95, 20000, 1),
+                config_module.LimitConfig("beta-weekly", "beta", 604800, 95, 20000, 1),
+            ), viewer={}, pr_exceptions=(), usage_max_age_seconds=3600, cache_dir=self.root / "cache", proxy_secret_ref=None), (("alpha", "alpha-account"), ("beta", "beta-account"),))
         self.queue = db.QueueDB(self.config.database)
         self.queue.initialize()
         self.queue.add_task(reviewed(_task("portable")))
@@ -112,36 +85,6 @@ class KickContractTests(unittest.TestCase):
             return {"provider_id": "alpha"}
         return {"dispatch": {"job_id": "job-1", "launched": True}}
 
-    def _active_multi_config(
-        self,
-        active: Path,
-        *,
-        personal_label: str = "Personal",
-        business_label: str = "Business",
-        personal_id: str = "alpha-personal",
-        business_id: str = "alpha-business",
-    ) -> config_module.RuntimeConfig:
-        personal_activation = config_module.AdapterConfig(
-            "personal-switch", "activation",
-            ("switch", "--label", personal_label, "--active-path", str(active)),
-        )
-        business_activation = config_module.AdapterConfig(
-            "business-switch", "activation",
-            ("switch", "--label", business_label, "--active-path", str(active)),
-        )
-        personal = replace(
-            self.config.accounts[0], id=personal_id,
-            activation_adapter_id="personal-switch",
-        )
-        business = replace(
-            self.config.accounts[0], id=business_id,
-            activation_adapter_id="business-switch",
-        )
-        return replace(
-            self.config,
-            adapters=(*self.config.adapters, personal_activation, business_activation),
-            accounts=(personal, business, self.config.accounts[1]),
-        )
 
     def test_cli_and_viewer_name_the_same_manual_kick_service(self) -> None:
         from bonus_drain import kick
@@ -168,8 +111,8 @@ class KickContractTests(unittest.TestCase):
             mock.patch.object(owner, "kick_task", return_value=result) as shared,
             _capture_cli_json() as payloads,
         ):
-            self.assertEqual(cli.main(["dispatch", "portable", "alpha", "--json"]), 0)
-            self.assertEqual(cli.main(["run-now", "portable", "alpha", "--json"]), 0)
+            self.assertEqual(isolated_cli(["dispatch", "portable", "alpha", "--json"]), 0)
+            self.assertEqual(isolated_cli(["run-now", "portable", "alpha", "--json"]), 0)
         self.assertEqual(
             [payload["dispatch"]["job_id"] for payload in payloads],
             ["job-shared", "job-shared"],
@@ -184,37 +127,6 @@ class KickContractTests(unittest.TestCase):
             ["alpha", "alpha"],
         )
 
-    def test_manual_kick_is_router_only_and_activation_is_only_an_account_side_effect(self) -> None:
-        from bonus_drain import kick
-
-        activation = config_module.AdapterConfig(
-            "switch", "activation", (str(self.root / "bin" / "account-switch"),),
-        )
-        alpha = replace(self.config.accounts[0], activation_adapter_id="switch")
-        cfg = replace(self.config, adapters=(*self.config.adapters, activation), accounts=(alpha, self.config.accounts[1]))
-        seen_argv: list[list[str]] = []
-        activation_events: list[tuple[str, str]] = []
-
-        def router(argv: list[str], **_kwargs: object) -> dict[str, object]:
-            seen_argv.append(argv)
-            return {"dispatch": {"job_id": "job-router", "launched": True}}
-
-        result = kick.kick_task(
-            cfg, self.queue, task_id="portable", requested_provider="alpha",
-            eligibility_key="manual/router-only", now_epoch=NOW,
-            router_call=router,
-            activation_call=lambda action, account: activation_events.append((action, account)),
-        )
-        self.assertEqual(result.job_id, "job-router")
-        self.assertEqual(activation_events, [("activate", "alpha-account")])
-        self.assertEqual(len(seen_argv), 1)
-        argv = seen_argv[0]
-        self.assertEqual(argv[:2], [str(self.root / "bin" / "t3-thread"), "--project"])
-        self.assertEqual(argv[argv.index("--engine") + 1], "alpha-engine")
-        self.assertNotIn("--dry-run", argv)
-        flattened = "\0".join([Path(argv[0]).name, *argv[1:-1]]).lower()
-        for forbidden in ("run-now.sh", "/bash", "claude", "codex", "grok", "account-switch"):
-            self.assertNotIn(forbidden, flattened)
 
     def test_dispatched_prompt_terminalizes_instead_of_leaving_a_blocked_lease(self) -> None:
         prompt = dispatcher.render_prompt(
@@ -238,923 +150,31 @@ class KickContractTests(unittest.TestCase):
             prompt.index("When finished, record exactly one terminal event"),
         )
 
-    def test_launch_scoped_activation_releases_after_a_proven_launch(self) -> None:
-        activation = config_module.AdapterConfig(
-            "switch", "activation", (str(self.root / "bin" / "account-switch"),),
-        )
-        alpha = replace(
-            self.config.accounts[0],
-            activation_adapter_id="switch",
-            activation_scope="launch",
-        )
-        cfg = replace(
-            self.config,
-            adapters=(*self.config.adapters, activation),
-            accounts=(alpha, self.config.accounts[1]),
-        )
-        activation_events: list[tuple[str, str]] = []
 
-        with mock.patch.object(
-            dispatcher,
-            "_activation",
-            side_effect=lambda _cfg, account, action, _callback: activation_events.append(
-                (action, account.id)
-            ),
-        ):
-            result = dispatcher.dispatch(
-                cfg,
-                self.queue,
-                task_id="portable",
-                eligibility_key="manual/launch-scope",
-                requested_provider="alpha",
-                router_call=self._router,
-            )
 
-        self.assertEqual(result.job_id, "job-1")
-        self.assertEqual(
-            activation_events,
-            [("activate", "alpha-account"), ("release", "alpha-account")],
-        )
-        self.assertEqual(self.queue.activation_leases(provider_id="alpha"), [])
-        self.assertIsNotNone(self.queue.claim_for("portable", "manual/launch-scope"))
-        self.assertEqual(
-            [event.status for event in self.queue.runs(task_id="portable")],
-            ["dispatched"],
-        )
-        self.assertIn("launch account, not a run-long account pin", result.prompt)
 
-        self.queue.record(
-            "portable",
-            "manual/launch-scope",
-            attempt_id=result.attempt_id,
-            status="done",
-            outcome={
-                "reason": {
-                    "code": "done_when_verified", "detail": "fixture proof",
-                    "signature": "done_when_verified:launch-scope",
-                },
-                "completion": {
-                    "verified": True, "mechanism": "command",
-                    "evidence": ["fixture://launch-scope"],
-                },
-            },
-            provider_id="alpha",
-            account_id="alpha-account",
-        )
-        self.assertIsNone(self.queue.claim_for("portable", "manual/launch-scope"))
 
-    def test_run_scoped_activation_stays_leased_until_terminal(self) -> None:
-        activation = config_module.AdapterConfig(
-            "switch", "activation", (str(self.root / "bin" / "account-switch"),),
-        )
-        alpha = replace(self.config.accounts[0], activation_adapter_id="switch")
-        cfg = replace(
-            self.config,
-            adapters=(*self.config.adapters, activation),
-            accounts=(alpha, self.config.accounts[1]),
-        )
-        activation_events: list[tuple[str, str]] = []
 
-        with mock.patch.object(
-            dispatcher,
-            "_activation",
-            side_effect=lambda _cfg, account, action, _callback: activation_events.append(
-                (action, account.id)
-            ),
-        ):
-            result = dispatcher.dispatch(
-                cfg,
-                self.queue,
-                task_id="portable",
-                eligibility_key="manual/run-scope",
-                requested_provider="alpha",
-                router_call=self._router,
-            )
 
-        self.assertEqual(activation_events, [("activate", "alpha-account")])
-        self.assertEqual(
-            [lease.account_id for lease in self.queue.activation_leases(provider_id="alpha")],
-            ["alpha-account"],
-        )
-        self.assertNotIn("launch account, not a run-long account pin", result.prompt)
 
-    def test_launch_scoped_release_failure_stays_fail_closed(self) -> None:
-        activation = config_module.AdapterConfig(
-            "switch", "activation", (str(self.root / "bin" / "account-switch"),),
-        )
-        alpha = replace(
-            self.config.accounts[0],
-            activation_adapter_id="switch",
-            activation_scope="launch",
-        )
-        cfg = replace(
-            self.config,
-            adapters=(*self.config.adapters, activation),
-            accounts=(alpha, self.config.accounts[1]),
-        )
 
-        def activation_side_effect(
-            _cfg: object, _account: object, action: str, _callback: object,
-        ) -> None:
-            if action == "release":
-                raise dispatcher.DispatchError("release failed")
 
-        with (
-            mock.patch.object(dispatcher, "_activation", side_effect=activation_side_effect),
-            self.assertRaisesRegex(
-                dispatcher.AmbiguousDispatch,
-                "launch-scoped activation cleanup requires reconciliation",
-            ),
-        ):
-            dispatcher.dispatch(
-                cfg,
-                self.queue,
-                task_id="portable",
-                eligibility_key="manual/launch-release-failure",
-                requested_provider="alpha",
-                router_call=self._router,
-            )
 
-        claim = self.queue.claim_for("portable", "manual/launch-release-failure")
-        self.assertIsNotNone(claim)
-        self.assertEqual(claim.state, "ambiguous")
-        self.assertEqual(
-            [event.status for event in self.queue.runs(task_id="portable")],
-            ["dispatched"],
-        )
-        leases = self.queue.activation_leases(provider_id="alpha")
-        self.assertEqual([lease.state for lease in leases], ["releasing"])
-        self.assertFalse(db.doctor(self.queue).ok)
 
-    def _launch_scoped_config(self) -> config_module.RuntimeConfig:
-        activation = config_module.AdapterConfig(
-            "switch", "activation", (str(self.root / "bin" / "account-switch"),),
-        )
-        alpha = replace(
-            self.config.accounts[0],
-            activation_adapter_id="switch",
-            activation_scope="launch",
-        )
-        return replace(
-            self.config,
-            adapters=(*self.config.adapters, activation),
-            accounts=(alpha, self.config.accounts[1]),
-        )
 
-    def test_abort_unlaunched_attempt_cannot_delete_an_activating_lease(self) -> None:
-        key = "manual/activating-lease-invariant"
-        attempt = self.queue.claim(
-            "portable",
-            key,
-            "alpha",
-            "alpha-account",
-            provider_capabilities=("legacy-exclusive", "cpu"),
-            now_epoch=NOW,
-        )
-        self.assertIsNotNone(attempt)
-        assert attempt is not None
 
-        def fail_activation() -> None:
-            raise RuntimeError("activation outcome is unknown")
 
-        with self.assertRaisesRegex(RuntimeError, "activation outcome is unknown"):
-            self.queue.acquire_activation(
-                "portable",
-                key,
-                "alpha",
-                "alpha-account",
-                fail_activation,
-                attempt_id=attempt.id,
-            )
 
-        with self.assertRaises(db.QueueError):
-            self.queue.abort_unlaunched_attempt(
-                "portable",
-                key,
-                attempt.id,
-                "activation failed",
-            )
 
-        claim = self.queue.claim_for("portable", key)
-        self.assertIsNotNone(claim)
-        self.assertEqual(claim.state, "claimed")
-        self.assertEqual(
-            [(lease.account_id, lease.state) for lease in self.queue.activation_leases()],
-            [("alpha-account", "activating")],
-        )
-        self.assertEqual(
-            [item.state for item in self.queue.attempts(task_id="portable")],
-            ["claimed"],
-        )
 
-    def test_secondary_activation_cleanup_error_retains_ambiguous_ownership(self) -> None:
-        cfg = self._launch_scoped_config()
-        active = self.root / "active"
-        active.write_text("Personal\n", encoding="utf-8")
-        activation = replace(
-            cfg.adapter("switch"),
-            argv=(
-                str(self.root / "bin" / "account-switch"),
-                "--label", "Personal",
-                "--active-path", str(active),
-            ),
-        )
-        cfg = replace(
-            cfg,
-            adapters=tuple(
-                activation if adapter.id == activation.id else adapter
-                for adapter in cfg.adapters
-            ),
-        )
-        router_calls: list[object] = []
 
-        def fail_activation(
-            _cfg: object, _account: object, action: str, _callback: object,
-        ) -> None:
-            if action == "activate":
-                raise dispatcher.DispatchError(
-                    "account activation activate failed: adapter switch exited 1: "
-                    "bonus-drain-account-activation: requested account did not become active"
-                )
 
-        with (
-            mock.patch.object(dispatcher, "_activation", side_effect=fail_activation),
-            mock.patch.object(
-                self.queue,
-                "abandon_unproven_activation",
-                side_effect=db.QueueError("secondary activation cleanup failed"),
-            ),
-            self.assertRaisesRegex(
-                dispatcher.AmbiguousDispatch,
-                "cleanup requires reconciliation",
-            ),
-        ):
-            dispatcher.dispatch(
-                cfg,
-                self.queue,
-                task_id="portable",
-                eligibility_key="manual/secondary-activation-cleanup",
-                requested_provider="alpha",
-                router_call=lambda *args, **kwargs: router_calls.append((args, kwargs)),
-            )
 
-        self.assertEqual(router_calls, [])
-        claim = self.queue.claim_for("portable", "manual/secondary-activation-cleanup")
-        self.assertIsNotNone(claim)
-        self.assertEqual(claim.state, "ambiguous")
-        self.assertEqual(
-            [(lease.account_id, lease.state) for lease in self.queue.activation_leases()],
-            [("alpha-account", "activating")],
-        )
-        self.assertEqual(
-            [item.state for item in self.queue.attempts(task_id="portable")],
-            ["ambiguous"],
-        )
 
-    def test_proven_unswitched_activation_releases_instead_of_sticking(self) -> None:
-        cfg = self._launch_scoped_config()
-        active = self.root / "active"
-        active.write_text("Personal\n", encoding="utf-8")
-        activation = replace(
-            cfg.adapter("switch"),
-            argv=(
-                str(self.root / "bin" / "account-switch"),
-                "--label", "Personal",
-                "--active-path", str(active),
-            ),
-        )
-        cfg = replace(
-            cfg,
-            adapters=tuple(
-                activation if adapter.id == activation.id else adapter
-                for adapter in cfg.adapters
-            ),
-        )
 
-        def boom(_cfg: object, _account: object, action: str, _callback: object) -> None:
-            if action == "activate":
-                raise dispatcher.DispatchError(
-                    "account activation activate failed: adapter switch exited 1: "
-                    "bonus-drain-account-activation: requested account did not become active"
-                )
 
-        with (
-            mock.patch.object(dispatcher, "_activation", side_effect=boom),
-            self.assertRaises(dispatcher.ActivationUnavailable),
-        ):
-            dispatcher.dispatch(
-                cfg,
-                self.queue,
-                task_id="portable",
-                eligibility_key="manual/unswitched",
-                requested_provider="alpha",
-                router_call=self._router,
-            )
 
-        self.assertIsNone(self.queue.claim_for("portable", "manual/unswitched"))
-        self.assertEqual(self.queue.activation_leases(provider_id="alpha"), [])
-        self.assertEqual(self.queue.runs(task_id="portable"), [])
-        self.assertTrue(db.doctor(self.queue).ok)
 
-    def test_single_account_activation_can_establish_a_missing_marker(self) -> None:
-        cfg = self._launch_scoped_config()
-        active = self.root / "missing-active"
-        activation = replace(
-            cfg.adapter("switch"),
-            argv=(
-                str(self.root / "bin" / "account-switch"),
-                "--label", "Personal",
-                "--active-path", str(active),
-            ),
-        )
-        cfg = replace(
-            cfg,
-            adapters=tuple(
-                activation if adapter.id == activation.id else adapter
-                for adapter in cfg.adapters
-            ),
-        )
-        activation_actions: list[str] = []
-
-        def establish_marker(
-            _cfg: object, _account: object, action: str, _callback: object,
-        ) -> None:
-            activation_actions.append(action)
-            if action == "activate":
-                active.write_text("Personal\n", encoding="utf-8")
-
-        with mock.patch.object(dispatcher, "_activation", side_effect=establish_marker):
-            result = dispatcher.dispatch(
-                cfg,
-                self.queue,
-                task_id="portable",
-                eligibility_key="alpha-account/manual/first-activation",
-                requested_provider="alpha",
-                router_call=self._router,
-            )
-
-        self.assertEqual(result.account_id, "alpha-account")
-        self.assertEqual(activation_actions, ["activate", "release"])
-        self.assertEqual(active.read_text(encoding="utf-8"), "Personal\n")
-        self.assertEqual(
-            [run.status for run in self.queue.runs(task_id="portable")],
-            ["dispatched"],
-        )
-
-    def test_unknown_activation_failure_stays_fail_closed(self) -> None:
-        cfg = self._launch_scoped_config()
-
-        def boom(_cfg: object, _account: object, action: str, _callback: object) -> None:
-            if action == "activate":
-                raise dispatcher.DispatchError("rotate subprocess timeout")
-
-        with (
-            mock.patch.object(dispatcher, "_activation", side_effect=boom),
-            self.assertRaises(dispatcher.AmbiguousDispatch),
-        ):
-            dispatcher.dispatch(
-                cfg,
-                self.queue,
-                task_id="portable",
-                eligibility_key="manual/timeout",
-                requested_provider="alpha",
-                router_call=self._router,
-            )
-
-        claim = self.queue.claim_for("portable", "manual/timeout")
-        self.assertIsNotNone(claim)
-        self.assertEqual(claim.state, "ambiguous")
-        self.assertEqual(
-            [lease.state for lease in self.queue.activation_leases(provider_id="alpha")],
-            ["activating"],
-        )
-        self.assertEqual(self.queue.runs(task_id="portable"), [])
-        self.assertFalse(db.doctor(self.queue).ok)
-
-    def test_manual_kick_reuses_the_provider_account_with_active_leases(self) -> None:
-        from bonus_drain import kick
-
-        active = self.root / "active"
-        active.write_text("Business\n", encoding="utf-8")
-        cfg = self._active_multi_config(active)
-        self.queue.add_task(reviewed(_task("already-running")))
-        held_key = f"alpha-business/alpha-weekly/{NOW + 604800}"
-        self.assertTrue(self.queue.claim(
-            "already-running", held_key, "alpha", "alpha-business",
-            provider_capabilities=("legacy-exclusive", "cpu"),
-        ))
-        self.assertTrue(self.queue.acquire_activation(
-            "already-running", held_key, "alpha", "alpha-business", lambda: None,
-        ))
-
-        result = kick.kick_task(
-            cfg, self.queue, task_id="portable", requested_provider="alpha",
-            now_epoch=NOW, router_call=self._router,
-        )
-
-        self.assertEqual(result.account_id, "alpha-business")
-        self.assertEqual(
-            {lease.account_id for lease in self.queue.activation_leases(provider_id="alpha")},
-            {"alpha-business"},
-        )
-
-    def test_manual_kick_uses_the_active_account_instead_of_config_order(self) -> None:
-        from bonus_drain import kick
-
-        active = self.root / "active"
-        active.write_text("Business\n", encoding="utf-8")
-        personal_activation = config_module.AdapterConfig(
-            "personal-switch", "activation", ("switch", "--label", "Personal", "--active-path", str(active)),
-        )
-        business_activation = config_module.AdapterConfig(
-            "business-switch", "activation", ("switch", "--label", "Business", "--active-path", str(active)),
-        )
-        personal = replace(
-            self.config.accounts[0], id="alpha-personal", activation_adapter_id="personal-switch",
-        )
-        business = replace(
-            self.config.accounts[0], id="alpha-business", activation_adapter_id="business-switch",
-        )
-        cfg = replace(
-            self.config,
-            adapters=(*self.config.adapters, personal_activation, business_activation),
-            accounts=(personal, business, self.config.accounts[1]),
-        )
-
-        result = kick.kick_task(
-            cfg, self.queue, task_id="portable", requested_provider="alpha",
-            now_epoch=NOW, router_call=self._router,
-            activation_call=lambda _action, _account: None,
-        )
-
-        self.assertEqual(result.account_id, "alpha-business")
-        self.assertTrue(result.eligibility_key.startswith("alpha-business/manual/"))
-
-    def test_manual_multi_account_provider_requires_an_explicit_or_active_account(self) -> None:
-        from bonus_drain import kick
-
-        personal = replace(self.config.accounts[0], id="alpha-personal")
-        business = replace(self.config.accounts[0], id="alpha-business")
-        cfg = replace(self.config, accounts=(personal, business, self.config.accounts[1]))
-
-        with self.assertRaisesRegex(dispatcher.InvalidRoute, "requires --account"):
-            kick.kick_task(
-                cfg, self.queue, task_id="portable", requested_provider="alpha",
-                now_epoch=NOW, router_call=self._router,
-            )
-
-    def test_missing_unknown_and_duplicate_active_markers_never_fall_back(self) -> None:
-        from bonus_drain import kick
-
-        active = self.root / "active"
-        cases = (
-            ("missing", None, "Personal", "Business"),
-            ("unknown", "Retired", "Personal", "Business"),
-            ("duplicate", "Business", "Business", "Business"),
-        )
-        for name, marker, personal_label, business_label in cases:
-            with self.subTest(name=name):
-                if marker is None:
-                    active.unlink(missing_ok=True)
-                else:
-                    active.write_text(f"{marker}\n", encoding="utf-8")
-                cfg = self._active_multi_config(
-                    active,
-                    personal_label=personal_label,
-                    business_label=business_label,
-                )
-                router_calls: list[object] = []
-                activation_calls: list[object] = []
-                with self.assertRaises(dispatcher.InvalidRoute):
-                    kick.kick_task(
-                        cfg,
-                        self.queue,
-                        task_id="portable",
-                        requested_provider="alpha",
-                        now_epoch=NOW,
-                        router_call=lambda *args, calls=router_calls, **kwargs: calls.append((args, kwargs)),
-                        activation_call=lambda *args, calls=activation_calls: calls.append(args),
-                    )
-                self.assertEqual(router_calls, [])
-                self.assertEqual(activation_calls, [])
-                self.assertEqual(self.queue.claims(), [])
-
-    def test_marker_and_unique_lease_disagreement_blocks_before_dispatch(self) -> None:
-        from bonus_drain import kick
-
-        active = self.root / "active"
-        active.write_text("Personal\n", encoding="utf-8")
-        cfg = self._active_multi_config(active)
-        self.queue.add_task(reviewed(_task("business-owner")))
-        key = f"alpha-business/alpha-weekly/{NOW + 604800}"
-        self.assertTrue(self.queue.claim(
-            "business-owner", key, "alpha", "alpha-business",
-            provider_capabilities=("legacy-exclusive", "cpu"),
-        ))
-        self.assertTrue(self.queue.acquire_activation(
-            "business-owner", key, "alpha", "alpha-business", lambda: None,
-        ))
-        router_calls: list[object] = []
-        activation_calls: list[object] = []
-
-        with self.assertRaisesRegex(dispatcher.InvalidRoute, "disagree"):
-            kick.kick_task(
-                cfg,
-                self.queue,
-                task_id="portable",
-                requested_provider="alpha",
-                now_epoch=NOW,
-                router_call=lambda *args, **kwargs: router_calls.append((args, kwargs)),
-                activation_call=lambda *args: activation_calls.append(args),
-            )
-
-        self.assertEqual(router_calls, [])
-        self.assertEqual(activation_calls, [])
-        self.assertEqual([claim.task_id for claim in self.queue.claims()], ["business-owner"])
-
-    def test_multiple_same_account_leases_allow_manual_selection(self) -> None:
-        from bonus_drain import kick
-
-        active = self.root / "active"
-        active.write_text("Business\n", encoding="utf-8")
-        cfg = self._active_multi_config(active)
-        for task_id in ("owner-one", "owner-two"):
-            self.queue.add_task(reviewed(_task(task_id)))
-            key = f"alpha-business/alpha-weekly/{NOW + 604800}/{task_id}"
-            self.assertTrue(self.queue.claim(
-                task_id, key, "alpha", "alpha-business",
-                provider_capabilities=("legacy-exclusive", "cpu"),
-            ))
-            self.queue.acquire_activation(
-                task_id, key, "alpha", "alpha-business", lambda: None,
-            )
-
-        result = kick.kick_task(
-            cfg,
-            self.queue,
-            task_id="portable",
-            requested_provider="alpha",
-            now_epoch=NOW,
-            router_call=self._router,
-        )
-
-        self.assertEqual(result.account_id, "alpha-business")
-
-    def test_distinct_account_leases_block_manual_selection(self) -> None:
-        from bonus_drain import kick
-
-        active = self.root / "active"
-        active.write_text("Business\n", encoding="utf-8")
-        cfg = self._active_multi_config(active)
-        for task_id in ("owner-one", "owner-two"):
-            self.queue.add_task(reviewed(_task(task_id)))
-            key = f"alpha-business/alpha-weekly/{NOW + 604800}/{task_id}"
-            self.assertTrue(self.queue.claim(
-                task_id, key, "alpha", "alpha-business",
-                provider_capabilities=("legacy-exclusive", "cpu"),
-            ))
-            self.queue.acquire_activation(
-                task_id, key, "alpha", "alpha-business", lambda: None,
-            )
-        with self.queue._connect() as connection:
-            connection.execute(
-                "UPDATE activation_leases SET account_id=? WHERE task_id=?",
-                ("alpha-personal", "owner-one"),
-            )
-
-        with self.assertRaisesRegex(dispatcher.InvalidRoute, "multiple|conflicting"):
-            kick.kick_task(
-                cfg,
-                self.queue,
-                task_id="portable",
-                requested_provider="alpha",
-                now_epoch=NOW,
-                router_call=lambda *_args, **_kwargs: self.fail("router was called"),
-            )
-
-    def test_multi_account_marker_paths_fail_closed_without_blocking(self) -> None:
-        from bonus_drain import kick
-
-        relative_target = self.root / "relative-active"
-        relative_target.write_text("Business\n", encoding="utf-8")
-        symlink_target = self.root / "symlink-target"
-        symlink_target.write_text("Business\n", encoding="utf-8")
-        symlink_marker = self.root / "symlink-active"
-        symlink_marker.symlink_to(symlink_target)
-        directory_marker = self.root / "directory-active"
-        directory_marker.mkdir()
-        oversized_marker = self.root / "oversized-active"
-        oversized_marker.write_bytes(b"Business" + b"x" * 5000)
-
-        cases = (
-            ("relative", Path(os.path.relpath(relative_target, Path.cwd()))),
-            ("symlink", symlink_marker),
-            ("directory", directory_marker),
-            ("oversized", oversized_marker),
-        )
-        for name, marker in cases:
-            with self.subTest(name=name):
-                cfg = self._active_multi_config(marker)
-                with self.assertRaises(dispatcher.InvalidRoute):
-                    kick.resolve_active_account_id(cfg, self.queue, "alpha")
-
-        fifo_marker = self.root / "fifo-active"
-        os.mkfifo(fifo_marker)
-        cfg = self._active_multi_config(fifo_marker)
-        outcome: list[object] = []
-
-        def resolve_fifo() -> None:
-            try:
-                outcome.append(kick.resolve_active_account_id(cfg, self.queue, "alpha"))
-            except Exception as exc:  # noqa: BLE001
-                outcome.append(exc)
-
-        thread = threading.Thread(target=resolve_fifo, daemon=True)
-        thread.start()
-        thread.join(0.25)
-        completed_without_blocking = not thread.is_alive()
-        if thread.is_alive():
-            descriptor = os.open(fifo_marker, os.O_WRONLY | os.O_NONBLOCK)
-            try:
-                os.write(descriptor, b"Business\n")
-            finally:
-                os.close(descriptor)
-            thread.join(1)
-        self.assertTrue(completed_without_blocking, "nonregular active marker read blocked")
-        self.assertEqual(len(outcome), 1)
-        self.assertIsInstance(outcome[0], dispatcher.InvalidRoute)
-
-    def test_changed_marker_makes_activation_refusal_ambiguous(self) -> None:
-        from bonus_drain import kick
-
-        active = self.root / "active"
-        active.write_text("Personal\n", encoding="utf-8")
-        cfg = self._active_multi_config(active)
-
-        def refused_after_switch(
-            _cfg: object, account: object, action: str, _callback: object,
-        ) -> None:
-            self.assertEqual((action, account.id), ("activate", "alpha-business"))
-            active.write_text("Business\n", encoding="utf-8")
-            raise dispatcher.DispatchError(
-                "account activation activate failed: adapter business-switch exited 1: "
-                "bonus-drain-account-activation: requested account did not become active"
-            )
-
-        with (
-            mock.patch.object(dispatcher, "_activation", side_effect=refused_after_switch),
-            self.assertRaises(dispatcher.AmbiguousDispatch),
-        ):
-            kick.kick_task(
-                cfg,
-                self.queue,
-                task_id="portable",
-                requested_provider="alpha",
-                account_id="alpha-business",
-                now_epoch=NOW,
-                router_call=self._router,
-            )
-
-        claim = self.queue.claims()[0]
-        self.assertEqual(claim.state, "ambiguous")
-        self.assertEqual(
-            [lease.state for lease in self.queue.activation_leases(provider_id="alpha")],
-            ["activating"],
-        )
-
-    def test_auto_and_custom_eligibility_keys_resolve_the_active_account(self) -> None:
-        from bonus_drain import kick
-
-        active = self.root / "active"
-        active.write_text("Business\n", encoding="utf-8")
-        cfg = self._active_multi_config(active)
-        for task_id, requested_provider, key in (
-            ("portable", "auto", "manual/auto-key"),
-            ("custom-key", "alpha", "manual/custom-key"),
-        ):
-            if task_id != "portable":
-                self.queue.add_task(reviewed(_task(task_id)))
-            with self.subTest(requested_provider=requested_provider):
-                result = kick.kick_task(
-                    cfg,
-                    self.queue,
-                    task_id=task_id,
-                    requested_provider=requested_provider,
-                    eligibility_key=key,
-                    now_epoch=NOW,
-                    router_call=self._router,
-                    activation_call=lambda _action, _account: None,
-                )
-                self.assertEqual(result.account_id, "alpha-business")
-
-    def test_custom_eligibility_key_rejects_lease_and_marker_disagreement(self) -> None:
-        from bonus_drain import kick
-
-        active = self.root / "active"
-        active.write_text("Personal\n", encoding="utf-8")
-        cfg = self._active_multi_config(active)
-        self.queue.add_task(reviewed(_task("business-owner")))
-        owner_key = f"alpha-business/alpha-weekly/{NOW + 604800}"
-        self.assertTrue(self.queue.claim(
-            "business-owner", owner_key, "alpha", "alpha-business",
-            provider_capabilities=("legacy-exclusive", "cpu"),
-        ))
-        self.assertTrue(self.queue.acquire_activation(
-            "business-owner", owner_key, "alpha", "alpha-business", lambda: None,
-        ))
-        router_calls: list[list[str]] = []
-
-        def router(argv: list[str], **_kwargs: object) -> dict[str, object]:
-            router_calls.append(argv)
-            return {"dispatch": {"job_id": "wrong-account-job", "launched": True}}
-
-        with self.assertRaisesRegex(dispatcher.InvalidRoute, "disagree"):
-            kick.kick_task(
-                cfg,
-                self.queue,
-                task_id="portable",
-                requested_provider="alpha",
-                eligibility_key="manual/custom-key",
-                now_epoch=NOW,
-                router_call=router,
-            )
-
-        self.assertEqual(router_calls, [])
-        self.assertIsNone(self.queue.claim_for("portable", "manual/custom-key"))
-        self.assertEqual(self.queue.runs(task_id="portable"), [])
-
-    def test_joining_same_account_lease_requires_matching_marker(self) -> None:
-        from bonus_drain import kick
-
-        active = self.root / "active"
-        active.write_text("Personal\n", encoding="utf-8")
-        cfg = self._active_multi_config(active)
-        self.queue.add_task(reviewed(_task("business-owner")))
-        owner_key = f"alpha-business/alpha-weekly/{NOW + 604800}"
-        self.assertTrue(self.queue.claim(
-            "business-owner", owner_key, "alpha", "alpha-business",
-            provider_capabilities=("legacy-exclusive", "cpu"),
-        ))
-        self.assertTrue(self.queue.acquire_activation(
-            "business-owner", owner_key, "alpha", "alpha-business", lambda: None,
-        ))
-        router_calls: list[list[str]] = []
-
-        def router(argv: list[str], **_kwargs: object) -> dict[str, object]:
-            router_calls.append(argv)
-            return {"dispatch": {"job_id": "wrong-account-job", "launched": True}}
-
-        with self.assertRaisesRegex(dispatcher.InvalidRoute, "disagree"):
-            kick.kick_task(
-                cfg,
-                self.queue,
-                task_id="portable",
-                requested_provider="alpha",
-                eligibility_key=f"alpha-business/manual/{NOW + 604800}",
-                account_id="alpha-business",
-                now_epoch=NOW,
-                router_call=router,
-            )
-
-        self.assertEqual(router_calls, [])
-        self.assertEqual(self.queue.runs(task_id="portable"), [])
-
-    def test_missing_marker_with_explicit_account_fails_without_override_advice(self) -> None:
-        from bonus_drain import kick
-
-        active = self.root / "missing-active"
-        cfg = self._active_multi_config(active)
-        router_calls: list[list[str]] = []
-
-        with self.assertRaises(dispatcher.InvalidRoute) as raised:
-            kick.kick_task(
-                cfg,
-                self.queue,
-                task_id="portable",
-                requested_provider="alpha",
-                account_id="alpha-business",
-                now_epoch=NOW,
-                router_call=lambda argv, **_kwargs: router_calls.append(argv),
-            )
-
-        self.assertNotIn("requires --account", str(raised.exception))
-        self.assertEqual(router_calls, [])
-        self.assertEqual(self.queue.claims(), [])
-
-    def test_explicit_account_cannot_disagree_with_eligibility_key(self) -> None:
-        from bonus_drain import kick
-
-        active = self.root / "active"
-        active.write_text("Business\n", encoding="utf-8")
-        cfg = self._active_multi_config(active)
-        with self.assertRaises(dispatcher.InvalidRoute):
-            kick.kick_task(
-                cfg,
-                self.queue,
-                task_id="portable",
-                requested_provider="alpha",
-                eligibility_key=f"alpha-personal/manual/{NOW + 604800}",
-                account_id="alpha-business",
-                now_epoch=NOW,
-                router_call=self._router,
-                activation_call=lambda _action, _account: None,
-            )
-        self.assertEqual(self.queue.claims(), [])
-
-    def test_unknown_lease_account_blocks_manual_selection(self) -> None:
-        from bonus_drain import kick
-
-        active = self.root / "active"
-        active.write_text("Business\n", encoding="utf-8")
-        cfg = self._active_multi_config(active)
-        self.queue.add_task(reviewed(_task("retired-owner")))
-        key = f"alpha-retired/alpha-weekly/{NOW + 604800}"
-        self.assertTrue(self.queue.claim(
-            "retired-owner", key, "alpha", "alpha-retired",
-            provider_capabilities=("legacy-exclusive", "cpu"),
-        ))
-        self.assertTrue(self.queue.acquire_activation(
-            "retired-owner", key, "alpha", "alpha-retired", lambda: None,
-        ))
-
-        with self.assertRaisesRegex(dispatcher.InvalidRoute, "unknown|configured"):
-            kick.kick_task(
-                cfg,
-                self.queue,
-                task_id="portable",
-                requested_provider="alpha",
-                now_epoch=NOW,
-                router_call=lambda *_args, **_kwargs: self.fail("router was called"),
-            )
-
-    def test_accounts_select_uses_active_winner_before_scalar_allocation(self) -> None:
-        active = self.root / "active"
-        active.write_text("Business\n", encoding="utf-8")
-        cfg = self._active_multi_config(active)
-        snapshots = {
-            ("alpha", "alpha-personal"): usage.UsageSnapshot(
-                "alpha", "alpha-personal", NOW,
-                {"alpha-weekly": {"used_percent": 70, "resets_at": NOW + 10_000}},
-            ),
-            ("alpha", "alpha-business"): usage.UsageSnapshot(
-                "alpha", "alpha-business", NOW,
-                {"alpha-weekly": {"used_percent": 70, "resets_at": NOW + 20_000}},
-            ),
-            ("beta", "beta-account"): usage.UsageSnapshot(
-                "beta", "beta-account", NOW,
-                {"beta-weekly": {"used_percent": 95, "resets_at": NOW + 20_000}},
-            ),
-        }
-        with (
-            mock.patch.object(cli, "_load_config", return_value=cfg),
-            mock.patch.object(cli, "_queue", return_value=(cfg, self.queue)) as opened,
-            mock.patch.object(usage, "read_all", return_value=snapshots),
-            mock.patch("builtins.print") as printed,
-        ):
-            result = cli.main([
-                "accounts", "select", "--config", str(cfg.source_path),
-                "--database", str(cfg.database), "--now", str(NOW),
-            ])
-
-        self.assertEqual(result, 0)
-        opened.assert_called_once()
-        self.assertEqual(opened.call_args.kwargs, {"graph_required": True})
-        printed.assert_called_once_with(f"alpha-business {NOW + 20_000}")
-
-    def test_accounts_select_equal_resets_keeps_active_later_account_id(self) -> None:
-        active = self.root / "active"
-        active.write_text("Business\n", encoding="utf-8")
-        cfg = self._active_multi_config(
-            active, personal_id="alpha-a", business_id="alpha-z",
-        )
-        reset = NOW + 20_000
-        snapshots = {
-            ("alpha", "alpha-a"): usage.UsageSnapshot(
-                "alpha", "alpha-a", NOW,
-                {"alpha-weekly": {"used_percent": 70, "resets_at": reset}},
-            ),
-            ("alpha", "alpha-z"): usage.UsageSnapshot(
-                "alpha", "alpha-z", NOW,
-                {"alpha-weekly": {"used_percent": 70, "resets_at": reset}},
-            ),
-            ("beta", "beta-account"): usage.UsageSnapshot(
-                "beta", "beta-account", NOW,
-                {"beta-weekly": {"used_percent": 95, "resets_at": reset}},
-            ),
-        }
-        with (
-            mock.patch.object(cli, "_load_config", return_value=cfg),
-            mock.patch.object(cli, "_queue", return_value=(cfg, self.queue)),
-            mock.patch.object(usage, "read_all", return_value=snapshots),
-            mock.patch("builtins.print") as printed,
-        ):
-            result = cli.main([
-                "accounts", "select", "--config", str(cfg.source_path),
-                "--database", str(cfg.database), "--now", str(NOW),
-            ])
-
-        self.assertEqual(result, 0)
-        printed.assert_called_once_with(f"alpha-z {reset}")
 
     def test_nonselect_accounts_action_does_not_open_queue(self) -> None:
         with (
@@ -1162,7 +182,7 @@ class KickContractTests(unittest.TestCase):
             mock.patch.object(cli, "_queue") as opened,
             mock.patch("builtins.print"),
         ):
-            self.assertEqual(cli.main(["accounts", "labels"]), 0)
+            self.assertEqual(isolated_cli(["accounts", "labels"]), 0)
         opened.assert_not_called()
 
     def test_runtime_injected_non_router_classifier_and_launcher_are_rejected_before_execution(self) -> None:
@@ -1326,7 +346,7 @@ class KickContractTests(unittest.TestCase):
     @staticmethod
     def _example_with_router_binding(ref_id: str) -> dict[str, object]:
         example = json.loads((SKILL_ROOT / "config.example.json").read_text(encoding="utf-8"))
-        example["secret_refs"] = [
+        example["secret_refs"] += [
             {"id": "typesafe-api-key", "source": "env", "name": "TYPESAFE_API_KEY"},
         ]
         example["adapters"][0]["secret_refs"] = {"TYPESAFE_API_KEY": ref_id}
@@ -1437,10 +457,8 @@ class KickContractTests(unittest.TestCase):
                 self.assertEqual(self.queue.claim_for(task_id, key), None)
 
     def test_router_missing_codex_executable_is_known_not_launched_and_retry_safe(self) -> None:
-        codex = config_module.ProviderConfig(
-            "codex", config_module.DispatchBinding("router", "codex"), frozenset(), "single",
-        )
-        cfg = replace(self.config, providers=(codex,), plans=(), accounts=(), limits=())
+        codex = config_module.ProviderConfig("codex", config_module.DispatchBinding("router", "codex"), frozenset())
+        cfg = replace(self.config, providers=(codex,), limits=())
         task_id = "missing-codex"
         key = "manual/missing-codex"
         self.queue.add_task(reviewed(_task(task_id)))
@@ -1460,10 +478,8 @@ class KickContractTests(unittest.TestCase):
                 self.assertEqual(self.queue.claim_for(task_id, key), None)
 
     def test_codex_daemon_start_timeout_is_known_not_launched(self) -> None:
-        codex = config_module.ProviderConfig(
-            "codex", config_module.DispatchBinding("router", "codex"), frozenset(), "single",
-        )
-        cfg = replace(self.config, providers=(codex,), plans=(), accounts=(), limits=())
+        codex = config_module.ProviderConfig("codex", config_module.DispatchBinding("router", "codex"), frozenset())
+        cfg = replace(self.config, providers=(codex,), limits=())
         task_id = "daemon-timeout"
         key = "manual/daemon-timeout"
         self.queue.add_task(reviewed(_task(task_id)))
@@ -1483,10 +499,8 @@ class KickContractTests(unittest.TestCase):
                 self.assertIsNone(self.queue.claim_for(task_id, key))
 
     def test_codex_ignores_task_mcp_scoping_for_explicit_and_auto_kicks(self) -> None:
-        codex = config_module.ProviderConfig(
-            "codex", config_module.DispatchBinding("router", "codex"), frozenset(), "single",
-        )
-        cfg = replace(self.config, providers=(codex,), plans=(), accounts=(), limits=())
+        codex = config_module.ProviderConfig("codex", config_module.DispatchBinding("router", "codex"), frozenset())
+        cfg = replace(self.config, providers=(codex,), limits=())
         cases = (
             ("codex-none-explicit", "none", "codex"),
             ("codex-none-auto", "none", "auto"),
@@ -1516,10 +530,8 @@ class KickContractTests(unittest.TestCase):
                 self.assertNotIn("--strict-mcp-config", launch)
 
     def test_claude_preserves_task_mcp_scoping(self) -> None:
-        claude = config_module.ProviderConfig(
-            "claude", config_module.DispatchBinding("router", "claude"), frozenset(), "single",
-        )
-        cfg = replace(self.config, providers=(claude,), plans=(), accounts=(), limits=())
+        claude = config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), frozenset())
+        cfg = replace(self.config, providers=(claude,), limits=())
         source_mcp = self.root / "claude-mcp.json"
         source_mcp.write_text(
             json.dumps({"mcpServers": {"project": {"command": "project-mcp"}}}),
@@ -1542,10 +554,8 @@ class KickContractTests(unittest.TestCase):
         self.assertEqual(launch[launch.index("--engine") + 1], "claudeAgent")
 
     def test_named_mcp_selection_does_not_validate_unselected_server_secrets(self) -> None:
-        claude = config_module.ProviderConfig(
-            "claude", config_module.DispatchBinding("router", "claude"), frozenset(), "single",
-        )
-        cfg = replace(self.config, providers=(claude,), plans=(), accounts=(), limits=())
+        claude = config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), frozenset())
+        cfg = replace(self.config, providers=(claude,), limits=())
         project = self.root / "project"
         project.mkdir()
         (project / ".git").mkdir()
@@ -1577,7 +587,7 @@ class KickContractTests(unittest.TestCase):
 
     def test_set_mcp_updates_the_canonical_task_contract(self) -> None:
         with _capture_cli_json() as payloads:
-            code = cli.main([
+            code = isolated_cli([
                 "set-mcp", "--database", str(self.config.database),
                 "portable", "none", "--json",
             ])
@@ -1587,7 +597,7 @@ class KickContractTests(unittest.TestCase):
 
     def test_set_providers_updates_the_canonical_task_contract(self) -> None:
         with _capture_cli_json() as payloads:
-            code = cli.main([
+            code = isolated_cli([
                 "set-providers", "--database", str(self.config.database),
                 "portable", "beta", "--json",
             ])
@@ -1597,10 +607,8 @@ class KickContractTests(unittest.TestCase):
         self.assertEqual(self.queue.task("portable").allowed_providers, ("beta",))
 
     def test_router_mcp_flag_parser_rejection_is_known_not_launched(self) -> None:
-        claude = config_module.ProviderConfig(
-            "claude", config_module.DispatchBinding("router", "claude"), frozenset(), "single",
-        )
-        cfg = replace(self.config, providers=(claude,), plans=(), accounts=(), limits=())
+        claude = config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), frozenset())
+        cfg = replace(self.config, providers=(claude,), limits=())
         source_mcp = self.root / "rejected-mcp.json"
         source_mcp.write_text(
             json.dumps({"mcpServers": {"project": {"command": "project-mcp"}}}),
@@ -1654,25 +662,12 @@ class KickContractTests(unittest.TestCase):
     def test_json_config_graph_is_authoritative_but_queue_allows_database_compatibility(self) -> None:
         configured_db = self.config.database
         poison_db = self.root / "poison" / "queue.db"
-        raw = {
-            "schema_version": 1,
-            "database": str(configured_db),
-            "cache_dir": str(self.config.cache_dir),
-            "record_command": ["/bin/true"],
-            "adapters": [{"id": "router", "kind": "t3-thread", "argv": ["/bin/true"]}],
-            "providers": [{
-                "id": "alpha", "account_mode": "single",
-                "dispatch": {"adapter_id": "router", "provider": "alpha-engine"},
-            }],
-            "plans": [{"id": "alpha-plan", "provider_id": "alpha"}],
-            "accounts": [{"id": "alpha-account", "provider_id": "alpha", "plan_id": "alpha-plan"}],
-            "limits": [{
-                "id": "alpha-weekly", "plan_id": "alpha-plan", "window_seconds": 604800,
+        raw = {"schema_version": 1, "database": str(configured_db), "cache_dir": str(self.config.cache_dir), "record_command": ["/bin/true"], "adapters": [{"id": "router", "kind": "t3-thread", "argv": ["/bin/true"]}], "providers": [{
+                "id": "alpha", "dispatch": {"adapter_id": "router", "provider": "alpha-engine"},
+            }], "limits": [{
+                "id": "alpha-weekly", "provider_id": "alpha", "window_seconds": 604800,
                 "ceiling_percent": 95, "lead_seconds": 20000, "batch_size": 1,
-            }],
-            "viewer": {},
-            "pr_exceptions": [],
-        }
+            }], "viewer": {}, "pr_exceptions": [], "secret_refs": [{"id": "proxy", "source": "file", "path": "/unused/proxy.env"}], "proxy_secret_ref": "proxy"}
         self.config.source_path.write_text(json.dumps(raw), encoding="utf-8")
         validated = config_module.validate_config(
             raw, source_dir=self.root, source_path=self.config.source_path,
@@ -1684,7 +679,7 @@ class KickContractTests(unittest.TestCase):
             mock.patch.dict(os.environ, {"BONUS_DB": str(poison_db)}, clear=False),
             _capture_cli_json() as payloads,
         ):
-            code = cli.main(["queue", "--config", str(self.config.source_path), "--json"])
+            code = isolated_cli(["queue", "--config", str(self.config.source_path), "--json"])
         self.assertEqual(code, 0)
         self.assertEqual(len(payloads), 1)
         self.assertIn("portable", {row["id"] for row in payloads[0]["tasks"]})
@@ -1695,7 +690,7 @@ class KickContractTests(unittest.TestCase):
         compatibility_queue.initialize()
         compatibility_queue.add_task(reviewed(_task("queue-compatibility")))
         with _capture_cli_json() as payloads:
-            code = cli.main([
+            code = isolated_cli([
                 "queue", "--config", str(self.config.source_path),
                 "--database", str(compatibility_db), "--json",
             ])

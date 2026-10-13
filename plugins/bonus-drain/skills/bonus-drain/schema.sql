@@ -68,29 +68,17 @@ CREATE TABLE IF NOT EXISTS dispatch_claims (
   FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
 );
 
-CREATE TABLE IF NOT EXISTS activation_leases (
-  task_id         TEXT NOT NULL,
-  eligibility_key TEXT NOT NULL,
-  provider_id     TEXT NOT NULL,
-  account_id      TEXT NOT NULL,
-  state           TEXT NOT NULL CHECK (state IN ('activating','active','releasing')),
-  acquired_at     TEXT NOT NULL,
-  attempt_id      TEXT,
-  PRIMARY KEY (task_id, eligibility_key),
-  FOREIGN KEY (task_id, eligibility_key)
-    REFERENCES dispatch_claims(task_id, eligibility_key) ON DELETE CASCADE
-);
 
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version    INTEGER PRIMARY KEY,
   applied_at TEXT NOT NULL
 );
 
--- Account holds: a proved activation or launcher failure backs off the account, not the task.
+-- Account holds: a proved account or launcher failure backs off the account, not the task.
 CREATE TABLE IF NOT EXISTS account_backoff (
   provider_id TEXT NOT NULL,
   account_id  TEXT NOT NULL,
-  cause       TEXT NOT NULL CHECK (cause IN ('activation_unswitched','codex_daemon_start')),
+  cause       TEXT NOT NULL CHECK (cause IN ('account_unavailable','codex_daemon_start')),
   failures    INTEGER NOT NULL CHECK (failures >= 1),
   not_before  TEXT NOT NULL,
   detail      TEXT,
@@ -133,8 +121,6 @@ CREATE TABLE IF NOT EXISTS scout_notification_state (
 CREATE INDEX IF NOT EXISTS idx_runs_task ON runs(task);
 CREATE INDEX IF NOT EXISTS idx_runs_cycle ON runs(cycle);
 CREATE INDEX IF NOT EXISTS idx_claims_task ON dispatch_claims(task_id);
-CREATE INDEX IF NOT EXISTS idx_activation_provider_account
-  ON activation_leases(provider_id, account_id);
 
 -- Attempts are immutable execution identities. Historical run/claim rows intentionally
 -- retain NULL attempt IDs; additive initialization never invents an identity for them.

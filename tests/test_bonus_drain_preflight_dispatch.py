@@ -27,7 +27,7 @@ sys.path.insert(
 from bonus_drain import checks, cli, db, dispatcher, notifications, scout, usage
 from bonus_drain import config as config_module
 
-from tests.readiness_fixture import rereviewed, review_args, reviewed
+from tests.readiness_fixture import isolated_cli, rereviewed, review_args, reviewed
 from tests.test_bonus_dependency_recovery import (
     KEY,
     NOW,
@@ -85,7 +85,7 @@ def alpha_snapshots(now: int = NOW) -> dict[tuple[str, str], usage.UsageSnapshot
     return {
         ("alpha", "alpha-account"): usage.UsageSnapshot(
             "alpha", "alpha-account", now,
-            {"alpha-weekly": {"used_percent": 70, "resets_at": now + 5_000}},
+            {"seven_day": {"used_percent": 70, "resets_at": now + 5_000}},
         ),
     }
 
@@ -117,9 +117,6 @@ def not_before(queue: db.QueueDB, provider_id: str, account_id: str) -> float:
     return db._timestamp_epoch(row["not_before"])
 
 
-def unswitched_activation(action: str, _account_id: str) -> None:
-    if action == "activate":
-        raise dispatcher.ActivationUnavailable(UNSWITCHED, known_not_switched=True)
 
 
 class HermeticEnvironment:
@@ -146,68 +143,11 @@ class AccountHoldDispatchTests(PreflightCase):
             requested_provider=kwargs.pop("provider", "alpha"), **kwargs,
         )
 
-    def test_injected_unswitched_activation_holds_account_not_task(self) -> None:
-        cfg = runtime(self.queue.path, activation=True)
-        self.add("held")
-        router = mock.Mock()
 
-        with (
-            mock.patch.object(db.time, "time", return_value=NOW),
-            self.assertRaises(dispatcher.ActivationUnavailable) as raised,
-        ):
-            self.dispatch("held", cfg, router_call=router, activation_call=unswitched_activation)
-
-        router.assert_not_called()
-        hold = raised.exception.account_hold
-        self.assertEqual(
-            (hold.provider_id, hold.account_id, hold.cause),
-            ("alpha", "alpha-account", "activation_unswitched"),
-        )
-        self.assertEqual(self.queue.attempts(task_id="held"), [])
-        self.assertIsNone(self.queue.claim_for("held"))
-        self.assertEqual(backoff_rows(self.queue), [("alpha", "alpha-account", "activation_unswitched", 1)])
-        self.assertEqual(not_before(self.queue, "alpha", "alpha-account"), NOW + 1_800)
-        self.assertTrue(self.queue.readiness("held", now_epoch=NOW)["ready"])
-
-    def test_lease_managed_unswitched_activation_holds_account(self) -> None:
-        base = runtime(self.queue.path)
-        active = self.root / "active"
-        active.write_text("Personal\n", encoding="utf-8")
-        switch = config_module.AdapterConfig(
-            "switch", "activation",
-            (str(self.root / "bin" / "account-switch"), "--label", "Personal", "--active-path", str(active)),
-        )
-        account = replace(base.accounts[0], activation_adapter_id="switch", activation_scope="launch")
-        cfg = replace(base, adapters=(*base.adapters, switch), accounts=(account,))
-        self.add("held")
-
-        def boom(_cfg: object, _account: object, action: str, _callback: object) -> None:
-            if action == "activate":
-                # The exact adapter text for a rotation the adapter proved never happened.
-                raise dispatcher.DispatchError(
-                    "account activation activate failed: adapter switch exited 1: "
-                    f"bonus-drain-account-activation: {UNSWITCHED}"
-                )
-
-        with (
-            mock.patch.object(dispatcher, "_activation", side_effect=boom),
-            mock.patch.object(db.time, "time", return_value=NOW),
-            self.assertRaises(dispatcher.ActivationUnavailable) as raised,
-        ):
-            self.dispatch("held", cfg)
-
-        self.assertEqual(raised.exception.account_hold.cause, "activation_unswitched")
-        self.assertEqual(self.queue.attempts(task_id="held"), [])
-        self.assertIsNone(self.queue.claim_for("held"))
-        self.assertEqual(self.queue.activation_leases(provider_id="alpha"), [])
-        self.assertEqual(backoff_rows(self.queue), [("alpha", "alpha-account", "activation_unswitched", 1)])
-        self.assertTrue(db.doctor(self.queue).ok)
 
     def test_codex_daemon_timeout_holds_launcher(self) -> None:
-        codex = config_module.ProviderConfig(
-            "codex", config_module.DispatchBinding("router", "codex"), frozenset(), "single",
-        )
-        cfg = replace(runtime(self.queue.path), providers=(codex,), plans=(), accounts=(), limits=())
+        codex = config_module.ProviderConfig("codex", config_module.DispatchBinding("router", "codex"), frozenset())
+        cfg = replace(runtime(self.queue.path), providers=(codex,), limits=())
         self.add("daemon")
         rejected = subprocess.CompletedProcess([], 1, b"", CODEX_DAEMON_TIMEOUT)
 
@@ -229,40 +169,7 @@ class AccountHoldDispatchTests(PreflightCase):
         self.assertIsNone(self.queue.claim_for("daemon"))
         self.assertEqual(backoff_rows(self.queue), [("codex", "*", "codex_daemon_start", 1)])
 
-    def test_backoff_doubles_on_repeated_failure(self) -> None:
-        cfg = runtime(self.queue.path, activation=True)
-        self.add("flapping")
-        deltas = []
-        for index in range(5):
-            moment = NOW + index * 20_000
-            with (
-                mock.patch.object(db.time, "time", return_value=moment),
-                self.assertRaises(dispatcher.ActivationUnavailable),
-            ):
-                self.dispatch(
-                    "flapping", cfg, activation_call=unswitched_activation, now_epoch=moment,
-                )
-            deltas.append(not_before(self.queue, "alpha", "alpha-account") - moment)
-        self.assertEqual(deltas, [1_800, 3_600, 7_200, 14_400, 14_400])
-        self.assertEqual(backoff_rows(self.queue), [("alpha", "alpha-account", "activation_unswitched", 5)])
-        self.assertEqual(self.queue.attempts(task_id="flapping"), [])
 
-    def test_successful_dispatch_clears_backoff(self) -> None:
-        cfg = runtime(self.queue.path, activation=True)
-        self.add("flapping")
-        with (
-            mock.patch.object(db.time, "time", return_value=NOW),
-            self.assertRaises(dispatcher.ActivationUnavailable),
-        ):
-            self.dispatch("flapping", cfg, activation_call=unswitched_activation)
-        self.assertEqual(len(backoff_rows(self.queue)), 1)
-
-        with mock.patch.object(db.time, "time", return_value=NOW + 60):
-            result = self.dispatch("flapping", cfg, activation_call=lambda *_args: None)
-
-        self.assertEqual(result.account_id, "alpha-account")
-        self.assertEqual(backoff_rows(self.queue), [])
-        self.assertEqual([item.state for item in self.queue.attempts(task_id="flapping")], ["dispatched"])
 
 
 class AccountHoldScoutTests(PreflightCase):
@@ -275,10 +182,6 @@ class AccountHoldScoutTests(PreflightCase):
         self.routed: list[str] = []
         self.personal_refusal = UNSWITCHED
 
-    def activate(self, action: str, account_id: str) -> None:
-        self.events.append((action, account_id))
-        if action == "activate" and account_id == "alpha-personal" and self.personal_refusal:
-            raise dispatcher.ActivationUnavailable(self.personal_refusal, known_not_switched=True)
 
     def route(self, argv: list[str], **_kwargs: object) -> dict[str, object]:
         self.routed.append(argv[argv.index("--engine") + 1])
@@ -290,8 +193,7 @@ class AccountHoldScoutTests(PreflightCase):
             mock.patch.object(db.time, "time", return_value=now),
         ):
             return scout.run_once(
-                config or self.config, queue or self.queue, now_epoch=now,
-                activation_call=self.activate, router_call=self.route,
+                config or self.config, queue or self.queue, now_epoch=now, router_call=self.route,
                 check_runner=self.runner(),
             )
 
@@ -306,45 +208,7 @@ class AccountHoldScoutTests(PreflightCase):
             timestamp=iso(now), now_epoch=now,
         )
 
-    def test_scout_uses_sibling_account_during_backoff(self) -> None:
-        self.queue.add_task(reviewed(provider_task("alpha-one", "alpha")))
 
-        first = self.tick(NOW)
-        self.assertEqual(first.dispatched, ())
-        self.assertEqual(first.errors, ())
-        self.assertEqual(list(first.account_holds), [{
-            "task_id": "alpha-one", "provider_id": "alpha",
-            "account_id": "alpha-personal", "cause": "activation_unswitched",
-        }])
-        self.assertEqual(self.queue.attempts(task_id="alpha-one"), [])
-
-        second = self.tick(NOW + 600)
-        self.assertIn(
-            "account backoff until", second.plan.closed[("alpha", "alpha-personal")],
-        )
-        self.assertEqual([item.account_id for item in second.dispatched], ["alpha-business"])
-        self.assertEqual(self.attempt_states("alpha-one"), ["dispatched"])
-        self.assertNotIn(("activate", "alpha-personal"), self.events[1:])
-
-    def test_no_consecutive_infra_aborts_across_ticks(self) -> None:
-        self.queue.add_task(reviewed(provider_task("alpha-one", "alpha")))
-        reports = [
-            self.tick(moment, business_used=80)
-            for moment in (NOW, NOW + 600, NOW + 1_801)
-        ]
-        for report in reports:
-            self.assertEqual(report.errors, ())
-            self.assertEqual(report.dispatched, ())
-        self.assertEqual([len(report.account_holds) for report in reports], [1, 0, 1])
-        self.assertNotIn("aborted", self.attempt_states("alpha-one"))
-        self.assertEqual(self.queue.attempts(task_id="alpha-one"), [])
-        self.assertEqual(
-            backoff_rows(self.queue), [("alpha", "alpha-personal", "activation_unswitched", 2)],
-        )
-        self.assertEqual(
-            [event for event in self.events if event[0] == "activate"],
-            [("activate", "alpha-personal"), ("activate", "alpha-personal")],
-        )
 
     def test_provider_launch_unavailable_breaks_only_its_batch(self) -> None:
         config = _two_provider_config(self.queue, self.root / "cache")
@@ -377,46 +241,6 @@ class AccountHoldScoutTests(PreflightCase):
         for task_id in ("alpha-one", "alpha-two"):
             self.assertEqual(self.queue.attempts(task_id=task_id), [])
 
-    def test_account_hold_never_cycles_health_notices(self) -> None:
-        config = replace(self.config, scout_ntfy_url="https://ntfy.example.test/bonus-drain")
-        self.queue.add_task(reviewed(provider_task("alpha-one", "alpha")))
-
-        def stuck_rows(queue: db.QueueDB) -> list[int]:
-            return [row["stuck"] for row in rows(queue, "SELECT stuck FROM scout_notification_state")]
-
-        with mock.patch.object(notifications, "urlopen") as urlopen:
-            first = self.tick(NOW, config=config)
-            self.assertNotIn(1, stuck_rows(self.queue))
-            second = self.tick(NOW + 600, config=config)
-            self.assertNotIn(1, stuck_rows(self.queue))
-            self.assertEqual([item.task_id for item in second.dispatched], ["alpha-one"])
-            self.finish("alpha-one", NOW + 900)
-            self.queue.add_task(reviewed(provider_task("alpha-two", "alpha")))
-            third = self.tick(NOW + 1_801, config=config)
-            self.assertNotIn(1, stuck_rows(self.queue))
-
-        urlopen.assert_not_called()
-        for report in (first, second, third):
-            self.assertEqual(report.errors, ())
-        self.assertEqual([len(report.account_holds) for report in (first, second, third)], [1, 0, 1])
-        self.assertEqual(third.account_holds[0]["task_id"], "alpha-two")
-        self.assertEqual(
-            backoff_rows(self.queue), [("alpha", "alpha-personal", "activation_unswitched", 2)],
-        )
-
-        # Liveness: contention (no proven unswitched account) is still a scout error and alerts.
-        contention_root = self.mkdir("contention")
-        queue = db.QueueDB(contention_root / "queue.db")
-        queue.initialize()
-        queue.add_task(reviewed(provider_task("alpha-busy", "alpha")))
-        contention = replace(config, database=queue.path)
-        self.personal_refusal = "active work refused rotation"
-        with mock.patch.object(notifications, "urlopen") as urlopen:
-            refused = self.tick(NOW, config=contention, queue=queue)
-        self.assertEqual([error["task_id"] for error in refused.errors], ["alpha-busy"])
-        self.assertEqual(refused.account_holds, ())
-        self.assertEqual(urlopen.call_count, 1)
-        self.assertEqual([item.state for item in queue.attempts(task_id="alpha-busy")], ["aborted"])
 
 
 class DependencyEdgeCliTests(PreflightCase):
@@ -443,7 +267,7 @@ class DependencyEdgeCliTests(PreflightCase):
             mock.patch.object(checks, "subprocess_runner", fake),
             captured_json() as payloads,
         ):
-            code = cli.main(list(argv))
+            code = isolated_cli(list(argv))
         return code, payloads
 
     def add_cli(self, task_id: str, *extra: str) -> tuple[int, list[object]]:
@@ -519,12 +343,8 @@ class EnqueueValidationCliTests(HermeticEnvironment, PreflightCase):
         base = runtime(self.queue.path)
         self.cfg = replace(base, providers=(
             *base.providers,
-            config_module.ProviderConfig(
-                "claude", config_module.DispatchBinding("router", "claude"), frozenset(), "single",
-            ),
-            config_module.ProviderConfig(
-                "codex", config_module.DispatchBinding("router", "codex"), frozenset(), "single",
-            ),
+            config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), frozenset()),
+            config_module.ProviderConfig("codex", config_module.DispatchBinding("router", "codex"), frozenset()),
         ))
 
     def default_runner(self) -> FakeRunner:
@@ -543,7 +363,7 @@ class EnqueueValidationCliTests(HermeticEnvironment, PreflightCase):
             mock.patch.object(checks, "subprocess_runner", fake),
             captured_json() as payloads,
         ):
-            code = cli.main(list(argv))
+            code = isolated_cli(list(argv))
         return code, payloads
 
     def add_cli(
@@ -587,14 +407,14 @@ class EnqueueValidationCliTests(HermeticEnvironment, PreflightCase):
         code, payloads = self.add_cli(
             "valid", "--mcp", "airtable", "--start-ref", "main",
             "--check", json.dumps({"type": "issue_open", "repo": "owner/repo", "number": 12}),
-            "--check", json.dumps({"type": "release_exists", "repo": "owner/repo", "tag": "v1.2.0"}),
+            "--check", json.dumps({"type": "publication_exists", "repo": "owner/repo", "tag": "v1.2.0"}),
             fake=fake,
         )
         self.assertEqual(code, 0, payloads)
         self.assertEqual(fake.unexpected, [])
         stored = self.queue.task("valid")
         self.assertEqual((stored.mcp, stored.start_ref), ("airtable", "refs/heads/main"))
-        self.assertEqual([item["type"] for item in stored.to_dict()["checks"]], ["issue_open", "release_exists"])
+        self.assertEqual([item["type"] for item in stored.to_dict()["checks"]], ["issue_open", "publication_exists"])
         code, payloads = self.add_cli("no-mcp", "--mcp", "none")
         self.assertEqual(code, 0, payloads)
         self.assertEqual(self.queue.task("no-mcp").mcp, "none")
@@ -645,7 +465,7 @@ class QueueTimeCheckCliTests(HermeticEnvironment, PreflightCase):
             contextlib.redirect_stderr(stderr),
             captured_json() as payloads,
         ):
-            code = cli.main(list(argv))
+            code = isolated_cli(list(argv))
         return code, payloads, stdout.getvalue(), stderr.getvalue()
 
     def add_cli(self, fake: FakeRunner, task_id: str, *extra: str):
@@ -1020,7 +840,7 @@ class ScoutPreflightTests(HermeticEnvironment, PreflightCase):
             mock.patch.object(checks, "subprocess_runner", side_effect=forbidden),
             captured_json() as payloads,
         ):
-            code = cli.main([
+            code = isolated_cli([
                 "queue", "0", "--json", "--local", "--database", str(self.queue.path),
                 "--now", str(NOW + 10),
             ])
@@ -1217,7 +1037,7 @@ class CollisionAllocationTests(PreflightCase):
         snapshots = {
             (provider, f"{provider}-account"): usage.UsageSnapshot(
                 provider, f"{provider}-account", NOW,
-                {f"{provider}-plan-weekly": {"used_percent": used, "resets_at": NOW + 40 * HOUR}},
+                {"seven_day": {"used_percent": used, "resets_at": NOW + 40 * HOUR}},
             )
             for provider, used in (("alpha", alpha_used), ("beta", beta_used))
         }
@@ -1391,7 +1211,7 @@ class GoalCollisionReservationTests(PreflightCase):
         return {
             (provider, f"{provider}-account"): usage.UsageSnapshot(
                 provider, f"{provider}-account", NOW,
-                {f"{provider}-plan-weekly": {"used_percent": 74, "resets_at": NOW + 40 * HOUR}},
+                {"seven_day": {"used_percent": 74, "resets_at": NOW + 40 * HOUR}},
             )
             for provider in ("alpha", "beta")
         }
@@ -1469,7 +1289,7 @@ class ResumeAndNoticeScoutTests(HermeticEnvironment, PreflightCase):
         ]
 
         with captured_json() as payloads:
-            code = cli.main([*common, "--status", "awaiting_human"])
+            code = isolated_cli([*common, "--status", "awaiting_human"])
 
         self.assertNotEqual(code, 0)
         # Refused as a status choice (or the retired-status message), not for a missing outcome.
@@ -1478,7 +1298,7 @@ class ResumeAndNoticeScoutTests(HermeticEnvironment, PreflightCase):
         self.assertNotIn("awaiting_human", [row["status"] for row in rows(self.queue, "SELECT status FROM runs")])
 
         with captured_json() as payloads:
-            code = cli.main([*common, "--status", "failed", "--summary", "blocked on an external decision"])
+            code = isolated_cli([*common, "--status", "failed", "--summary", "blocked on an external decision"])
         self.assertEqual(code, 0, payloads)
         self.assertEqual(self.queue.attempts(task_id="parked")[0].state, "failed")
 
@@ -1546,7 +1366,7 @@ class HeldReportCliTests(HermeticEnvironment, PreflightCase):
         before = table_counts(self.queue.path)
 
         with captured_json() as payloads:
-            code = cli.main(["held-report", "--database", str(self.queue.path), "--json"])
+            code = isolated_cli(["held-report", "--database", str(self.queue.path), "--json"])
 
         self.assertEqual(code, 0, payloads)
         self.assertEqual(table_counts(self.queue.path), before)

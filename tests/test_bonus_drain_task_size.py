@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from tests.readiness_fixture import review_args, reviewed
+from tests.readiness_fixture import isolated_cli, proxy_fixture, review_args, reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
@@ -74,35 +74,13 @@ def _runtime_config(database: Path) -> config_module.RuntimeConfig:
     router = config_module.AdapterConfig(
         "router", "t3-thread", ("/bin/true",),
     )
-    return config_module.RuntimeConfig(
-        schema_version=1,
-        source_path=None,
-        database=database,
-        record_command=("/bin/true",),
-        secret_refs=(),
-        adapters=(router,),
-        providers=(
-            config_module.ProviderConfig(
-                "alpha",
-                config_module.DispatchBinding("router", "alpha"),
-                frozenset({"cpu"}),
-                "single",
-            ),
-        ),
-        plans=(config_module.PlanConfig("alpha-plan", "alpha"),),
-        accounts=(
-            config_module.AccountConfig("alpha-account", "alpha", "alpha-plan"),
-        ),
-        limits=(
+    return proxy_fixture(config_module.RuntimeConfig(schema_version=1, source_path=None, database=database, record_command=("/bin/true",), secret_refs=(), adapters=(router,), providers=(
+            config_module.ProviderConfig("alpha", config_module.DispatchBinding("router", "alpha"), frozenset({"cpu"})),
+        ), limits=(
             config_module.LimitConfig(
-                "alpha-weekly", "alpha-plan", 604_800, 95, 20_000, 3,
+                "alpha-weekly", "alpha", 604_800, 95, 20_000, 3,
             ),
-        ),
-        viewer={},
-        pr_exceptions=(),
-        usage_max_age_seconds=3_600,
-        cache_dir=database.parent / "cache",
-    )
+        ), viewer={}, pr_exceptions=(), usage_max_age_seconds=3_600, cache_dir=database.parent / "cache", proxy_secret_ref=None), (("alpha", "alpha-account"),))
 
 
 class TaskSizeContractTests(unittest.TestCase):
@@ -285,7 +263,7 @@ class TaskSizeContractTests(unittest.TestCase):
             versions = {
                 row[0] for row in connection.execute("SELECT version FROM schema_migrations")
             }
-            self.assertTrue({1, 3, 4} <= versions <= {1, 2, 3, 4}, versions)
+            self.assertTrue({1, 3, 4} <= versions <= {1, 2, 3, 4, 5}, versions)
             self.assertEqual(
                 connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0],
                 len(versions),
@@ -303,7 +281,7 @@ class TaskSizeContractTests(unittest.TestCase):
 
         for size in SIZES:
             with self.subTest(surface="cli", size=size), _capture_cli_json() as payloads:
-                code = cli.main(_cli_add(self.database, f"cli-{size}", size))
+                code = isolated_cli(_cli_add(self.database, f"cli-{size}", size))
                 self.assertEqual(code, 0)
                 self.assertEqual(len(payloads), 1)
                 self.assertEqual(payloads[0]["task"], self.queue.task(f"cli-{size}").to_dict())
@@ -330,13 +308,13 @@ class TaskSizeContractTests(unittest.TestCase):
                 self.assertIsNone(self.queue.task(f"bad-lower-{index}"))
 
             with self.subTest(surface="cli-invalid", size=invalid), _capture_cli_json():
-                code = cli.main(_cli_add(self.database, f"bad-cli-{index}", invalid))
+                code = isolated_cli(_cli_add(self.database, f"bad-cli-{index}", invalid))
                 self.assertEqual(code, 2)
                 self.assertIsNone(self.queue.task(f"bad-cli-{index}"))
 
         with _capture_cli_json():
             self.assertEqual(
-                cli.main(_cli_add(self.database, "missing-cli-size")),
+                isolated_cli(_cli_add(self.database, "missing-cli-size")),
                 2,
             )
         self.assertIsNone(self.queue.task("missing-cli-size"))
@@ -408,7 +386,7 @@ class TaskSizeContractTests(unittest.TestCase):
 
             with self.subTest(surface="cli-ineligible", task=task_id), _capture_cli_json():
                 self.assertEqual(
-                    cli.main([
+                    isolated_cli([
                         "set-size", task_id, "large", "--cycle", str(cycle),
                         "--database", str(self.database), "--json",
                     ]),
@@ -418,7 +396,7 @@ class TaskSizeContractTests(unittest.TestCase):
 
         with _capture_cli_json():
             self.assertEqual(
-                cli.main([
+                isolated_cli([
                     "set-size", "target", "medium",
                     "--database", str(self.database), "--json",
                 ]),
@@ -428,7 +406,7 @@ class TaskSizeContractTests(unittest.TestCase):
         self.assertEqual(self.queue.task("target").size, "huge")
 
         with _capture_cli_json() as payloads:
-            code = cli.main([
+            code = isolated_cli([
                 "set-size", "target", "medium", "--cycle", str(cycle),
                 "--database", str(self.database), "--json",
             ])
@@ -444,7 +422,7 @@ class TaskSizeContractTests(unittest.TestCase):
                 self.assertEqual(self.queue.task("target").size, "medium")
 
             with self.subTest(surface="cli-invalid", size=invalid), _capture_cli_json():
-                code = cli.main([
+                code = isolated_cli([
                     "set-size", "target", invalid,
                     "--cycle", str(cycle), "--database", str(self.database), "--json",
                 ])
@@ -455,7 +433,7 @@ class TaskSizeContractTests(unittest.TestCase):
             self.queue.set_size("no-such-task", "large", cycle)
         with _capture_cli_json():
             self.assertEqual(
-                cli.main([
+                isolated_cli([
                     "set-size", "no-such-task", "large",
                     "--cycle", str(cycle), "--database", str(self.database), "--json",
                 ]),
@@ -504,7 +482,7 @@ class TaskSizeContractTests(unittest.TestCase):
         self.assertIsNone(legacy.to_dict()["size"])
         with _capture_cli_json() as payloads:
             self.assertEqual(
-                cli.main(["queue", "--database", str(self.database), "--json"]),
+                isolated_cli(["queue", "--database", str(self.database), "--json"]),
                 0,
             )
         self.assertEqual(
@@ -514,7 +492,7 @@ class TaskSizeContractTests(unittest.TestCase):
 
         with _capture_cli_json() as payloads:
             self.assertEqual(
-                cli.main(["pick", "--database", str(self.database), "10", str(NOW)]),
+                isolated_cli(["pick", "--database", str(self.database), "10", str(NOW)]),
                 0,
             )
         self.assertEqual(
@@ -525,7 +503,7 @@ class TaskSizeContractTests(unittest.TestCase):
         for task in (sized, legacy):
             with self.subTest(surface="contract-task", task=task.id), _capture_cli_json() as payloads:
                 self.assertEqual(
-                    cli.main([
+                    isolated_cli([
                         "contract-task", "--database", str(self.database),
                         "--id", task.id, "--title", task.title,
                     ]),
@@ -556,7 +534,7 @@ class TaskSizeContractTests(unittest.TestCase):
         with mock.patch.object(cli.dispatcher, "render_prompt", side_effect=render_stub):
             for raw in (raw_sized, raw_legacy):
                 with contextlib.redirect_stdout(io.StringIO()) as output:
-                    code = cli.main([
+                    code = isolated_cli([
                         "render-prompt-json", "--database", str(self.database),
                         "--task-json", json.dumps(raw), "--cycle", str(NOW),
                         "--provider", "alpha",
@@ -625,7 +603,7 @@ class TaskSizeContractTests(unittest.TestCase):
 
         snapshot = usage.UsageSnapshot(
             "alpha", "alpha-account", NOW,
-            {"alpha-weekly": {"used_percent": 20, "resets_at": NOW + 1_000}},
+            {"seven_day": {"used_percent": 20, "resets_at": NOW + 1_000}},
         )
         snapshots = {("alpha", "alpha-account"): snapshot}
         with mock.patch.object(scout, "read_all", return_value=snapshots):

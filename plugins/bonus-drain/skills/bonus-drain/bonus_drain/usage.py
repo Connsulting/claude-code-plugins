@@ -5,30 +5,26 @@ from __future__ import annotations
 import json
 import math
 import os
-import re
 import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .config import AccountConfig, AdapterConfig, RuntimeConfig
+from .config import RuntimeConfig, _identifier
 
 
-class AdapterFailure(RuntimeError):
-    """A usage adapter failed or returned an unsafe/unusable response."""
+class UsageError(RuntimeError):
+    """Usage acquisition or cached data is unusable."""
 
 
-_SECRET_DIAGNOSTIC_RE = re.compile(
-    r"(?i)(token|secret|password|api[_-]?key|authorization)\s*[=:]\s*([^\s,;]+)"
-)
-
-
-def _redact(value: Any) -> str:
-    text = str(value).replace("\r", " ").replace("\n", " ")[:1000]
-    return _SECRET_DIAGNOSTIC_RE.sub(lambda match: f"{match.group(1)}=[REDACTED]", text)
+@dataclass(frozen=True)
+class ProxyAccount:
+    id: str
+    provider_id: str
+    unmetered: bool = False
 
 
 @dataclass(frozen=True)
@@ -39,6 +35,7 @@ class UsageSnapshot:
     limits: Mapping[str, Mapping[str, float | int]]
     fresh: bool = True
     error: str | None = None
+    unmetered: bool = False
 
     def cache_dict(self) -> dict[str, Any]:
         return {
@@ -46,6 +43,8 @@ class UsageSnapshot:
             "account_id": self.account_id,
             "captured_at": self.captured_at,
             "limits": {key: dict(value) for key, value in self.limits.items()},
+            "unmetered": self.unmetered,
+            "error": self.error,
         }
 
     def to_dict(self) -> dict[str, Any]:
@@ -61,7 +60,7 @@ def cache_path(cache_root: str | os.PathLike[str] | Path, provider_id: str, acco
 
 def _epoch(value: Any, label: str) -> int:
     if isinstance(value, bool):
-        raise AdapterFailure(f"{label} must be an epoch")
+        raise UsageError(f"{label} must be an epoch")
     if isinstance(value, (int, float)) and math.isfinite(float(value)):
         return int(value)
     if isinstance(value, str):
@@ -71,16 +70,15 @@ def _epoch(value: Any, label: str) -> int:
             try:
                 return int(datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp())
             except ValueError as exc:
-                raise AdapterFailure(f"{label} must be an epoch") from exc
-    raise AdapterFailure(f"{label} must be an epoch")
+                raise UsageError(f"{label} must be an epoch") from exc
+    raise UsageError(f"{label} must be an epoch")
 
 
 def normalize_snapshot(
     raw: Any,
-    account: AccountConfig,
+    account: ProxyAccount,
     *,
     now_epoch: int,
-    require_resets: bool = True,
 ) -> UsageSnapshot:
     if isinstance(raw, UsageSnapshot):
         raw = raw.cache_dict()
@@ -88,102 +86,47 @@ def normalize_snapshot(
         try:
             raw = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise AdapterFailure("usage adapter returned invalid JSON") from exc
+            raise UsageError("usage cache returned invalid JSON") from exc
     if not isinstance(raw, Mapping):
-        for attribute in ("data", "json", "output", "stdout"):
-            candidate = getattr(raw, attribute, None)
-            if candidate is not None:
-                return normalize_snapshot(
-                    candidate() if callable(candidate) else candidate,
-                    account,
-                    now_epoch=now_epoch,
-                    require_resets=require_resets,
-                )
-        raise AdapterFailure("usage adapter returned a non-object")
+        raise UsageError("usage cache returned a non-object")
 
     if "provider_id" not in raw:
-        raise AdapterFailure("usage adapter omitted provider_id")
+        raise UsageError("usage cache omitted provider_id")
     if "account_id" not in raw:
-        raise AdapterFailure("usage adapter omitted account_id")
+        raise UsageError("usage cache omitted account_id")
     if "captured_at" not in raw:
-        raise AdapterFailure("usage adapter omitted captured_at")
+        raise UsageError("usage cache omitted captured_at")
     provider_id = raw.get("provider_id")
     account_id = raw.get("account_id")
     if provider_id != account.provider_id or account_id != account.id:
-        raise AdapterFailure("usage adapter identity mismatch")
+        raise UsageError("usage cache identity mismatch")
     captured_at = _epoch(raw.get("captured_at"), "captured_at")
     raw_limits = raw.get("limits")
     if not isinstance(raw_limits, Mapping):
-        raise AdapterFailure("usage adapter omitted limits")
+        raise UsageError("usage cache omitted limits")
     limits: dict[str, dict[str, float | int]] = {}
     for raw_id, raw_reading in raw_limits.items():
         limit_id = str(raw_id)
         if not isinstance(raw_reading, Mapping):
-            raise AdapterFailure(f"limit {limit_id} is not an object")
+            raise UsageError(f"limit {limit_id} is not an object")
         used = raw_reading.get("used_percent")
         if isinstance(used, bool) or not isinstance(used, (int, float)) or not math.isfinite(float(used)):
-            raise AdapterFailure(f"limit {limit_id} has invalid used_percent")
+            raise UsageError(f"limit {limit_id} has invalid used_percent")
         used_number = float(used)
         if used_number < 0 or used_number > 100:
-            raise AdapterFailure(f"limit {limit_id} used_percent is outside 0..100")
+            raise UsageError(f"limit {limit_id} used_percent is outside 0..100")
         reset = raw_reading.get("resets_at")
         limits[limit_id] = {"used_percent": used_number}
-        if require_resets or reset is not None:
-            limits[limit_id]["resets_at"] = _epoch(reset, f"limit {limit_id} resets_at")
-        if "unreported_since" in raw_reading:
-            # The provider left this period's percent unset; used_percent is its first
-            # reported step. The planner and scout bound such a reading to one probe job.
-            since = _epoch(raw_reading.get("unreported_since"), f"limit {limit_id} unreported_since")
-            # A separate reset adapter supplies resets_at later; refresh_all re-normalizes the
-            # merged reading, so the ordering is always checked before the cache is written.
-            limit_reset = limits[limit_id].get("resets_at")
-            if limit_reset is not None and since >= limit_reset:
-                raise AdapterFailure(f"limit {limit_id} unreported_since must precede its reset")
-            limits[limit_id]["unreported_since"] = since
-    return UsageSnapshot(account.provider_id, account.id, captured_at, limits)
+        limits[limit_id]["resets_at"] = _epoch(reset, f"limit {limit_id} resets_at")
+    return UsageSnapshot(
+        account.provider_id, account.id, captured_at, limits,
+        fresh=raw.get("error") is None,
+        error="proxy usage unavailable" if raw.get("error") else None,
+        unmetered=account.unmetered,
+    )
 
 
-def normalize_resets(
-    raw: Any,
-    account: AccountConfig,
-    *,
-    now_epoch: int,
-) -> tuple[int, Mapping[str, int]]:
-    """Normalize a reset-only adapter response without inventing utilization values."""
-
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise AdapterFailure("reset adapter returned invalid JSON") from exc
-    if not isinstance(raw, Mapping):
-        for attribute in ("data", "json", "output", "stdout"):
-            candidate = getattr(raw, attribute, None)
-            if candidate is not None:
-                return normalize_resets(
-                    candidate() if callable(candidate) else candidate,
-                    account,
-                    now_epoch=now_epoch,
-                )
-        raise AdapterFailure("reset adapter returned a non-object")
-    if raw.get("provider_id", account.provider_id) != account.provider_id or raw.get("account_id", account.id) != account.id:
-        raise AdapterFailure("reset adapter identity mismatch")
-    captured_at = _epoch(raw.get("captured_at", now_epoch), "captured_at")
-    raw_limits = raw.get("limits")
-    if not isinstance(raw_limits, Mapping):
-        raise AdapterFailure("reset adapter omitted limits")
-    resets: dict[str, int] = {}
-    for raw_id, raw_reading in raw_limits.items():
-        limit_id = str(raw_id)
-        if not isinstance(raw_reading, Mapping):
-            raise AdapterFailure(f"reset limit {limit_id} is not an object")
-        resets[limit_id] = _epoch(
-            raw_reading.get("resets_at"), f"reset limit {limit_id} resets_at"
-        )
-    return captured_at, resets
-
-
-def _atomic_write(path: Path, snapshot: UsageSnapshot) -> None:
+def write_cache(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         path.parent.chmod(0o700)
@@ -195,7 +138,7 @@ def _atomic_write(path: Path, snapshot: UsageSnapshot) -> None:
     temporary = Path(temporary_name)
     try:
         os.fchmod(descriptor, 0o600)
-        payload = (json.dumps(snapshot.cache_dict(), sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+        payload = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
         with os.fdopen(descriptor, "wb") as stream:
             descriptor = -1
             stream.write(payload)
@@ -214,7 +157,7 @@ def _atomic_write(path: Path, snapshot: UsageSnapshot) -> None:
 
 def read_cached(
     cache_root: str | os.PathLike[str] | Path,
-    account: AccountConfig,
+    account: ProxyAccount,
     *,
     now_epoch: int | None = None,
     max_age_seconds: int = 3_600,
@@ -224,19 +167,41 @@ def read_cached(
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         snapshot = normalize_snapshot(raw, account, now_epoch=now)
-    except (OSError, UnicodeError, json.JSONDecodeError, AdapterFailure) as exc:
-        return UsageSnapshot(account.provider_id, account.id, 0, {}, fresh=False, error=_redact(exc))
+    except (OSError, UnicodeError, json.JSONDecodeError, UsageError):
+        return UsageSnapshot(account.provider_id, account.id, 0, {}, fresh=False, error="usage cache unavailable", unmetered=account.unmetered)
     if snapshot.captured_at > now + 300:
         return UsageSnapshot(
             snapshot.provider_id, snapshot.account_id, snapshot.captured_at, snapshot.limits,
-            fresh=False, error="cache timestamp is in the future",
+            fresh=False, error="cache timestamp is in the future", unmetered=account.unmetered,
         )
     if now - snapshot.captured_at > max_age_seconds:
         return UsageSnapshot(
             snapshot.provider_id, snapshot.account_id, snapshot.captured_at, snapshot.limits,
-            fresh=False, error="stale usage cache",
+            fresh=False, error="stale usage cache", unmetered=account.unmetered,
         )
     return snapshot
+
+
+def read_accounts(
+    config: RuntimeConfig,
+    cache_root: str | os.PathLike[str] | Path | None = None,
+    *,
+    now_epoch: int | None = None,
+) -> tuple[ProxyAccount, ...]:
+    root = Path(cache_root) if cache_root is not None else config.usage_cache_dir
+    try:
+        raw = json.loads((root / "auth-files.json").read_text(encoding="utf-8"))
+        _epoch(raw["captured_at"], "captured_at")
+        accounts = []
+        providers = {provider.id for provider in config.providers}
+        for item in raw["accounts"]:
+            provider = _identifier(item["provider_id"], "provider_id")
+            account_id = _identifier(item["id"], "account_id")
+            if provider in providers:
+                accounts.append(ProxyAccount(account_id, provider, bool(item["unmetered"])))
+        return tuple(accounts)
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError, UsageError):
+        return ()
 
 
 def read_all(
@@ -250,7 +215,7 @@ def read_all(
         (account.provider_id, account.id): read_cached(
             root, account, now_epoch=now_epoch, max_age_seconds=config.usage_max_age_seconds,
         )
-        for account in config.accounts
+        for account in read_accounts(config, root, now_epoch=now_epoch)
     }
 
 
@@ -262,148 +227,31 @@ def read_cache(
     *,
     now_epoch: int | None = None,
 ) -> UsageSnapshot:
-    """Compatibility-shaped single cache read used by both viewer implementations."""
-
-    account = config.account(account_id)
-    if account.provider_id != provider_id:
-        return UsageSnapshot(provider_id, account_id, 0, {}, fresh=False, error="cache identity mismatch")
-    return read_cached(
-        cache_root, account, now_epoch=now_epoch,
-        max_age_seconds=config.usage_max_age_seconds,
-    )
-
-
-load_cached = read_cache
-
-
-def _default_adapter_call(
-    adapter: AdapterConfig,
-    variables: Mapping[str, str],
-    *,
-    config: RuntimeConfig,
-) -> Any:
-    try:
-        from . import adapters  # type: ignore
-    except ImportError as exc:  # pragma: no cover - packaging always includes adapters
-        raise AdapterFailure("adapter runtime is unavailable") from exc
-    # execute_adapter has one stable signature.  Do not catch TypeError here: a TypeError from
-    # inside a successfully started adapter call is a real failure, and retrying would execute a
-    # foreground adapter twice.
-    return adapters.execute_adapter(adapter, variables=variables, config=config)
+    account = next((item for item in read_accounts(config, cache_root, now_epoch=now_epoch)
+                    if item.id == account_id and item.provider_id == provider_id), None)
+    if account is None:
+        return UsageSnapshot(provider_id, account_id, 0, {}, fresh=False, error="unknown proxy account")
+    return read_cached(cache_root, account, now_epoch=now_epoch,
+                       max_age_seconds=config.usage_max_age_seconds)
 
 
 def refresh_all(
     config: RuntimeConfig,
     cache_root: str | os.PathLike[str] | Path | None = None,
     *,
-    adapter_call: Callable[..., Any] | None = None,
     now_epoch: int | None = None,
 ) -> dict[tuple[str, str], UsageSnapshot]:
-    """Refresh every configured account independently.
-
-    Activation is intentionally absent: reading usage does not require or mutate the active
-    account.  One failing adapter leaves its last good file intact and cannot suppress siblings.
-    """
-
-    now = int(time.time() if now_epoch is None else now_epoch)
-    root = Path(cache_root) if cache_root is not None else config.usage_cache_dir
-    results: dict[tuple[str, str], UsageSnapshot] = {}
-    for account in config.accounts:
-        key = (account.provider_id, account.id)
-        if not account.usage_adapter_id:
-            existing = read_cached(
-                root, account, now_epoch=now, max_age_seconds=config.usage_max_age_seconds,
-            )
-            results[key] = UsageSnapshot(
-                existing.provider_id, existing.account_id, existing.captured_at, existing.limits,
-                fresh=False, error="account has no usage adapter",
-            )
-            continue
-        adapter = config.adapter(account.usage_adapter_id)
-        variables = {
-            "provider_id": account.provider_id,
-            "account_id": account.id,
-            "cache_path": str(cache_path(root, account.provider_id, account.id)),
-        }
-        try:
-            if adapter_call is None:
-                raw = _default_adapter_call(adapter, variables, config=config)
-            else:
-                raw = adapter_call(adapter, variables, config=config)
-            expected_ids = {item.id for item in config.limits_for_plan(account.plan_id)}
-            snapshot = normalize_snapshot(
-                raw, account, now_epoch=now,
-                require_resets=account.reset_adapter_id is None,
-            )
-            missing_usage = expected_ids - set(snapshot.limits)
-            if missing_usage:
-                raise AdapterFailure(
-                    f"usage adapter omitted configured limit {min(missing_usage)}"
-                )
-            if account.reset_adapter_id is not None:
-                reset_adapter = config.adapter(account.reset_adapter_id)
-                if adapter_call is None:
-                    reset_raw = _default_adapter_call(reset_adapter, variables, config=config)
-                else:
-                    reset_raw = adapter_call(reset_adapter, variables, config=config)
-                reset_captured, resets = normalize_resets(reset_raw, account, now_epoch=now)
-                missing_resets = expected_ids - set(resets)
-                if missing_resets:
-                    raise AdapterFailure(
-                        f"reset adapter omitted configured limit {min(missing_resets)}"
-                    )
-                merged = {
-                    limit_id: {
-                        "used_percent": snapshot.limits[limit_id]["used_percent"],
-                        "resets_at": resets[limit_id],
-                    }
-                    for limit_id in expected_ids
-                }
-                for limit_id in expected_ids:
-                    # Dropping the flag would turn a bounded probe reading into real usage.
-                    if "unreported_since" in snapshot.limits[limit_id]:
-                        merged[limit_id]["unreported_since"] = snapshot.limits[limit_id]["unreported_since"]
-                snapshot = normalize_snapshot(
-                    UsageSnapshot(
-                        account.provider_id, account.id,
-                        min(snapshot.captured_at, reset_captured), merged,
-                    ),
-                    account, now_epoch=now,
-                )
-            _atomic_write(cache_path(root, account.provider_id, account.id), snapshot)
-            results[key] = snapshot
-        except Exception as exc:  # noqa: BLE001
-            # An account failure is data and must not abort refreshing sibling accounts.
-            existing = read_cached(
-                root, account, now_epoch=now, max_age_seconds=config.usage_max_age_seconds,
-            )
-            results[key] = UsageSnapshot(
-                existing.provider_id, existing.account_id, existing.captured_at, existing.limits,
-                fresh=False, error=_redact(exc),
-            )
-    return results
+    from .proxy_usage import refresh
+    return refresh(config, cache_root, now_epoch=now_epoch)
 
 
-def legacy_window_line(
-    config: RuntimeConfig,
-    snapshot: UsageSnapshot,
-) -> str:
-    """Render the historical ``5h reset weekly reset`` line without provider branches."""
-
-    account = config.account(snapshot.account_id)
-    limits = config.limits_for_plan(account.plan_id)
-    ordered = sorted(limits, key=lambda item: (item.window_seconds, item.id))
-    short = ordered[0] if len(ordered) > 1 else None
-    long = ordered[-1] if ordered else None
-
-    def reading(limit_id: str | None) -> tuple[float | int, int]:
-        if not limit_id or limit_id not in snapshot.limits:
-            return 0, 0
-        item = snapshot.limits[limit_id]
+def legacy_window_line(config: RuntimeConfig, snapshot: UsageSnapshot) -> str:
+    """Render the shell window line from the normalized proxy cache."""
+    def reading(name: str) -> tuple[float | int, int]:
+        item = snapshot.limits.get(name, {})
         used = item.get("used_percent", 0)
-        used_value: float | int = int(used) if float(used).is_integer() else float(used)
-        return used_value, int(item.get("resets_at", 0))
-
-    short_used, short_reset = reading(short.id if short else None)
-    long_used, long_reset = reading(long.id if long else None)
+        return (int(used) if float(used).is_integer() else float(used),
+                int(item.get("resets_at", 0)))
+    short_used, short_reset = reading("five_hour")
+    long_used, long_reset = reading("seven_day")
     return f"{short_used} {short_reset} {long_used} {long_reset}"

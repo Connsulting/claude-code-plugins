@@ -13,7 +13,7 @@ installation paths, database identity, router, and release version keep their ex
 Every ready task is eligible for the automatic Bonus scheduler when capacity gates permit.
 Priority controls drain order. `run-now` and the viewer's Run now button accelerate one task by
 bypassing pacing only; they do not bypass dependencies, recurrence cooldown, provider
-compatibility, atomic claims, or activation leases. Paused tasks cannot run.
+compatibility or atomic claims. Paused tasks cannot run.
 
 ## Dependencies
 

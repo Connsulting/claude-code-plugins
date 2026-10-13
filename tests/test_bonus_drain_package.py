@@ -80,68 +80,28 @@ class BonusDrainPackageContractTests(unittest.TestCase):
         self.assertIsInstance(value, dict, f"{path} must contain a JSON object")
         return value
 
-    def activation_command(self, pin: Path, *extra: str) -> list[str]:
-        return [
-            str(SKILL_ROOT / "bin" / "bonus-drain-account-activation"),
-            "--action", "activate",
-            "--account", "account-business",
-            "--expected-account", "account-business",
-            "--label", "Business",
-            "--pin-file", str(pin),
-            *extra,
-        ]
 
-    def make_rotator(self, root: Path) -> Path:
-        rotator = root / "rotator"
-        rotator.write_text(
-            "#!/bin/sh\n"
-            "trace=$1\n"
-            "printf 'called\\n' >> \"$trace\"\n"
-            "if [ \"$#\" -eq 3 ]; then\n"
-            "  printf '%s\\n' \"$3\" > \"$2\"\n"
-            "fi\n",
-            encoding="utf-8",
-        )
-        rotator.chmod(0o700)
-        return rotator
 
     def installed_config(self, home: Path, config_path: Path) -> None:
         state = home / ".local" / "state" / "bonus-drain"
         state.mkdir(parents=True)
+        dotenv = state / "proxy.env"
+        dotenv.write_text("CPA_BASE_URL=http://127.0.0.1:1\nCPA_MGMT_KEY=fixture-credential\n")
+        dotenv.chmod(0o600)
         config_path.write_text(
-            json.dumps({
-                "schema_version": 1,
-                "database": str(state / "queue.db"),
-                "cache_dir": str(home / ".cache" / "bonus-drain"),
-                "record_command": [str(home / ".local" / "bin" / "bonus-drain"), "record"],
-                "secret_refs": [],
-                "adapters": [
+            json.dumps({"schema_version": 1, "database": str(state / "queue.db"), "cache_dir": str(home / ".cache" / "bonus-drain"), "record_command": [str(home / ".local" / "bin" / "bonus-drain"), "record"], "secret_refs": [{"id": "proxy", "source": "file", "path": str(dotenv)}], "adapters": [
                     {"id": "router", "kind": "t3-thread", "argv": ["/bin/true"]},
-                    {"id": "usage", "kind": "usage", "argv": ["/bin/true"]},
-                ],
-                "providers": [{
+                ], "providers": [{
                     "id": "provider-a",
-                    "account_mode": "single",
                     "dispatch": {"adapter_id": "router", "provider": "provider-a"},
-                }],
-                "plans": [{"id": "plan-a", "provider_id": "provider-a"}],
-                "accounts": [{
-                    "id": "account-a",
-                    "provider_id": "provider-a",
-                    "plan_id": "plan-a",
-                    "usage_adapter_id": "usage",
-                }],
-                "limits": [{
+                }], "limits": [{
                     "id": "weekly",
-                    "plan_id": "plan-a",
+                    "provider_id": "provider-a",
                     "window_seconds": 604800,
                     "ceiling_percent": 98,
                     "lead_seconds": 108000,
                     "batch_size": 1,
-                }],
-                "viewer": {"bind": "127.0.0.1", "mutations_enabled": False},
-                "pr_exceptions": [],
-            }),
+                }], "viewer": {"bind": "127.0.0.1", "mutations_enabled": False}, "pr_exceptions": [], "proxy_secret_ref": "proxy"}),
             encoding="utf-8",
         )
 
@@ -224,61 +184,6 @@ class BonusDrainPackageContractTests(unittest.TestCase):
 
         self.assertTrue((SKILL_ROOT / "services" / "jobs-viewer" / "server.py").is_file())
 
-    def test_example_releases_only_claude_activation_after_launch(self) -> None:
-        example = self.load_json(SKILL_ROOT / "config.example.json")
-        accounts = {account["id"]: account for account in example["accounts"]}
-
-        self.assertEqual(accounts["claude-personal"]["activation_scope"], "launch")
-        self.assertEqual(accounts["claude-business"]["activation_scope"], "launch")
-        self.assertNotIn("activation_scope", accounts["codex-personal"])
-
-        sys.path.insert(0, str(SKILL_ROOT))
-        try:
-            from bonus_drain import config as config_module
-        finally:
-            sys.path.pop(0)
-        validated = config_module.validate_config(
-            example,
-            source_dir=SKILL_ROOT,
-            source_path=SKILL_ROOT / "config.example.json",
-        )
-        self.assertEqual(validated.recurrence_timezone, "America/New_York")
-        self.assertEqual(
-            {account.id: account.activation_scope for account in validated.accounts},
-            {
-                "claude-personal": "launch",
-                "claude-business": "launch",
-                "codex-personal": "run",
-                "grok-personal": "run",
-            },
-        )
-
-        invalid_timezone = json.loads(json.dumps(example))
-        invalid_timezone["recurrence_timezone"] = "Eastern-ish"
-        with self.assertRaisesRegex(
-            config_module.ConfigError,
-            "unknown recurrence_timezone: Eastern-ish",
-        ):
-            config_module.validate_config(
-                invalid_timezone,
-                source_dir=SKILL_ROOT,
-                source_path=SKILL_ROOT / "config.example.json",
-            )
-
-        mixed = json.loads(json.dumps(example))
-        next(
-            account for account in mixed["accounts"]
-            if account["id"] == "claude-business"
-        )["activation_scope"] = "run"
-        with self.assertRaisesRegex(
-            config_module.ConfigError,
-            "accounts must share one activation_scope",
-        ):
-            config_module.validate_config(
-                mixed,
-                source_dir=SKILL_ROOT,
-                source_path=SKILL_ROOT / "config.example.json",
-            )
 
     def test_packaged_viewer_unit_preserves_user_installed_router_binaries(self) -> None:
         viewer_unit = SKILL_ROOT / "systemd" / "bonus-drain-viewer.service"
@@ -340,17 +245,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             config["providers"] = [
                 provider for provider in config["providers"] if provider["id"] == "codex"
             ]
-            config["providers"][0]["account_mode"] = "single"
-            config["plans"] = [
-                plan for plan in config["plans"] if plan["id"] == "codex-personal-plan"
-            ]
-            config["accounts"] = [
-                account for account in config["accounts"] if account["id"] == "codex-personal"
-            ]
-            config["accounts"][0].pop("activation_adapter_id", None)
-            config["limits"] = [
-                limit for limit in config["limits"] if limit["id"] == "codex-personal-weekly"
-            ]
+            config["limits"] = [item for item in config["limits"] if item["provider_id"] == "codex"]
             for adapter in config["adapters"]:
                 adapter["argv"][0] = "/bin/true"
             config_path = root / "config.json"
@@ -367,39 +262,6 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             report.diagnostics,
         )
 
-    def test_doctor_rotator_check_follows_each_activation_rotate_value(self) -> None:
-        # Real rotators are the --rotate value of each activation adapter, whatever their name.
-        sys.path.insert(0, str(SKILL_ROOT))
-        try:
-            from bonus_drain import lifecycle
-        finally:
-            sys.path.pop(0)
-
-        for executable in (True, False):
-            with self.subTest(executable=executable), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                rotator = root / "rotate.sh"
-                rotator.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-                rotator.chmod(0o700 if executable else 0o600)
-                activation = root / "bin" / "bonus-drain-account-activation"
-                activation.parent.mkdir()
-                activation.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-                activation.chmod(0o700)
-                config = self.load_json(SKILL_ROOT / "config.example.json")
-                config["database"] = str(root / "queue.db")
-                for adapter in config["adapters"]:
-                    adapter["argv"][0] = str(activation) if adapter["kind"] == "activation" else "/bin/true"
-                    adapter["argv"] = [
-                        str(rotator) if token == "/ABSOLUTE/PATH/TO/ai-token-rotator" else token
-                        for token in adapter["argv"]
-                    ]
-                config_path = root / "config.json"
-                config_path.write_text(json.dumps(config), encoding="utf-8")
-
-                report = lifecycle.doctor(root / "home", config_path=config_path)
-
-                self.assertIs(report.checks["config"], True, report)
-                self.assertIs(report.checks["optional:ai-token-rotator"], executable, report)
 
     def test_same_version_install_rejects_changed_source_without_changing_current(self) -> None:
         sys.path.insert(0, str(SKILL_ROOT))
@@ -457,7 +319,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             home = Path(temporary) / "home"
             config_path = home / ".config" / "bonus-drain" / "config.json"
             subprocess.run(
-                [str(SKILL_ROOT / "install.sh"), "--home", str(home)],
+                [str(SKILL_ROOT / "bin/bonus-drain"), "install", "--source", str(SKILL_ROOT), "--home", str(home)],
                 check=True,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
@@ -524,7 +386,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             home = Path(temporary) / "home"
             subprocess.run(
-                [str(SKILL_ROOT / "install.sh"), "--home", str(home)],
+                [str(SKILL_ROOT / "bin/bonus-drain"), "install", "--source", str(SKILL_ROOT), "--home", str(home)],
                 check=True,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
@@ -565,7 +427,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             config_path = home / ".config" / "bonus-drain" / "config.json"
             config_path.parent.mkdir(parents=True)
             subprocess.run(
-                [str(SKILL_ROOT / "install.sh"), "--home", str(home)],
+                [str(SKILL_ROOT / "bin/bonus-drain"), "install", "--source", str(SKILL_ROOT), "--home", str(home)],
                 check=True,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
@@ -710,9 +572,6 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             "skills/bonus-drain/config.example.json",
             "skills/bonus-drain/distribution-manifest.json",
             "skills/bonus-drain/bin/bonus-drain",
-            "skills/bonus-drain/bin/bonus-drain-account-usage",
-            "skills/bonus-drain/bin/bonus-drain-grok-usage",
-            "skills/bonus-drain/bin/bonus-drain-account-activation",
             "skills/bonus-drain/install.sh",
             "skills/bonus-drain/uninstall.sh",
             "skills/bonus-drain/bonus_drain/__init__.py",
@@ -753,9 +612,6 @@ class BonusDrainPackageContractTests(unittest.TestCase):
 
         for relative_path in (
             "skills/bonus-drain/bin/bonus-drain",
-            "skills/bonus-drain/bin/bonus-drain-account-usage",
-            "skills/bonus-drain/bin/bonus-drain-grok-usage",
-            "skills/bonus-drain/bin/bonus-drain-account-activation",
             "skills/bonus-drain/install.sh",
             "skills/bonus-drain/uninstall.sh",
             "skills/bonus-drain/scripts/install.sh",
@@ -767,319 +623,17 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                 f"{relative_path} must be executable for a standalone install",
             )
 
-    def test_packaged_adapters_are_manifest_owned_and_configuration_is_explicit(self) -> None:
+    def test_proxy_reader_is_manifest_owned_and_configuration_is_explicit(self) -> None:
         _manifest, included = self.distribution_manifest()
-        adapter_paths = {
-            "bin/bonus-drain-account-usage",
-            "bin/bonus-drain-grok-usage",
-            "bin/bonus-drain-account-activation",
-        }
-        self.assertTrue(
-            adapter_paths <= included,
-            f"distribution manifest does not own adapters: {sorted(adapter_paths - included)}",
-        )
-        for relative in adapter_paths:
-            path = SKILL_ROOT / relative
-            self.require_file(path)
-            self.assertTrue(os.access(path, os.X_OK), f"{relative} must retain executable mode")
-
-        wrappers = {
-            name: (SKILL_ROOT / name).read_text(encoding="utf-8")
-            for name in ("usage.sh", "codex-usage.sh", "grok-usage.sh")
-        }
-        for name, text in wrappers.items():
-            with self.subTest(wrapper=name):
-                self.assertNotIn("--legacy-index", text)
-                self.assertNotIn("LEGACY_INDEX", text)
-
+        self.assertIn("bonus_drain/proxy_usage.py", included)
         example = self.load_json(SKILL_ROOT / "config.example.json")
-        adapter_argv = {
-            adapter["id"]: adapter.get("argv", [])
-            for adapter in example.get("adapters", [])
-            if isinstance(adapter, dict) and isinstance(adapter.get("id"), str)
-        }
-        flattened = "\n".join(
-            "\0".join(str(token) for token in argv)
-            for argv in adapter_argv.values()
-        )
-        for executable in sorted(adapter_paths):
-            self.assertIn(
-                executable.removeprefix("bin/"),
-                flattened,
-                f"example config must demonstrate shipped {executable}",
-            )
-        self.assertNotIn("/usr/local/libexec/bonus-drain", flattened)
-        self.assertIn("{provider_id}", flattened)
-        self.assertIn("{account_id}", flattened)
-        self.assertIn("{action}", flattened)
-
-    def test_activation_skips_rotator_when_requested_label_is_already_active(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            pin = root / "PIN"
-            active = root / "active"
-            trace = root / "trace"
-            active.write_text("Business\n", encoding="utf-8")
-            rotator = self.make_rotator(root)
-
-            completed = subprocess.run(
-                self.activation_command(
-                    pin,
-                    "--rotate", str(rotator),
-                    "--rotate-arg", str(trace),
-                    "--active-path", str(active),
-                ),
-                check=False,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertFalse(trace.exists())
-            self.assertEqual(pin.read_text(encoding="utf-8"), "Business\n")
-
-    def test_activation_rejects_repeated_identity_options(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            pin = root / "PIN"
-            active = root / "active"
-            active.write_text("Business\n", encoding="utf-8")
-            cases = (
-                ("--account", "account-business"),
-                ("--expected-account", "account-business"),
-                ("--label", "Business"),
-                ("--pin-file", str(pin)),
-                ("--active-path", str(active)),
-            )
-            for option, value in cases:
-                with self.subTest(option=option):
-                    pin.unlink(missing_ok=True)
-                    command = self.activation_command(
-                        pin, "--active-path", str(active), option, value,
-                    )
-                    completed = subprocess.run(
-                        command,
-                        check=False,
-                        stdin=subprocess.DEVNULL,
-                        capture_output=True,
-                        text=True,
-                        timeout=5,
-                    )
-                    self.assertNotEqual(completed.returncode, 0)
-                    self.assertFalse(pin.exists())
-
-    def test_activation_rejects_abbreviated_identity_options(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            pin = root / "PIN"
-            active = root / "active"
-            active.write_text("Business\n", encoding="utf-8")
-            completed = subprocess.run(
-                self.activation_command(
-                    pin,
-                    "--active-path", str(active),
-                    "--expected-acc", "account-business",
-                ),
-                check=False,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-
-            self.assertNotEqual(completed.returncode, 0)
-            self.assertFalse(pin.exists())
-
-    def test_config_rejects_abbreviated_activation_identity_options(self) -> None:
-        sys.path.insert(0, str(SKILL_ROOT))
-        try:
-            from bonus_drain import config as config_module
-        finally:
-            sys.path.pop(0)
-        example = self.load_json(SKILL_ROOT / "config.example.json")
-        adapter = next(
-            item for item in example["adapters"]
-            if item["id"] == "claude-personal-activation"
-        )
-        adapter["argv"].extend(("--expected-acc", "claude-personal"))
-
-        with self.assertRaisesRegex(config_module.ConfigError, "identity|option"):
-            config_module.validate_config(
-                example,
-                source_dir=SKILL_ROOT,
-                source_path=SKILL_ROOT / "config.example.json",
-            )
-
-    def test_config_rejects_duplicate_labels_within_multi_account_provider(self) -> None:
-        sys.path.insert(0, str(SKILL_ROOT))
-        try:
-            from bonus_drain import config as config_module
-        finally:
-            sys.path.pop(0)
-        example = self.load_json(SKILL_ROOT / "config.example.json")
-        labels: dict[str, str] = {}
-        for adapter in example["adapters"]:
-            if adapter["id"] not in {
-                "claude-personal-activation", "claude-business-activation",
-            }:
-                continue
-            argv = adapter["argv"]
-            label_index = argv.index("--label") + 1
-            labels[adapter["id"]] = argv[label_index]
-            if adapter["id"] == "claude-business-activation":
-                argv[label_index] = labels["claude-personal-activation"]
-
-        with self.assertRaisesRegex(config_module.ConfigError, "label"):
-            config_module.validate_config(
-                example,
-                source_dir=SKILL_ROOT,
-                source_path=SKILL_ROOT / "config.example.json",
-            )
-
-    def test_activation_rollback_failure_is_not_reported_as_proven_unswitched(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            pin = root / "PIN"
-            active = root / "active"
-            active.write_text("Personal\n", encoding="utf-8")
-            rotator = root / "break-rollback"
-            rotator.write_text(
-                "#!/bin/sh\n"
-                "rm -f \"$1\"\n"
-                "mkdir \"$1\"\n",
-                encoding="utf-8",
-            )
-            rotator.chmod(0o700)
-
-            completed = subprocess.run(
-                self.activation_command(
-                    pin,
-                    "--rotate", str(rotator),
-                    "--rotate-arg", str(pin),
-                    "--active-path", str(active),
-                ),
-                check=False,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-
-            self.assertNotEqual(completed.returncode, 0)
-            self.assertTrue(pin.is_dir())
-            self.assertNotIn("requested account did not become active", completed.stderr)
-
-    def test_activation_without_active_path_still_invokes_rotator(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            pin = root / "PIN"
-            trace = root / "trace"
-            rotator = self.make_rotator(root)
-
-            completed = subprocess.run(
-                self.activation_command(
-                    pin,
-                    "--rotate", str(rotator),
-                    "--rotate-arg", str(trace),
-                ),
-                check=False,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertEqual(trace.read_text(encoding="utf-8").splitlines(), ["called"])
-            self.assertEqual(pin.read_text(encoding="utf-8"), "Business\n")
-
-    def test_missing_configured_active_marker_rotates_then_requires_proof(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            pin = root / "PIN"
-            active = root / "active"
-            trace = root / "trace"
-            rotator = self.make_rotator(root)
-
-            completed = subprocess.run(
-                self.activation_command(
-                    pin,
-                    "--rotate", str(rotator),
-                    "--rotate-arg", str(trace),
-                    "--active-path", str(active),
-                ),
-                check=False,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-
-            self.assertEqual(completed.returncode, 1)
-            self.assertEqual(trace.read_text(encoding="utf-8").splitlines(), ["called"])
-            self.assertIn("active account path", completed.stderr)
-            self.assertFalse(pin.exists())
-
-    def test_inactive_target_invokes_rotator_once_and_verifies_new_marker(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            pin = root / "PIN"
-            active = root / "active"
-            trace = root / "trace"
-            active.write_text("Personal\n", encoding="utf-8")
-            rotator = self.make_rotator(root)
-
-            completed = subprocess.run(
-                self.activation_command(
-                    pin,
-                    "--rotate", str(rotator),
-                    "--rotate-arg", str(trace),
-                    "--rotate-arg", str(active),
-                    "--rotate-arg", "Business",
-                    "--active-path", str(active),
-                ),
-                check=False,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertEqual(trace.read_text(encoding="utf-8").splitlines(), ["called"])
-            self.assertEqual(active.read_text(encoding="utf-8"), "Business\n")
-            self.assertEqual(pin.read_text(encoding="utf-8"), "Business\n")
-
-    def test_failed_inactive_rotation_restores_prior_pin(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            pin = root / "PIN"
-            active = root / "active"
-            trace = root / "trace"
-            pin.write_text("Personal\n", encoding="utf-8")
-            active.write_text("Personal\n", encoding="utf-8")
-            rotator = self.make_rotator(root)
-
-            completed = subprocess.run(
-                self.activation_command(
-                    pin,
-                    "--rotate", str(rotator),
-                    "--rotate-arg", str(trace),
-                    "--active-path", str(active),
-                ),
-                check=False,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-
-            self.assertEqual(completed.returncode, 1)
-            self.assertEqual(trace.read_text(encoding="utf-8").splitlines(), ["called"])
-            self.assertIn("requested account did not become active", completed.stderr)
-            self.assertEqual(pin.read_text(encoding="utf-8"), "Personal\n")
+        self.assertEqual({item["kind"] for item in example["adapters"]}, {"agent-router"})
+        self.assertNotIn("accounts", example)
+        self.assertNotIn("plans", example)
+        refs = {item["id"]: item for item in example["secret_refs"]}
+        self.assertEqual(refs[example["proxy_secret_ref"]]["source"], "file")
+        self.assertEqual(example["unmetered_max_inflight"], 2)
+        self.assertTrue(all("provider_id" in item for item in example["limits"]))
 
     def test_package_test_command_is_idempotent_without_bytecode_environment_flags(self) -> None:
         if os.environ.get("BONUS_DRAIN_PACKAGE_IDEMPOTENCE_CHILD") == "1":

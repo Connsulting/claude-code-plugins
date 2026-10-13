@@ -55,12 +55,12 @@ any new writer. This last snapshot is what includes late-added jobs.
 
 Create a timestamped directory on the same trusted host. Preserve modes and copy:
 
-- the DB plus any `-wal` and `-shm` files after writers are quiesced;
-- the old and new config files, excluding resolved secret values;
-- the unit files and the `unit-files.before.txt`, `timers.before.txt`, and
+1. the DB plus any `-wal` and `-shm` files after writers are quiesced;
+1. the old and new config files, excluding resolved secret values;
+1. the unit files and the `unit-files.before.txt`, `timers.before.txt`, and
   `units.before.txt` inventories;
-- the viewer profile and HTTPS terminator mapping inventory;
-- the installed-version/current-link inventory.
+1. the viewer profile and HTTPS terminator mapping inventory;
+1. the installed-version/current-link inventory.
 
 Hash the backup and make it read-only. Open the copied DB with SQLite in read-only mode and
 record `PRAGMA integrity_check`, table names, task/run counts, and schema version. A backup
@@ -95,14 +95,15 @@ task/run/status counts before and after initialization. Migrated `claude_only` a
 legacy-exclusive model rows remain restricted to providers declaring the reserved
 `legacy-exclusive` capability in JSON.
 
-Initialization also creates the additive `activation_leases` table. It does not synthesize a
-lease for historical rows. Before enabling scout, `doctor` must report no ambiguous claim or
-incomplete activation transition, and every multi-account provider must validate with a
-verified activator and one shared activation scope across its accounts. Run-scoped activation
-releases the last external PIN at terminal; launch-scoped activation releases it only after the
-router identity and dispatched record are durable. Release failure preserves the claim/lease
-for manual reconciliation. Back up this table with the rest of the queue for both cutover and
-rollback.
+Schema migration 5 drops the removed account ownership table and changes historical account
+backoff causes to `account_unavailable`, preserving dispatch claims and attempts. It also
+migrates stored check and grant names required by the source identifier contract. Back up the
+quiesced database before upgrading; the prior runtime cannot use the removed table.
+
+Remove configured plans, accounts, and provider usage/reset readers. Bind every pacing limit
+to `provider_id`, declare the private dotenv file in `secret_refs`, and set `proxy_secret_ref`.
+Refresh populates the proxy account inventory before automated planning. `doctor` must report
+no ambiguous dispatch claim before enabling scout.
 
 Do not enable the viewer until its local or remote mode has been reviewed against
 [SECURITY.md](SECURITY.md).
@@ -111,14 +112,14 @@ Do not enable the viewer until its local or remote mode has been reviewed agains
 
 Retain the exact commands and output proving:
 
-- one XDG database is used by the stable CLI and every enumerated consumer;
-- old writers are inactive and masked, and no old DB writer remains;
-- config, DB, unit-state, and version backups exist and pass read-back checks;
-- refresh writes only atomic `0600` snapshots and retains a last-good snapshot on failure;
-- scout and viewers perform no foreground provider read;
-- `doctor` has no ambiguous claim requiring reconciliation;
-- the new refresh/scout timer identities and next-fire times are correct.
-- exact viewer-unit text and `systemd-analyze verify` prove the direct server command and
+1. one XDG database is used by the stable CLI and every enumerated consumer;
+1. old writers are inactive and masked, and no old DB writer remains;
+1. config, DB, unit-state, and version backups exist and pass read-back checks;
+1. refresh writes only atomic `0600` snapshots and retains a last-good snapshot on failure;
+1. scout and viewers perform no foreground provider read;
+1. `doctor` has no ambiguous claim requiring reconciliation;
+1. the new refresh/scout timer identities and next-fire times are correct.
+1. exact viewer-unit text and `systemd-analyze verify` prove the direct server command and
   refresh-timer ordering; HTTP contracts prove exact Host/HTTPS Origin and JSON-only
   mutations, while a disposable Chrome test proves the frozen frontend renders through the
   real handler. Neither proves systemd, Tailscale, nor product TLS.

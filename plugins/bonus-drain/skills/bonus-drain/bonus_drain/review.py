@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from .db import Task
 
 GRANT_KINDS = (
-    "merge", "release", "sacred_path", "contract_change", "external_infra", "credential", "scope", "other",
+    "merge", "publication", "sacred_path", "contract_change", "external_infra", "credential", "scope", "other",
 )
 FINDING_CATEGORIES = ("authority", "contradiction", "feasibility", "external_dependency")
 DEPENDENCY_KINDS = ("credential", "provider_credit", "mcp_auth", "cluster_resource", "vendor_capability", "other")

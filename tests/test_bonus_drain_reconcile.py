@@ -13,7 +13,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "plugins/bonus-drai
 
 from bonus_drain import db, reconcile, scout
 from bonus_drain.adapters import AdapterError
-from bonus_drain.dispatcher import DispatchError
 
 from tests.readiness_fixture import reviewed
 from tests.test_bonus_drain_review_repairs import (
@@ -52,9 +51,6 @@ class ScoutReconciliationTests(unittest.TestCase):
             "abandoned", ELIGIBILITY_KEY, "alpha", "alpha-account",
         )
         self.assertIsNotNone(self.attempt)
-        self.queue.acquire_activation(
-            "abandoned", ELIGIBILITY_KEY, "alpha", "alpha-account", lambda: None,
-        )
         self.queue.record(
             "abandoned", ELIGIBILITY_KEY, attempt_id=self.attempt.id,
             status="dispatched", cycle=RESET,
@@ -66,7 +62,7 @@ class ScoutReconciliationTests(unittest.TestCase):
             "provider": "alpha", "job_id": "job-1", "state": state, **extra,
         }]}
 
-    def run_scout(self, response, *, dry_run=False, release=None, config=None, usage_snapshots=None):
+    def run_scout(self, response, *, dry_run=False, config=None, usage_snapshots=None):
         with (
             mock.patch.object(reconcile, 'execute_adapter', return_value=response),
             mock.patch.object(scout, 'read_all', return_value=snapshots() if usage_snapshots is None else usage_snapshots),
@@ -74,21 +70,17 @@ class ScoutReconciliationTests(unittest.TestCase):
         ):
             report = scout.run_once(
                 config or self.config, self.queue, now_epoch=NOW, dry_run=dry_run,
-                activation_call=release,
-            )
+                            )
         return report, dispatch
 
     def test_terminal_worker_releases_ownership_and_unblocks_dispatch_once(self):
         self.queue.add_task(reviewed(task("next-job")))
-        release = mock.Mock()
-        report, dispatch = self.run_scout(self.response(), release=release)
+        report, dispatch = self.run_scout(self.response())
         self.assertEqual(report.blockers, ())
         self.assertEqual(report.reconciliation[0]["action"], "failed")
         self.assertEqual(dispatch.call_args.kwargs["task_id"], "next-job")
-        release.assert_called_once_with("release", "alpha-account")
         self.assertEqual(self.queue.inflight(), [])
         self.assertEqual(self.queue.claims(), [])
-        self.assertEqual(self.queue.activation_leases(), [])
         self.assertEqual([r.status for r in self.queue.runs()], ["failed", "dispatched"])
         self.assertFalse(self.queue.eligible_tasks(RESET, task_id="abandoned"))
         with mock.patch.object(reconcile, "execute_adapter") as probe:
@@ -115,16 +107,12 @@ class ScoutReconciliationTests(unittest.TestCase):
                 self.assertEqual(dispatch.call_args.kwargs["requested_provider"], "beta")
                 self.assertIn(("alpha", "alpha-account"), report.plan.closed)
                 self.assertEqual(len(self.queue.claims()), 1)
-                self.assertEqual(len(self.queue.activation_leases()), 1)
                 self.assertEqual(len(self.queue.runs()), 1)
 
     def test_dry_run_reports_repair_without_recording_or_releasing(self):
-        release = mock.Mock()
-        report, dispatch = self.run_scout(self.response("failed"), dry_run=True, release=release)
+        report, dispatch = self.run_scout(self.response("failed"), dry_run=True)
         self.assertEqual(report.reconciliation[0]["action"], "would_fail")
         self.assertEqual(len(self.queue.runs()), 1)
-        self.assertEqual(len(self.queue.activation_leases()), 1)
-        release.assert_not_called()
         dispatch.assert_not_called()
 
     def test_unavailable_probe_preserves_claim(self):
@@ -138,7 +126,6 @@ class ScoutReconciliationTests(unittest.TestCase):
             self.queue.record(
                 "abandoned", ELIGIBILITY_KEY, attempt_id=self.attempt.id,
                 status="done", outcome=verified_outcome(),
-                release_activation=lambda: None,
             )
             return self.response()
 
@@ -159,7 +146,6 @@ class ScoutReconciliationTests(unittest.TestCase):
                     "signature": "verification_needed:fixture-race",
                     "queue_time_knowable": False,
                 }},
-                release_activation=lambda: None,
             )
             return original(*args, **kwargs)
 
@@ -167,15 +153,6 @@ class ScoutReconciliationTests(unittest.TestCase):
             report, _ = self.run_scout(self.response())
         self.assertIn("already recorded as skipped", report.reconciliation[0]["reason"])
         self.assertEqual([r.status for r in self.queue.runs()], ["skipped", "dispatched"])
-
-    def test_failed_activation_release_stays_blocked(self):
-        release = mock.Mock(side_effect=DispatchError("release failed"))
-        report, dispatch = self.run_scout(self.response(), release=release)
-        self.assertEqual(report.reconciliation[0]["action"], "held")
-        self.assertEqual(len(self.queue.inflight()), 1)
-        self.assertEqual(self.queue.activation_leases()[0].state, "releasing")
-        self.assertFalse(db.doctor(self.queue).ok)
-        dispatch.assert_not_called()
 
     def test_ambiguous_claim_stops_before_probing(self):
         self.queue.mark_ambiguous("abandoned", ELIGIBILITY_KEY, detail="unknown launch")
@@ -193,16 +170,13 @@ class ScoutReconciliationTests(unittest.TestCase):
         )
 
     def test_cancelled_t3_run_idle_30_minutes_is_recorded_failed(self):
-        release = mock.Mock()
         report, _dispatch = self.run_scout(self.response(
             "turn_ended", run_status="cancelled",
             last_activity_at=self._activity_stamp(1800), surface="t3",
-        ), release=release)
+        ))
         self.assertEqual(report.reconciliation[0]["action"], "failed")
         self.assertEqual([row.status for row in self.queue.runs()], ["failed", "dispatched"])
         self.assertEqual(self.queue.claims(), [])
-        self.assertEqual(self.queue.activation_leases(), [])
-        release.assert_called_once_with("release", "alpha-account")
         stored = self.queue.attempts(task_id="abandoned")
         self.assertEqual(stored[0].reason_signature, "unknown_launch:t3_run_cancelled")
 
@@ -213,7 +187,6 @@ class ScoutReconciliationTests(unittest.TestCase):
         ))
         self.assertEqual(report.reconciliation[0]["action"], "held")
         self.assertEqual(len(self.queue.claims()), 1)
-        self.assertEqual(len(self.queue.activation_leases()), 1)
         self.assertEqual(len(self.queue.runs()), 1)
 
     def test_turn_ended_completed_t3_run_keeps_current_hold(self):
@@ -227,23 +200,20 @@ class ScoutReconciliationTests(unittest.TestCase):
             "worker state is unknown; operator reconciliation required",
         )
         self.assertEqual(len(self.queue.claims()), 1)
-        self.assertEqual(len(self.queue.activation_leases()), 1)
         self.assertEqual(len(self.queue.runs()), 1)
 
     def test_state_read_failure_preserves_the_claim_and_a_terminal_run_fails_it(self):
-        release = mock.Mock()
         with mock.patch.object(
             reconcile, "execute_adapter", side_effect=reconcile.T3StateError("locked"),
         ):
-            report = reconcile.reconcile_inflight(self.config, self.queue, activation_call=release)
+            report = reconcile.reconcile_inflight(self.config, self.queue)
         self.assertEqual(report[0]["action"], "held")
         self.assertIn("locked", report[0]["reason"])
-        release.assert_not_called()
         with mock.patch.object(
             reconcile, "execute_adapter",
             return_value=reconcile.T3Thread("failed", False, None, None),
         ):
-            report = reconcile.reconcile_inflight(self.config, self.queue, activation_call=release)
+            report = reconcile.reconcile_inflight(self.config, self.queue)
         self.assertEqual(report[0]["action"], "failed")
         self.assertEqual(self.queue.inflight(), [])
 

@@ -1,4 +1,4 @@
-"""Safe execution of configured usage, activation, and t3-thread adapters."""
+"""Safe execution of configured launch adapters."""
 
 from __future__ import annotations
 
@@ -124,15 +124,6 @@ def _secrets(
 ) -> tuple[dict[str, str], dict[str, str]]:
     refs = {ref.id: ref for ref in config.secret_refs}
     bindings = dict(adapter.secret_refs)
-    account_id = variables.get("account_id")
-    if account_id and adapter.kind in {"usage", "reset"}:
-        try:
-            account = config.account(account_id)
-        except config_module.ConfigError:
-            account = None
-        if account is not None:
-            for name, ref_id in account.secret_refs.items():
-                bindings.setdefault(f"BONUS_SECRET_{name.upper()}", ref_id)
     values: dict[str, str] = {}
     exported: dict[str, str] = {}
     for name, ref_id in bindings.items():

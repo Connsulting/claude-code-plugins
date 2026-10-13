@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.readiness_fixture import reviewed
+from tests.readiness_fixture import proxy_fixture, reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
@@ -73,33 +73,13 @@ class FableModelCanonicalizationTests(unittest.TestCase):
                 "router", "t3-thread", (str(root / "bin" / "t3-thread"),),
                 timeout_seconds=0.2, max_output_bytes=1024,
             )
-            config = config_module.RuntimeConfig(
-                schema_version=1,
-                source_path=root / "config.json",
-                database=root / "queue.db",
-                record_command=("/bin/true",),
-                secret_refs=(),
-                adapters=(router,),
-                providers=(
-                    config_module.ProviderConfig(
-                        "claude", config_module.DispatchBinding("router", "claude"),
-                        frozenset({"legacy-exclusive"}), "single",
-                    ),
-                ),
-                plans=(config_module.PlanConfig("claude-plan", "claude"),),
-                accounts=(
-                    config_module.AccountConfig("claude-account", "claude", "claude-plan"),
-                ),
-                limits=(
+            config = proxy_fixture(config_module.RuntimeConfig(schema_version=1, source_path=root / "config.json", database=root / "queue.db", record_command=("/bin/true",), secret_refs=(), adapters=(router,), providers=(
+                    config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), frozenset({"legacy-exclusive"})),
+                ), limits=(
                     config_module.LimitConfig(
-                        "claude-weekly", "claude-plan", 604800, 95, 20000, 1,
+                        "claude-weekly", "claude", 604800, 95, 20000, 1,
                     ),
-                ),
-                viewer={},
-                pr_exceptions=(),
-                usage_max_age_seconds=3600,
-                cache_dir=root / "cache",
-            )
+                ), viewer={}, pr_exceptions=(), usage_max_age_seconds=3600, cache_dir=root / "cache", proxy_secret_ref=None), (("claude", "claude-account"),))
             queue = db.QueueDB(config.database)
             queue.initialize()
             queue.add_task(reviewed(_task("legacy-fable", model="opus")))

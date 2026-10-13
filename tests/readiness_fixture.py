@@ -105,3 +105,25 @@ def review_args(argv: Sequence[str]) -> tuple[str, ...]:
         done_when=_flag(argv, "--done-when"),
         goal=_flag(argv, "--goal"),
     ))
+
+
+def proxy_fixture(config: Any, accounts: Sequence[tuple[str, str]], *, now: int = 2_000_000_000) -> Any:
+    from bonus_drain.usage import write_cache
+    write_cache(config.usage_cache_dir / "auth-files.json", {
+        "captured_at": now,
+        "accounts": [{"id": account, "provider_id": provider, "unmetered": False}
+                     for provider, account in accounts],
+    })
+    return config
+
+
+def isolated_cli(argv: Sequence[str]) -> int:
+    """CLI tests must never discover the operator's real configuration."""
+    import os
+    from unittest.mock import patch
+
+    from bonus_drain import cli, config
+    if "--config" in argv or os.environ.get("BONUS_DRAIN_CONFIG"):
+        return cli.main(argv)
+    with patch.object(config, "default_config_path", return_value=Path("/nonexistent/bonus-drain-test-config.json")):
+        return cli.main(argv)

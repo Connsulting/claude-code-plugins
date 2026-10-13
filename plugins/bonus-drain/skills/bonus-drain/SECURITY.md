@@ -3,7 +3,7 @@
 ## Trust boundaries
 
 Bonus Drain accepts configuration and autonomous task content, reads usage through
-bounded adapters, writes normalized cache and SQLite state, and asks `t3-thread` to
+the bounded proxy management reader, writes normalized cache and SQLite state, and asks `t3-thread` to
 launch a concrete provider. It does not execute a provider directly.
 
 Config rejects inline credential-shaped values, shell interpolation, relative or unsafe
@@ -12,48 +12,21 @@ than `t3-thread`. Adapter subprocesses use argv arrays with `shell=False`, an al
 environment, time and output caps, and redacted diagnostics. Cache replacement is atomic,
 mode `0600`, and only a coherent normalized record replaces the last good value.
 
-The account-snapshot adapter reads exactly one configured file and validates explicit
-provider, account, source-label, source-window, destination-limit, and freshness values. The
-Grok normalizer invokes only one absolute collector with the literal `--direct-collect` flag,
-never the generic usage command, so configured collection cannot recurse.
+The proxy reader resolves one configured private dotenv file and sends its management
+credential only to the configured CLIProxyAPI origin. Redirects are refused. Account inventory
+is sanitized before caching; tokens, credential fields, Authorization headers and raw response
+bodies never enter logs or cache. Usage requests permit exactly the Anthropic OAuth usage URL
+and the ChatGPT WHAM usage URL, with the proxy's literal token placeholder. Other providers
+are unmetered and receive no usage request.
 
-The optional activation adapter accepts no credentials. PIN and active-label paths must be
-absolute and may not traverse symlinks. Activation writes a mode-0600 pin atomically, invokes
-an optional rotator with `shell=False` and a minimal environment, verifies the requested label
-when configured, and restores/removes its pin on failure. Release removes only a pin whose
-current contents still match that adapter's literal label. Account identity mismatches and
-successful-but-unswitched rotations fail closed.
-
-Activation and release serialize on a private per-PIN lock. Label reads use no-follow file
-descriptors and accept only bounded regular files. Collector and rotator subprocesses start
-in isolated process groups; timeout kills the group, including descendants. Activation never
-receives unrelated account secret references.
-
-Launch-scoped activation is permitted only by explicit account configuration. It releases a
-pin after both the router job identity and dispatched row are durable while retaining the task
-claim. Run scope remains the default. A failed post-launch release leaves a committed
-`releasing` lease and ambiguous claim for reconciliation rather than pretending the pin moved.
-
-Multi-account providers require a verified activation adapter on every account. A durable
-SQLite lease is created only for a matching dispatch claim. Committed `activating` and
-`releasing` transition states bracket external PIN changes; an interrupted side effect remains
-durable, blocks dispatch, and is reported for reconciliation. Same-account holders share one
-active lease, cross-account switches are rejected, ambiguous outcomes retain their lease, and
-only the last holder releases. Run-scoped holders release at terminal; launch-scoped holders
-release after a proven dispatch. Lease deletion commits only after a verified release; a failure
-leaves the `releasing` marker instead of silently unlocking.
-
-Normalized usage responses must explicitly state provider ID, account ID, and capture time.
-Direct Grok collection is configuration-limited to one account identity, and an omitted usage
-percentage is unknown capacity. File secret references are opened without following symlinks
-and must be current-user-owned mode-0600 regular files no larger than 65536 bytes; diagnostics
-report only validity, never content.
+File secret references are opened without following symlinks and must be current-user-owned
+mode-0600 regular files no larger than 65536 bytes. Diagnostics report validity, never content.
 
 Claims are made transactionally before routing and carry an immutable attempt ID. A terminal
-record may close only the exact matching attempt, claim, and activation ownership; a late or
+record may close only the exact matching attempt, claim ownership; a late or
 mismatched attempt cannot release a successor. A proved-not-launched failure retains an `aborted`
 attempt and releases only its matching ownership. An ambiguous router response or timeout retains
-the exact attempt, claim, and runtime account lease to prevent a duplicate or account switch.
+the exact attempt and claim to prevent a duplicate launch.
 Ordinary requeue schedules recovery without deleting terminal rows or attempts, and managed goal
 tasks remain protected by their public requeue guard. `doctor` reports reconciliation requirements.
 Authority-required, permanent, unknown-launch, and no-progress recovery holds cannot trigger a
@@ -78,18 +51,18 @@ timestamps remain historical evidence and cannot shorten recovery backoff or byp
 
 Bonus Drain preserves the established two-tab background-jobs viewer. Request threads read
 persisted usage snapshots and SQLite, and inspect local systemd timer metadata; they never call
-a provider API, activation command, or router for a GET. The separate
+a provider API or router for a GET. The separate
 `bonus-drain-refresh.timer` owns bounded usage refresh. Run now is always an explicit button
 action. Concrete and `auto` Run now both delegate to the shared router-only kickoff service.
 
 The viewer defaults to:
 
-- bind `127.0.0.1`;
-- no application authentication, identity session, or cookie;
-- mutations disabled unless explicitly enabled;
-- no CORS headers;
-- request bodies capped at 4096 bytes;
-- `no-store`, same-origin referrer, nosniff, and frame-deny headers.
+1. bind `127.0.0.1`;
+1. no application authentication, identity session, or cookie;
+1. mutations disabled unless explicitly enabled;
+1. no CORS headers;
+1. request bodies capped at 4096 bytes;
+1. `no-store`, same-origin referrer, nosniff, and frame-deny headers.
 
 Binding a local-mode viewer to a non-loopback address is rejected.
 
@@ -105,10 +78,10 @@ route, authentication cookie, identity session, or viewer secret.
 
 Startup fails unless all of these remain true:
 
-- the viewer binds to a loopback address;
-- exact Host and HTTPS Origin allowlists are configured;
-- the trusted loopback proxy flag is true;
-- configuration contains no application-auth field.
+1. the viewer binds to a loopback address;
+1. exact Host and HTTPS Origin allowlists are configured;
+1. the trusted loopback proxy flag is true;
+1. configuration contains no application-auth field.
 
 Every tailnet member that can reach the exact viewer URL is therefore an operator. This is
 the intended trust model, not a second authentication layer.
@@ -153,10 +126,10 @@ The viewer provides monitoring and execution controls, with no contract editor o
 endpoint. Request bodies remain capped at 4 KiB. Planning threads edit contracts through the
 CLI. Dependency changes are validated in the same write transaction as the contract update.
 Claims recheck dependencies, automatic execution policy, and the selected contract before
-activation or routing.
+routing.
 
 `viewer.preview: true` displays a copied-queue banner and rejects dispatch both in the viewer
 and the shared dispatcher. Preview setup additionally replaces all external adapters with
-rejecting executables and retargets database, cache, and activation paths to a private copy.
+rejecting executables and retargets database, cache, and proxy secret references to a private copy.
 Requeueing there changes only that copy. No runtime installation or automatic scheduler is
 implied by running a preview.

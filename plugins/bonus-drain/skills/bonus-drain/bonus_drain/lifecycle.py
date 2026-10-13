@@ -1,7 +1,7 @@
 """Safe, versioned installation and operational checks for Bonus Drain.
 
 The lifecycle layer deliberately does not start services. Its only queue mutation is
-applying additive schema migrations to an existing queue database before a new release
+applying additive schema migrations to an existing queue database before a new publication
 becomes current.  It
 installs only files it can later prove it owns, leaves XDG state/config/cache alone,
 and refuses uninstall when an operator has added or changed an owned installation
@@ -302,7 +302,7 @@ def _migrate_queue(home_path: Path, *, selected: bool) -> None:
     env = dict(os.environ)
     if selected:
         # Caller overrides pointing outside the selected home would migrate the caller's
-        # queue and leave the published release reading an unmigrated one.
+        # queue and leave the published publication reading an unmigrated one.
         for key in _PATH_OVERRIDES:
             value = env.get(key)
             if value and not Path(value).expanduser().resolve().is_relative_to(home_path):
@@ -321,22 +321,22 @@ def _migrate_queue(home_path: Path, *, selected: bool) -> None:
     try:
         db.QueueDB(database).initialize()
     except (OSError, sqlite3.Error, db.QueueError) as exc:
-        raise LifecycleError(f"queue migration failed; current release unchanged: {exc}") from exc
+        raise LifecycleError(f"queue migration failed; current publication unchanged: {exc}") from exc
 
 
 def install(source: str | Path, home: str | Path | None = None, *, version: str | None = None) -> InstalledPaths:
     """Install a version without enabling or starting any services.
 
-    An existing queue database is migrated by this release before ``current`` switches;
-    a migration failure leaves the previous release current.
+    An existing queue database is migrated by this publication before ``current`` switches;
+    a migration failure leaves the previous publication current.
     """
 
     source_path = Path(source).expanduser().resolve()
     if not source_path.is_dir() or source_path.is_symlink():
         raise LifecycleError(f"invalid source directory: {source_path}")
     home_path, lib, wrapper, unit_dir = _paths(Path(home) if home is not None else Path.home())
-    release = _version(source_path, version)
-    version_dir = lib / release
+    publication = _version(source_path, version)
+    version_dir = lib / publication
     current = lib / "current"
     source_files = _runtime_files(source_path)
     source_hashes = {str(rel): _sha256(source_path / rel) for rel in source_files}
@@ -380,11 +380,11 @@ def install(source: str | Path, home: str | Path | None = None, *, version: str 
         installed_hashes = _verify_version_dir(version_dir)
         if installed_hashes != source_hashes:
             raise OwnershipError(
-                f"same version source payload differs from installed release: {release}; "
+                f"same version source payload differs from installed publication: {publication}; "
                 "choose a new install version"
             )
     else:
-        staging = Path(tempfile.mkdtemp(prefix=f".{release}.", dir=lib))
+        staging = Path(tempfile.mkdtemp(prefix=f".{publication}.", dir=lib))
         try:
             owned: dict[str, str] = {}
             for rel in source_files:
@@ -394,7 +394,7 @@ def install(source: str | Path, home: str | Path | None = None, *, version: str 
                 shutil.copy2(src, dest, follow_symlinks=False)
                 owned[str(rel)] = _sha256(dest)
             marker = json.dumps(
-                {"format": 1, "version": release, "files": owned},
+                {"format": 1, "version": publication, "files": owned},
                 sort_keys=True, separators=(",", ":"),
             ).encode("utf-8") + b"\n"
             _write_atomic(staging / _OWNED_NAME, marker, 0o600)
@@ -408,7 +408,7 @@ def install(source: str | Path, home: str | Path | None = None, *, version: str 
     temporary_link = lib / f".current.{os.getpid()}"
     try:
         temporary_link.unlink(missing_ok=True)
-        temporary_link.symlink_to(release)
+        temporary_link.symlink_to(publication)
         os.replace(temporary_link, current)
     finally:
         temporary_link.unlink(missing_ok=True)
@@ -419,7 +419,7 @@ def install(source: str | Path, home: str | Path | None = None, *, version: str 
 
     install_record = {
         "format": 1,
-        "version": release,
+        "version": publication,
         "wrapper": {"path": str(wrapper), "sha256": _sha256(wrapper)},
         "units": {str(path): _sha256(path) for path in unit_payloads},
         "source": {"path": str(source_path), "files": installed_hashes},
@@ -429,7 +429,7 @@ def install(source: str | Path, home: str | Path | None = None, *, version: str 
         json.dumps(install_record, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n",
         0o600,
     )
-    return InstalledPaths(release, version_dir, current, wrapper, tuple(unit_payloads))
+    return InstalledPaths(publication, version_dir, current, wrapper, tuple(unit_payloads))
 
 
 def _install_record(lib: Path) -> dict[str, Any]:
@@ -454,29 +454,17 @@ def _executable_available(command: str) -> bool:
     return resolved is not None and Path(resolved).is_file()
 
 
-def _configured_rotators(cfg: Any) -> list[str]:
-    """Return the --rotate value of every activation adapter, whatever the rotator is named."""
-
-    rotators: list[str] = []
-    for adapter in cfg.adapters:
-        if adapter.kind != "activation":
-            continue
-        argv = list(adapter.argv)
-        for index, token in enumerate(argv[:-1]):
-            if token == "--rotate":
-                rotators.append(argv[index + 1])
-    return rotators
 
 
 def status(home: str | Path | None = None) -> InstallStatus:
     _home, lib, wrapper, unit_dir = _paths(Path(home) if home is not None else Path.home())
     current = lib / "current"
     problems: list[str] = []
-    release: str | None = None
+    publication: str | None = None
     if not current.is_symlink():
-        problems.append("current release symlink is missing")
+        problems.append("current publication symlink is missing")
     else:
-        release = Path(os.readlink(current)).name
+        publication = Path(os.readlink(current)).name
         try:
             _verify_version_dir((current.parent / os.readlink(current)).resolve())
         except OwnershipError as exc:
@@ -490,7 +478,7 @@ def status(home: str | Path | None = None) -> InstallStatus:
     if missing_units:
         problems.append("systemd templates missing: " + ", ".join(missing_units))
     installed = current.is_symlink() or wrapper.exists() or (lib / _INSTALL_NAME).exists()
-    return InstallStatus(installed, release, wrapper, current, units, tuple(problems))
+    return InstallStatus(installed, publication, wrapper, current, units, tuple(problems))
 
 
 def doctor(
@@ -600,7 +588,7 @@ def doctor(
             required_checks.add(check_name)
 
         for adapter in cfg.adapters:
-            if adapter.kind not in {"t3-thread", "usage", "reset", "activation"}:
+            if adapter.kind not in {"agent-router", "t3-thread"}:
                 continue
             check_name = f"adapter:{adapter.kind}:{adapter.id}"
             available = bool(adapter.argv) and _executable_available(adapter.argv[0])
@@ -612,12 +600,6 @@ def doctor(
                     f"adapter {adapter.id} ({adapter.kind}) executable is unavailable: {executable}"
                 )
 
-        activation_configured = any(adapter.kind == "activation" for adapter in cfg.adapters)
-        if activation_configured:
-            rotators = _configured_rotators(cfg)
-            unavailable = sorted({rotator for rotator in rotators if not _executable_available(rotator)})
-            checks["optional:ai-token-rotator"] = bool(rotators) and not unavailable
-            diagnostics.extend(f"activation rotator is not executable: {rotator}" for rotator in unavailable)
         if consumers:
             compatibility = check_consumer_compatibility(cfg, consumers)
             checks["consumers"] = compatibility.ok

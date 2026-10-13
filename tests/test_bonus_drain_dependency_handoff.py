@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from tests.readiness_fixture import reviewed
+from tests.readiness_fixture import isolated_cli, proxy_fixture, reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
@@ -80,32 +80,12 @@ def verified_outcome(repo: dict[str, object] | None = None) -> dict[str, object]
 
 
 def runtime(database: Path) -> config_module.RuntimeConfig:
-    return config_module.RuntimeConfig(
-        schema_version=1,
-        source_path=None,
-        database=database,
-        record_command=("/bin/true", "record"),
-        secret_refs=(),
-        adapters=(config_module.AdapterConfig(
-            "router", "t3-thread", ("/bin/true",),
+    return proxy_fixture(config_module.RuntimeConfig(schema_version=1, source_path=None, database=database, record_command=("/bin/true", "record"), secret_refs=(), adapters=(config_module.AdapterConfig(
+            "router", "agent-router", ("/bin/true",),
             timeout_seconds=10, max_output_bytes=65_536,
-        ),),
-        providers=(config_module.ProviderConfig(
-            "alpha", config_module.DispatchBinding("router", "alpha"),
-            frozenset(), "single",
-        ),),
-        plans=(config_module.PlanConfig("alpha-plan", "alpha"),),
-        accounts=(config_module.AccountConfig(
-            "alpha-account", "alpha", "alpha-plan",
-        ),),
-        limits=(config_module.LimitConfig(
-            "alpha-weekly", "alpha-plan", 604_800, 95, 20_000, 6,
-        ),),
-        viewer={},
-        pr_exceptions=(),
-        usage_max_age_seconds=3_600,
-        cache_dir=database.parent / "cache",
-    )
+        ),), providers=(config_module.ProviderConfig("alpha", config_module.DispatchBinding("router", "alpha"), frozenset()),), limits=(config_module.LimitConfig(
+            "alpha-weekly", "alpha", 604_800, 95, 20_000, 6,
+        ),), viewer={}, pr_exceptions=(), usage_max_age_seconds=3_600, cache_dir=database.parent / "cache", proxy_secret_ref=None), (("alpha", "alpha-account"),))
 
 
 class SimpleBranchResolutionContract(unittest.TestCase):
@@ -289,7 +269,7 @@ class QueueBranchChoiceContract(unittest.TestCase):
         snapshots = {
             ("alpha", "alpha-account"): usage.UsageSnapshot(
                 "alpha", "alpha-account", NOW,
-                {"alpha-weekly": {"used_percent": 70, "resets_at": NOW + 1_000}},
+                {"seven_day": {"used_percent": 70, "resets_at": NOW + 1_000}},
             ),
         }
         with mock.patch.object(scout, "read_all", return_value=snapshots):
@@ -337,7 +317,7 @@ class QueueBranchChoiceContract(unittest.TestCase):
         snapshots = {
             ("alpha", "alpha-account"): usage.UsageSnapshot(
                 "alpha", "alpha-account", NOW,
-                {"alpha-weekly": {"used_percent": 70, "resets_at": NOW + 1_000}},
+                {"seven_day": {"used_percent": 70, "resets_at": NOW + 1_000}},
             ),
         }
         with mock.patch.object(scout, "read_all", return_value=snapshots):
@@ -362,7 +342,7 @@ class QueueBranchChoiceContract(unittest.TestCase):
             connection.execute("UPDATE tasks SET title='changed' WHERE id='child'")
         self.assertEqual(self.queue.task("child").title, "child")
         with mock.patch.object(cli, "_json") as output:
-            self.assertEqual(cli.main([
+            self.assertEqual(isolated_cli([
                 "queue", "--database", str(self.queue.path), "--local", "--now", str(NOW), "--json",
             ]), 0)
         self.assertEqual(output.call_args.args[0]["readiness"]["child"], strict)
@@ -399,7 +379,7 @@ class QueueBranchChoiceContract(unittest.TestCase):
 
         snapshots = {("alpha", "alpha-account"): usage.UsageSnapshot(
             "alpha", "alpha-account", NOW + 300,
-            {"alpha-weekly": {"used_percent": 20, "resets_at": NOW + 1_000}},
+            {"seven_day": {"used_percent": 20, "resets_at": NOW + 1_000}},
         )}
         with mock.patch.object(scout, "read_all", return_value=snapshots):
             recovered = scout.run_once(

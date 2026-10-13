@@ -12,7 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
-from tests.readiness_fixture import review_json, reviewed
+from tests.readiness_fixture import isolated_cli, review_json, reviewed
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
@@ -46,15 +46,12 @@ def _task_obj(**overrides: object) -> db.Task:
 
 
 def _provider(provider_id: str, *capabilities: str) -> config_module.ProviderConfig:
-    return config_module.ProviderConfig(
-        provider_id, config_module.DispatchBinding("router", provider_id),
-        frozenset(capabilities), "single",
-    )
+    return config_module.ProviderConfig(provider_id, config_module.DispatchBinding("router", provider_id), frozenset(capabilities))
 
 
-def _limit(plan_id: str) -> config_module.LimitConfig:
+def _limit(provider_id: str) -> config_module.LimitConfig:
     return config_module.LimitConfig(
-        f"{plan_id}-weekly", plan_id, 604800, 95, 259200, 6,
+        f"{provider_id}-weekly", provider_id, 604800, 95, 259200, 6,
         max_percent_per_window=0.5, estimated_percent_per_job=1.0,
         pacing_window_seconds=HOUR,
     )
@@ -65,32 +62,14 @@ def _config(database: Path, providers: tuple[str, ...]) -> config_module.Runtime
     router = config_module.AdapterConfig(
         "router", "t3-thread", ("/bin/true",), timeout_seconds=0.2, max_output_bytes=1024,
     )
-    return config_module.RuntimeConfig(
-        schema_version=1,
-        source_path=None,
-        database=database,
-        record_command=("/bin/true",),
-        secret_refs=(),
-        adapters=(router,),
-        providers=tuple(_provider(item, *capabilities[item]) for item in providers),
-        plans=tuple(config_module.PlanConfig(f"{item}-plan", item) for item in providers),
-        accounts=tuple(
-            config_module.AccountConfig(f"{item}-account", item, f"{item}-plan")
-            for item in providers
-        ),
-        limits=tuple(_limit(f"{item}-plan") for item in providers),
-        viewer={},
-        pr_exceptions=(),
-        usage_max_age_seconds=3600,
-        cache_dir=database.parent / "cache",
-    )
+    return config_module.RuntimeConfig(schema_version=1, source_path=None, database=database, record_command=("/bin/true",), secret_refs=(), adapters=(router,), providers=tuple(_provider(item, *capabilities[item]) for item in providers), limits=tuple(_limit(item) for item in providers), viewer={}, pr_exceptions=(), usage_max_age_seconds=3600, cache_dir=database.parent / "cache", proxy_secret_ref=None)
 
 
 def _snapshots(providers: tuple[str, ...]) -> dict[tuple[str, str], usage.UsageSnapshot]:
     return {
         (item, f"{item}-account"): usage.UsageSnapshot(
             item, f"{item}-account", NOW,
-            {f"{item}-plan-weekly": {"used_percent": 70, "resets_at": RESET}},
+            {"seven_day": {"used_percent": 70, "resets_at": RESET}},
         )
         for item in providers
     }
@@ -209,7 +188,7 @@ class PlanningTests(CapabilityRoutingCase):
         exhausted = {
             ("grok", "grok-account"): usage.UsageSnapshot(
                 "grok", "grok-account", NOW,
-                {"grok-plan-weekly": {"used_percent": 100, "resets_at": RESET}},
+                {"seven_day": {"used_percent": 100, "resets_at": RESET}},
             ),
         }
         with mock.patch.object(scout, "read_all", return_value=exhausted):
@@ -426,34 +405,15 @@ class LongHorizonCoordinatorTests(CapabilityRoutingCase):
 class CLIRefusalTests(CapabilityRoutingCase):
     def setUp(self) -> None:
         super().setUp()
-        raw = {
-            "schema_version": 1,
-            "database": str(self.queue.path),
-            "cache_dir": str(self.root / "cache"),
-            "record_command": ["/bin/true"],
-            "adapters": [{"id": "router", "kind": "t3-thread", "argv": ["/bin/true"]}],
-            "providers": [
-                {"id": "codex", "account_mode": "single", "capabilities": ["implement"],
+        raw = {"schema_version": 1, "database": str(self.queue.path), "cache_dir": str(self.root / "cache"), "record_command": ["/bin/true"], "adapters": [{"id": "router", "kind": "t3-thread", "argv": ["/bin/true"]}], "providers": [
+                {"id": "codex", "capabilities": ["implement"],
                  "dispatch": {"adapter_id": "router", "provider": "codex"}},
-                {"id": "grok", "account_mode": "single",
-                 "dispatch": {"adapter_id": "router", "provider": "grok"}},
-            ],
-            "plans": [
-                {"id": "codex-plan", "provider_id": "codex"},
-                {"id": "grok-plan", "provider_id": "grok"},
-            ],
-            "accounts": [
-                {"id": "codex-account", "provider_id": "codex", "plan_id": "codex-plan"},
-                {"id": "grok-account", "provider_id": "grok", "plan_id": "grok-plan"},
-            ],
-            "limits": [
-                {"id": f"{item}-weekly", "plan_id": f"{item}-plan", "window_seconds": 604800,
+                {"id": "grok", "dispatch": {"adapter_id": "router", "provider": "grok"}},
+            ], "limits": [
+                {"id": f"{item}-weekly", "provider_id": item, "window_seconds": 604800,
                  "ceiling_percent": 95, "lead_seconds": 20000, "batch_size": 1}
                 for item in ("codex", "grok")
-            ],
-            "viewer": {},
-            "pr_exceptions": [],
-        }
+            ], "viewer": {}, "pr_exceptions": [], "secret_refs": [{"id": "proxy", "source": "file", "path": "/unused/proxy.env"}], "proxy_secret_ref": "proxy"}
         self.config_path = self.root / "config.json"
         self.config_path.write_text(json.dumps(raw), encoding="utf-8")
 
@@ -465,7 +425,7 @@ class CLIRefusalTests(CapabilityRoutingCase):
             cli, "_json", side_effect=lambda value, **kw: real_json(value, **kw) if "stream" in kw else None,
         )
         with redirect_stderr(stderr), quiet:
-            code = cli.main([argv[0], "--config", str(self.config_path), *argv[1:]])
+            code = isolated_cli([argv[0], "--config", str(self.config_path), *argv[1:]])
         return code, stderr.getvalue()
 
     def add(self, task_id: str, goal: str, *extra: str) -> tuple[int, str]:
@@ -547,7 +507,7 @@ class CLIRefusalTests(CapabilityRoutingCase):
 
         payloads: list[object] = []
         with mock.patch.object(cli, "_json", side_effect=lambda value, **_k: payloads.append(value)):
-            code = cli.main([
+            code = isolated_cli([
                 "set-providers", "--config", str(self.config_path), "impl", "auto", "--json",
             ])
         self.assertEqual(code, 0)
@@ -593,14 +553,14 @@ class CLIRefusalTests(CapabilityRoutingCase):
         def picked(flag: str) -> list[str]:
             payloads: list[object] = []
             with mock.patch.object(cli, "_json", side_effect=lambda value, **_k: payloads.append(value)):
-                code = cli.main(["pick", "--config", str(self.config_path), "10", "0", flag])
+                code = isolated_cli(["pick", "--config", str(self.config_path), "10", "0", flag])
             self.assertEqual(code, 0)
             return sorted(item["id"] for item in payloads[0])
 
         def counted(command: str, flag: str) -> str:
             stdout = io.StringIO()
             with redirect_stdout(stdout):
-                code = cli.main([command, "--config", str(self.config_path), "0", flag])
+                code = isolated_cli([command, "--config", str(self.config_path), "0", flag])
             self.assertEqual(code, 0)
             return stdout.getvalue().strip()
 

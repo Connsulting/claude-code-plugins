@@ -250,16 +250,17 @@ class JobsViewerContractTests(unittest.TestCase):
 
     def test_gates_uses_the_current_json_cli_protocol(self) -> None:
         self.viewer._gates_cache.update(t=0.0, key=None, val=None)
-        response = SimpleNamespace(stdout=(
-            "lead_hours=30\n"
-            '{"gates":[{"provider_id":"grok","open":true,"batch_size":6,'
-            '"resets_at":2000000000}],'
-            '"allocations":[{"task_id":"t1","provider_id":"grok",'
-            '"account_id":"grok-personal"}]}\n'
-        ))
-        with mock.patch.object(self.viewer.subprocess, "run", return_value=response) as run:
+        response = SimpleNamespace(returncode=0, stdout=json.dumps({
+            "gates": [{"provider_id": "grok", "open": True, "batch_size": 6, "resets_at": 2000000000}],
+            "allocations": [{"task_id": "t1", "provider_id": "grok", "account_id": "grok-personal"}],
+        }))
+        cfg = mock.Mock()
+        cfg.limits_for_provider.return_value = ()
+        with (mock.patch.object(self.viewer.subprocess, "run", return_value=response) as run,
+              mock.patch.object(self.viewer.graph_config, "load_config", return_value=cfg),
+              mock.patch.object(self.viewer.graph_usage, "read_all", return_value={})):
             gates = self.viewer.get_gates(4, 4, 4, None, None)
-        self.assertIn("gates --json", run.call_args.args[0][2])
+        self.assertEqual(run.call_args.args[0][-3:], ["gates", "--json", "--local"])
         self.assertEqual(gates["grok_batch"], 6)
         self.assertEqual(gates["coordinator"], "grok")
         self.assertEqual(gates["allocations"], {"t1": "grok"})
@@ -493,7 +494,6 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertEqual(kwargs["outcome"]["reason"]["code"], "verification_needed")
         self.assertNotIn("completion", kwargs["outcome"])
         self.assertIn("failed", kwargs["summary"])
-        self.assertTrue(callable(kwargs["release_activation"]))
 
     def test_finish_rejects_jobs_that_are_not_in_flight(self) -> None:
         queue = mock.Mock()
@@ -563,10 +563,6 @@ class JobsViewerContractTests(unittest.TestCase):
                     now_epoch=2_000_000_000,
                 )
                 self.assertIsNotNone(attempt)
-                self.assertTrue(queue.acquire_activation(
-                    parent_id, key, "claude", "claude-personal", lambda: None,
-                    attempt_id=attempt.id,
-                ))
                 router_job_id = f"router-{status}"
                 queue.record(
                     parent_id, key, attempt_id=attempt.id, status="dispatched",
@@ -580,9 +576,6 @@ class JobsViewerContractTests(unittest.TestCase):
                     mock.patch.object(
                         self.viewer.graph_config, "load_config", return_value=cfg,
                     ),
-                    mock.patch.object(
-                        self.viewer.graph_dispatcher, "_activation",
-                    ) as release_activation,
                     mock.patch.dict(
                         os.environ, {"BONUS_DRAIN_CONFIG": "/tmp/config.json"},
                     ),
@@ -590,12 +583,8 @@ class JobsViewerContractTests(unittest.TestCase):
                     ok, message = self.viewer.finish_inflight_task(parent_id, status)
 
                 self.assertTrue(ok, message)
-                release_activation.assert_called_once_with(
-                    cfg, account, "release", None,
-                )
                 self.assertEqual(queue.inflight(), [])
                 self.assertIsNone(queue.claim_for(parent_id, key))
-                self.assertEqual(queue.activation_leases(), [])
                 terminal = queue.runs(task_id=parent_id)[0]
                 self.assertEqual(terminal.status, status)
                 self.assertEqual(terminal.attempt_id, attempt.id)
@@ -690,7 +679,6 @@ class JobsViewerContractTests(unittest.TestCase):
     def test_expected_router_rejections_return_bounded_errors(self) -> None:
         cfg = mock.Mock(database=Path("/tmp/queue.db"))
         for failure in (
-            self.viewer.graph_dispatcher.ActivationUnavailable("account is busy"),
             self.viewer.graph_dispatcher.ClassificationFailure("classification unavailable"),
         ):
             with (

@@ -19,6 +19,8 @@ from collections.abc import Iterator
 from pathlib import Path
 from unittest import mock
 
+from tests.readiness_fixture import isolated_cli
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
@@ -36,7 +38,7 @@ CODEX_ERROR = "adapter codex-personal-usage exited 1: collector timeout"
 def _snapshot(provider: str, account: str, error: str | None) -> usage.UsageSnapshot:
     return usage.UsageSnapshot(
         provider, account, NOW,
-        {f"{account}-weekly": {"used_percent": 10.0, "resets_at": NOW + 3600}},
+        {"seven_day": {"used_percent": 10.0, "resets_at": NOW + 3600}},
         fresh=error is None, error=error,
     )
 
@@ -65,7 +67,7 @@ class RefreshExitTests(unittest.TestCase):
 
     def _run(self, *snapshots: usage.UsageSnapshot) -> tuple[int, list[object], list[object]]:
         with self._refresh(*snapshots) as payloads:
-            code = cli.main(["refresh", "--json", "--now", str(NOW)])
+            code = isolated_cli(["refresh", "--json", "--now", str(NOW)])
         stdout = [value for value, stream in payloads if stream is not sys.stderr]
         stderr = [value for value, stream in payloads if stream is sys.stderr]
         return code, stdout, stderr

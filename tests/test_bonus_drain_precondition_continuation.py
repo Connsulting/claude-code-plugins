@@ -7,12 +7,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests.readiness_fixture import isolated_cli
+
 sys.path.insert(
     0,
     str(Path(__file__).resolve().parents[1] / "plugins" / "bonus-drain" / "skills" / "bonus-drain"),
 )
 
-from bonus_drain import cli, db, dispatcher, reconcile
+from bonus_drain import db, dispatcher, reconcile
 
 from tests.test_bonus_dependency_recovery import (
     KEY,
@@ -196,7 +198,7 @@ class ContinuationTests(RecoveryCase):
         before = self.source_row(source.id)
 
         with captured_json() as payloads:
-            code = cli.main([
+            code = isolated_cli([
                 "continue-progress", "--database", str(self.queue.path),
                 "--task", "cli-resume", "--from-attempt", source.id, "--json",
             ])
@@ -206,7 +208,7 @@ class ContinuationTests(RecoveryCase):
         opened_attempt = payloads[0]["attempt_id"]
 
         with captured_json() as payloads:
-            code = cli.main([
+            code = isolated_cli([
                 "continue-progress", "--database", str(self.queue.path),
                 "--task", "cli-resume", "--from-attempt", source.id, "--json",
             ])
