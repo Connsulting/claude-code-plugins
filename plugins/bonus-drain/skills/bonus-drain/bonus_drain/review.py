@@ -339,6 +339,29 @@ def contract_digest(task: Task) -> str:
     return hashlib.sha256(checks.canonical(value).encode("utf-8")).hexdigest()
 
 
+# Brian's 2026-10-13 decision: Bonus Drain work runs on the default Docker engine (k8), never the
+# local one. Only explicit engine selectors match; the words "docker" or "local" alone do not.
+_LOCAL_ENGINE_RE = re.compile(
+    r"unix:///var/run/docker\.sock|/var/run/docker\.sock|docker\s+--context[\s=]+local\b"
+    r"|DOCKER_CONTEXT=local\b",
+    re.IGNORECASE,
+)
+_LOCAL_ENGINE_FIELDS = ("goal", "context", "constraints", "precondition", "done_when")
+
+
+def local_engine_refusal(task: Task) -> str | None:
+    """Refusal when the contract text or a check spec selects the local Docker engine, else None."""
+
+    texts = [getattr(task, field) or "" for field in _LOCAL_ENGINE_FIELDS] + list(task.checks)
+    matched = list(dict.fromkeys(m.group(0) for text in texts for m in _LOCAL_ENGINE_RE.finditer(text)))
+    if not matched:
+        return None
+    return (
+        "contract requires the local Docker engine; Bonus Drain work runs on the default engine (k8). "
+        "Remove: " + ", ".join(matched)
+    )
+
+
 def review_problems(task: Task) -> list[str]:
     """Cross-check the task's stored review against the task; an empty list means valid."""
 

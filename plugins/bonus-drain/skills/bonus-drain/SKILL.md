@@ -93,6 +93,11 @@ already in place, preconditions probed, and a runnable verification for every ac
 criterion. `add` refuses a task without a record, and an `edit` that changes the contract must
 carry a fresh one. If either answer is no, fix the task, split it, or leave it out of the queue.
 
+`add` and any contract-changing `edit` also refuse a task whose goal, context, constraints,
+precondition, done_when, or a check spec selects the local Docker engine (`/var/run/docker.sock`,
+`docker --context local`, `DOCKER_CONTEXT=local`), because Bonus Drain work runs on the default
+k8 engine; tasks already stored are not retroactively held, so in-flight work is not disturbed.
+
 Record shape. Unknown keys are rejected; the queue stamps `reviewed_at` and `review_digest`, and
 you do not supply them:
 
