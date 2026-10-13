@@ -20,7 +20,6 @@ from . import (
     db,
     dispatcher,
     factory_terminal,
-    planner,
     review,
     scout,
     usage,
@@ -189,11 +188,6 @@ def _tick(args: argparse.Namespace) -> tuple[config_module.RuntimeConfig, db.Que
     return cfg, queue, scout.plan_tick(
         cfg, queue, now_epoch=now, host_load_reader=_host_load_reader(cfg),
     )
-
-
-def _plan(args: argparse.Namespace) -> tuple[config_module.RuntimeConfig, db.QueueDB, planner.PlanResult]:
-    cfg, queue, tick = _tick(args)
-    return cfg, queue, tick.plan
 
 
 def _task_values(args: argparse.Namespace) -> dict[str, Any]:
@@ -746,8 +740,9 @@ def _command(args: argparse.Namespace) -> int:
         })
         return 0
     if command == "plan":
-        _cfg, _queue_obj, result = _plan(args)
-        payload = result.to_dict()
+        _cfg, _queue_obj, tick = _tick(args)
+        payload = tick.plan.to_dict()
+        payload["blockers"] = list(tick.dependency_holds)
         _json(payload)
         return 0
     if command == "usage":

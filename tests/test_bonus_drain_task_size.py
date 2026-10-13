@@ -579,6 +579,91 @@ class TaskSizeContractTests(unittest.TestCase):
         self.assertIn("task size large exceeds provider alpha max_size medium",
                       holds["greater"]["reason"])
 
+    def test_plan_json_exposes_provider_size_blockers_and_preserves_subscriptions(self) -> None:
+        cfg = _runtime_config(self.database)
+        cfg = replace(
+            cfg,
+            providers=tuple(
+                config_module.ProviderConfig(
+                    provider_id, config_module.DispatchBinding("router", provider_id),
+                    max_size, frozenset({"cpu"}),
+                )
+                for provider_id, max_size in (("grok", "small"), ("muse", "medium"))
+            ),
+            limits=tuple(
+                replace(cfg.limits[0], id=f"{provider_id}-weekly", provider_id=provider_id)
+                for provider_id in ("grok", "muse")
+            ),
+        )
+        accounts = (("grok", "grok-account"), ("muse", "muse-account"))
+        proxy_fixture(cfg, accounts, now=NOW)
+        for provider_id, account_id in accounts:
+            snapshot = usage.UsageSnapshot(
+                provider_id, account_id, NOW,
+                {"seven_day": {"used_percent": 20, "resets_at": NOW + 1_000}},
+            )
+            usage.write_cache(
+                usage.cache_path(cfg.usage_cache_dir, provider_id, account_id),
+                snapshot.cache_dict(),
+            )
+        for task_id, size, providers in (
+            ("small-grok", "small", ("grok",)),
+            ("medium-muse", "medium", ("muse",)),
+            ("large-restricted", "large", ("grok", "muse")),
+        ):
+            self.queue.add_task(reviewed(
+                _task_values(task_id, size=size) | {"allowed_providers": providers},
+            ))
+
+        payloads = {}
+        with (
+            mock.patch.object(cli, "_load_config", return_value=cfg),
+            mock.patch.object(cli, "_host_load_reader", return_value=None),
+        ):
+            for command in ("plan", "gates"):
+                output = io.StringIO()
+                with mock.patch.dict(cli._json.__kwdefaults__, {"stream": output}):
+                    code = isolated_cli([
+                        command, "--database", str(self.database), "--now", str(NOW), "--json",
+                    ])
+                self.assertEqual(code, 0)
+                payloads[command] = json.loads(output.getvalue())
+
+        plan = payloads["plan"]
+        self.assertCountEqual(
+            [(batch["provider_id"], batch["batch_size"]) for batch in plan["batches"]],
+            [("grok", 1), ("muse", 1)],
+        )
+        allocations = payloads["gates"]["allocations"]
+        self.assertNotIn("large-restricted", [row["task_id"] for row in allocations])
+        self.assertCountEqual(
+            [(row["task_id"], row["provider_id"]) for row in allocations],
+            [("small-grok", "grok"), ("medium-muse", "muse")],
+        )
+        blockers = [row for row in plan["blockers"] if row.get("kind") == "provider_size"]
+        self.assertCountEqual(
+            [(row["task_id"], row["provider_id"], row["size"], row["max_size"])
+             for row in blockers],
+            [("large-restricted", "grok", "large", "small"),
+             ("large-restricted", "muse", "large", "medium")],
+        )
+        for blocker in blockers:
+            self.assertIn(
+                f"task size large exceeds provider {blocker['provider_id']} "
+                f"max_size {blocker['max_size']}",
+                blocker["reason"],
+            )
+        self.assertEqual(plan["subscriptions"], payloads["gates"]["subscriptions"])
+        self.assertCountEqual(
+            [(row["provider_id"], row["account_id"]) for row in plan["subscriptions"]],
+            accounts,
+        )
+        for subscription in plan["subscriptions"]:
+            self.assertEqual(
+                subscription["limits"]["seven_day"],
+                {"used_percent": 20, "resets_at": NOW + 1_000},
+            )
+
     def test_atomic_claim_accepts_smaller_and_equal_and_refuses_greater_or_unsized(self) -> None:
         for task_id, size, accepted in (("smaller", "small", True), ("equal", "medium", True),
                                        ("greater", "large", False), ("unsized", None, False)):
