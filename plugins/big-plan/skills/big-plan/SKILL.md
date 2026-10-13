@@ -14,10 +14,10 @@ Use Big Plan for substantial plans that benefit from structured review, anchored
 3. Use ordinary Markdown plus the supported affordances documented in `README.md`: task checkboxes, `decide`, `decide-multi`, `.compare` grids, Mermaid fences, and GitHub-style callouts.
 4. Determine the server root from `BIG_PLAN_ROOT`, defaulting to `${XDG_STATE_HOME:-$HOME/.local/state}/big-plan/plans`, and calculate the plan path relative to that root.
 5. Before any POST, verify `http://127.0.0.1:${BIG_PLAN_PORT:-8765}/` responds. If the staged unit is inactive, start it with `systemctl --user start big-plan.service`, then verify the endpoint again. Do not POST to an unavailable service.
-6. Register provenance with `POST /api/session/<relative-path>` when the current engine and session ID are available. Registration also creates `<plan>.md.big-plan`, making the plan visible in the index. If there is intentionally no session provenance, publish it with `POST /api/promote/<relative-path>` instead.
+6. Register with `POST /api/session/<relative-path>` using `{threadId,name,cwd}`. In T3, call `t3_thread_list` and use `currentThreadId`, or use `orchestrator_capabilities.parentThreadId`. Pass the exact ID, including any prefix. Outside T3, use `threadId:null`. Registration creates `<plan>.md.big-plan`, making the plan visible in the index.
 7. Return the plan's review URL, not only the index URL. Check its transport and page response as described below before handing it off.
 
-For Claude, send `{engine:"claude", sessionId:$CLAUDE_CODE_SESSION_ID, name, cwd}`. For Grok, use `{engine:"grok", sessionId:$GROK_SESSION_ID, name, cwd}`. For Codex, use the current rollout UUID as `sessionId` and `engine:"codex"`. Never invent a session ID; promote without provenance when it is unavailable. Include the repository working directory as `cwd` when registering: external storage cannot infer it from a Git ancestor. Plans promoted without provenance can be reviewed, but feedback dispatch requires registration with a repository `cwd`.
+T3 does not currently expose a thread-ID environment variable. Provider transcript IDs do not identify T3 threads. Never invent a thread ID. Always include the repository working directory as `cwd`: external plan storage cannot infer it from a Git ancestor. Registration with `threadId:null` lets feedback start a new T3 thread in that repository. Promote-only publication remains available through `POST /api/promote/<relative-path>`, but an external plan still needs a registered repository before Send can work.
 
 The local API base defaults to `http://127.0.0.1:${BIG_PLAN_PORT:-8765}`. URL-encode the relative path before using it in an API or browser URL.
 
@@ -39,4 +39,4 @@ Before editing a reviewed plan, create its baseline with `POST /api/snapshot/<re
 4. Leave reviewer-owned decisions open.
 5. Give the reviewer the same dynamically derived plan URL. The UI highlights changes against the snapshot, and the reviewer can accept individual hunks or clear the snapshot.
 
-The Send button may dispatch a full agent turn through the session sidecar. Treat it as one send per feedback batch.
+The Send button delivers feedback to the recorded authoring T3 thread. Without usable T3 provenance, New thread starts a thread in the registered repository. Treat it as one send per feedback batch. The server uses the installed claude-settings t3-thread transport described in README.md.

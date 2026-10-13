@@ -111,50 +111,38 @@ Each comment carries its own thread and its comment id, so a second round of fee
 
 **Raw** in the topbar, between Copy and Download, opens `GET /<plan>.md?view=raw`: the plan source as preformatted text in the same chrome, with a **View Doc** link back. Use it when you want to read the markdown without downloading a file. Unlike Copy and Download it stays visible at mobile width, because a phone is where saving a `.md` is the least convenient.
 
-## Send-feedback round-trip (no copy/paste)
+## Send-feedback round-trip
 
-**Send** in the topbar, right of Copy and Download, delivers that same aggregated prompt straight to the session that wrote the plan. It ships from the server `disabled` and only enables once a destination resolves.
-
-The topbar has no room for a session name, so the label stays short and the destination surfaces three other ways: in the tooltip, in a confirm dialog when (and only when) the route is `dispatch` and a press would spend a session that is not already the plan's, and in the flash after the send (`Home Directory Spring Cle… ✓`). Unlike Copy and Download it stays visible at mobile width, because the phone is where the comments actually get written.
+The topbar delivers the aggregated open feedback through T3. It starts disabled and enables once the server resolves the destination. **Send** delivers to the authoring T3 thread; **New thread** starts a T3 thread in the plan's repository and asks for confirmation first. The tooltip names the destination, and the button confirms delivery afterward.
 
 ### Provenance: `<plan>.md.session`
 
-Routing needs to know who wrote the plan, and nothing else records that. The authoring agent writes a sidecar next to the plan. Like `.md.snapshot`, it deliberately does **not** end in `.md`, so the index and agentic Markdown searches ignore it.
+Registration records the T3 thread that authored the plan, plus its repository working directory. The sidecar does not end in `.md`, so the index and Markdown searches ignore it.
 
 ```json
 {
-  "engine": "claude",
-  "sessionId": "ab612b3a-acb9-4038-ada0-474c4324a817",
+  "threadId": "mcp:ab612b3a-acb9-4038-ada0-474c4324a817",
   "name": "Home Directory Spring Cleaning Audit",
   "cwd": "/home/example/project",
-  "recordedAt": "2026-08-14T18:00:00+00:00"
+  "recordedAt": "2026-10-13T18:00:00+00:00"
 }
 ```
 
-`engine` is `claude`, `codex`, or `grok`.
+In a T3 agent session, call `t3_thread_list` without a project ID and use its `currentThreadId`, or use `orchestrator_capabilities.parentThreadId`. These are app thread IDs, including prefixes such as `mcp:`. T3 does not currently expose a thread-ID environment variable. Do not use a Claude session ID, Codex rollout UUID, or Grok session ID.
 
-Register it with one call rather than hand-writing the file. From a Claude session:
-
-```bash
-SID="$CLAUDE_CODE_SESSION_ID"
-curl -sX POST "http://localhost:8765/api/session/<rel/path.md>" -H 'Content-Type: application/json' \
-  -d "$(~/.local/bin/claude agents --json | jq -c --arg sid "$SID" \
-        '.[]|select(.sessionId==$sid)|{engine:"claude",sessionId,name,cwd}')"
-```
-
-From Codex, `engine` is `codex` and `sessionId` is the rollout UUID (the trailing UUID in `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`).
-
-From Grok, `engine` is `grok` and `sessionId` is `$GROK_SESSION_ID` (the session directory name under `~/.grok/sessions/<encoded-cwd>/`):
+Pass that tool result to registration, along with the actual repository directory:
 
 ```bash
-curl -sX POST "http://localhost:8765/api/session/<rel/path.md>" -H 'Content-Type: application/json' \
-  -d "$(jq -n --arg sid "$GROK_SESSION_ID" --arg cwd "$PWD" \
-        '{engine:"grok",sessionId:$sid,name:"",cwd:$cwd}')"
+# THREAD_ID is the exact currentThreadId returned by the T3 tool above.
+jq -n --arg tid "$THREAD_ID" --arg cwd "$PWD" \
+  '{threadId:$tid,name:"Plan review",cwd:$cwd}' | \
+  curl -sS -X POST "http://localhost:8765/api/session/<encoded-relative-path>" \
+    -H 'Content-Type: application/json' -d @-
 ```
 
-A Grok-labelled sidecar that was registered as `codex` (the only valid engine before Grok delivery existed) is healed at send time when that id is still a Grok session on disk, so those plans do not mint a new Codex thread.
+Outside T3, register `{threadId:null,name,cwd}`. This records the repository so Send can start a new thread. Never invent a thread ID. Existing sidecars that record only a provider session ID use the new-thread route, retaining their repository `cwd`.
 
-In-repo plans without usable provenance dispatch from their Git ancestor. External plans require session registration with a repository `cwd` before feedback can be dispatched.
+In-repository plans can infer the repository from their Git ancestor. Plans in external storage require registration with an existing absolute repository `cwd`, even when they have no authoring thread.
 
 ### Index publication
 
@@ -177,35 +165,24 @@ Promotion affects the index only: direct plan, raw Markdown, and PDF URLs keep
 working for unpromoted files. Remove the `.md.big-plan` marker to take a plan
 back out of the index.
 
-### The five delivery modes
+### The two delivery routes
 
-`GET /api/submit/<rel>` previews the decision with no side effects; `POST` (body `{"prompt": "..."}`) performs it.
+`GET /api/submit/<rel>` previews the destination. `POST` with `{prompt,expectMode,expectSessionId}` delivers feedback. The preview's `sessionId` is the T3 thread ID, or null for a new thread. The endpoint returns HTTP 409 with a new preview when either expectation changed. An unavailable T3 server produces an error; it does not silently select another destination.
 
-| Mode | When | Mechanism |
-| --- | --- | --- |
-| `message` | Claude session is live in the roster | A throwaway `claude -p` courier calls `SendMessage`, waking the idle session in place with its authoring context intact |
-| `resume` | Claude session recorded but no longer live | `claude --bg --model opus[1m] --resume <id>` replays its transcript into a fresh worker |
-| `codex` | Codex thread | Joins the thread in the local Codex app server, then starts a turn or steers its active turn |
-| `grok` | Grok thread | Joins the local Grok leader and prompts that session, loading it first when it is not already resident. With no leader at all, `grok --resume --prompt-file` |
-| `dispatch` | No usable provenance | `agent-router run --dir <repo>` starts fresh and owns the engine choice |
+1. `thread`: a recorded, unarchived T3 thread receives a queued follow-up. Idle threads start immediately; busy threads receive the feedback after their active turn.
+2. `new_thread`: absent, invalid, deleted, archived, or non-T3 provenance starts a thread on the registered repository. The prompt includes the plan path, comments sidecar, and instructions for handling feedback.
 
-There is no Claude CLI verb for cross-session messaging, which is why `message` mode shells a courier: `SendMessage` is a tool, not a command. Codex uses its local app server instead of `codex exec resume`: the service joins the loaded thread through the control socket, starts a turn when idle, and steers a regular turn when active. Grok does the same through the shared leader (`session/prompt`, or `session/load` then `session/prompt`) instead of `grok -p --resume`. Both preserve the authoring session and avoid opening a second writer.
+### Supported T3 transport
 
-### Failures are reported, not logged and forgotten
+Install the `t3-thread` skill from claude-settings at `~/.claude/skills/t3-thread`. New threads use its `t3-thread --project <repo> --prompt - --json` launcher. Existing threads use the same skill's authentication, version check, and WebSocket RPC modules to submit T3's `message.dispatch` command in queue mode. There is no separate delivery transport. Node 22 or newer must be on PATH or installed under `~/.nvm/versions/node`.
 
-A Claude or router send spawns detached, so the HTTP response cannot wait for an agent turn. It does wait `EARLY_FAILURE_WINDOW` (2.5s, `BIG_PLAN_EARLY_FAILURE_WINDOW`) and fails the request with the process's own stderr if the agent died in that window. Codex delivery is synchronous through the local app server and returns its new or steered turn ID. Grok delivery is synchronous through the local leader until the roster shows the session accepted the prompt. Other early failures such as a missing binary or rejected session id still return an error. Without the early watch the endpoint returned `200 sent` for an agent that never started, and the reason sat in an outbox log nobody reads.
+The transport mints a short-lived token through the T3 CLI and revokes it on exit. No existing agent credential is copied. Feedback is passed on stdin, never argv or a shell. A durable payload copy is kept under `~/.local/state/big-plan/outbox/`. The payload includes the snapshot baseline step and reply endpoint so the receiving agent can process the feedback without reconstructing the review context.
 
-If `claude agents --json` cannot be read at all, the route degrades to `dispatch`, never `resume`. Guessing wrong the other way puts a second worker on a live transcript, and the two interleave writes into one JSONL.
+### Failures reach the HTTP response
 
-### Why the feedback text never reaches a shell
+The server waits for T3 to acknowledge delivery and checks the feedback run for startup failure over 2.5 seconds. Missing binaries, unreachable servers, rejected commands, malformed transport responses, and startup failures return an error instead of HTTP 200. A timeout has an uncertain outcome; inspect T3 before retrying. A successful response confirms delivery, not completion of the agent's work.
 
-Every command is built as an argv list (no `shell=True`) and the reviewer's comment text is written to an outbox file under `~/.local/state/big-plan/outbox/`; only that path is ever passed to a subprocess. A comment containing backticks or `;rm -rf /` is inert. The one sidecar field that does reach argv, `sessionId`, is validated against a UUID-shaped regex.
-
-The payload the target receives wraps the aggregated comments with the plan path, the comment sidecar path, and the `cp plan.md plan.md.snapshot` baseline step, because a session reading it mid-context will not go re-read this README before editing.
-
-### Cost
-
-A send costs the target session a full turn of its own budget, so this is one press per feedback batch, not one per comment. That is the deliberate exception to the fire-and-forget rule: reviewer feedback arriving is new information the run needs, not a progress poll.
+Treat Send as one agent turn per feedback batch.
 
 ## Deployment
 
@@ -260,7 +237,7 @@ For ad-hoc serving from a different root:
 
 No auth. The launcher binds to `0.0.0.0` only after a bounded probe confirms a running Tailscale backend, nonempty MagicDNS name, and IPv4 address; otherwise it binds to localhost. The healthy-path bind keeps localhost callbacks, direct tailnet access, and an existing Tailscale Serve proxy working. `0.0.0.0` listens on every interface, so this mode is suitable only on a trusted or firewalled host. The `/assets/` route is allowlisted to `style.css`, `app.js`, `diff.js`, and `mermaid.min.js`. The `/raw/` route only serves files ending in `.md`. Path traversal is blocked via `safe_join`.
 
-`POST /api/submit` raises the stakes of that posture: it spawns a Claude, Codex, or Grok process, so anything that can reach port 8765 can start an agent on this box. It is not an arbitrary-command surface (argv lists only, no shell, prompt text confined to a file, `sessionId` regex-validated, and the target is whatever the plan's own provenance sidecar names), but it is a compute trigger. Same rule, sharper edge: tailnet only.
+`POST /api/submit` starts or queues a T3 agent turn, so anything that can reach port 8765 can trigger compute. Feedback travels on stdin, and the destination comes from the plan's provenance or repository directory. Keep the service on the tailnet.
 
 **CSRF.** "Tailnet only" does not cover the browser: `localhost:8765` is reachable from any page the user has open, tailnet or not, so without a guard any website could have forged a POST that spawned an agent. Every `POST` is therefore refused when it looks cross-origin -- `Sec-Fetch-Site` is anything but `same-origin`/`none`, or `Origin` disagrees with `Host`. Requests carrying neither header are allowed, which is what keeps the `curl` registration flow above working; a browser always sends at least one on a cross-origin POST. The two spawn endpoints additionally require `Content-Type: application/json`, so a `text/plain` "simple request" cannot skip the preflight that we deliberately never answer.
 

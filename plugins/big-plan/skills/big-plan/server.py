@@ -22,10 +22,10 @@ Endpoints:
     POST /api/task/<rel/path.md>            flip a task checkbox by line number
                                             body: {"line": int (1-based), "checked": bool}
     GET  /api/submit/<rel/path.md>          preview where a submit would go (no side effects)
-    POST /api/submit/<rel/path.md>          send open feedback to the authoring session
+    POST /api/submit/<rel/path.md>          send open feedback through T3
                                             body: {"prompt": str}
-    POST /api/session/<rel/path.md>         record which session authored the plan
-                                            body: {engine: claude|codex|grok, sessionId, name, cwd}
+    POST /api/session/<rel/path.md>         record the authoring T3 thread and repository
+                                            body: {threadId: str|null, name, cwd}
     GET  /<rel/path.md>?view=diff           collapsed unified diff (baseline -> current)
     GET  /<rel/path.md>?view=raw            the plan source as preformatted markdown
     POST /api/snapshot/<rel/path.md>        set the diff baseline (copy current .md -> .md.snapshot)
@@ -61,7 +61,6 @@ from urllib.parse import quote, unquote
 
 import dispatch
 import render
-
 
 _TASK_LINE_RE = re.compile(r"^(?P<lead>[ ]*[-*+]\s+)\[(?P<state>[ xX])\](?P<rest>\s+.*)$")
 INDEX_PAGE_SIZE = 20
@@ -167,12 +166,12 @@ def _tailscale_hosts() -> set[str]:
     try:
         import subprocess
         out = subprocess.run(
-            ["tailscale", "status", "--json"], capture_output=True, text=True, timeout=5
+            ["tailscale", "status", "--json"], check=False, capture_output=True, text=True, timeout=5
         )
         if out.returncode != 0:
             return set()
         self_node = json.loads(out.stdout).get("Self", {})
-    except Exception:
+    except Exception:  # noqa: BLE001 -- malformed status data must not break hostname discovery
         return set()
     hosts = set()
     dns = str(self_node.get("DNSName", "")).rstrip(".").lower()
@@ -227,9 +226,7 @@ def is_plan_file(p: Path) -> bool:
     name_lower = p.name.lower()
     if name_lower.endswith(".plan.md"):
         return True
-    if name_lower == "plan.md":
-        return True
-    return False
+    return name_lower == "plan.md"
 
 
 def promotion_path(md_path: Path) -> Path:
@@ -378,7 +375,7 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "big-plan/0.1"
 
     def log_message(self, fmt: str, *args) -> None:
-        sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), fmt % args))
+        sys.stderr.write(f"[{self.log_date_time_string()}] {fmt % args}\n")
 
     def _send(self, status: int, body: bytes, content_type: str = "text/html; charset=utf-8") -> None:
         self.send_response(status)
@@ -412,6 +409,7 @@ class Handler(BaseHTTPRequestHandler):
                         f"--print-to-pdf={pdf_path}",
                         url,
                     ],
+                    check=False,
                     capture_output=True,
                     text=True,
                     timeout=30,
@@ -523,7 +521,7 @@ class Handler(BaseHTTPRequestHandler):
         tmp.replace(snap_path)
         self._send_json(HTTPStatus.OK, {"accepted": rel})
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         raw_path, _, query = self.path.partition("?")
         path = unquote(raw_path)
         params = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
@@ -596,6 +594,9 @@ class Handler(BaseHTTPRequestHandler):
             # actually reach, so nobody presses "send" not knowing where it goes.
             try:
                 decision = dispatch.route(md_path, ROOT_DIR)
+            except dispatch.DispatchFailed as error:
+                self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(error)})
+                return
             except ValueError as error:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
                 return
@@ -636,7 +637,7 @@ class Handler(BaseHTTPRequestHandler):
 
         self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain")
 
-    def do_POST(self) -> None:  # noqa: N802
+    def do_POST(self) -> None:
         path = unquote(self.path.split("?", 1)[0])
 
         if not host_allowed(self.headers.get("Host", "")):
@@ -690,13 +691,16 @@ class Handler(BaseHTTPRequestHandler):
                 return
             # The button labels itself from a GET preview, but routing is
             # recomputed here. If it moved in between (provenance deleted, the
-            # roster gone unreadable), refuse rather than quietly starting a
-            # fresh session under a label that promised the authoring one.
+            # authoring thread archived), refuse rather than quietly starting a
+            # new thread under a label that promised the authoring one.
             expect_mode = payload.get("expectMode")
             decision = None
             if expect_mode:
                 try:
                     decision = dispatch.route(md_path, ROOT_DIR)
+                except dispatch.DispatchFailed as error:
+                    self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(error)})
+                    return
                 except ValueError as error:
                     self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(error)})
                     return
@@ -711,16 +715,13 @@ class Handler(BaseHTTPRequestHandler):
                     return
             try:
                 # Hand the validated decision through: letting submit() re-route
-                # would make the check and the spawn independent, so a roster
-                # change in between could spawn a mode nobody agreed to.
+                # would make the check and delivery independent.
                 result = dispatch.submit(md_path, rel, ROOT_DIR, payload.get("prompt"), decision)
             except ValueError as e:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(e)})
                 return
             except dispatch.DispatchFailed as e:
-                # The agent died on startup (a busy Codex thread, a rejected
-                # session id). Say so rather than reporting a send that did not
-                # happen and leaving the reason in a log nobody reads.
+                # T3 refused the delivery. Surface the failure in the response.
                 self.log_message("submit %s FAILED: %s", rel, e)
                 self._send_json(HTTPStatus.BAD_GATEWAY, {"error": str(e)})
                 return
@@ -761,8 +762,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 record = dispatch.save_provenance(
                     md_path,
-                    engine=str(payload.get("engine") or ""),
-                    session_id=str(payload.get("sessionId") or ""),
+                    thread_id=payload.get("threadId"),
                     name=str(payload.get("name") or ""),
                     cwd=str(payload.get("cwd") or ""),
                 )
@@ -1029,7 +1029,7 @@ def get_tailscale_url(port: int) -> str | None:
         import subprocess
         out = subprocess.run(
             ["tailscale", "status", "--json"],
-            capture_output=True, text=True, timeout=3,
+            check=False, capture_output=True, text=True, timeout=3,
         )
         if out.returncode != 0:
             return None
@@ -1037,7 +1037,7 @@ def get_tailscale_url(port: int) -> str | None:
         dns = data.get("Self", {}).get("DNSName", "").rstrip(".")
         if dns:
             return f"http://{dns}:{port}/"
-    except Exception:
+    except Exception:  # noqa: BLE001 -- malformed status data must not break hostname discovery
         return None
     return None
 

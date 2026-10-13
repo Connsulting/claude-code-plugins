@@ -2,20 +2,19 @@
 
 from __future__ import annotations
 
-import importlib.util
 import hashlib
+import importlib.util
 import json
-import threading
-from urllib.error import HTTPError
-from urllib.request import Request, urlopen
 import os
 import re
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
-
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 RUNTIME_DIR = Path(__file__).parent
 SERVER_PATH = RUNTIME_DIR / "server.py"
@@ -67,65 +66,62 @@ class ListMarkdownTest(unittest.TestCase):
             )
 
     def test_state_plans_are_discovered_only_after_publication(self) -> None:
-        with tempfile.TemporaryDirectory() as home:
-            with mock.patch.dict(os.environ, {"HOME": home, "XDG_STATE_HOME": ""}):
-                root = server.plans_root()
-                plan = root / "example-repo" / "review.md"
-                plan.parent.mkdir(parents=True)
-                plan.write_text("# Review\n")
-                self.assertTrue(server.is_plan_file(plan))
-                self.assertEqual(server.list_markdown(root), [])
-                server.promote(plan)
-                self.assertEqual(server.list_markdown(root), [plan])
-                self.assertIn("example-repo/review.md", server.render_index(root).decode())
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {"HOME": home, "XDG_STATE_HOME": ""}):
+            root = server.plans_root()
+            plan = root / "example-repo" / "review.md"
+            plan.parent.mkdir(parents=True)
+            plan.write_text("# Review\n")
+            self.assertTrue(server.is_plan_file(plan))
+            self.assertEqual(server.list_markdown(root), [])
+            server.promote(plan)
+            self.assertEqual(server.list_markdown(root), [plan])
+            self.assertIn("example-repo/review.md", server.render_index(root).decode())
 
     def test_xdg_root_and_in_repo_plan_names(self) -> None:
-        with tempfile.TemporaryDirectory() as state:
-            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": state}):
-                self.assertEqual(server.plans_root(), Path(state) / "big-plan" / "plans")
-                self.assertTrue(server.is_plan_file(Path(state) / "big-plan/plans/repo/a.md"))
-                self.assertTrue(server.is_plan_file(Path("/repo/a.plan.md")))
-                self.assertTrue(server.is_plan_file(Path("/repo/PLAN.md")))
-                self.assertFalse(server.is_plan_file(Path("/repo/drafts/a.md")))
+        with tempfile.TemporaryDirectory() as state, mock.patch.dict(os.environ, {"XDG_STATE_HOME": state}):
+            self.assertEqual(server.plans_root(), Path(state) / "big-plan" / "plans")
+            self.assertTrue(server.is_plan_file(Path(state) / "big-plan/plans/repo/a.md"))
+            self.assertTrue(server.is_plan_file(Path("/repo/a.plan.md")))
+            self.assertTrue(server.is_plan_file(Path("/repo/PLAN.md")))
+            self.assertFalse(server.is_plan_file(Path("/repo/drafts/a.md")))
 
     def test_external_plan_http_review_and_routing(self) -> None:
-        with tempfile.TemporaryDirectory() as home:
-            with mock.patch.dict(os.environ, {"HOME": home, "XDG_STATE_HOME": ""}):
-                root = server.plans_root()
-                plan = root / "example-repo" / "review.md"
-                plan.parent.mkdir(parents=True)
-                plan.write_text("# External Review\n")
-                old_root = server.ROOT_DIR
-                server.ROOT_DIR = root
-                httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
-                thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-                thread.start()
-                base = f"http://127.0.0.1:{httpd.server_port}"
-                relative = "example-repo/review.md"
-                try:
-                    request = Request(base + "/api/promote/" + relative, data=b"{}",
-                                      headers={"Content-Type": "application/json"})
-                    with urlopen(request) as response:
-                        self.assertEqual(response.status, 200)
-                    with urlopen(base) as response:
-                        self.assertIn(relative, response.read().decode())
-                    with urlopen(base + "/" + relative) as response:
-                        self.assertIn("External Review", response.read().decode())
-                    for request in (
-                        Request(base + "/api/submit/" + relative),
-                        Request(base + "/api/submit/" + relative,
-                                data=json.dumps({"expectMode": "dispatch", "prompt": "Review"}).encode(),
-                                headers={"Content-Type": "application/json"}),
-                    ):
-                        with self.assertRaises(HTTPError) as error:
-                            urlopen(request)
-                        self.assertEqual(error.exception.code, 400)
-                        self.assertIn("repository cwd", error.exception.read().decode())
-                finally:
-                    httpd.shutdown()
-                    httpd.server_close()
-                    thread.join(timeout=5)
-                    server.ROOT_DIR = old_root
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, {"HOME": home, "XDG_STATE_HOME": ""}):
+            root = server.plans_root()
+            plan = root / "example-repo" / "review.md"
+            plan.parent.mkdir(parents=True)
+            plan.write_text("# External Review\n")
+            old_root = server.ROOT_DIR
+            server.ROOT_DIR = root
+            httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{httpd.server_port}"
+            relative = "example-repo/review.md"
+            try:
+                request = Request(base + "/api/promote/" + relative, data=b"{}",
+                                  headers={"Content-Type": "application/json"})
+                with urlopen(request) as response:
+                    self.assertEqual(response.status, 200)
+                with urlopen(base) as response:
+                    self.assertIn(relative, response.read().decode())
+                with urlopen(base + "/" + relative) as response:
+                    self.assertIn("External Review", response.read().decode())
+                for request in (
+                    Request(base + "/api/submit/" + relative),
+                    Request(base + "/api/submit/" + relative,
+                            data=json.dumps({"expectMode": "new_thread", "prompt": "Review"}).encode(),
+                            headers={"Content-Type": "application/json"}),
+                ):
+                    with self.assertRaises(HTTPError) as error:
+                        urlopen(request)
+                    self.assertEqual(error.exception.code, 400)
+                    self.assertIn("repository cwd", error.exception.read().decode())
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+                thread.join(timeout=5)
+                server.ROOT_DIR = old_root
 
 
 class SidebarControlsTest(unittest.TestCase):
@@ -303,6 +299,99 @@ class DecisionNoteRenderTest(unittest.TestCase):
         self.assertIn('class="decide-note-input"', page)
         self.assertIn("Begin with the phone review.", page)
         self.assertIn('value="Staged" checked', page)
+
+
+class FeedbackHttpTest(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.plan = self.root / "review.md"
+        self.plan.write_text("# Review\n")
+        root_patch = mock.patch.object(server, "ROOT_DIR", self.root)
+        root_patch.start()
+        self.addCleanup(root_patch.stop)
+        self.httpd = server.ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self.stop_server)
+        self.base = f"http://127.0.0.1:{self.httpd.server_port}"
+        self.destination = {"mode": "thread", "sessionId": "mcp:author", "target": "Author",
+                            "cwd": str(self.root), "reason": "authoring thread"}
+
+    def stop_server(self) -> None:
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(timeout=5)
+
+    def request(self, endpoint, payload=None, headers=None):
+        request = Request(self.base + endpoint,
+                          data=json.dumps(payload).encode() if payload is not None else None,
+                          headers=headers or {"Content-Type": "application/json"})
+        try:
+            response = urlopen(request)
+        except HTTPError as error:
+            response = error
+        with response:
+            return response.status, json.loads(response.read())
+
+    def test_registration_records_t3_thread_and_promotes(self) -> None:
+        for thread_id in ["mcp:author", None]:
+            status, record = self.request("/api/session/review.md", {
+                "threadId": thread_id, "name": "Review", "cwd": str(self.root),
+            })
+            self.assertEqual(status, 200)
+            self.assertEqual(record["threadId"], thread_id)
+            self.assertEqual(json.loads(server.dispatch.provenance_path(self.plan).read_text()), record)
+            self.assertTrue(server.promotion_path(self.plan).exists())
+
+    def test_route_change_mode_or_identity_is_409_without_delivery(self) -> None:
+        with mock.patch.object(server.dispatch, "route", return_value=self.destination), mock.patch.object(server.dispatch, "submit") as submit:
+            for mode, session_id in [("new_thread", None), ("thread", "mcp:other")]:
+                status, data = self.request("/api/submit/review.md", {
+                    "prompt": "Feedback", "expectMode": mode, "expectSessionId": session_id,
+                })
+                self.assertEqual(status, 409)
+                self.assertEqual(data["route"], self.destination)
+            submit.assert_not_called()
+
+    def test_validated_route_passes_to_delivery(self) -> None:
+        with mock.patch.object(server.dispatch, "route", return_value=self.destination) as route, mock.patch.object(
+            server.dispatch, "submit", return_value={**self.destination, "status": "sent"}
+        ) as submit:
+            status, data = self.request("/api/submit/review.md", {
+                "prompt": "Feedback", "expectMode": "thread", "expectSessionId": "mcp:author",
+            })
+        self.assertEqual((status, data["status"]), (200, "sent"))
+        route.assert_called_once()
+        submit.assert_called_once_with(self.plan, "review.md", self.root, "Feedback", self.destination)
+
+    def test_t3_preview_and_delivery_failures_are_502(self) -> None:
+        failure = server.dispatch.DispatchFailed("T3 refused feedback")
+        with mock.patch.object(server.dispatch, "route", side_effect=failure):
+            for payload in [None, {"expectMode": "thread", "prompt": "Feedback"}]:
+                status, data = self.request("/api/submit/review.md", payload)
+                self.assertEqual(status, 502)
+                self.assertIn("T3 refused", data["error"])
+        with mock.patch.object(server.dispatch, "submit", side_effect=failure):
+            status, data = self.request("/api/submit/review.md", {"prompt": "Feedback"})
+            self.assertEqual(status, 502)
+            self.assertIn("T3 refused", data["error"])
+
+    def test_csrf_host_and_content_type_block_before_delivery(self) -> None:
+        headers_list = [
+            ({"Content-Type": "application/json", "Origin": "https://attacker.invalid"}, 403),
+            ({"Content-Type": "application/json", "Sec-Fetch-Site": "cross-site"}, 403),
+            ({"Content-Type": "application/json", "Host": "attacker.invalid"}, 403),
+            ({"Content-Type": "text/plain"}, 415),
+        ]
+        with mock.patch.object(server.dispatch, "submit") as submit, mock.patch.object(server.dispatch, "save_provenance") as register:
+            for endpoint in ["/api/submit/review.md", "/api/session/review.md"]:
+                for headers, expected in headers_list:
+                    status, _ = self.request(endpoint, {"prompt": "Feedback"}, headers)
+                    self.assertEqual(status, expected)
+            submit.assert_not_called()
+            register.assert_not_called()
 
 
 if __name__ == "__main__":

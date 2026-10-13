@@ -34,7 +34,6 @@ from markdown.extensions import Extension
 from markdown.extensions.toc import slugify_unicode
 from markdown.treeprocessors import Treeprocessor
 
-
 SECTION_BOUNDARY_LEVEL = 2  # H2 boundaries open/close <details> sections
 HASH_HEADER_PRIORITY = 70  # python-markdown's own "hashheader" priority; fallback only
 
@@ -242,7 +241,6 @@ class BlockAnchorTreeprocessor(Treeprocessor):
             if n:
                 anchor = f"{anchor}-{n}"
             el.set("data-anchor", anchor)
-        return None
 
 
 class BlockAnchorExtension(Extension):
@@ -293,7 +291,6 @@ class ExternalLinkTreeprocessor(Treeprocessor):
             if re.match(r"^https?://", href, re.IGNORECASE):
                 el.set("target", "_blank")
                 el.set("rel", "noopener noreferrer")
-        return None
 
 
 class ExternalLinkExtension(Extension):

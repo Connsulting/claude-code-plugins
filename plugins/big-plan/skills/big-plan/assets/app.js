@@ -585,21 +585,15 @@
     const submitUrl = `/api/submit/${encodeURIPath(relpath)}`;
     let route = null;
 
-    // The topbar has no room for a destination name, so the label stays short
-    // and the destination lives in the tooltip, in the dispatch-mode confirm,
-    // and in the flash after the send. Only `dispatch` costs a session that was
-    // not already the plan's, so that is the one press that asks first.
     const labelEl = btn.querySelector(".sf-label") || btn;
-    const baseLabel = labelEl.textContent;
 
     function applyRoute(r) {
       route = r;
-      labelEl.textContent = baseLabel;
+      labelEl.textContent = r.mode === "new_thread" ? "New thread" : "Send";
       btn.title =
-        r.mode === "dispatch"
-          ? `No authoring session is recorded for this plan (${r.reason}). ` +
-            "Sending starts a fresh one."
-          : `Sends all open feedback to ${r.target} (${r.mode}: ${r.reason}).`;
+        r.mode === "new_thread"
+          ? "Starts a new T3 thread in the plan's repository with all open feedback."
+          : `Sends all open feedback to the authoring T3 thread: ${r.target}.`;
     }
 
     // Ships disabled from the server so it cannot be pressed before we know
@@ -611,7 +605,7 @@
         applyRoute(await res.json());
         btn.disabled = false;
       } catch (err) {
-        btn.title = "Could not resolve a target session for this plan.";
+        btn.title = "Could not resolve a T3 destination for this plan.";
       }
     })();
 
@@ -623,10 +617,10 @@
         return;
       }
       if (
-        route.mode === "dispatch" &&
+        route.mode === "new_thread" &&
         !confirm(
-          "No authoring session is recorded for this plan, so this starts a " +
-            "brand new session with the feedback. Continue?"
+          "No usable authoring T3 thread is recorded for this plan. " +
+            "Start a new T3 thread in the plan's repository with the feedback?"
         )
       ) {
         return;
@@ -639,7 +633,7 @@
           method: "POST",
           headers: { "Content-Type": "application/json" },
           // The server recomputes the route and 409s if it moved, so a button
-          // labelled for the authoring session can never quietly spend a new one.
+          // labelled for the authoring thread can never quietly start a new one.
           body: JSON.stringify({
             prompt,
             expectMode: route.mode,
@@ -652,25 +646,25 @@
           btn.disabled = false;
           alert(
             "The destination changed since this page loaded, so nothing was " +
-              `sent. It now goes to: ${data.route.target || "a new session"} ` +
+              `sent. It now goes to: ${data.route.target || "a new T3 thread"} ` +
               `(${data.route.reason}). Press again to confirm.`
           );
           return;
         }
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-        labelEl.textContent = baseLabel;
+        applyRoute(route);
         // Names the destination after the fact, since the label cannot. Clipped
         // so a long session name cannot wrap the topbar for the flash duration.
         const dest =
-          data.mode === "dispatch" ? "new session" : String(data.target || "");
+          data.mode === "new_thread" ? "new T3 thread" : String(data.target || "");
         flashSaving(
           labelEl,
-          (dest.length > 24 ? dest.slice(0, 23) + "…" : dest) + " ✓"
+          "Sent to " + (dest.length > 24 ? dest.slice(0, 23) + "..." : dest)
         );
         btn.classList.add("flash");
         setTimeout(() => btn.classList.remove("flash"), 1200);
       } catch (err) {
-        labelEl.textContent = baseLabel;
+        applyRoute(route);
         btn.classList.add("err");
         alert("Could not send: " + err.message);
       } finally {
