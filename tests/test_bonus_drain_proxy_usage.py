@@ -13,6 +13,7 @@ import threading
 import time
 import unittest
 from dataclasses import replace
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -30,13 +31,16 @@ class ProxyUsageTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.now = int(time.time())
+        sleep = mock.patch.object(proxy_usage.time, "sleep")
+        self.sleep = sleep.start()
+        self.addCleanup(sleep.stop)
         self.requests = []
         self.files = [
             {"provider": "anthropic", "auth_index": "a", "access_token": "private-provider-token"},
             {"provider": "claude", "auth_index": "b"},
             {"provider": "openai", "auth_index": "c"},
             {"provider": "xai", "auth_index": "d"},
-            {"provider": "meta", "auth_index": "e"},
+            {"provider": "meta", "auth_index": "e", "name": "meta account+e.json"},
             {"provider": "claude", "auth_index": "off", "disabled": True},
         ]
         self.bodies = {
@@ -51,6 +55,22 @@ class ProxyUsageTests(unittest.TestCase):
                 "secondary_window": {"used_percent": 12, "reset_at": self.now + 10800,
                                      "limit_window_seconds": 604800}}},
         }
+        self.bodies["d"] = {"config": {
+            "creditUsagePercent": 3.0, "currentPeriod": {
+                "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                "start": datetime.fromtimestamp(self.now - 604800, timezone.utc).isoformat(timespec="milliseconds"),
+                "end": datetime.fromtimestamp(self.now + 14400, timezone.utc).isoformat(timespec="milliseconds"),
+            },
+        }}
+        self.bodies["e"] = {
+            "api_key": "private-muse-api-key", "email": "private-muse-personal-field",
+            "subs_usage": {
+                "window": {"used_percent": 8.0, "window_duration_mins": 300, "resets_at": self.now + 18000},
+                "weekly": {"used_percent": 9.0, "resets_at": self.now + 18000},
+            },
+        }
+        self.muse_auth = {"dca_token": "dca:private-muse-token", "other": "private-auth-field"}
+        self.fail_once = set()
         self.failure = set()
         self.redirect = False
         owner = self
@@ -71,7 +91,9 @@ class ProxyUsageTests(unittest.TestCase):
                     return
                 self.send_response(200)
                 self.end_headers()
-                self.wfile.write(json.dumps({"files": owner.files}).encode())
+                response = (owner.muse_auth if self.path.startswith("/v0/management/auth-files/download?")
+                            else {"files": owner.files})
+                self.wfile.write(json.dumps(response).encode())
 
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -79,8 +101,10 @@ class ProxyUsageTests(unittest.TestCase):
                 self.send_response(200)
                 self.end_headers()
                 index = body["auth_index"]
-                response = {"status_code": 401 if index in owner.failure else 200,
-                            "body": "private-provider-token" if index in owner.failure
+                failed = index in owner.failure or index in owner.fail_once
+                owner.fail_once.discard(index)
+                response = {"status_code": 401 if failed else 200,
+                            "body": "private-provider-token" if failed
                             else json.dumps(owner.bodies[index])}
                 self.wfile.write(json.dumps(response).encode())
 
@@ -103,7 +127,7 @@ class ProxyUsageTests(unittest.TestCase):
             "limits": [{"id": name + "-weekly", "provider_id": name,
                         "window_seconds": 604800, "ceiling_percent": 98,
                         "lead_seconds": 604800, "batch_size": 3}
-                       for name in ("claude", "codex")],
+                       for name in ("claude", "codex", "grok", "muse")],
         }
         self.config = config.validate_config(self.raw)
         self.config_path = self.root / "config.json"
@@ -136,28 +160,45 @@ class ProxyUsageTests(unittest.TestCase):
         self.assertEqual(planned["batches"][0]["resets_at"], self.now + 3600)
         self.assertEqual(len(planned["subscriptions"]), 5)
         self.assertNotIn("accounts", planned)
-        self.assertIsNone(planned["batches"][-1]["resets_at"])
-        self.assertTrue(planned["batches"][-1]["unmetered"])
-        self.assertTrue(accounts["grok-d"]["unmetered"])
+        for provider, percent in (("grok", 3), ("muse", 9)):
+            gate = next(g for g in planned["gates"] if g["provider_id"] == provider)
+            self.assertFalse(gate["unmetered"])
+            self.assertGreater(gate["surplus"], 0)
+            self.assertEqual(gate["limit_ids"], [provider + "-weekly"])
+            account = accounts[provider + ("-d" if provider == "grok" else "-e")]
+            self.assertFalse(account["unmetered"])
+            self.assertEqual(account["limits"]["seven_day"]["used_percent"], percent)
         for path in self.config.usage_cache_dir.rglob("*.json"):
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             text = path.read_text()
             self.assertNotIn("fixture-management-credential", text)
             self.assertNotIn("private-provider-token", text)
             self.assertNotIn("Authorization", text)
+            for sensitive in ("dca:private-muse-token", "private-muse-api-key",
+                              "private-muse-personal-field", "private-auth-field"):
+                self.assertNotIn(sensitive, text)
 
-    def test_only_metered_accounts_call_allowed_endpoints_with_fixed_headers(self):
+    def test_all_four_providers_call_allowed_endpoints_with_fixed_headers(self):
         usage.refresh_all(self.config, now_epoch=self.now)
         self.assertEqual(self.requests[0], ("GET", "/v0/management/auth-files", None))
         calls = [body for method, path, body in self.requests if method == "POST"]
-        self.assertEqual([body["auth_index"] for body in calls], ["a", "b", "c"])
-        for call in calls:
+        self.assertEqual([body["auth_index"] for body in calls], ["a", "b", "c", "d", "e"])
+        for call in calls[:-1]:
             self.assertEqual(call["method"], "GET")
             self.assertEqual(call["header"]["Authorization"], "Bearer $TOKEN$")
         self.assertEqual(calls[0]["url"], proxy_usage.ANTHROPIC_URL)
         self.assertEqual(calls[0]["header"]["anthropic-beta"], "oauth-2025-04-20")
         self.assertEqual(calls[0]["header"]["User-Agent"], "claude-cli/2.1.280 (external, cli)")
         self.assertEqual(calls[2]["url"], proxy_usage.CODEX_URL)
+        self.assertEqual(calls[3]["url"], proxy_usage.GROK_URL)
+        self.assertEqual(calls[3]["header"]["x-xai-token-auth"], "xai-grok-cli")
+        self.assertEqual(calls[3]["header"]["x-grok-client-version"], "1.0.46")
+        self.assertIn(("GET", "/v0/management/auth-files/download?name=meta%20account%2Be.json", None), self.requests)
+        self.assertEqual(calls[4], {
+            "auth_index": "e", "method": "POST", "url": proxy_usage.MUSE_URL,
+            "header": {"Authorization": "Bearer dca:private-muse-token", **proxy_usage.TARGETS[proxy_usage.MUSE_URL]},
+            "data": "{}",
+        })
 
     def test_api_call_rejects_every_nonexact_target_before_network(self):
         reader = proxy_usage.ProxyReader(self.config)
@@ -198,17 +239,18 @@ class ProxyUsageTests(unittest.TestCase):
         self.files.append({"provider": "future", "auth_index": "f"})
         records = usage.refresh_all(config.validate_config(raw))
         self.assertTrue(records[("future", "future-f")].unmetered)
-        self.assertEqual(len([request for request in self.requests if request[0] == "POST"]), 3)
+        self.assertEqual(len([request for request in self.requests if request[0] == "POST"]), 5)
 
     def test_proxy_aliases_map_to_configured_grok_and_muse_providers(self):
         self.files.append({"provider": "grok", "auth_index": "g"})
+        self.bodies["g"] = self.bodies["d"]
         records = usage.refresh_all(self.config, now_epoch=self.now)
         self.assertIn(("grok", "grok-d"), records)
         self.assertIn(("grok", "grok-g"), records)
         self.assertIn(("muse", "muse-e"), records)
         self.assertFalse(any(provider in {"xai", "meta"} for provider, _account in records))
-        self.assertTrue(records[("grok", "grok-d")].unmetered)
-        self.assertTrue(records[("muse", "muse-e")].unmetered)
+        self.assertFalse(records[("grok", "grok-d")].unmetered)
+        self.assertFalse(records[("muse", "muse-e")].unmetered)
 
     def test_viewer_renders_all_six_subscriptions_and_api_returns_same_inventory(self):
         from tests.test_bonus_drain_jobs_viewer import (
@@ -254,13 +296,13 @@ class ProxyUsageTests(unittest.TestCase):
         self.assertEqual(sum(row["provider_id"] == "claude" for row in inventory), 2)
         self.assertEqual(sum(row["provider_id"] == "codex" for row in inventory), 2)
         unmetered = {row["provider_id"] for row in inventory if row["unmetered"]}
-        self.assertEqual(unmetered, {"grok", "muse"})
+        self.assertEqual(unmetered, set())
         cards = re.findall(r'<details class="arow">.*?</details>', body, re.DOTALL)
         self.assertEqual(len(cards), 6)
         self.assertEqual(sum("Claude ·" in card for card in cards), 2)
         self.assertEqual(sum("Codex ·" in card for card in cards), 2)
-        self.assertTrue(any("Grok" in card and "unmetered" in card for card in cards))
-        self.assertTrue(any("Muse" in card and "unmetered" in card for card in cards))
+        self.assertTrue(any("Grok" in card and "<b>3%</b>" in card for card in cards))
+        self.assertTrue(any("Muse" in card and "<b>9%</b>" in card for card in cards))
 
     def test_max_size_is_required_and_rejects_unknown_values(self):
         for value in (None, "unknown", "gigantic", 2, True):
@@ -345,20 +387,105 @@ class ProxyUsageTests(unittest.TestCase):
         self.assertEqual(json.loads(recorded.stdout)["run"]["account_id"], "claude-personal")
 
     def test_unmetered_provider_cap_counts_all_accounts_and_running_claims(self):
-        self.files.append({"provider": "xai", "auth_index": "d2"})
+        raw = dict(self.raw, providers=[*self.raw["providers"], {
+            "id": "future", "max_size": "small", "dispatch": {"adapter_id": "router", "provider": "future"}}])
+        self.config = config.validate_config(raw)
+        self.files.extend([{"provider": "future", "auth_index": "d"},
+                           {"provider": "future", "auth_index": "d2"}])
         usage.refresh_all(self.config)
         queue = db.QueueDB(self.config.database)
         for index in range(4):
             queue.add_task(reviewed({"id": str(index), "title": "fixture", "kind": "oneoff",
                                     "priority": 2, "cwd": str(self.root), "goal": "fixture", "size": "small",
-                                    "allowed_providers": ["grok"]}))
-        queue.claim("0", "grok-d2/unmetered/123", "grok", "grok-d2", provider_max_size="huge", now_epoch=self.now)
+                                    "allowed_providers": ["future"]}))
+        queue.claim("0", "future-d2/unmetered/123", "future", "future-d2", provider_max_size="huge", now_epoch=self.now)
         tick = scout.plan_tick(self.config, queue, now_epoch=self.now)
-        self.assertEqual([(b.provider_id, b.batch_size) for b in tick.plan.batches], [("grok", 1)])
-        queue.claim("1", "grok-d/unmetered/123", "grok", "grok-d", provider_max_size="huge", now_epoch=self.now)
+        self.assertEqual([(b.provider_id, b.batch_size) for b in tick.plan.batches], [("future", 1)])
+        queue.claim("1", "future-d/unmetered/123", "future", "future-d", provider_max_size="huge", now_epoch=self.now)
         self.assertEqual(scout.plan_tick(self.config, queue, now_epoch=self.now).plan.batches, ())
         raised_cap = replace(self.config, unmetered_max_inflight=3)
         self.assertEqual(scout.plan_tick(raised_cap, queue, now_epoch=self.now).plan.batches[0].batch_size, 1)
+
+    def test_transient_failure_is_retried_before_pool_planning(self):
+        for provider, index in (("claude", "a"), ("codex", "c"), ("grok", "d"), ("muse", "e")):
+            with self.subTest(provider=provider):
+                self.requests.clear()
+                self.sleep.reset_mock()
+                self.fail_once.add(index)
+                records = usage.refresh_all(self.config, now_epoch=self.now)
+                snapshot = records[(provider, provider + "-" + index)]
+                self.assertTrue(snapshot.fresh)
+                self.assertIsNone(snapshot.error)
+                self.assertTrue(snapshot.limits)
+                self.sleep.assert_called_once_with(2)
+                calls = [body for method, _path, body in self.requests
+                         if method == "POST" and body["auth_index"] == index]
+                self.assertEqual(len(calls), 2)
+                plan = planner.build_plan(self.config, records, eligible_count=10, now_epoch=self.now)
+                self.assertTrue(next(g for g in plan.gates if g.provider_id == provider).open)
+                if provider == "muse":
+                    downloads = [path for method, path, _body in self.requests
+                                 if method == "GET" and "/download?" in path]
+                    self.assertEqual(len(downloads), 2)
+
+    def test_persistent_failure_records_error_after_exactly_two_attempts(self):
+        self.failure.add("c")
+        records = usage.refresh_all(self.config, now_epoch=self.now)
+        self.sleep.assert_called_once_with(2)
+        self.assertEqual(sum(method == "POST" and body["auth_index"] == "c"
+                             for method, _path, body in self.requests), 2)
+        snapshot = records[("codex", "codex-c")]
+        self.assertFalse(snapshot.fresh)
+        self.assertEqual(snapshot.error, "proxy usage unavailable")
+        self.assertEqual(snapshot.limits, {})
+        plan = planner.build_plan(self.config, records, eligible_count=10, now_epoch=self.now)
+        self.assertFalse(next(g for g in plan.gates if g.provider_id == "codex").open)
+
+    def test_muse_download_rejects_missing_or_invalid_token_without_api_call(self):
+        for token in (None, "private-provider-token", "dca:", "dca:private\ntoken", 123):
+            with self.subTest(token_type=type(token).__name__):
+                self.muse_auth = {"dca_token": token}
+                self.requests.clear()
+                records = usage.refresh_all(self.config, now_epoch=self.now)
+                snapshot = records[("muse", "muse-e")]
+                self.assertEqual(snapshot.error, "proxy usage unavailable")
+                self.assertFalse(any(method == "POST" and body["auth_index"] == "e"
+                                     for method, _path, body in self.requests))
+                self.assertNotIn("private", json.dumps(snapshot.cache_dict()))
+
+    def test_muse_missing_auth_filename_fails_closed(self):
+        self.files[4].pop("name")
+        records = usage.refresh_all(self.config, now_epoch=self.now)
+        self.assertEqual(records[("muse", "muse-e")].error, "proxy usage unavailable")
+        self.assertFalse(any("/download?" in path for _method, path, _body in self.requests))
+
+    def test_grok_parser_maps_iso_weekly_period(self):
+        windows = proxy_usage.parse_windows("grok", self.bodies["d"])
+        self.assertEqual(windows, {"seven_day": {"used_percent": 3.0, "resets_at": self.now + 14400}})
+
+    def test_muse_parser_keeps_only_short_and_weekly_usage(self):
+        windows = proxy_usage.parse_windows("muse", self.bodies["e"])
+        self.assertEqual(windows, {
+            "five_hour": {"used_percent": 8.0, "resets_at": self.now + 18000},
+            "seven_day": {"used_percent": 9.0, "resets_at": self.now + 18000},
+        })
+
+    def test_grok_and_muse_parsers_reject_malformed_usage(self):
+        invalid = [
+            ("grok", {}), ("grok", {"config": {"currentPeriod": {"type": "monthly"}}}),
+            ("muse", {}), ("muse", {"subs_usage": {"window": {"window_duration_mins": 60}}}),
+        ]
+        for percent in (None, True, -1, 101, float("nan"), "3"):
+            grok = json.loads(json.dumps(self.bodies["d"]))
+            grok["config"]["creditUsagePercent"] = percent
+            invalid.append(("grok", grok))
+            for name in ("window", "weekly"):
+                muse = json.loads(json.dumps(self.bodies["e"]))
+                muse["subs_usage"][name]["used_percent"] = percent
+                invalid.append(("muse", muse))
+        for provider, body in invalid:
+            with self.subTest(provider=provider), self.assertRaises(usage.UsageError):
+                proxy_usage.parse_windows(provider, body)
 
     def test_invalid_and_stale_readings_fail_closed(self):
         self.bodies["a"]["seven_day"]["utilization"] = None

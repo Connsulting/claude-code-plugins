@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .config import RuntimeConfig, resolve_secret
@@ -25,16 +25,30 @@ from .usage import (
 
 ANTHROPIC_URL = "https://api.anthropic.com/api/oauth/usage"
 CODEX_URL = "https://chatgpt.com/backend-api/wham/usage"
+GROK_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+MUSE_URL = "https://api.meta.ai/muse-code/key"
 TARGETS = {
     ANTHROPIC_URL: {
         "anthropic-beta": "oauth-2025-04-20",
         "User-Agent": "claude-cli/2.1.280 (external, cli)",
     },
     CODEX_URL: {},
+    GROK_URL: {
+        "x-xai-token-auth": "xai-grok-cli",
+        "x-grok-client-version": "1.0.46",
+        "accept": "*/*",
+        "user-agent": "grok-pager/1.0.46 grok-shell/1.0.46 (macos; aarch64)",
+    },
+    MUSE_URL: {
+        "Accept": "application/json", "Content-Type": "application/json",
+        "x-api-version": "1.0.0",
+    },
 }
+PROVIDER_TARGETS = {"claude": ANTHROPIC_URL, "codex": CODEX_URL,
+                    "grok": GROK_URL, "muse": MUSE_URL}
 # CPA uses vendor names for some auth files; routing uses the configured pool ids.
 PROVIDERS = {"anthropic": "claude", "claude": "claude", "openai": "codex",
-             "codex": "codex", "grok": "grok", "xai": "grok", "meta": "muse"}
+             "codex": "codex", "grok": "grok", "xai": "grok", "meta": "muse", "muse": "muse"}
 MAX_RESPONSE_BYTES = 1_048_576
 
 
@@ -79,6 +93,7 @@ class ProxyReader:
         self._base = base
         self._key = key
         self._opener = build_opener(_NoRedirect())
+        self._muse_files: dict[str, str] = {}
 
     def _request(self, endpoint: str, payload: Mapping[str, Any] | None = None) -> Any:
         data = None if payload is None else json.dumps(payload).encode("utf-8")
@@ -103,6 +118,7 @@ class ProxyReader:
         configured = {item.id for item in config.providers}
         accounts = []
         seen = set()
+        self._muse_files.clear()
         for row in rows:
             if not isinstance(row, Mapping):
                 raise UsageError("invalid proxy account entry")
@@ -121,7 +137,11 @@ class ProxyReader:
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", index):
                 raise UsageError("invalid proxy auth index")
             account = ProxyAccount(provider + "-" + index, provider,
-                                   provider not in {"claude", "codex"})
+                                   provider not in PROVIDER_TARGETS)
+            if provider == "muse":
+                filename = row.get("name")
+                if isinstance(filename, str) and filename:
+                    self._muse_files[index] = filename
             if account.id in seen:
                 raise UsageError("duplicate proxy account")
             seen.add(account.id)
@@ -131,10 +151,23 @@ class ProxyReader:
     def api_call(self, auth_index: str, url: str) -> Mapping[str, Any]:
         if url not in TARGETS:
             raise UsageError("usage target is not allowed")
-        raw = self._request("api-call", {
+        payload = {
             "auth_index": auth_index, "method": "GET", "url": url,
             "header": {"Authorization": "Bearer $TOKEN$", **TARGETS[url]},
-        })
+        }
+        if url == MUSE_URL:
+            filename = self._muse_files.get(auth_index)
+            if filename is None:
+                raise UsageError("Muse auth filename unavailable")
+            auth = self._request("auth-files/download?name=" + quote(filename, safe=""))
+            token = auth.get("dca_token") if isinstance(auth, Mapping) else None
+            if (not isinstance(token, str) or not token.startswith("dca:")
+                    or len(token) <= 4 or any(char.isspace() for char in token)):
+                raise UsageError("Muse auth credential unavailable")
+            payload["method"] = "POST"
+            payload["data"] = "{}"
+            payload["header"]["Authorization"] = "Bearer " + token
+        raw = self._request("api-call", payload)
         if not isinstance(raw, Mapping) or raw.get("status_code") != 200:
             raise UsageError("provider usage request failed")
         body = raw.get("body")
@@ -182,6 +215,23 @@ def parse_windows(provider: str, body: Mapping[str, Any]) -> dict[str, Mapping[s
             duration = raw.get("limit_window_seconds") if isinstance(raw, Mapping) else None
             window = "seven_day" if duration == 604800 else "five_hour" if duration == 18000 else fallback
             windows[window] = _reading(raw, "used_percent", "reset_at")
+    elif provider == "grok":
+        config = body.get("config")
+        period = config.get("currentPeriod") if isinstance(config, Mapping) else None
+        if not isinstance(period, Mapping) or period.get("type") != "USAGE_PERIOD_TYPE_WEEKLY":
+            raise UsageError("missing Grok weekly usage period")
+        windows["seven_day"] = _reading({
+            "used_percent": config.get("creditUsagePercent"), "resets_at": period.get("end"),
+        }, "used_percent", "resets_at")
+    elif provider == "muse":
+        limits = body.get("subs_usage")
+        if not isinstance(limits, Mapping):
+            raise UsageError("missing Muse usage limits")
+        short = limits.get("window")
+        if not isinstance(short, Mapping) or short.get("window_duration_mins") != 300:
+            raise UsageError("invalid Muse short usage window")
+        windows["five_hour"] = _reading(short, "used_percent", "resets_at")
+        windows["seven_day"] = _reading(limits.get("weekly"), "used_percent", "resets_at")
     return windows
 
 
@@ -193,15 +243,20 @@ def refresh(config: RuntimeConfig, cache_root: str | Path | None = None, *,
     accounts = reader.accounts(config)
     results = {}
     for account, index in accounts:
-        try:
-            windows = {} if account.unmetered else parse_windows(
-                account.provider_id, reader.api_call(index, ANTHROPIC_URL if account.provider_id == "claude" else CODEX_URL),
-            )
-            snapshot = UsageSnapshot(account.provider_id, account.id, now, windows,
-                                     unmetered=account.unmetered)
-        except UsageError:
-            snapshot = UsageSnapshot(account.provider_id, account.id, now, {}, fresh=False,
-                                     error="proxy usage unavailable", unmetered=account.unmetered)
+        for attempt in range(2):
+            try:
+                windows = {} if account.unmetered else parse_windows(
+                    account.provider_id, reader.api_call(index, PROVIDER_TARGETS[account.provider_id]),
+                )
+                snapshot = UsageSnapshot(account.provider_id, account.id, now, windows,
+                                         unmetered=account.unmetered)
+                break
+            except UsageError:
+                if attempt == 0:
+                    time.sleep(2)
+                    continue
+                snapshot = UsageSnapshot(account.provider_id, account.id, now, {}, fresh=False,
+                                         error="proxy usage unavailable", unmetered=account.unmetered)
         write_cache(cache_path(root, account.provider_id, account.id), snapshot.cache_dict())
         results[(account.provider_id, account.id)] = snapshot
     write_cache(root / "auth-files.json", {

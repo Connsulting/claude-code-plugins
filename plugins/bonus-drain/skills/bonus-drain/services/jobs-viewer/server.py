@@ -1999,38 +1999,53 @@ def _codex_cards(gates: dict, cx: dict | None, n_codex: int, coord: str, batch: 
     return cards
 
 
-def _unmetered_card(gates: dict, provider: str, eligible: int, batch: int) -> list[dict]:
+def _metered_cards(gates: dict, provider: str, eligible: int, batch: int) -> list[dict]:
+    """Show each Grok or Muse subscription's normalized usage and pool pacing."""
     pool = _gate_for_card(gates, provider)
-    configured = any(row.get("provider_id") == provider for row in gates.get("subscriptions", [])) or bool(pool)
-    if not configured:
-        return []
     try:
         cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
-        cap = cfg.unmetered_max_inflight
+        limits = cfg.limits_for_provider(provider)
+        weekly = next((limit for limit in limits if limit.window_seconds == 604800), None)
     except graph_config.ConfigError:
-        cap = 2
-    return [{
-        "name": provider.title(), "account_id": provider, "engine": provider,
-        "tag": '<span class="tag acc">pool running</span>' if batch else "",
-        "u5": None, "u7": None, "hot": None, "ceiling": 100, "r7": None,
-        "windows": 0, "opens_in": None, "ppw": 0, "batch": 0, "pool_batch": batch,
-        "batch_n": cap, "eligible": eligible, "elig_label": "jobs", "lead_h": 0,
-        "active": False, "live": bool(pool.get("open")) or batch > 0,
-        "draining": batch > 0, "behind": "", "urgent": False, "urgency_h": 0,
-        "unmetered": True, "pool_open": bool(pool.get("open")), "pool_reason": pool.get("reason"),
-        "pool_surplus": 0, "subscription_count": sum(
-            row.get("provider_id") == provider for row in gates.get("subscriptions", [])
-        ),
-    }]
+        weekly = None
+    lead = weekly.lead_seconds / 3600 if weekly else 0
+    cards = []
+    for snapshot in gates.get("subscriptions", []):
+        if snapshot.get("provider_id") != provider:
+            continue
+        readings = snapshot.get("limits", {}) if snapshot.get("fresh", True) else {}
+        short, week = readings.get("five_hour", {}), readings.get("seven_day", {})
+        pacing = snapshot.get("pacing", {}).get(weekly.id, {}) if weekly else {}
+        reset = week.get("resets_at")
+        account_id = snapshot["account_id"]
+        cards.append({
+            "name": _card_name(provider, account_id.removeprefix(provider + "-")),
+            "account_id": account_id, "engine": provider,
+            "tag": '<span class="tag acc">pool running</span>' if batch else "",
+            "u5": short.get("used_percent"), "u7": week.get("used_percent"),
+            "hot": None, "ceiling": weekly.ceiling_percent if weekly else 100,
+            "r7": reset, "windows": windows_until_reset(reset, lead, 5),
+            "opens_in": max(0, reset - time.time() - lead * 3600) if reset else None,
+            "ppw": weekly.max_percent_per_window if weekly else 0,
+            "batch": 0, "pool_batch": batch, "batch_n": weekly.batch_size if weekly else 3,
+            "eligible": eligible, "elig_label": "jobs", "lead_h": lead,
+            "active": False, "live": bool(pool.get("open")) or batch > 0,
+            "draining": batch > 0, "behind": "", "urgent": bool(pool.get("urgent")),
+            "urgency_h": weekly.urgency_seconds / 3600 if weekly else 0,
+            "pool_open": bool(pool.get("open")), "pool_reason": pool.get("reason"),
+            "pool_surplus": pool.get("surplus"),
+            "reserve": pacing.get("reserve"), "surplus": pacing.get("surplus"),
+            **_card_floor_fields(provider),
+        })
+    return cards
 
 
 def _grok_cards(gates: dict, grok: dict | None, n_grok: int, coord: str, batch: int) -> list[dict]:
-    """Grok has a provider concurrency cap and no metered usage window."""
-    return _unmetered_card(gates, "grok", n_grok, batch)
+    return _metered_cards(gates, "grok", n_grok, batch)
 
 
 def _muse_cards(gates: dict, n_muse: int, batch: int) -> list[dict]:
-    return _unmetered_card(gates, "muse", n_muse, batch)
+    return _metered_cards(gates, "muse", n_muse, batch)
 
 
 def _pacing_strip(anchor, gates: dict, dispatches: list[float], batch: int) -> str:

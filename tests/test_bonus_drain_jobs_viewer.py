@@ -100,13 +100,13 @@ class JobsViewerContractTests(unittest.TestCase):
             {"codex_acct": [{"label": "Personal", "account_id": "codex-personal", "u7": 22}],
              "provider_gates": {"codex": {"provider_id": "codex", "open": True}}}, None, 0, "", 0,
         )[0]
-        grok_gates = {"subscriptions": [{"provider_id": "grok", "account_id": "grok-d", "unmetered": True}],
+        grok_gates = {"subscriptions": [{"provider_id": "grok", "account_id": "grok-d", "limits": {"seven_day": {"used_percent": 3}}}],
                       "provider_gates": {"grok": {"provider_id": "grok", "open": True}}}
         grok = self.viewer._grok_cards(grok_gates, None, 0, "", 0)[0]
 
         self.assertEqual(claude["name"], "Claude · Business")
         self.assertEqual(codex["name"], "Codex · Personal")
-        self.assertEqual(grok["name"], "Grok")
+        self.assertEqual(grok["name"], "Grok · d")
         for card in (claude, codex):
             with self.subTest(account=card["name"]):
                 self.assertFalse(card["active"])
@@ -119,8 +119,8 @@ class JobsViewerContractTests(unittest.TestCase):
         window_draining = self.viewer._grok_cards(
             grok_gates, None, 0, "grok", 0,
         )[0]
-        self.assertIn("unmetered", self.viewer._account_row(window_draining).lower())
-        self.assertIsNone(grok["u7"])
+        self.assertIn("<b>3%</b>", self.viewer._account_row(window_draining))
+        self.assertEqual(grok["u7"], 3)
 
         draining = self.viewer._claude_cards(
             {"acct": [{"label": "Business", "account_id": "claude-business", "u7": 22}],
@@ -211,19 +211,23 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertIn("pool running", running["tag"])
         self.assertIn('bar lg draining', self.viewer._account_row(running))
 
-    def test_live_grok_unmetered_batch_drives_the_verdict(self) -> None:
+    def test_live_grok_metered_batch_drives_the_verdict(self) -> None:
         grok = self.viewer._grok_cards(
-            {"provider_gates": {"grok": {"provider_id": "grok", "open": True, "unmetered": True}}},
+            {"subscriptions": [{"provider_id": "grok", "account_id": "grok-d",
+                                "limits": {"seven_day": {"used_percent": 3}}}],
+             "provider_gates": {"grok": {"provider_id": "grok", "open": True}}},
             None, 4, "grok", 2,
         )[0]
-        self.assertIn("unmetered", self.viewer._account_row(grok).lower())
+        self.assertIn("<b>3%</b>", self.viewer._account_row(grok))
         tone, label, text, _sub = self.viewer._verdict([grok], "grok", 30 * 3600)
         self.assertEqual((tone, label), ("live", "draining"))
         self.assertIn("Grok", text)
 
     def test_verdict_lists_every_dispatching_provider(self) -> None:
         grok = self.viewer._grok_cards(
-            {"provider_gates": {"grok": {"provider_id": "grok", "open": True, "unmetered": True}}},
+            {"subscriptions": [{"provider_id": "grok", "account_id": "grok-d",
+                                "limits": {"seven_day": {"used_percent": 3}}}],
+             "provider_gates": {"grok": {"provider_id": "grok", "open": True}}},
             None, 4, "grok", 1,
         )[0]
         claude = self.viewer._claude_cards(
@@ -236,7 +240,7 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertIn("dchip", text)
         self.assertIn("Grok", text)
         self.assertIn("Claude", text)
-        self.assertIn("1/2", text)
+        self.assertIn("1/3", text)
         self.assertIn("4/4", sub)
 
     def test_ready_status_uses_planner_reserve_and_next_scout_is_systemd_backed(self) -> None:
