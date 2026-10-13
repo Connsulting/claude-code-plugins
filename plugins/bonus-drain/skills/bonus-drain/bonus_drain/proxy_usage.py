@@ -161,8 +161,14 @@ def parse_windows(provider: str, body: Mapping[str, Any]) -> dict[str, Mapping[s
     windows = {}
     if provider == "claude":
         for name, raw in body.items():
-            if (name in {"five_hour", "seven_day"} or name.startswith("seven_day_")) and raw is not None:
-                windows[name] = _reading(raw, "utilization", "resets_at")
+            required = name in {"five_hour", "seven_day"}
+            if not required and not name.startswith("seven_day_"):
+                continue
+            if not isinstance(raw, Mapping) or raw.get("utilization") is None:
+                if required and name in body:
+                    windows[name] = _reading(raw, "utilization", "resets_at")
+                continue
+            windows[name] = _reading(raw, "utilization", "resets_at")
     elif provider == "codex":
         limits = body.get("rate_limit")
         if not isinstance(limits, Mapping):

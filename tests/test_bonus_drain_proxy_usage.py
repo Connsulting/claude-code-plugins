@@ -218,6 +218,12 @@ class ProxyUsageTests(unittest.TestCase):
         self.assertFalse(any(record.fresh for record in records.values()))
         self.assertEqual(planner.build_plan(self.config, records, eligible_count=5, now_epoch=self.now + 4000).batches, ())
 
+    def test_claude_ignores_null_model_windows(self):
+        body = {"five_hour": {"utilization": 1, "resets_at": self.now + 60},
+                "seven_day": {"utilization": 2, "resets_at": self.now + 120},
+                "seven_day_opus": None, "seven_day_breakdown": {"utilization": None}}
+        self.assertEqual(set(proxy_usage.parse_windows("claude", body)), {"five_hour", "seven_day"})
+
     def test_codex_single_weekly_window_is_retained(self):
         body = {"rate_limit": {"primary_window": {"used_percent": 7, "reset_at": self.now + 86400,
                                                    "limit_window_seconds": 604800}}}
