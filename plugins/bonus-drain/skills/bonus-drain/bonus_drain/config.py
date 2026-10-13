@@ -176,6 +176,7 @@ class HostLoadGateConfig:
     cpu_some_avg60_max: float = 40.0
     mem_available_min_gib: float = 4.0
     load_per_cpu_max: float = 1.5
+    disk_free_min_gib: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -298,6 +299,7 @@ def _host_load_gate(value: Any) -> HostLoadGateConfig:
     gate = _require_mapping(value, "host_load_gate")
     _reject_unknown(gate, {
         "enabled", "cpu_some_avg60_max", "mem_available_min_gib", "load_per_cpu_max",
+        "disk_free_min_gib",
     }, "host_load_gate")
     defaults = HostLoadGateConfig()
     enabled = gate.get("enabled", defaults.enabled)
@@ -320,6 +322,10 @@ def _host_load_gate(value: Any) -> HostLoadGateConfig:
             "host_load_gate.mem_available_min_gib", minimum=0,
         ),
         load_per_cpu_max=load_per_cpu_max,
+        disk_free_min_gib=_number(
+            gate.get("disk_free_min_gib", defaults.disk_free_min_gib),
+            "host_load_gate.disk_free_min_gib", minimum=0,
+        ),
     )
 
 

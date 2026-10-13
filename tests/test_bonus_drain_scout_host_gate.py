@@ -42,6 +42,7 @@ def _gate(**changes: object) -> config_module.HostLoadGateConfig:
         "cpu_some_avg60_max": 40.0,
         "mem_available_min_gib": 4.0,
         "load_per_cpu_max": 1.5,
+        "disk_free_min_gib": 30.0,
     }
     values.update(changes)
     return config_module.HostLoadGateConfig(**values)
@@ -52,12 +53,14 @@ def _load(
     mem_gib: float | None = 64.0,
     load1: float | None = 1.0,
     cpu_count: int | None = 16,
+    disk_gib: float | None = 200.0,
 ) -> scout.HostLoad:
     return scout.HostLoad(
         cpu_some_avg60=cpu,
         mem_available_bytes=None if mem_gib is None else int(mem_gib * GIB),
         load1=load1,
         cpu_count=cpu_count,
+        disk_free_bytes=None if disk_gib is None else int(disk_gib * GIB),
     )
 
 
@@ -132,6 +135,25 @@ class HostPressureVerdictTests(unittest.TestCase):
     def test_memory_at_minimum_is_clear(self) -> None:
         self.assertIsNone(scout.host_pressure(_gate(), _load(cpu=1.0, mem_gib=4.0)))
 
+    def test_low_disk_blocks_even_with_calm_cpu(self) -> None:
+        # remote-dev's root disk ran out on 2026-10-13 while ~20 jobs launched below 30 GiB free.
+        blocker = scout.host_pressure(_gate(), _load(cpu=1.0, disk_gib=12.0))
+        self.assertIsNotNone(blocker)
+        self.assertEqual(blocker["kind"], "host_pressure")
+        self.assertEqual(blocker["reasons"], ["disk free 12.00 GiB < 30 GiB"])
+        self.assertAlmostEqual(blocker["disk_free_gib"], 12.0, places=3)
+        self.assertEqual(blocker["thresholds"]["disk_free_min_gib"], 30.0)
+
+    def test_healthy_disk_does_not_block(self) -> None:
+        self.assertIsNone(scout.host_pressure(_gate(), _load(cpu=1.0, disk_gib=30.0)))
+        self.assertIsNone(scout.host_pressure(_gate(), _load(cpu=1.0, disk_gib=500.0)))
+
+    def test_unknown_disk_neither_blocks_nor_clears(self) -> None:
+        self.assertIsNone(scout.host_pressure(_gate(), _load(cpu=1.0, disk_gib=None)))
+        blocker = scout.host_pressure(_gate(), _load(cpu=80.0, disk_gib=None))
+        self.assertIsNotNone(blocker)
+        self.assertIsNone(blocker["disk_free_gib"])
+
     def test_missing_psi_falls_back_to_loadavg_above_ratio(self) -> None:
         # 34.1 / 16 = 2.13 > 1.5
         blocker = scout.host_pressure(_gate(), _load(cpu=None, load1=34.1, cpu_count=16))
@@ -149,7 +171,8 @@ class HostPressureVerdictTests(unittest.TestCase):
     def test_nothing_readable_gives_no_verdict(self) -> None:
         self.assertIsNone(
             scout.host_pressure(
-                _gate(), _load(cpu=None, mem_gib=None, load1=None, cpu_count=None),
+                _gate(),
+                _load(cpu=None, mem_gib=None, load1=None, cpu_count=None, disk_gib=None),
             ),
         )
 
@@ -189,7 +212,7 @@ class ReadHostLoadTests(unittest.TestCase):
         )
         self._write_meminfo_and_loadavg()
 
-        load = scout.read_host_load(self.proc, cpu_count=lambda: 16)
+        load = scout.read_host_load(self.proc, database_dir=self.proc, cpu_count=lambda: 16)
 
         self.assertAlmostEqual(load.cpu_some_avg60, 55.10)
         self.assertEqual(load.mem_available_bytes, 7340032 * 1024)
@@ -199,7 +222,7 @@ class ReadHostLoadTests(unittest.TestCase):
     def test_missing_psi_still_reads_loadavg(self) -> None:
         self._write_meminfo_and_loadavg()
 
-        load = scout.read_host_load(self.proc, cpu_count=lambda: 8)
+        load = scout.read_host_load(self.proc, database_dir=self.proc, cpu_count=lambda: 8)
 
         self.assertIsNone(load.cpu_some_avg60)
         self.assertAlmostEqual(load.load1, 34.10)
@@ -210,7 +233,7 @@ class ReadHostLoadTests(unittest.TestCase):
         self.assertEqual(blocker["source"], "loadavg")
 
     def test_empty_proc_root_reads_nothing(self) -> None:
-        load = scout.read_host_load(self.proc, cpu_count=lambda: None)
+        load = scout.read_host_load(self.proc, database_dir=self.proc, cpu_count=lambda: None)
 
         self.assertIsNone(load.cpu_some_avg60)
         self.assertIsNone(load.mem_available_bytes)
@@ -223,11 +246,41 @@ class ReadHostLoadTests(unittest.TestCase):
         (self.proc / "meminfo").write_text("MemTotal: 1 kB\n", encoding="utf-8")
         (self.proc / "loadavg").write_text("not-a-number\n", encoding="utf-8")
 
-        load = scout.read_host_load(self.proc, cpu_count=lambda: 4)
+        load = scout.read_host_load(self.proc, database_dir=self.proc, cpu_count=lambda: 4)
 
         self.assertIsNone(load.cpu_some_avg60)
         self.assertIsNone(load.mem_available_bytes)
         self.assertIsNone(load.load1)
+
+    def test_disk_free_reads_the_database_directory(self) -> None:
+        seen: list[str] = []
+
+        def statvfs(path: str) -> os.statvfs_result:
+            seen.append(path)
+            return os.statvfs_result((4096, 4096, 0, 0, 3 * GIB // 4096, 0, 0, 0, 0, 255))
+
+        load = scout.read_host_load(
+            self.proc, database_dir=self.proc / "state", cpu_count=lambda: 4, statvfs=statvfs,
+        )
+
+        self.assertEqual(seen, [str(self.proc / "state")])
+        self.assertEqual(load.disk_free_bytes, 3 * GIB)
+
+    def test_statvfs_error_gives_unknown_disk_without_raising(self) -> None:
+        def statvfs(_path: str) -> os.statvfs_result:
+            raise OSError(5, "Input/output error")
+
+        load = scout.read_host_load(
+            self.proc, database_dir=self.proc, cpu_count=lambda: 4, statvfs=statvfs,
+        )
+
+        self.assertIsNone(load.disk_free_bytes)
+        self.assertIsNone(scout.host_pressure(_gate(), load))
+
+    def test_real_statvfs_reads_free_space(self) -> None:
+        load = scout.read_host_load(self.proc, database_dir=self.proc, cpu_count=lambda: 4)
+
+        self.assertIsInstance(load.disk_free_bytes, int)
 
 
 class HostLoadGateConfigTests(unittest.TestCase):
@@ -247,6 +300,7 @@ class HostLoadGateConfigTests(unittest.TestCase):
         self.assertEqual(gate.cpu_some_avg60_max, 40.0)
         self.assertEqual(gate.mem_available_min_gib, 4.0)
         self.assertEqual(gate.load_per_cpu_max, 1.5)
+        self.assertEqual(gate.disk_free_min_gib, 30.0)
         self.assertEqual(gate, config_module.HostLoadGateConfig())
 
     def test_overrides_are_honored(self) -> None:
@@ -254,11 +308,13 @@ class HostLoadGateConfigTests(unittest.TestCase):
             "cpu_some_avg60_max": 25,
             "mem_available_min_gib": 8.5,
             "load_per_cpu_max": 2,
+            "disk_free_min_gib": 50,
         })).host_load_gate
         self.assertTrue(gate.enabled)
         self.assertEqual(gate.cpu_some_avg60_max, 25.0)
         self.assertEqual(gate.mem_available_min_gib, 8.5)
         self.assertEqual(gate.load_per_cpu_max, 2.0)
+        self.assertEqual(gate.disk_free_min_gib, 50.0)
 
     def test_gate_can_be_disabled(self) -> None:
         gate = self.validate(
@@ -275,6 +331,8 @@ class HostLoadGateConfigTests(unittest.TestCase):
             "cpu over 100": {"cpu_some_avg60_max": 100.5},
             "negative cpu": {"cpu_some_avg60_max": -1},
             "negative memory": {"mem_available_min_gib": -0.5},
+            "negative disk": {"disk_free_min_gib": -1},
+            "string disk": {"disk_free_min_gib": "30"},
             "zero load ratio": {"load_per_cpu_max": 0},
             "negative load ratio": {"load_per_cpu_max": -1.5},
             "string threshold": {"cpu_some_avg60_max": "40"},
@@ -375,6 +433,16 @@ class GatedTickTests(ScoutTickCase):
         payload = report.to_dict()
         self.assertIn("host_pressure", [b["kind"] for b in payload["blockers"]])
         self.assertEqual(payload["dispatched"], [])
+
+    def test_low_disk_tick_launches_nothing(self) -> None:
+        self.queue.add_task(reviewed(task("ready")))
+
+        report, _ = self.run_tick(lambda: _load(cpu=5.0, disk_gib=8.0))
+
+        self.assertEqual(self.router_calls, [])
+        self.assertEqual(report.dispatched, ())
+        host = [b for b in report.blockers if b.get("kind") == "host_pressure"]
+        self.assertEqual([b["reasons"] for b in host], [["disk free 8.00 GiB < 30 GiB"]])
 
     def test_disabled_gate_dispatches_under_pressure(self) -> None:
         from dataclasses import replace

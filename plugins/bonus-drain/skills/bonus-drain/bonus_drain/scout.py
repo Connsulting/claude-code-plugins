@@ -50,6 +50,7 @@ class HostLoad:
     mem_available_bytes: int | None
     load1: float | None
     cpu_count: int | None
+    disk_free_bytes: int | None
 
 
 def _read_text(path: Path) -> str:
@@ -98,12 +99,27 @@ def _load1(text: str) -> float | None:
         return None
 
 
+def _disk_free_bytes(
+    directory: Path, statvfs: Callable[[str], os.statvfs_result],
+) -> int | None:
+    try:
+        stat = statvfs(str(directory))
+    except OSError:
+        return None
+    return int(stat.f_bavail) * int(stat.f_frsize)
+
+
 def read_host_load(
     proc_root: str | os.PathLike[str] | Path = "/proc",
     *,
+    database_dir: str | os.PathLike[str] | Path,
     cpu_count: Callable[[], int | None] = os.cpu_count,
+    statvfs: Callable[[str], os.statvfs_result] = os.statvfs,
 ) -> HostLoad:
-    """Read CPU PSI, MemAvailable, and the 1-minute load average; never raises."""
+    """Read CPU PSI, MemAvailable, the 1-minute load average, and the queue db's free disk.
+
+    Never raises: an unreadable source is None.
+    """
 
     root = Path(proc_root)
     try:
@@ -116,6 +132,7 @@ def read_host_load(
         mem_available_bytes=_mem_available_bytes(_read_text(root / "meminfo")),
         load1=_load1(_read_text(root / "loadavg")),
         cpu_count=cpus if isinstance(cpus, int) and cpus > 0 else None,
+        disk_free_bytes=_disk_free_bytes(Path(database_dir), statvfs),
     )
 
 
@@ -156,6 +173,14 @@ def host_pressure(gate: HostLoadGateConfig, load: HostLoad) -> dict[str, Any] | 
         reasons.append(
             f"memory available {mem_available_gib:.2f} GiB < {gate.mem_available_min_gib:g} GiB"
         )
+    disk_free_gib = None if load.disk_free_bytes is None else load.disk_free_bytes / _GIB
+    if (
+        load.disk_free_bytes is not None
+        and load.disk_free_bytes < gate.disk_free_min_gib * _GIB
+    ):
+        reasons.append(
+            f"disk free {disk_free_gib:.2f} GiB < {gate.disk_free_min_gib:g} GiB"
+        )
     if not reasons:
         return None
     return {
@@ -166,10 +191,12 @@ def host_pressure(gate: HostLoadGateConfig, load: HostLoad) -> dict[str, Any] | 
         "cpu_some_avg60": load.cpu_some_avg60,
         "load_per_cpu": load_per_cpu,
         "mem_available_gib": mem_available_gib,
+        "disk_free_gib": disk_free_gib,
         "thresholds": {
             "cpu_some_avg60_max": gate.cpu_some_avg60_max,
             "mem_available_min_gib": gate.mem_available_min_gib,
             "load_per_cpu_max": gate.load_per_cpu_max,
+            "disk_free_min_gib": gate.disk_free_min_gib,
         },
     }
 
