@@ -6,6 +6,7 @@ import json
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -186,6 +187,49 @@ class ScoutReconciliationTests(unittest.TestCase):
             report = scout.run_once(self.config, self.queue, now_epoch=NOW)
         self.assertEqual(report.blockers[0]["kind"], "reconciliation_required")
         probe.assert_not_called()
+
+    def _activity_stamp(self, age_seconds: int) -> str:
+        return datetime.fromtimestamp(NOW - age_seconds, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.000Z"
+        )
+
+    def test_cancelled_t3_run_idle_30_minutes_is_recorded_failed(self):
+        release = mock.Mock()
+        report, _dispatch = self.run_scout(self.response(
+            "turn_ended", run_status="cancelled",
+            last_activity_at=self._activity_stamp(1800), surface="t3",
+        ), release=release)
+        self.assertEqual(report.reconciliation[0]["action"], "failed")
+        self.assertEqual([row.status for row in self.queue.runs()], ["failed", "dispatched"])
+        self.assertEqual(self.queue.claims(), [])
+        self.assertEqual(self.queue.activation_leases(), [])
+        release.assert_called_once_with("release", "alpha-account")
+        stored = self.queue.attempts(task_id="abandoned")
+        self.assertEqual(stored[0].reason_signature, "unknown_launch:t3_run_cancelled")
+
+    def test_cancelled_t3_run_idle_5_minutes_stays_held(self):
+        report, _dispatch = self.run_scout(self.response(
+            "turn_ended", run_status="cancelled",
+            last_activity_at=self._activity_stamp(300), surface="t3",
+        ))
+        self.assertEqual(report.reconciliation[0]["action"], "held")
+        self.assertEqual(len(self.queue.claims()), 1)
+        self.assertEqual(len(self.queue.activation_leases()), 1)
+        self.assertEqual(len(self.queue.runs()), 1)
+
+    def test_turn_ended_completed_t3_run_keeps_current_hold(self):
+        report, _dispatch = self.run_scout(self.response(
+            "turn_ended", run_status="completed",
+            last_activity_at=self._activity_stamp(1800), surface="t3",
+        ))
+        self.assertEqual(report.reconciliation[0]["action"], "held")
+        self.assertEqual(
+            report.reconciliation[0]["reason"],
+            "worker state is unknown; operator reconciliation required",
+        )
+        self.assertEqual(len(self.queue.claims()), 1)
+        self.assertEqual(len(self.queue.activation_leases()), 1)
+        self.assertEqual(len(self.queue.runs()), 1)
 
     def test_real_status_subprocess_accepts_failure_report_but_not_probe_failure(self):
         router = self.root / "router"
