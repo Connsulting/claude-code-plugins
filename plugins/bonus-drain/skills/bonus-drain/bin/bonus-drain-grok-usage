@@ -140,6 +140,11 @@ def main() -> int:
         raise AdapterError("collector returned a non-object")
 
     now = int(time.time()) if args.now is None else args.now
+    if raw.get("source_ts") is None:
+        # The collector reports source_ts null when it found nothing to read at all.
+        raise AdapterError(
+            "collector found no reading: direct billing failed and no billing event in log"
+        )
     captured_at = _epoch(raw.get("source_ts"), "source_ts")
     if captured_at > now + 300:
         raise AdapterError("collector timestamp is in the future")
