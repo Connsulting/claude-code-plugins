@@ -1,7 +1,7 @@
 """Read-only T3 orchestration state.
 
-The SQL matches the historical t3_state lookup: latest unheld run, plus whether any
-run is preparing, starting, or running. This module does not shell out to another tool.
+Read the latest unheld run, parent liveness, and recursive subagent liveness in
+one SQLite snapshot. This module does not shell out to another tool.
 """
 
 from __future__ import annotations
@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 BUSY_TIMEOUT_SECONDS = 2.0
+TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
+_TERMINAL_RUN_SQL = ", ".join(f"'{status}'" for status in sorted(TERMINAL_RUN_STATUSES))
 
 LATEST_RUN = (
     "SELECT r.run_id FROM orchestration_v2_projection_runs r "
@@ -20,6 +22,16 @@ LATEST_RUN = (
 )
 
 LOOKUP_SQL = f"""
+WITH RECURSIVE descendants(thread_id) AS (
+  SELECT child.thread_id FROM orchestration_v2_projection_threads child
+  WHERE json_extract(child.payload_json, '$.lineage.parentThreadId') = :thread_id
+    AND json_extract(child.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+  UNION
+  SELECT child.thread_id FROM orchestration_v2_projection_threads child
+  JOIN descendants parent
+    ON json_extract(child.payload_json, '$.lineage.parentThreadId') = parent.thread_id
+  WHERE json_extract(child.payload_json, '$.lineage.relationshipToParent') = 'subagent'
+)
 SELECT latest.status,
        EXISTS (
          SELECT 1 FROM orchestration_v2_projection_runs a
@@ -44,14 +56,29 @@ SELECT latest.status,
        t.updated_at,
        latest.requested_at,
        json_extract(latest.payload_json, '$.startedAt'),
-       latest.completed_at
+       latest.completed_at,
+       COALESCE(
+         (SELECT r.status FROM orchestration_v2_projection_runs r
+          WHERE r.thread_id = t.thread_id
+          ORDER BY r.ordinal DESC, r.run_id DESC LIMIT 1), ''
+       ) NOT IN ({_TERMINAL_RUN_SQL}),
+       EXISTS (
+         SELECT 1 FROM descendants d
+         WHERE EXISTS (
+           SELECT 1 FROM orchestration_v2_projection_runs a
+           WHERE a.thread_id = d.thread_id
+             AND a.status IN ('preparing', 'starting', 'running')
+         ) OR COALESCE(
+           (SELECT r.status FROM orchestration_v2_projection_runs r
+            WHERE r.thread_id = d.thread_id
+            ORDER BY r.ordinal DESC, r.run_id DESC LIMIT 1), ''
+         ) NOT IN ({_TERMINAL_RUN_SQL})
+       )
 FROM orchestration_v2_projection_threads t
 LEFT JOIN orchestration_v2_projection_runs latest
   ON latest.run_id = ({LATEST_RUN})
 WHERE t.thread_id = :thread_id AND t.deleted_at IS NULL
 """
-
-TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
 
 ENGINE_BY_PROVIDER = {"claude": "claudeAgent"}
 
@@ -66,6 +93,9 @@ class T3Thread:
     active_run: bool
     last_error: str | None
     last_activity_at: str | None
+    completed_at: str | None
+    unsettled_run: bool
+    live_descendant: bool
 
 
 def state_db_path(home: Path | None = None) -> Path:
@@ -108,4 +138,7 @@ def lookup_thread(thread_id: str, path: Path | None = None) -> T3Thread | None:
         active_run=bool(row[1]),
         last_error=row[2] if isinstance(row[2], str) else None,
         last_activity_at=max(stamps) if stamps else None,
+        completed_at=row[6] if isinstance(row[6], str) else None,
+        unsettled_run=bool(row[7]),
+        live_descendant=bool(row[8]),
     )

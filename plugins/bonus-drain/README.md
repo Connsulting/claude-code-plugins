@@ -170,14 +170,14 @@ Monthly tasks start waiting when their 28-day cooldown ends. Before any claim, s
 queue reconciliation blockers, global in-flight runs with their ages, and the resolved executable
 identity for every router needed by the tick. A lifecycle or router failure stops the tick once
 instead of failing each selected task.
-Before applying the in-flight gate, each normal scout tick checks the configured router's
-status report. An exact provider/job match freshly reported as `completed` or `failed`,
-without a queue terminal event, is recorded as `failed` through the same lifecycle path as
-the record CLI. This releases its claim and applicable activation lease without asserting
-task completion or retrying it. Running, unknown, missing, duplicate, and unqueryable jobs
-remain blocked; age alone never proves that a worker ended. The router's most recent 1,000
-jobs are queried once per adapter with a maximum 30-second timeout; jobs outside that window
-require operator reconciliation. Scout JSON includes the decisions in `reconciliation`,
+Before applying the in-flight gate, each normal scout tick reads T3 state through read-only
+SQLite. An active parent run or any recursive subagent descendant with an active run or
+nonterminal latest run keeps the task running. A terminal parent run that ended less than
+900 seconds ago also stays running. Once the thread settles and that grace period ends,
+a missing queue terminal event is recorded as `failed` through the record CLI's lifecycle
+path. This releases its claim and applicable activation lease without asserting task
+completion or retrying it. Missing or unreadable T3 state remains held; age alone never
+proves that a worker ended. Scout JSON includes the decisions in `reconciliation`,
 and `--dry-run` reports `would_fail` without changing the queue or releasing activation.
 Existing ambiguous claims still stop the scout before any automatic reconciliation.
 Normalized usage requires explicit provider/account identity and capture time. Missing Grok
@@ -349,6 +349,12 @@ ordinary operator requeue preserves prior attempts and leaves those holds held; 
 --override-hold --reason <text>` explicitly reschedules an authority-required, permanent, or
 no-progress hold, and still refuses unknown launches, claimed, goal-managed, done, non-one-off,
 and changed-contract work.
+`recover-complete` can accept verified completion for an unknown-launch reconciliation
+closure only with signature `unknown_launch:missing_terminal_record` or
+`unknown_launch:t3_run_*`. Its source attempt must identify a readable T3 thread with no
+active or unsettled parent run and no live subagent descendant. It consumes only that
+closure's matching recovery hold and preserves prior attempts. Other unknown launches
+remain held, including with `requeue --override-hold`.
 Public requeue remains unavailable for goal-managed work; admitted implementation and integration
 recovery stays under the goal contract, while coordinators and frozen acceptance use fresh
 follow-up jobs.

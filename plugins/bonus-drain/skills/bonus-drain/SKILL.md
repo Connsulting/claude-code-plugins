@@ -348,9 +348,12 @@ bonus-drain scout --json
 Do not loop to empty the queue. systemd owns later ticks. A zero-dispatch result with explicit
 closed reasons is successful operation.
 
-Before the in-flight gate, scout checks router status and records `failed` for a positively
-terminal worker that omitted its terminal event, using that exact attempt and an unverified
-structured reason under the existing claim/lease lifecycle.
+Before the in-flight gate, scout reads T3 state through read-only SQLite. Active or unsettled
+parent runs and recursive subagent descendants with an active run or nonterminal latest run
+keep their ancestor running. A terminal parent run also stays running until 900 seconds
+after it ended. Scout then records `failed` for a settled terminal worker that omitted its
+terminal event, using that exact attempt and an unverified structured reason under the
+existing claim/lease lifecycle.
 Running or unknown jobs remain held; missing status and elapsed time do not prove exit.
 Inspect the `reconciliation` list in scout JSON. `--dry-run` only proposes queue repairs.
 Ambiguous claims still require operator reconciliation and are never cleared automatically.
@@ -481,6 +484,11 @@ configurable record adapter, which may not support recovery. It appends a verifi
 without a new claim or router launch and does not require a previously scheduled recovery
 projection; if an exact projection exists, it consumes it atomically. If it refuses because a
 successor owns the task, keep the evidence for that successor and do not overwrite its state.
+An unknown-launch reconciliation closure is recoverable only with signature
+`unknown_launch:missing_terminal_record` or `unknown_launch:t3_run_*` and a source attempt's
+readable T3 thread with no active or unsettled run or live recursive subagent descendant.
+Only that closure's matching hold may be consumed. Missing or unreadable state and other
+unknown-launch signatures remain refused, including by `requeue --override-hold`.
 
 For repository dependencies, use the resolved branch in the prompt. An explicit child start_ref
 wins only when repository parent metadata is valid. It cannot override missing or malformed

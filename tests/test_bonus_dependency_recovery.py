@@ -23,8 +23,10 @@ SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 CLI = SKILL_ROOT / "bin" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
 
-from bonus_drain import cli, db, dispatcher, goals, scout, usage
+from bonus_drain import cli, db, dispatcher, goals, scout, t3_state, usage
 from bonus_drain import config as config_module
+
+from tests.test_bonus_drain_reconcile import T3StateFixture
 
 NOW = 2_000_000_000
 KEY = "alpha-account/alpha-weekly/2000001000"
@@ -725,6 +727,222 @@ class AutomaticRecoveryContracts(RecoveryCase):
             capabilities=(db.LEGACY_EXCLUSIVE_CAPABILITY,),
         )
         self.assertEqual(claude[0].id, "exclusive")
+
+
+class T3ClosureCompletionContracts(RecoveryCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.state = T3StateFixture(self.root / "t3.sqlite")
+        patcher = mock.patch.object(t3_state, "state_db_path", return_value=self.state.path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def prepare_closure(
+        self, task_id: str = "closed", *,
+        signature: str = "unknown_launch:missing_terminal_record", held: bool = True,
+    ):
+        self.add(task_id)
+        self.add(f"{task_id}-dependent", depends_on=[task_id])
+        source = self.claim(task_id)
+        thread_id = f"{task_id}-thread"
+        self.queue.record(
+            task_id, KEY, attempt_id=source.id, status="dispatched",
+            provider_id="alpha", account_id="alpha-account", router_job_id=thread_id,
+            surface="t3", now_epoch=NOW,
+        )
+        # The terminal record can omit router_job_id; the dispatch retains the identity.
+        self.terminal(task_id, source, "failed", reason("unknown_launch", signature))
+        if held:
+            self.queue.reconcile_recoveries(now_epoch=NOW, dry_run=False)
+            self.assertEqual(self.queue.recovery_for(task_id).state, "held")
+        self.state.thread(thread_id)
+        self.state.run(thread_id, "cancelled")
+        return source, thread_id
+
+    def snapshot(self):
+        return {table: rows(self.queue, f"SELECT * FROM {table} ORDER BY rowid") for table in (
+            "task_attempts", "runs", "task_recovery", "dispatch_claims",
+        )}
+
+    def complete(self, task_id: str, source):
+        return self.queue.recover_complete(
+            task_id, expected_attempt_id=source.id, outcome=verified(),
+            summary="continued work supplied verified completion", now_epoch=NOW + 10,
+        )
+
+    def assert_refused(self, task_id: str, source, pattern: str):
+        before = self.snapshot()
+        with self.assertRaisesRegex(db.QueueError, pattern):
+            self.complete(task_id, source)
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse(self.queue.readiness(f"{task_id}-dependent", now_epoch=NOW + 10)["ready"])
+
+    def test_settled_t3_closures_complete_through_verified_path_without_history_loss(self):
+        for index, signature in enumerate((
+            "unknown_launch:missing_terminal_record", "unknown_launch:t3_run_cancelled",
+            "unknown_launch:t3_run_interrupted", "unknown_launch:t3_run_failed",
+        )):
+            with self.subTest(signature=signature):
+                task_id = f"closed-{index}"
+                source, thread_id = self.prepare_closure(task_id, signature=signature)
+                self.state.thread(f"{thread_id}-child", thread_id)
+                self.state.run(f"{thread_id}-child", "completed")
+                self.state.thread(f"{thread_id}-grandchild", f"{thread_id}-child")
+                self.state.run(f"{thread_id}-grandchild", "failed")
+                original = rows(self.queue, "SELECT * FROM task_attempts WHERE id=?", (source.id,))
+                history = rows(self.queue, "SELECT * FROM runs WHERE task=? ORDER BY rowid_pk", (task_id,))
+                completed = self.complete(task_id, source)
+                self.assertEqual(completed.status, "done")
+                self.assertNotEqual(completed.attempt_id, source.id)
+                self.assertEqual(rows(self.queue, "SELECT * FROM task_attempts WHERE id=?", (source.id,)), original)
+                self.assertEqual(rows(
+                    self.queue, "SELECT * FROM runs WHERE task=? AND rowid_pk!=? ORDER BY rowid_pk",
+                    (task_id, completed.rowid_pk),
+                ), history)
+                verification = rows(self.queue, "SELECT * FROM task_attempts WHERE id=?", (completed.attempt_id,))[0]
+                self.assertEqual((verification["mode"], verification["origin"], verification["recovery_of"]),
+                                 ("verification", "continuation", source.id))
+                self.assertIsNone(self.queue.recovery_for(task_id))
+                self.assertEqual(self.queue.claims(), [])
+                self.assertTrue(self.queue.readiness(f"{task_id}-dependent", now_epoch=NOW + 10)["ready"])
+                replay = self.complete(task_id, source)
+                self.assertEqual(replay.rowid_pk, completed.rowid_pk)
+
+    def test_settled_closure_completes_without_a_recovery_projection(self):
+        source, thread_id = self.prepare_closure(held=False)
+        self.assertIsNone(self.queue.recovery_for("closed"))
+        self.state.run(thread_id, "completed", ended_age=0)
+        self.assertEqual(self.complete("closed", source).status, "done")
+
+    def test_active_or_unsettled_parent_refuses_then_accepts_after_settling(self):
+        for index, status in enumerate(("preparing", "starting", "running", "queued", "unknown")):
+            with self.subTest(status=status):
+                task_id = f"parent-{index}"
+                source, thread_id = self.prepare_closure(task_id, held=index % 2 == 0)
+                self.state.run(thread_id, status)
+                self.assert_refused(task_id, source, "active or unsettled")
+                self.state.run(thread_id, "completed")
+                self.assertEqual(self.complete(task_id, source).status, "done")
+
+    def test_parent_active_history_or_held_latest_queue_refuses_completion(self):
+        source, thread_id = self.prepare_closure()
+        self.state.run(thread_id, "running")
+        self.state.run(thread_id, "completed", ordinal=2)
+        self.assert_refused("closed", source, "active or unsettled")
+        self.state.run(thread_id, "cancelled")
+        self.state.run(thread_id, "queued", ordinal=3, held=True)
+        self.assert_refused("closed", source, "active or unsettled")
+        self.state.run(thread_id, "completed", ordinal=3)
+        self.assertEqual(self.complete("closed", source).status, "done")
+
+    def test_nested_active_unsettled_or_missing_child_run_refuses_until_settled(self):
+        for index, status in enumerate((None, "preparing", "starting", "running", "queued", "waiting")):
+            with self.subTest(status=status):
+                task_id = f"nested-{index}"
+                source, thread_id = self.prepare_closure(task_id)
+                child = f"{thread_id}-child"
+                grandchild = f"{thread_id}-grandchild"
+                self.state.thread(child, thread_id)
+                self.state.run(child, "completed")
+                self.state.thread(grandchild, child)
+                if status is not None:
+                    self.state.run(grandchild, status, held=status == "queued")
+                self.assert_refused(task_id, source, "active or unsettled")
+                self.state.run(grandchild, "interrupted")
+                self.assertEqual(self.complete(task_id, source).status, "done")
+
+    def test_old_active_descendant_run_refuses_even_with_a_terminal_latest_run(self):
+        source, thread_id = self.prepare_closure()
+        self.state.thread("child", thread_id)
+        self.state.run("child", "running")
+        self.state.run("child", "completed", ordinal=2)
+        self.assert_refused("closed", source, "active or unsettled")
+        self.state.run("child", "cancelled")
+        self.assertEqual(self.complete("closed", source).status, "done")
+
+    def test_missing_or_unreadable_t3_state_refuses_without_queue_changes(self):
+        source, _thread_id = self.prepare_closure()
+        broken = T3StateFixture(self.root / "broken.sqlite")
+        with sqlite3.connect(broken.path) as connection:
+            connection.execute("DROP TABLE orchestration_v2_projection_threads")
+        missing = self.root / "missing.sqlite"
+        for path in (missing, broken.path):
+            with self.subTest(path=path.name), mock.patch.object(t3_state, "state_db_path", return_value=path):
+                self.assert_refused("closed", source, "cannot verify T3 state")
+        self.assertFalse(missing.exists())
+        self.assertEqual(self.complete("closed", source).status, "done")
+
+    def test_missing_or_deleted_source_thread_refuses_then_accepts_present_thread(self):
+        source, thread_id = self.prepare_closure()
+        with sqlite3.connect(self.state.path) as connection:
+            connection.execute("DELETE FROM orchestration_v2_projection_threads WHERE thread_id=?", (thread_id,))
+        self.assert_refused("closed", source, "readable source T3 thread")
+        self.state.thread(thread_id, deleted=True)
+        self.assert_refused("closed", source, "readable source T3 thread")
+        self.state.thread(thread_id)
+        self.assertEqual(self.complete("closed", source).status, "done")
+
+    def test_other_unknown_launch_signatures_are_refused_even_without_a_hold(self):
+        for index, signature in enumerate((
+            "unknown_launch:ambiguous_dispatch", "unknown_launch:operator_override",
+            "unknown_launch:missing_terminal_record_extra", "unknown_launch:t3_run",
+        )):
+            with self.subTest(signature=signature):
+                task_id = f"unknown-{index}"
+                source, _thread_id = self.prepare_closure(task_id, signature=signature, held=index % 2 == 0)
+                self.assert_refused(task_id, source, "T3 reconciliation closure")
+
+    def test_closure_requires_source_attempt_thread_identity_and_refuses_legacy(self):
+        self.add("no-thread")
+        self.add("no-thread-dependent", depends_on=["no-thread"])
+        source = self.claim("no-thread")
+        self.terminal("no-thread", source, "failed", reason("unknown_launch", "unknown_launch:missing_terminal_record"))
+        self.assert_refused("no-thread", source, "source attempt's T3 thread")
+        self.add("legacy")
+        legacy = self.queue.record(
+            "legacy", None, status="failed", cycle=0, router_job_id="legacy-thread",
+            outcome=reason("unknown_launch", "unknown_launch:missing_terminal_record"),
+        )
+        self.state.thread("legacy-thread")
+        self.state.run("legacy-thread", "completed")
+        before = self.snapshot()
+        with self.assertRaisesRegex(db.QueueError, "T3 reconciliation closure"):
+            self.queue.recover_complete(
+                "legacy", expected_legacy_run_rowid=legacy.rowid_pk, outcome=verified(),
+                summary="cannot adopt legacy ownership", now_epoch=NOW + 10,
+            )
+        self.assertEqual(self.snapshot(), before)
+
+    def test_settled_closure_still_refuses_other_retained_hold_reasons(self):
+        source, _thread_id = self.prepare_closure()
+        with sqlite3.connect(self.queue.path) as connection:
+            connection.execute("UPDATE task_recovery SET reason_code='authority_required' WHERE task_id='closed'")
+        self.assert_refused("closed", source, "held or changed: authority_required")
+
+    def test_settled_closure_still_requires_verified_outcome(self):
+        source, _thread_id = self.prepare_closure()
+        before = self.snapshot()
+        with self.assertRaises(db.QueueError):
+            self.queue.recover_complete(
+                "closed", expected_attempt_id=source.id, outcome={"completion": {"verified": False}},
+                summary="unverified", now_epoch=NOW + 10,
+            )
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.complete("closed", source).status, "done")
+
+    def test_requeue_override_still_refuses_a_safely_recoverable_t3_closure(self):
+        source, _thread_id = self.prepare_closure()
+        before = self.snapshot()
+        with captured_json() as payloads:
+            code = isolated_cli([
+                "requeue", "--database", str(self.queue.path), "closed", "--json",
+                "--override-hold", "--reason", "verified task completion exists",
+                "--now", str(NOW + 10),
+            ])
+        self.assertEqual(code, 1, payloads)
+        self.assertIn("unknown_launch", payloads[0]["message"])
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.complete("closed", source).status, "done")
 
 
 class RecoverCompleteContracts(RecoveryCase):

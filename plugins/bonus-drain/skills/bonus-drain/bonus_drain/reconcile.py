@@ -73,14 +73,18 @@ class _Observation:
 def _normalize_observation(raw: Any, thread_id: str, *, provider_name: str, now_epoch: int | None) -> _Observation | str | None:
     if isinstance(raw, T3Thread):
         status = raw.run_status
-        if raw.active_run or status not in TERMINAL_RUN_STATUSES:
+        if raw.active_run or raw.unsettled_run or raw.live_descendant or status not in TERMINAL_RUN_STATUSES:
             hold = (
-                "worker is running" if raw.active_run or status in {
+                "worker is running" if raw.active_run or raw.unsettled_run or raw.live_descendant or status in {
                     "preparing", "starting", "running", "queued",
                 } or status is None
                 else "worker state is unknown; operator reconciliation required"
             )
             return _Observation(status, hold, hold, "")
+        ended_at = _rfc3339_epoch(raw.completed_at) if raw.completed_at is not None else None
+        now = float(now_epoch) if now_epoch is not None else datetime.now(timezone.utc).timestamp()
+        if ended_at is not None and now - ended_at < _ABANDONED_TURN_IDLE_SECONDS:
+            return _Observation(status, "worker is running", "worker is running", "")
         if status in {"cancelled", "interrupted"}:
             reason = f"T3 run_status {status} without a terminal record"
             return _Observation(status, None, reason, f"unknown_launch:t3_run_{status}")
@@ -130,7 +134,8 @@ def reconcile_inflight(
 
     ``thread_lookup`` is a test seam. Runtime callers leave it unset and read
     ``~/.t3/userdata/statev2.sqlite`` read-only. A missing or duplicate observation
-    stays held. An active run stays held.
+    stays held. Active or unsettled parent/descendant runs and a parent run that
+    ended less than 900 seconds ago stay held.
     """
 
     reports: list[dict[str, Any]] = []

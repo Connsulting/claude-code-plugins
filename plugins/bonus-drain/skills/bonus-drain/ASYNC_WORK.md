@@ -80,6 +80,12 @@ even when no recovery projection has been scheduled; when one exists, it consume
 matching projection. It refuses changed contracts, ambiguous ownership, a held recovery, or an
 already queued or active successor; the worker then keeps its evidence for that successor instead
 of recording over it. A refusal does not authorize a second dispatch.
+The held-recovery exception is an unknown-launch reconciliation closure with signature
+`unknown_launch:missing_terminal_record` or `unknown_launch:t3_run_*`. Verified completion
+can consume that exact hold only when the source attempt identifies a readable T3 thread
+with no active or unsettled run and no live recursive subagent descendant. Missing or
+unreadable T3 state and other unknown-launch signatures remain refused. This does not
+permit `requeue --override-hold` to override an unknown launch.
 
 Repository work carries its exact remote, target_ref, branch_ref, and integration_state. These
 fields identify the parent work and its integration status. Older head OIDs and merge receipts

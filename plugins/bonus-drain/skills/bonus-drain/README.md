@@ -327,6 +327,20 @@ recovery without deleting history and leaves retained holds held. `requeue <task
 may admit implementation or integration recovery under its existing guards, while coordinator and
 frozen acceptance failures require fresh follow-up jobs.
 
+Scout reads T3 state through read-only SQLite before the in-flight gate. Active or unsettled
+parent runs and recursive subagent descendants with an active run or nonterminal latest run
+keep their ancestor running. A terminal parent run stays running for 900 seconds after it
+ends; an older terminal run with no queue terminal record closes as an unverified failure.
+Missing or unreadable state stays held.
+
+`recover-complete` can consume an unknown-launch reconciliation hold only when the source
+attempt's signature is `unknown_launch:missing_terminal_record` or `unknown_launch:t3_run_*`,
+the source T3 thread is readable and has no active or unsettled run, and no recursive subagent
+descendant is live. It uses the existing verified outcome requirements and appends a
+verification attempt without a new launch. Other unknown-launch signatures, missing T3
+state, and unrelated holds remain refused. `requeue --override-hold` still refuses every
+unknown-launch source.
+
 A repository producing task records `remote`, `target_ref`, `branch_ref`, and `integration_state`.
 Those fields establish the handoff identity. Commit OIDs and merge receipts may remain as audit
 evidence, but dependency readiness does not require them. `reverify-handoff` records a structural
