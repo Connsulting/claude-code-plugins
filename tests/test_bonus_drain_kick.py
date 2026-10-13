@@ -215,7 +215,7 @@ class KickContractTests(unittest.TestCase):
         self.assertEqual(called, [])
         self.assertEqual(self.queue.claims(), [])
 
-    def test_auto_without_an_open_gate_does_not_launch_or_claim(self) -> None:
+    def test_auto_without_usage_cache_uses_first_compatible_provider(self) -> None:
         self.queue.add_task(reviewed(_task("classify-none")))
         calls: list[list[str]] = []
 
@@ -231,6 +231,81 @@ class KickContractTests(unittest.TestCase):
         self.assertEqual(result.provider_id, "alpha")
         self.assertEqual(len(calls), 1)
         self.assertNotIn("--dry-run", calls[0])
+
+    def test_agent_router_adapter_uses_its_t3_launch_protocol(self) -> None:
+        cfg = replace(self.config, adapters=(replace(self.config.adapters[0], kind="agent-router"),))
+        seen = []
+
+        def route(argv, **_kwargs):
+            seen.append(argv)
+            return {"dispatch": {"threadId": "thread-router"}}
+
+        result = dispatcher.dispatch(
+            cfg, self.queue, task_id="portable", eligibility_key="manual/router",
+            requested_provider="alpha", router_call=route, now_epoch=NOW,
+        )
+        argv = seen[0]
+        self.assertEqual(argv[1:3], ["run", "--provider"])
+        self.assertEqual(argv[argv.index("--provider") + 1], "alpha-engine")
+        self.assertEqual(argv[argv.index("--surface") + 1], "t3")
+        self.assertEqual(argv[-1], result.prompt)
+        self.assertEqual(result.surface, "t3")
+        self.assertEqual(self.queue.inflight()[0].router_job_id, "thread-router")
+
+    def test_t3_noncreation_retries_then_records_one_dispatch(self) -> None:
+        sleeps = []
+        responses = [
+            subprocess.CompletedProcess([], 6, b"", b"not created"),
+            subprocess.CompletedProcess([], 6, b"", b"not created"),
+            subprocess.CompletedProcess([], 0, b'{"threadId":"thread-retried"}', b""),
+        ]
+        with mock.patch("bonus_drain.adapters.run_bounded_process", side_effect=responses) as launched:
+            result = dispatcher.dispatch(
+                self.config, self.queue, task_id="portable", eligibility_key="manual/retry",
+                requested_provider="alpha", now_epoch=NOW, retry_sleep=sleeps.append,
+            )
+        self.assertEqual(sleeps, [60, 60])
+        self.assertEqual(launched.call_count, 3)
+        self.assertEqual(result.job_id, "thread-retried")
+        self.assertEqual([attempt.state for attempt in self.queue.attempts()], ["dispatched"])
+        self.assertEqual([run.status for run in self.queue.runs()], ["dispatched"])
+        argv = launched.call_args.args[0]
+        self.assertEqual(argv[argv.index("--engine") + 1], "alpha-engine")
+        self.assertEqual(Path(argv[argv.index("--prompt-file") + 1]).read_text(), result.prompt)
+
+    def test_t3_noncreation_exhaustion_aborts_the_attempt(self) -> None:
+        sleeps = []
+        with (
+            mock.patch("bonus_drain.adapters.run_bounded_process", return_value=
+                       subprocess.CompletedProcess([], 6, b"", b"not created")) as launched,
+            self.assertRaises(dispatcher.KnownDispatchFailure),
+        ):
+            dispatcher.dispatch(
+                self.config, self.queue, task_id="portable", eligibility_key="manual/retry",
+                requested_provider="alpha", now_epoch=NOW, retry_sleep=sleeps.append,
+            )
+        self.assertEqual(sleeps, [60, 60])
+        self.assertEqual(launched.call_count, 3)
+        self.assertEqual([attempt.state for attempt in self.queue.attempts()], ["aborted"])
+        self.assertEqual(self.queue.claims(), [])
+        self.assertEqual(self.queue.inflight(), [])
+        self.assertEqual(self.queue.runs(), [])
+
+    def test_auto_does_not_treat_malformed_cache_as_missing(self) -> None:
+        from bonus_drain import usage
+
+        for provider in ("alpha", "beta"):
+            path = usage.cache_path(self.config.usage_cache_dir, provider, provider + "-account")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("malformed")
+        with self.assertRaisesRegex(dispatcher.InvalidRoute, "no open usage gate"):
+            dispatcher.dispatch(
+                self.config, self.queue, task_id="portable", eligibility_key="manual/malformed",
+                requested_provider="auto", now_epoch=NOW,
+                router_call=lambda *_args, **_kwargs: self.fail("unexpected launch"),
+            )
+        self.assertEqual(self.queue.claims(), [])
+        self.assertEqual(self.queue.attempts(), [])
 
     def test_post_spawn_uncertainty_retains_one_ambiguous_claim_and_never_relaunches(self) -> None:
         cases: dict[str, object] = {

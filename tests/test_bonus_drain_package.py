@@ -627,7 +627,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
         _manifest, included = self.distribution_manifest()
         self.assertIn("bonus_drain/proxy_usage.py", included)
         example = self.load_json(SKILL_ROOT / "config.example.json")
-        self.assertEqual({item["kind"] for item in example["adapters"]}, {"agent-router"})
+        self.assertEqual({item["kind"] for item in example["adapters"]}, {"t3-thread"})
         self.assertNotIn("accounts", example)
         self.assertNotIn("plans", example)
         refs = {item["id"]: item for item in example["secret_refs"]}

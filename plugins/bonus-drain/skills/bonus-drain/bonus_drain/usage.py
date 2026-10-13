@@ -167,6 +167,8 @@ def read_cached(
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         snapshot = normalize_snapshot(raw, account, now_epoch=now)
+    except FileNotFoundError:
+        return UsageSnapshot(account.provider_id, account.id, 0, {}, fresh=False, error="missing usage cache", unmetered=account.unmetered)
     except (OSError, UnicodeError, json.JSONDecodeError, UsageError):
         return UsageSnapshot(account.provider_id, account.id, 0, {}, fresh=False, error="usage cache unavailable", unmetered=account.unmetered)
     if snapshot.captured_at > now + 300:

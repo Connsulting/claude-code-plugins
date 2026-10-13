@@ -1244,7 +1244,7 @@ def _completed_router_result(
         if isinstance(completed.stdout, bytes) else str(completed.stdout or "")
     stderr = completed.stderr.decode("utf-8", errors="replace") \
         if isinstance(completed.stderr, bytes) else str(completed.stderr or "")
-    if completed.returncode == 6:
+    if adapter.kind == "t3-thread" and completed.returncode == 6:
         raise LaunchNotCreated("t3-thread exited 6 before creating a thread")
     try:
         value = _strict_json_loads(stdout)
@@ -1351,8 +1351,8 @@ def _call_router(
 ) -> Mapping[str, Any]:
     if phase not in {"classification", "launch"}:
         raise DispatchError(f"invalid router phase: {phase}")
-    if adapter.kind != "t3-thread":
-        raise InvalidRoute(f"{phase} adapter {adapter.id} must be kind t3-thread")
+    if adapter.kind not in {"agent-router", "t3-thread"}:
+        raise InvalidRoute(f"{phase} adapter {adapter.id} must be kind agent-router or t3-thread")
     if phase == "classification" and "--dry-run" not in argv:
         raise DispatchError("router classification must use --dry-run")
     if phase == "launch" and "--dry-run" in argv:
@@ -1475,7 +1475,7 @@ def select_auto_provider(
         )
         raise InvalidRoute(f"no configured provider is compatible with task {task.id}{needs}")
     gates = build_gates(
-        config, usage.read_all(config), eligible_count=1,
+        config, usage.read_all(config, now_epoch=now_epoch), eligible_count=1,
         now_epoch=int(time.time() if now_epoch is None else now_epoch),
     )
     by_id: dict[str, list[Any]] = {}
@@ -1553,8 +1553,8 @@ def dispatch(
     if provider.id == "auto" or not provider_compatible(task, provider):
         raise InvalidRoute(f"provider {provider.id} is incompatible with task {task.id}")
     adapter = config.adapter(provider.dispatch.adapter_id)
-    if adapter.kind != "t3-thread":
-        raise InvalidRoute(f"launch adapter {adapter.id} must be kind t3-thread")
+    if adapter.kind not in {"agent-router", "t3-thread"}:
+        raise InvalidRoute(f"launch adapter {adapter.id} must be kind agent-router or t3-thread")
 
     from .usage import read_accounts
     accounts = tuple(item for item in read_accounts(config, now_epoch=now_epoch)
@@ -1631,17 +1631,25 @@ def dispatch(
         prompt_path = prompt_dir / f"{attempt.id}.txt"
         prompt_path.write_text(prompt, encoding="utf-8")
         prompt_path.chmod(0o600)
-        launch_argv = [
-            *adapter.argv,
-            "--project", task.cwd,
-            "--engine", t3_engine(provider.dispatch.provider),
-            "--prompt-file", str(prompt_path),
-            "--title", task.title,
-        ]
+        if adapter.kind == "t3-thread":
+            launch_argv = [
+                *adapter.argv,
+                "--project", task.cwd,
+                "--engine", t3_engine(provider.dispatch.provider),
+                "--prompt-file", str(prompt_path),
+                "--title", task.title,
+            ]
+        else:
+            launch_argv = [
+                *adapter.argv, "run", "--provider", provider.dispatch.provider,
+                "--dir", task.cwd, "--name", task.title, "--surface", "t3",
+            ]
         model = canonical_model(task.model)
         if model:
             launch_argv.extend(["--model", model])
         launch_argv.append("--json")
+        if adapter.kind == "agent-router":
+            launch_argv.append(prompt)
         surface = "t3"
         run_summary: str | None = None
         response: Mapping[str, Any] | None = None

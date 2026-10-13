@@ -2,13 +2,11 @@
 
 Bonus Drain queues low-priority work and spends only configured provider capacity
 that would otherwise expire. It is a Python-standard-library runtime with one stable
-`bonus-drain` command. Providers, accounts, plans, limits, usage readers, and optional
-account activators are data in the validated JSON config; the planner contains no
-provider-name branches.
+`bonus-drain` command. Configuration defines providers and pacing limits. CLIProxyAPI
+supplies enabled accounts and their capacity readings.
 
-Every launch goes through an `t3-thread` adapter. `auto` is classification only:
-the router is queried with a dry run, Bonus Drain validates the result, then claims and
-launches once with a concrete provider and account. Missing, malformed, resetless, or
+Every launch opens a T3 thread through a `t3-thread` or `agent-router` adapter. `auto` selects a compatible provider
+from cached proxy usage before claiming and launching a T3 thread. Missing, malformed, resetless, or
 stale cache data closes only the affected account. Leaving work queued is expected.
 
 Set `scout_ntfy_url` in the config to a full ntfy topic URL such as
@@ -50,11 +48,9 @@ the remaining-headroom floor (`max_percent_per_window` points per
 `min(batch_size, floor(surplus / estimated_percent_per_job))` with one point equal
 to one job, then subtracts already-running jobs on that provider. `batch_size` is
 the per-provider cap (3 in the example). Optional top-level `max_jobs` is a
-cross-provider ceiling including in-flight work; omit it for no global cap. Optional
-`launch_surface` (`background` by default, or `t3`, also settable per provider) launches work
-as T3 Code threads through `t3-thread run --surface t3`; Claude MCP scopes are dropped on
-t3 and the dropped scope is noted on the dispatched run. Bonus Drain is
-the last `urgency_seconds` (24 hours) and uses the same floor. For a provider with multiple
+cross-provider ceiling including in-flight work; omit it for no global cap. Every run
+launches as a T3 Code thread. Task MCP scopes do not restrict these threads. The last
+`urgency_seconds` (24 hours) uses the same remaining-headroom floor. For a provider with multiple
 accounts, Scout applies the complete gates to each account and chooses the earliest reset
 with headroom. Recurring tasks still cool down, and each weekly reset key may run only once.
 
@@ -149,11 +145,10 @@ The reserved `implement` capability works the same way for tasks that invoke the
 skill (`use_implement`, or `/implement`, `$implement`, or "implement skill" in the prompt
 text). Only providers declaring it plan, claim, or launch that work; a provider that cannot
 drive the skill, such as Grok, omits it. When the only open gate lacks it, the scout reports
-a `provider_capability` blocker naming the task. Auto classification that lands on an
-incapable provider falls through to the first compatible provider, before any claim.
+a `provider_capability` blocker naming the task. Auto selection excludes incapable providers before any claim.
 
-CLI `auto` is a non-launching, pre-claim `agent-router --dry-run`; its uncertainty is
-retry-safe. After a concrete router launch has been attempted, any uncertainty is
+CLI `auto` chooses a compatible provider with the soonest reset among open proxy
+usage gates. Providers missing usage cache rank after providers with open gates. After a concrete router launch has been attempted, any uncertainty is
 post-launch ambiguity: the claim remains fail-closed until explicit
 reconciliation and no caller retries automatically.
 

@@ -252,8 +252,7 @@
         },
         "kind": {
           "enum": [
-            "agent-router",
-            "t3-thread"
+              "t3-thread"
           ]
         },
         "argv": {

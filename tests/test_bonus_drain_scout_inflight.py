@@ -44,7 +44,7 @@ def _limit(provider_id: str, ceiling: float = 95) -> config_module.LimitConfig:
 
 
 def _two_provider_config(queue: db.QueueDB, cache: Path) -> config_module.RuntimeConfig:
-    router = config_module.AdapterConfig("router", "agent-router", ("/bin/true",))
+    router = config_module.AdapterConfig("router", "t3-thread", ("/bin/true",))
     return proxy_fixture(config_module.RuntimeConfig(schema_version=1, source_path=None, database=queue.path, record_command=("/bin/true",), secret_refs=(), adapters=(router,), providers=(
             config_module.ProviderConfig("alpha", config_module.DispatchBinding("router", "alpha"), frozenset()),
             config_module.ProviderConfig("beta", config_module.DispatchBinding("router", "beta"), frozenset()),

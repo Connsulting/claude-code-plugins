@@ -26,13 +26,12 @@ source private helper functions or invent a second DB path.
 2. The refresher alone calls CLIProxyAPI management. Scout, plan, and viewers read cache.
 3. Missing, stale, malformed, or resetless cache closes only that account. No data is not
    zero usage.
-4. Every accounted launch goes through the configured `t3-thread` adapter. Direct provider
+4. Every accounted launch opens a T3 thread through the configured dispatch adapter. Direct provider
    launch and `codex-bg-thread` are forbidden.
-5. `auto` classifies in a router dry run only. Validate the result, claim the task, and launch
-   once with a concrete provider/account. Never persist `auto` or a null provider.
+5. `auto` selects a compatible provider from cached proxy usage, preferring the soonest
+   open reset. Claim the task and launch with that concrete provider/account. Never persist `auto` or a null provider.
    `set-providers TASK auto` clears the provider pin; it stores an empty allowlist.
-6. Classifier uncertainty is pre-claim and retry-safe because `t3-thread --dry-run` is
-   non-launching. Claiming creates a unique immutable attempt alongside
+6. Provider selection reads cached usage before claiming and does not launch a worker. Claiming creates a unique immutable attempt alongside
    `(task_id, eligibility_key)` before routing. Known-not-launched failure records that attempt
    as aborted and frees its claim; post-launch ambiguity retains the exact claim and attempt
    until reconciliation.
@@ -242,8 +241,8 @@ Estimate size before previewing or adding the task:
 
 When between sizes, choose the larger. `unknown` is display-only for legacy/null rows and is
 never valid on add. Prefer `mcp=none` unless the task demonstrably needs a named server. When
-the provider's `launch_surface` is `t3`, the MCP scope is dropped at launch (T3 Code threads
-ignore `--mcp-config`) and the run notes it, so do not rely on a scope to restrict a t3 job. Mark
+launching a T3 Code thread, task MCP scopes do not restrict its configured connectors.
+Do not rely on a scope to restrict a T3 job. Mark
 build-shaped work only through the explicit implementation flag; do not infer it from cwd or
 prose.
 

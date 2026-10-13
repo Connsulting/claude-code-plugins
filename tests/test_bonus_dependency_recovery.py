@@ -130,7 +130,7 @@ def runtime(
     *,
     source_path: Path | None = None,
 ) -> config_module.RuntimeConfig:
-    adapters = [config_module.AdapterConfig("router", "agent-router", (str(router),))]
+    adapters = [config_module.AdapterConfig("router", "t3-thread", (str(router),))]
     return proxy_fixture(config_module.RuntimeConfig(schema_version=1, source_path=source_path, database=database, record_command=(str(CLI), "record"), secret_refs=(), adapters=tuple(adapters), providers=(
             config_module.ProviderConfig("alpha", config_module.DispatchBinding("router", "alpha"), frozenset({db.IMPLEMENT_CAPABILITY})),
         ), limits=(

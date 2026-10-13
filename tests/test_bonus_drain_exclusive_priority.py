@@ -42,7 +42,7 @@ class ExclusivePriorityTests(unittest.TestCase):
             queue.add_task(reviewed(_task("portable-p1", 1)))
             queue.add_task(reviewed(_task("portable-p2", 2)))
             queue.add_task(reviewed(_task("claude-only-p3", 3, claude_only=True)))
-            router = config_module.AdapterConfig("router", "agent-router", ("/bin/true",))
+            router = config_module.AdapterConfig("router", "t3-thread", ("/bin/true",))
             config = proxy_fixture(config_module.RuntimeConfig(schema_version=1, source_path=None, database=queue.path, record_command=("/bin/true",), secret_refs=(), adapters=(router,), providers=(
                     config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), frozenset({"legacy-exclusive"})),
                     config_module.ProviderConfig("codex", config_module.DispatchBinding("router", "codex"), frozenset()),

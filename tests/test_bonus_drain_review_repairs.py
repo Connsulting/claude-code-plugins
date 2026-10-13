@@ -51,7 +51,7 @@ def task(
 
 
 def runtime(database: Path, *, router_path: str = "/bin/true") -> config_module.RuntimeConfig:
-    router = config_module.AdapterConfig("router", "agent-router", (router_path,))
+    router = config_module.AdapterConfig("router", "t3-thread", (router_path,))
     return proxy_fixture(config_module.RuntimeConfig(schema_version=1, source_path=None, database=database, record_command=("/bin/true",), secret_refs=(), adapters=(router,), providers=(
             config_module.ProviderConfig("alpha", config_module.DispatchBinding("router", "alpha"), frozenset()),
         ), limits=(config_module.LimitConfig("alpha-weekly", "alpha", 604_800, 95, 20_000, 6),), viewer={}, pr_exceptions=(), usage_max_age_seconds=3_600, cache_dir=database.parent / "cache", proxy_secret_ref=None), (("alpha", "alpha-account"),))

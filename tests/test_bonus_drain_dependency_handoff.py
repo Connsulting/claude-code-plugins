@@ -81,7 +81,7 @@ def verified_outcome(repo: dict[str, object] | None = None) -> dict[str, object]
 
 def runtime(database: Path) -> config_module.RuntimeConfig:
     return proxy_fixture(config_module.RuntimeConfig(schema_version=1, source_path=None, database=database, record_command=("/bin/true", "record"), secret_refs=(), adapters=(config_module.AdapterConfig(
-            "router", "agent-router", ("/bin/true",),
+            "router", "t3-thread", ("/bin/true",),
             timeout_seconds=10, max_output_bytes=65_536,
         ),), providers=(config_module.ProviderConfig("alpha", config_module.DispatchBinding("router", "alpha"), frozenset()),), limits=(config_module.LimitConfig(
             "alpha-weekly", "alpha", 604_800, 95, 20_000, 6,
