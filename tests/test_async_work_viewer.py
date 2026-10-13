@@ -4,12 +4,13 @@ import threading
 import unittest
 from dataclasses import replace
 from http.server import ThreadingHTTPServer
-from unittest import mock
 from types import SimpleNamespace
+from unittest import mock
+
+from bonus_drain import dispatcher
 
 from tests import test_bonus_drain_jobs_viewer as viewer_tests
 from tests import test_bonus_drain_kick as kick_tests
-from bonus_drain import dispatcher
 
 
 class AsyncViewerTests(unittest.TestCase):
@@ -101,9 +102,8 @@ class AsyncViewerTests(unittest.TestCase):
         timeout = self.viewer.subprocess.TimeoutExpired(cmd=['bonusdb', 'queue'], timeout=15)
         with mock.patch.object(
             self.viewer.subprocess, 'run', side_effect=[timeout, legacy],
-        ) as run:
-            with self.assertRaisesRegex(RuntimeError, 'queue'):
-                self.viewer.get_remaining(0)
+        ) as run, self.assertRaisesRegex(RuntimeError, 'queue'):
+            self.viewer.get_remaining(0)
 
         self.assertEqual(run.call_count, 1)
 
@@ -115,9 +115,11 @@ class AsyncViewerTests(unittest.TestCase):
             }),
             stderr='credential=do_not_expose',
         )
-        with mock.patch.object(self.viewer.subprocess, 'run', return_value=result) as run:
-            with self.assertRaises(RuntimeError) as raised:
-                self.viewer.get_remaining(0)
+        with (
+            mock.patch.object(self.viewer.subprocess, 'run', return_value=result) as run,
+            self.assertRaises(RuntimeError) as raised,
+        ):
+            self.viewer.get_remaining(0)
 
         self.assertEqual(run.call_count, 1)
         self.assertNotIn('do_not_expose', str(raised.exception))
@@ -131,9 +133,8 @@ class AsyncViewerTests(unittest.TestCase):
         )
         with mock.patch.object(
             self.viewer.subprocess, 'run', side_effect=[malformed, legacy],
-        ) as run:
-            with self.assertRaisesRegex(RuntimeError, 'queue'):
-                self.viewer.get_remaining(0)
+        ) as run, self.assertRaisesRegex(RuntimeError, 'queue'):
+            self.viewer.get_remaining(0)
 
         self.assertEqual(run.call_count, 1)
 
@@ -146,9 +147,11 @@ class AsyncViewerTests(unittest.TestCase):
                     'readiness': readiness,
                 }
                 result = mock.Mock(returncode=0, stdout=json.dumps(payload), stderr='')
-                with mock.patch.object(self.viewer.subprocess, 'run', return_value=result):
-                    with self.assertRaisesRegex(RuntimeError, 'queue'):
-                        self.viewer._remaining_snapshot(0)
+                with (
+                    mock.patch.object(self.viewer.subprocess, 'run', return_value=result),
+                    self.assertRaisesRegex(RuntimeError, 'queue'),
+                ):
+                    self.viewer._remaining_snapshot(0)
 
     def test_malformed_task_readiness_contract_is_rejected(self):
         malformed_statuses = (
@@ -166,9 +169,11 @@ class AsyncViewerTests(unittest.TestCase):
                     'readiness': {'task': status},
                 }
                 result = mock.Mock(returncode=0, stdout=json.dumps(payload), stderr='')
-                with mock.patch.object(self.viewer.subprocess, 'run', return_value=result):
-                    with self.assertRaisesRegex(RuntimeError, 'queue'):
-                        self.viewer._remaining_snapshot(0)
+                with (
+                    mock.patch.object(self.viewer.subprocess, 'run', return_value=result),
+                    self.assertRaisesRegex(RuntimeError, 'queue'),
+                ):
+                    self.viewer._remaining_snapshot(0)
 
     def test_queue_failure_surfaces_on_page_and_api(self):
         error = RuntimeError('bonus queue command failed')

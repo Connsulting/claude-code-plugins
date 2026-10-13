@@ -9,7 +9,6 @@ import re
 import unittest
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ROOT = REPO_ROOT / "plugins" / "big-plan"
 SKILL_ROOT = PLUGIN_ROOT / "skills" / "big-plan"
@@ -108,8 +107,8 @@ class BigPlanPackageContractTest(unittest.TestCase):
             SKILL_ROOT / "README.md",
             SKILL_ROOT / "big-plan.service",
         ]
-        hardcoded_tailnet = re.compile(r"[a-z0-9-]+\.tail[a-z0-9-]+\.ts\.net", re.I)
-        personal_home = re.compile(r"/home/(?!example(?:/|$))[a-z0-9._-]+", re.I)
+        hardcoded_tailnet = re.compile(r"[a-z0-9-]+\.tail[a-z0-9-]+\.ts\.net", re.IGNORECASE)
+        personal_home = re.compile(r"/home/(?!example(?:/|$))[a-z0-9._-]+", re.IGNORECASE)
         for path in portable_files:
             text = path.read_text(encoding="utf-8")
             self.assertIsNone(hardcoded_tailnet.search(text), path)

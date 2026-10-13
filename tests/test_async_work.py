@@ -1,18 +1,21 @@
 """Async queue contracts: shared eligibility, dependency safety and editable handoffs."""
-import json
 import hashlib
+import json
 import sqlite3
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
 from tests.readiness_fixture import rereviewed, review_json, reviewed
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'plugins/bonus-drain/skills/bonus-drain'))
-from bonus_drain import cli, db, dispatcher, scout, usage
 from dataclasses import replace
+
+from bonus_drain import cli, db, dispatcher, scout, usage
+
 from tests import test_bonus_drain_kick as kick_tests
 from tests.test_bonus_drain_preflight_checks import FakeRunner, git_ls_remote, ok
 
@@ -56,7 +59,7 @@ class AsyncWorkTests(unittest.TestCase):
         self.assertTrue(self.queue.claim('a', 'account/limit/2000000000', 'alpha', 'account', automatic=True))
 
     def test_cli_new_work_has_no_execution_mode_contract(self):
-        with mock.patch.object(cli, '_json') as output:
+        with mock.patch.object(cli, '_json'):
             self.assertEqual(cli.main(['add', '--database', str(self.queue.path), '--id', 'new', '--title', 'New', '--kind', 'oneoff', '--size', 'small', '--cwd', '/tmp', '--goal', 'proof', '--readiness-review', review_json(goal='proof'), '--json']), 0)
         self.assertNotIn('execution_mode', self.queue.task('new').to_dict())
 
@@ -208,7 +211,7 @@ class DispatchReadinessTests(unittest.TestCase):
 
     def test_waiting_dependency_never_calls_router_or_activation(self):
         f = self.fixture
-        f.queue.add_task(reviewed(dict(id='child', title='child', cwd='/tmp', goal='proof', depends_on=['portable'])))
+        f.queue.add_task(reviewed({'id': 'child', 'title': 'child', 'cwd': '/tmp', 'goal': 'proof', 'depends_on': ['portable']}))
         router, activation = mock.Mock(), mock.Mock()
         with self.assertRaises(dispatcher.AlreadyClaimed):
             dispatcher.dispatch(f.config, f.queue, task_id='child', eligibility_key='alpha-account/manual/2000000000', requested_provider='auto', router_call=router, activation_call=activation)
@@ -217,7 +220,7 @@ class DispatchReadinessTests(unittest.TestCase):
 
     def test_weekday_weekly_task_accepts_manual_but_not_automatic_start(self):
         f = self.fixture
-        f.queue.add_task(reviewed(dict(id='weekly', title='Weekly', cwd='/tmp', goal='proof', kind='recurring', cadence='weekly')))
+        f.queue.add_task(reviewed({'id': 'weekly', 'title': 'Weekly', 'cwd': '/tmp', 'goal': 'proof', 'kind': 'recurring', 'cadence': 'weekly'}))
         self.assertEqual(f.queue.readiness('weekly', now_epoch=kick_tests.NOW)['hold_reason'], 'weekend_window')
         with self.assertRaises(dispatcher.AlreadyClaimed):
             dispatcher.dispatch(f.config, f.queue, task_id='weekly', eligibility_key='alpha-account/limit/2000000000', requested_provider='alpha', trigger='bonus', router_call=f._router, now_epoch=kick_tests.NOW)
@@ -236,8 +239,8 @@ class ScoutWorkflowTests(unittest.TestCase):
         fixture.setUp()
         self.addCleanup(fixture.tearDown)
         queue = fixture.queue
-        queue.add_task(reviewed(dict(id='waiting', title='Waiting', cwd='/tmp', goal='proof', depends_on=['portable'])))
-        queue.add_task(reviewed(dict(id='other-ready', title='Ready', cwd='/tmp', goal='proof')))
+        queue.add_task(reviewed({'id': 'waiting', 'title': 'Waiting', 'cwd': '/tmp', 'goal': 'proof', 'depends_on': ['portable']}))
+        queue.add_task(reviewed({'id': 'other-ready', 'title': 'Ready', 'cwd': '/tmp', 'goal': 'proof'}))
         self.assertEqual({task.id for task in queue.eligible_tasks(0, automatic=True)}, {'portable', 'other-ready'})
         config = replace(fixture.config, adapters=(replace(fixture.config.adapters[0], argv=('/bin/true',)),))
         snapshots = {(provider, provider+'-account'): usage.UsageSnapshot(provider, provider+'-account', kick_tests.NOW,
