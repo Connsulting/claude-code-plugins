@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sys
 import tempfile
 import unittest
@@ -231,26 +230,20 @@ class ScoutReconciliationTests(unittest.TestCase):
         self.assertEqual(len(self.queue.activation_leases()), 1)
         self.assertEqual(len(self.queue.runs()), 1)
 
-    def test_real_status_subprocess_accepts_failure_report_but_not_probe_failure(self):
-        router = self.root / "router"
-        config = runtime(self.queue.path, router_path=str(router))
+    def test_state_read_failure_preserves_the_claim_and_a_terminal_run_fails_it(self):
         release = mock.Mock()
-        def script(exit_code):
-            router.write_text(
-                "#!/usr/bin/env python3\nimport json,sys\n"
-                "assert sys.argv[1:] == ['status', '--limit', '1000', '--json']\n"
-                f"print({json.dumps(self.response('failed'))!r})\n"
-                f"sys.exit({exit_code})\n"
-            )
-            router.chmod(0o755)
-
-        script(2)
-        report = reconcile.reconcile_inflight(config, self.queue, activation_call=release)
+        with mock.patch.object(
+            reconcile, "execute_adapter", side_effect=reconcile.T3StateError("locked"),
+        ):
+            report = reconcile.reconcile_inflight(self.config, self.queue, activation_call=release)
         self.assertEqual(report[0]["action"], "held")
-        self.assertEqual(len(self.queue.inflight()), 1)
+        self.assertIn("locked", report[0]["reason"])
         release.assert_not_called()
-        script(1)
-        report = reconcile.reconcile_inflight(config, self.queue, activation_call=release)
+        with mock.patch.object(
+            reconcile, "execute_adapter",
+            return_value=reconcile.T3Thread("failed", False, None, None),
+        ):
+            report = reconcile.reconcile_inflight(self.config, self.queue, activation_call=release)
         self.assertEqual(report[0]["action"], "failed")
         self.assertEqual(self.queue.inflight(), [])
 

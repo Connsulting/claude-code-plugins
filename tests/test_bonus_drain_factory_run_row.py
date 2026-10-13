@@ -40,7 +40,7 @@ def _task(task_id: str, **overrides: object) -> dict[str, object]:
 
 def _config(root: Path) -> config_module.RuntimeConfig:
     router = config_module.AdapterConfig(
-        "router", "agent-router", (str(root / "bin" / "agent-router"),),
+        "router", "t3-thread", (str(root / "bin" / "t3-thread"),),
         timeout_seconds=0.2, max_output_bytes=1024,
     )
     return config_module.RuntimeConfig(
@@ -133,8 +133,8 @@ class FactoryRunRowTests(unittest.TestCase):
         self.assertEqual(payload["repo"], self.root.name)
         self.assertEqual(payload["factory_version"], "v1")
 
-        launch = next(argv for argv in seen if "--dry-run" not in argv)
-        prompt = launch[-1]
+        launch = next(argv for argv in seen if "--prompt-file" in argv)
+        prompt = Path(launch[launch.index("--prompt-file") + 1]).read_text(encoding="utf-8")
         lines = prompt.splitlines()
         self.assertTrue(prompt.startswith("/implement "))
         self.assertIn("BACKGROUND_RUN=1", lines)
@@ -148,8 +148,9 @@ class FactoryRunRowTests(unittest.TestCase):
         result, seen = self._dispatch("plain-task", telemetry_call=lambda a, p: calls.append(a))
         self.assertEqual(calls, [])
         self.assertIsNone(result.factory_run_id)
-        launch = next(argv for argv in seen if "--dry-run" not in argv)
-        self.assertNotIn("FACTORY_RUN_ID", launch[-1])
+        launch = next(argv for argv in seen if "--prompt-file" in argv)
+        prompt = Path(launch[launch.index("--prompt-file") + 1]).read_text(encoding="utf-8")
+        self.assertNotIn("FACTORY_RUN_ID", prompt)
 
     def test_router_without_log_id_omits_decision_id(self) -> None:
         self.queue.add_task(reviewed(_task("no-log", use_implement=True, cwd=str(self.root))))

@@ -75,9 +75,9 @@ from tests.test_bonus_drain_scout_inflight import (
 )
 
 UNSWITCHED = "requested account did not become active"
-# The exact agent-router diagnostic for a Codex daemon that never started (no thread launched).
+# The exact t3-thread diagnostic for a Codex daemon that never started (no thread launched).
 CODEX_DAEMON_TIMEOUT = (
-    b"agent-router: `/home/user/.local/bin/codex app-server daemon start` timed out after 10s\n"
+    b"t3-thread: `/home/user/.local/bin/codex app-server daemon start` timed out after 10s\n"
 )
 
 
@@ -281,7 +281,7 @@ class AccountHoldScoutTests(PreflightCase):
             raise dispatcher.ActivationUnavailable(self.personal_refusal, known_not_switched=True)
 
     def route(self, argv: list[str], **_kwargs: object) -> dict[str, object]:
-        self.routed.append(argv[argv.index("--provider") + 1])
+        self.routed.append(argv[argv.index("--engine") + 1])
         return {"dispatch": {"job_id": f"job-{len(self.routed)}", "launched": True}}
 
     def tick(self, now: int, *, business_used: float = 70, config=None, queue=None) -> scout.ScoutReport:
@@ -353,7 +353,7 @@ class AccountHoldScoutTests(PreflightCase):
         routed: list[str] = []
 
         def route(argv: list[str], **_kwargs: object):
-            provider = argv[argv.index("--provider") + 1]
+            provider = argv[argv.index("--engine") + 1]
             routed.append(provider)
             if provider == "alpha":
                 return subprocess.CompletedProcess([], 1, b"", CODEX_DAEMON_TIMEOUT)
@@ -614,8 +614,8 @@ class EnqueueValidationCliTests(HermeticEnvironment, PreflightCase):
         self.assertIsNone(self.queue.task("target").mcp)
 
         code, payloads = self.run_cli("set-mcp", "--database", str(self.queue.path), "target", "none", "--json")
-        self.assertEqual(code, 0, payloads)
-        self.assertEqual(self.queue.task("target").mcp, "none")
+        self.assertEqual(code, 2, payloads)
+        self.assertIsNone(self.queue.task("target").mcp)
 
 
 class QueueTimeCheckCliTests(HermeticEnvironment, PreflightCase):

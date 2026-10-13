@@ -44,13 +44,13 @@ def main():
     data['pr_exceptions'] = []
     bindir = destination / 'bin'
     bindir.mkdir()
-    for name in ('agent-router', 'bonus-drain-account-activation', 'usage-disabled'):
+    for name in ('t3-thread', 'bonus-drain-account-activation', 'usage-disabled'):
         path = bindir / name
         path.write_text('#!/bin/sh\necho "Preview: external execution disabled" >&2\nexit 1\n')
         path.chmod(0o700)
     for adapter in data['adapters']:
-        if adapter['kind'] == 'agent-router':
-            adapter['argv'] = [str(bindir / 'agent-router')]
+        if adapter['kind'] == 't3-thread':
+            adapter['argv'] = [str(bindir / 't3-thread')]
         elif adapter['kind'] == 'usage':
             adapter['argv'] = [str(bindir / 'usage-disabled')]
         else:

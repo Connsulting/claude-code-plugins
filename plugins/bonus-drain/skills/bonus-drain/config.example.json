@@ -3,7 +3,6 @@
   "recurrence_timezone": "America/New_York",
   "record_command": ["/ABSOLUTE/PATH/TO/.local/bin/bonus-drain", "record"],
   "usage_max_age_seconds": 3600,
-  "launch_surface": "background",
   "scout_ntfy_url": null,
   "host_load_gate": {
     "enabled": true, "cpu_some_avg60_max": 40, "mem_available_min_gib": 4,
@@ -12,8 +11,8 @@
   "secret_refs": [],
   "adapters": [
     {
-      "id": "router", "kind": "agent-router",
-      "argv": ["/ABSOLUTE/PATH/TO/.local/bin/agent-router"],
+      "id": "router", "kind": "t3-thread",
+      "argv": ["/ABSOLUTE/PATH/TO/.local/bin/t3-thread"],
       "timeout_seconds": 90, "max_output_bytes": 1048576, "env_allowlist": []
     },
     {

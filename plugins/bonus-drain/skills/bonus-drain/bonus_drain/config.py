@@ -24,7 +24,6 @@ class ConfigError(ValueError):
 
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-LAUNCH_SURFACES = ("background", "t3")
 _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 _ALLOWED_PLACEHOLDERS = {
     "account_id",
@@ -133,7 +132,6 @@ class ProviderConfig:
     dispatch: DispatchBinding
     capabilities: frozenset[str] = frozenset()
     account_mode: str = "multi"
-    launch_surface: str | None = None
 
 
 @dataclass(frozen=True)
@@ -197,7 +195,6 @@ class RuntimeConfig:
     usage_max_age_seconds: int = 3_600
     cache_dir: Path = Path(".")
     max_jobs: int | None = None
-    launch_surface: str = "background"
     host_load_gate: HostLoadGateConfig = field(default_factory=HostLoadGateConfig)
     scout_ntfy_url: str | None = None
 
@@ -227,9 +224,6 @@ class RuntimeConfig:
     def accounts_for_provider(self, provider_id: str) -> tuple[AccountConfig, ...]:
         return tuple(account for account in self.accounts if account.provider_id == provider_id)
 
-    def launch_surface_for(self, provider: ProviderConfig) -> str:
-        return provider.launch_surface or self.launch_surface
-
 
 def _lookup(items: Iterable[Any], item_id: str, label: str) -> Any:
     for item in items:
@@ -247,12 +241,6 @@ def _require_mapping(value: Any, label: str) -> Mapping[str, Any]:
 def _require_list(value: Any, label: str) -> list[Any]:
     if not isinstance(value, list):
         raise ConfigError(f"{label} must be an array")
-    return value
-
-
-def _launch_surface(value: Any, label: str) -> str:
-    if value not in LAUNCH_SURFACES:
-        raise ConfigError(f"{label} must be one of {', '.join(LAUNCH_SURFACES)}")
     return value
 
 
@@ -425,7 +413,7 @@ def validate_config(
     data = _require_mapping(raw, "config")
     _reject_unknown(data, {
         "schema_version", "database", "cache_dir", "record_command",
-        "usage_max_age_seconds", "max_jobs", "launch_surface", "recurrence_timezone", "secret_refs", "adapters", "providers", "plans",
+        "usage_max_age_seconds", "max_jobs", "recurrence_timezone", "secret_refs", "adapters", "providers", "plans",
         "accounts", "limits", "viewer", "pr_exceptions", "host_load_gate", "scout_ntfy_url",
     }, "config")
     _reject_inline_secrets(data)
@@ -478,7 +466,7 @@ def validate_config(
     secret_ids = {item.id for item in secrets}
 
     adapters: list[AdapterConfig] = []
-    allowed_kinds = {"agent-router", "usage", "reset", "activation"}
+    allowed_kinds = {"t3-thread", "usage", "reset", "activation"}
     for index, row in enumerate(adapter_rows):
         _reject_unknown(row, {
             "id", "kind", "argv", "timeout_seconds", "max_output_bytes",
@@ -487,7 +475,7 @@ def validate_config(
         item_id = _identifier(row.get("id"), f"adapters[{index}].id")
         kind = _string(row.get("kind"), f"adapters[{index}].kind")
         if kind not in allowed_kinds:
-            suffix = "; dispatch adapters must be agent-router" if kind == "provider" else ""
+            suffix = "; dispatch adapters must be t3-thread" if kind == "provider" else ""
             raise ConfigError(f"unsupported adapter kind {kind!r}{suffix}")
         timeout = _number(row.get("timeout_seconds", 30), f"adapters[{index}].timeout_seconds", minimum=0.1, maximum=3600)
         maximum = _integer(row.get("max_output_bytes", 1_048_576), f"adapters[{index}].max_output_bytes", minimum=1)
@@ -531,7 +519,7 @@ def validate_config(
     providers: list[ProviderConfig] = []
     for index, row in enumerate(provider_rows):
         _reject_unknown(
-            row, {"id", "dispatch", "capabilities", "account_mode", "launch_surface"},
+            row, {"id", "dispatch", "capabilities", "account_mode"},
             f"providers[{index}]",
         )
         item_id = _identifier(row.get("id"), f"providers[{index}].id")
@@ -539,21 +527,16 @@ def validate_config(
         _reject_unknown(dispatch, {"adapter_id", "provider"}, f"providers[{index}].dispatch")
         adapter_id = _identifier(dispatch.get("adapter_id"), f"providers[{index}].dispatch.adapter_id")
         adapter = adapter_by_id.get(adapter_id)
-        if adapter is None or adapter.kind != "agent-router":
-            raise ConfigError(f"provider {item_id} dispatch must reference an agent-router adapter")
+        if adapter is None or adapter.kind != "t3-thread":
+            raise ConfigError(f"provider {item_id} dispatch must reference an t3-thread adapter")
         router_provider = _string(dispatch.get("provider", item_id), f"providers[{index}].dispatch.provider")
         capabilities_raw = _require_list(row.get("capabilities", []), f"providers[{index}].capabilities")
         capabilities = frozenset(_identifier(value, f"providers[{index}].capabilities") for value in capabilities_raw)
         account_mode = _string(row.get("account_mode", "multi"), f"providers[{index}].account_mode")
         if account_mode not in {"single", "multi"}:
             raise ConfigError(f"providers[{index}].account_mode must be single or multi")
-        provider_surface = (
-            None if row.get("launch_surface") is None
-            else _launch_surface(row.get("launch_surface"), f"providers[{index}].launch_surface")
-        )
         providers.append(ProviderConfig(
             item_id, DispatchBinding(adapter_id, router_provider), capabilities, account_mode,
-            provider_surface,
         ))
     provider_ids = {provider.id for provider in providers}
 
@@ -872,7 +855,6 @@ def validate_config(
             None if data.get("max_jobs") is None
             else _integer(data.get("max_jobs"), "max_jobs", minimum=1)
         ),
-        launch_surface=_launch_surface(data.get("launch_surface", "background"), "launch_surface"),
         host_load_gate=_host_load_gate(data.get("host_load_gate", {})),
         scout_ntfy_url=scout_ntfy_url,
     )

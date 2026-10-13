@@ -72,7 +72,7 @@ def _capture_cli_json() -> Iterator[list[object]]:
 
 def _runtime_config(database: Path) -> config_module.RuntimeConfig:
     router = config_module.AdapterConfig(
-        "router", "agent-router", ("/bin/true",),
+        "router", "t3-thread", ("/bin/true",),
     )
     return config_module.RuntimeConfig(
         schema_version=1,

@@ -30,11 +30,6 @@
       "minimum": 1,
       "description": "Maximum concurrent jobs across providers, including in-flight. Omitted means no global cap."
     },
-    "launch_surface": {
-      "enum": ["background", "t3"],
-      "default": "background",
-      "description": "Where agent-router launches queued work: detached background jobs, or T3 Code threads (agent-router run --surface t3). Providers may override it."
-    },
     "host_load_gate": {
       "type": "object",
       "additionalProperties": false,
@@ -145,7 +140,7 @@
       "required": ["id", "kind", "argv"],
       "properties": {
         "id": {"$ref": "#/$defs/id"},
-        "kind": {"enum": ["agent-router", "usage", "reset", "activation"]},
+        "kind": {"enum": ["t3-thread", "usage", "reset", "activation"]},
         "argv": {"$ref": "#/$defs/argv"},
         "timeout_seconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600},
         "max_output_bytes": {"type": "integer", "minimum": 1},
@@ -172,11 +167,7 @@
           "type": "array", "items": {"$ref": "#/$defs/id"},
           "description": "Capabilities this provider offers. Reserved: legacy-exclusive runs migrated claude_only and legacy-exclusive model rows; implement means the provider can drive the implement skill, and a task that invokes it (use_implement, or a /implement, $implement, or implement skill reference in its prompt text) runs only on providers declaring it. Omit implement on providers that cannot drive the skill."
         },
-        "account_mode": {"type": "string", "enum": ["single", "multi"], "default": "multi"},
-        "launch_surface": {
-          "enum": ["background", "t3"],
-          "description": "Overrides the top-level launch_surface for this provider. Omitted means inherit."
-        }
+        "account_mode": {"type": "string", "enum": ["single", "multi"], "default": "multi"}
       }
     },
     "plan": {

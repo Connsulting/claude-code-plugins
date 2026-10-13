@@ -600,7 +600,7 @@ def doctor(
             required_checks.add(check_name)
 
         for adapter in cfg.adapters:
-            if adapter.kind not in {"agent-router", "usage", "reset", "activation"}:
+            if adapter.kind not in {"t3-thread", "usage", "reset", "activation"}:
                 continue
             check_name = f"adapter:{adapter.kind}:{adapter.id}"
             available = bool(adapter.argv) and _executable_available(adapter.argv[0])

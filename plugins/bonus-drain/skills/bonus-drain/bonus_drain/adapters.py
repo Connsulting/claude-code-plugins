@@ -1,4 +1,4 @@
-"""Safe execution of configured usage, activation, and agent-router adapters."""
+"""Safe execution of configured usage, activation, and t3-thread adapters."""
 
 from __future__ import annotations
 

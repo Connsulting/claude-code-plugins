@@ -53,7 +53,7 @@ fi
 
 SESS_DIR="${CODEX_SESSIONS_DIR:-$HOME/.codex/sessions}"
 # Scan depth has to clear a RUN of windowless rollouts, not just one: while the limit is spent
-# every further Codex attempt (interactive, /implement, agent-router) appends another one, and
+# every further Codex attempt (interactive, /implement, t3-thread) appends another one, and
 # once they push the last real reading past the scan depth the card vanishes again. They are
 # tiny files, and the healthy case still stops at the first rollout, so depth is nearly free.
 SCAN_N="${CODEX_USAGE_SCAN_N:-60}"     # how many newest rollouts to scan for a rate_limits event

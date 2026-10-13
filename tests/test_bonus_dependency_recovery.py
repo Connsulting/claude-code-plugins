@@ -134,7 +134,7 @@ def runtime(
     activation_scope: str = "run",
     activation: bool = False,
 ) -> config_module.RuntimeConfig:
-    adapters = [config_module.AdapterConfig("router", "agent-router", (str(router),))]
+    adapters = [config_module.AdapterConfig("router", "t3-thread", (str(router),))]
     activation_id = None
     if activation:
         activation_id = "activation"
@@ -1273,7 +1273,7 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
 
     def test_every_uncertain_router_identity_retains_one_ambiguous_owner_and_capacity_hold(self) -> None:
         cases: dict[str, object] = {
-            "timeout": subprocess.TimeoutExpired(["agent-router"], 1),
+            "timeout": subprocess.TimeoutExpired(["t3-thread"], 1),
             "malformed": subprocess.CompletedProcess([], 0, b"not-json", b""),
             "missing": {},
             "duplicate": subprocess.CompletedProcess(

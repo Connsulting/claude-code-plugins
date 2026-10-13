@@ -446,7 +446,7 @@ def _config(root: Path, database: Path):
     from bonus_drain import config as config_module
 
     router = config_module.AdapterConfig(
-        "router", "agent-router", (str(root / "bin" / "agent-router"),),
+        "router", "t3-thread", (str(root / "bin" / "t3-thread"),),
         timeout_seconds=0.2, max_output_bytes=1024,
     )
     return config_module.RuntimeConfig(

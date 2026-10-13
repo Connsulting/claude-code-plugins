@@ -74,7 +74,7 @@ substantial assembly work to their owning jobs. Check affected proof on the new 
 
 Preserve existing review boundaries. A new combined diff or integration decision may need
 its own review; this does not justify reviewing every task twice. Use the established
-`agent-router adversarial-review` interface when required, with truthful authorship and
+`t3-thread adversarial-review` interface when required, with truthful authorship and
 capacity rules. A timeout or skipped review is not approval.
 
 ## Acceptance and another round

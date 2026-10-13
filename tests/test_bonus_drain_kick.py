@@ -62,7 +62,7 @@ class KickContractTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
         router = config_module.AdapterConfig(
-            "router", "agent-router", (str(self.root / "bin" / "agent-router"),),
+            "router", "t3-thread", (str(self.root / "bin" / "t3-thread"),),
             timeout_seconds=0.2, max_output_bytes=1024,
         )
         self.config = config_module.RuntimeConfig(
@@ -209,8 +209,8 @@ class KickContractTests(unittest.TestCase):
         self.assertEqual(activation_events, [("activate", "alpha-account")])
         self.assertEqual(len(seen_argv), 1)
         argv = seen_argv[0]
-        self.assertEqual(argv[:2], [str(self.root / "bin" / "agent-router"), "run"])
-        self.assertEqual(argv[argv.index("--provider") + 1], "alpha-engine")
+        self.assertEqual(argv[:2], [str(self.root / "bin" / "t3-thread"), "--project"])
+        self.assertEqual(argv[argv.index("--engine") + 1], "alpha-engine")
         self.assertNotIn("--dry-run", argv)
         flattened = "\0".join([Path(argv[0]).name, *argv[1:-1]]).lower()
         for forbidden in ("run-now.sh", "/bash", "claude", "codex", "grok", "account-switch"):
@@ -1195,40 +1195,26 @@ class KickContractTests(unittest.TestCase):
         self.assertEqual(called, [])
         self.assertEqual(self.queue.claims(), [])
 
-    def test_auto_classifier_uncertainty_is_dry_run_preclaim_and_retry_safe(self) -> None:
-        cases: tuple[object, ...] = (
-            "not-json",
-            subprocess.TimeoutExpired(["agent-router"], 0.1),
-            adapters.ProcessOutputLimit("too much output"),
+    def test_auto_without_an_open_gate_does_not_launch_or_claim(self) -> None:
+        self.queue.add_task(reviewed(_task("classify-none")))
+        calls: list[list[str]] = []
+
+        def must_not_launch(argv: list[str], **_kwargs: object) -> dict[str, object]:
+            calls.append(argv)
+            return {"threadId": "unexpected"}
+
+        result = dispatcher.dispatch(
+            self.config, self.queue, task_id="classify-none",
+            eligibility_key="manual/classify-none", requested_provider="auto",
+            router_call=must_not_launch,
         )
-        for index, outcome in enumerate(cases):
-            task_id = f"classify-{index}"
-            self.queue.add_task(reviewed(_task(task_id)))
-            calls: list[list[str]] = []
-
-            def uncertain(
-                argv: list[str], *, calls=calls, outcome=outcome, **_kwargs: object,
-            ) -> object:
-                calls.append(argv)
-                if isinstance(outcome, BaseException):
-                    raise outcome
-                return outcome
-
-            for _attempt in range(2):
-                with self.assertRaises(dispatcher.DispatchError) as raised:
-                    dispatcher.dispatch(
-                        self.config, self.queue, task_id=task_id,
-                        eligibility_key=f"manual/classifier-{index}", requested_provider="auto",
-                        router_call=uncertain,
-                    )
-                self.assertNotIsInstance(raised.exception, dispatcher.AmbiguousDispatch)
-                self.assertEqual(self.queue.claim_for(task_id), None)
-            self.assertEqual(len(calls), 2)
-            self.assertTrue(all("--dry-run" in argv for argv in calls))
+        self.assertEqual(result.provider_id, "alpha")
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("--dry-run", calls[0])
 
     def test_post_spawn_uncertainty_retains_one_ambiguous_claim_and_never_relaunches(self) -> None:
         cases: dict[str, object] = {
-            "timeout": subprocess.TimeoutExpired(["agent-router"], 0.1),
+            "timeout": subprocess.TimeoutExpired(["t3-thread"], 0.1),
             "overflow": adapters.ProcessOutputLimit("too much output"),
             "nonzero": subprocess.CompletedProcess([], 7, b"", b"router failed"),
             "malformed": subprocess.CompletedProcess([], 0, b"not-json", b""),
@@ -1393,7 +1379,7 @@ class KickContractTests(unittest.TestCase):
             )
 
         phases = [("--dry-run" in call.args[0], call.kwargs["env"]) for call in spawned.call_args_list]
-        self.assertEqual([dry for dry, _env in phases], [True, False])
+        self.assertEqual([dry for dry, _env in phases], [False])
         for _dry, env in phases:
             self.assertEqual(env.get("TYPESAFE_API_KEY"), secret)
             self.assertNotIn("BONUS_TEST_CLASSIFIER_KEY", env)
@@ -1416,7 +1402,7 @@ class KickContractTests(unittest.TestCase):
         cfg = self._router_with_bound_secret()
         environ = {key: value for key, value in os.environ.items() if key != "BONUS_TEST_CLASSIFIER_KEY"}
         for requested, failure in (
-            ("auto", dispatcher.ClassificationFailure),
+            ("auto", dispatcher.KnownDispatchFailure),
             ("alpha", dispatcher.KnownDispatchFailure),
         ):
             key = f"manual/unresolved-{requested}"
@@ -1483,7 +1469,7 @@ class KickContractTests(unittest.TestCase):
         self.queue.add_task(reviewed(_task(task_id)))
         rejected = subprocess.CompletedProcess(
             [], 1, b"", (
-                b"agent-router: `/home/user/.local/bin/codex app-server daemon start` "
+                b"t3-thread: `/home/user/.local/bin/codex app-server daemon start` "
                 b"timed out after 10s\n"
             ),
         )
@@ -1551,12 +1537,9 @@ class KickContractTests(unittest.TestCase):
             requested_provider="claude", router_call=router,
         )
         launch = seen[0]
-        mcp_index = launch.index("--mcp-config")
-        self.assertEqual(launch[mcp_index + 2], "--strict-mcp-config")
-        self.assertEqual(
-            json.loads(Path(launch[mcp_index + 1]).read_text(encoding="utf-8")),
-            {"mcpServers": {"project": {"command": "project-mcp"}}},
-        )
+        self.assertNotIn("--mcp-config", launch)
+        self.assertNotIn("--strict-mcp-config", launch)
+        self.assertEqual(launch[launch.index("--engine") + 1], "claudeAgent")
 
     def test_named_mcp_selection_does_not_validate_unselected_server_secrets(self) -> None:
         claude = config_module.ProviderConfig(
@@ -1589,11 +1572,8 @@ class KickContractTests(unittest.TestCase):
             )
 
         launch = seen[0]
-        mcp_index = launch.index("--mcp-config")
-        self.assertEqual(
-            json.loads(Path(launch[mcp_index + 1]).read_text(encoding="utf-8")),
-            {"mcpServers": {"wiki": {"command": "wiki-mcp"}}},
-        )
+        self.assertNotIn("--mcp-config", launch)
+        self.assertNotIn("--strict-mcp-config", launch)
 
     def test_set_mcp_updates_the_canonical_task_contract(self) -> None:
         with _capture_cli_json() as payloads:
@@ -1602,9 +1582,8 @@ class KickContractTests(unittest.TestCase):
                 "portable", "none", "--json",
             ])
 
-        self.assertEqual(code, 0)
-        self.assertEqual(payloads[0]["task"]["mcp"], "none")
-        self.assertEqual(self.queue.task("portable").mcp, "none")
+        self.assertEqual(code, 2)
+        self.assertIn("invalid choice", payloads[0]["error"])
 
     def test_set_providers_updates_the_canonical_task_contract(self) -> None:
         with _capture_cli_json() as payloads:
@@ -1630,7 +1609,7 @@ class KickContractTests(unittest.TestCase):
         self.queue.add_task(reviewed(_task("mcp-parser-rejection", mcp=str(source_mcp))))
         rejected = subprocess.CompletedProcess(
             [], 2, b"", (
-                b"agent-router: --mcp-config is a claude only flag, but this task routed "
+                b"t3-thread: --mcp-config is a claude only flag, but this task routed "
                 b"to codex: rerun with --provider claude, or drop --mcp-config"
             ),
         )
@@ -1643,7 +1622,7 @@ class KickContractTests(unittest.TestCase):
                 eligibility_key="manual/mcp-parser-rejection", requested_provider="claude",
             )
         argv = launched.call_args.args[0]
-        self.assertIn("--mcp-config", argv)
+        self.assertNotIn("--mcp-config", argv)
         self.assertEqual(self.queue.claim_for("mcp-parser-rejection"), None)
 
     def test_racing_concrete_kicks_produce_exactly_one_router_launch(self) -> None:
@@ -1680,7 +1659,7 @@ class KickContractTests(unittest.TestCase):
             "database": str(configured_db),
             "cache_dir": str(self.config.cache_dir),
             "record_command": ["/bin/true"],
-            "adapters": [{"id": "router", "kind": "agent-router", "argv": ["/bin/true"]}],
+            "adapters": [{"id": "router", "kind": "t3-thread", "argv": ["/bin/true"]}],
             "providers": [{
                 "id": "alpha", "account_mode": "single",
                 "dispatch": {"adapter_id": "router", "provider": "alpha-engine"},

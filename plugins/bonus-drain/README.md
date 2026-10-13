@@ -15,7 +15,7 @@ starting services. Cutover remains an explicit manual operation.
 Required runtime dependencies are:
 
 - Python 3.10 or newer with the standard-library `sqlite3` module;
-- an executable `agent-router`, referenced by an absolute argv in the JSON configuration;
+- an executable `t3-thread`, referenced by an absolute argv in the JSON configuration;
 - one executable usage adapter per account, reporting every configured limit and reset in one
   coherent normalized response.
 
@@ -142,17 +142,17 @@ a credential rotator to enforce five-hour thresholds during the run. A failed or
 release remains durable and requires explicit reconciliation; it must never be treated as
 immediately released.
 
-CLI `auto` classification is a non-launching `agent-router --dry-run` before a claim, so its
+CLI `auto` classification is a non-launching `t3-thread --dry-run` before a claim, so its
 uncertainty is retry-safe. Once a concrete launch has been attempted, timeout, malformed
 output, missing job identity, or bookkeeping uncertainty is ambiguous: no caller retries it,
 and the claim and applicable activation lease stay fail-closed until reconciliation.
 
 Top-level `launch_surface` chooses where concrete launches run: `background` (the default,
-and the unchanged argv) or `t3`, which adds `--surface t3` so agent-router opens a T3 Code
+and the unchanged argv) or `t3`, which adds `--surface t3` so t3-thread opens a T3 Code
 thread. A provider may set its own `launch_surface` to override the global value. The
 classification dry-run never passes `--surface`. On `t3`, the returned job identity is the T3
 thread ID and is stored verbatim. The run records its surface, and the viewer badges t3 jobs
-in flight. agent-router accepts `--mcp-config` and `--strict-mcp-config` on `t3` but ignores
+in flight. t3-thread accepts `--mcp-config` and `--strict-mcp-config` on `t3` but ignores
 them with a warning, so they cannot enforce a Claude task's MCP scope. Bonus Drain therefore
 omits both flags, skips the scoped MCP file, and notes the dropped scope in the dispatched
 run's summary.
@@ -191,7 +191,7 @@ secret bindings.
 Secrets are references only. Declare an environment-variable or file reference in
 `secret_refs` and map it by ID from an adapter. Never place a secret value in the
 JSON, an argv, a unit, a log, or the repository. Every launch goes through an explicit
-`agent-router` adapter. Multi-account activation is optional; `ai-token-rotator` is one
+`t3-thread` adapter. Multi-account activation is optional; `ai-token-rotator` is one
 possible activation adapter, not a core dependency.
 
 ## Viewer
@@ -217,7 +217,7 @@ not call provider APIs from a request.
 
 Run now is never automatic and bypasses pacing only. It still requires an active compatible
 task and an atomic claim. Concrete-provider and `auto` buttons both use the shared
-`kick_task` service; `auto` asks `agent-router` to classify before the one launch.
+`kick_task` service; `auto` asks `t3-thread` to classify before the one launch.
 
 ### Tailscale access boundary
 

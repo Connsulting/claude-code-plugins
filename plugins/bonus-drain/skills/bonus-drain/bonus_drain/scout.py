@@ -933,7 +933,7 @@ def _run_locked(
             "kind": "router_unavailable",
             "adapter_id": item["adapter_id"],
             "executable": item["executable"],
-            "message": "resolved agent-router executable is missing or not executable",
+            "message": "resolved t3-thread executable is missing or not executable",
         } for item in unavailable)
         router_errors = lifecycle_errors + tuple(errors) + tuple({
             "task_id": "*", "kind": "router_unavailable",

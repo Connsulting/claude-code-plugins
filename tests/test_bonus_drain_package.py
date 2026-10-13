@@ -116,7 +116,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                 "record_command": [str(home / ".local" / "bin" / "bonus-drain"), "record"],
                 "secret_refs": [],
                 "adapters": [
-                    {"id": "router", "kind": "agent-router", "argv": ["/bin/true"]},
+                    {"id": "router", "kind": "t3-thread", "argv": ["/bin/true"]},
                     {"id": "usage", "kind": "usage", "argv": ["/bin/true"]},
                 ],
                 "providers": [{

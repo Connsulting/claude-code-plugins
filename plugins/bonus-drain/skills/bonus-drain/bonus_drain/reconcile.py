@@ -1,21 +1,33 @@
-"""Close abandoned runs only when the router positively observes a terminal worker."""
+"""Close abandoned runs when T3 shows a terminal thread and the queue has no terminal event."""
 
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
-from .adapters import AdapterError, execute_adapter
+from .adapters import AdapterError
 from .config import ConfigError, RuntimeConfig
 from .db import QueueDB, QueueError
 from .dispatcher import DispatchError, _activation
+from .t3_state import TERMINAL_RUN_STATUSES, T3StateError, T3Thread, lookup_thread
 
-# A cancelled or interrupted T3 run can sit in turn_ended while the worker is gone.
-# Fifteen minutes without activity is terminal. A completed turn can still be a
-# worker waiting on a background wake, so that row stays held.
 _ABANDONED_TURN_IDLE_SECONDS = 900
+
+
+def execute_adapter(adapter, fields, **_kwargs):
+    """Observation seam. Production reads the T3 state database.
+
+    Tests replace this with the historical status-row payload. A direct call
+    passes ``thread_id`` and optional ``state_path``.
+    """
+
+    del adapter
+    thread_id = fields["thread_id"]
+    path = fields.get("state_path")
+    return lookup_thread(thread_id, path)
 
 
 def _rfc3339_epoch(value: str) -> float | None:
@@ -30,7 +42,6 @@ def _rfc3339_epoch(value: str) -> float | None:
 
 
 def _abandoned_turn(row: dict[str, Any], now_epoch: int | None) -> tuple[str, str] | None:
-    """Cancelled or interrupted turn_ended idle for at least 15 minutes."""
     if row.get("state") != "turn_ended":
         return None
     run_status = row.get("run_status")
@@ -51,18 +62,80 @@ def _abandoned_turn(row: dict[str, Any], now_epoch: int | None) -> tuple[str, st
     return run_status, activity
 
 
+@dataclass(frozen=True)
+class _Observation:
+    run_status: str | None
+    hold_reason: str | None
+    reason: str
+    signature: str
+
+
+def _normalize_observation(raw: Any, thread_id: str, *, provider_name: str, now_epoch: int | None) -> _Observation | str | None:
+    if isinstance(raw, T3Thread):
+        status = raw.run_status
+        if raw.active_run or status not in TERMINAL_RUN_STATUSES:
+            hold = (
+                "worker is running" if raw.active_run or status in {
+                    "preparing", "starting", "running", "queued",
+                } or status is None
+                else "worker state is unknown; operator reconciliation required"
+            )
+            return _Observation(status, hold, hold, "")
+        if status in {"cancelled", "interrupted"}:
+            reason = f"T3 run_status {status} without a terminal record"
+            return _Observation(status, None, reason, f"unknown_launch:t3_run_{status}")
+        reason = f"T3 observed {status} execution without a terminal record"
+        return _Observation(status, None, reason, "unknown_launch:missing_terminal_record")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        return "router status returned malformed rows"
+    rows = raw.get("rows")
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        return "router status returned malformed rows"
+    matches = [
+        row for row in rows
+        if row.get("job_id") == thread_id and row.get("provider") == provider_name
+    ]
+    if len(matches) != 1:
+        return "job missing or duplicated in router status; operator reconciliation required"
+    row = matches[0]
+    state = row.get("state")
+    abandoned = _abandoned_turn(row, now_epoch)
+    if state not in ("completed", "failed") and abandoned is None:
+        hold = (
+            "worker is running" if state == "running"
+            else "worker state is unknown; operator reconciliation required"
+        )
+        return _Observation(None, hold, hold, "")
+    if abandoned is None:
+        reason = f"router observed {state} execution without a terminal record"
+        return _Observation(str(state), None, reason, "unknown_launch:missing_terminal_record")
+    run_status, activity = abandoned
+    reason = (
+        "router observed turn_ended "
+        f"run_status {run_status} last_activity_at {activity} "
+        "without a terminal record"
+    )
+    return _Observation(run_status, None, reason, f"unknown_launch:t3_run_{run_status}")
+
+
 def reconcile_inflight(
     config: RuntimeConfig, queue: QueueDB, *, dry_run: bool = False,
     activation_call: Callable[[str, str], Any] | None = None,
     now_epoch: int | None = None,
+    thread_lookup: Callable[[str], T3Thread | None] | None = None,
+    state_path: Path | None = None,
 ) -> tuple[dict[str, Any], ...]:
-    """Reuse router status and the CLI's terminal-record path; never retry a task.
+    """Read T3 thread state and record a missing terminal event as failed.
 
-    The router exposes a bounded history, not an exact-job query. An omitted job is
-    unknown, never dead. Use the fresh `state`, not the persisted historical outcome.
+    ``thread_lookup`` is a test seam. Runtime callers leave it unset and read
+    ``~/.t3/userdata/statev2.sqlite`` read-only. A missing or duplicate observation
+    stays held. An active run stays held.
     """
+
     reports: list[dict[str, Any]] = []
-    observations: dict[str, list[dict[str, Any]] | str] = {}
+    observations: dict[str, T3Thread | None | str] = {}
     for run in queue.inflight():
         report = {
             "task_id": run.task, "eligibility_key": run.eligibility_key,
@@ -78,66 +151,46 @@ def reconcile_inflight(
             report["reason"] = "missing execution identity; operator reconciliation required"
             continue
         try:
-            provider = config.provider(run.provider_id)
-            adapter = config.adapter(provider.dispatch.adapter_id)
-            if adapter.id not in observations:
+            thread_id = run.router_job_id
+            if thread_id not in observations:
                 try:
-                    result = execute_adapter(
-                        replace(
+                    if thread_lookup is not None:
+                        raw = thread_lookup(thread_id)
+                    else:
+                        provider = config.provider(run.provider_id)
+                        adapter = config.adapter(provider.dispatch.adapter_id)
+                        raw = execute_adapter(
                             adapter,
-                            argv=(*adapter.argv, "status", "--limit", "1000", "--json"),
-                            timeout_seconds=min(adapter.timeout_seconds, 30),
-                        ),
-                        # status exits 1 for a valid report containing failed jobs;
-                        # 2 means the probe itself could not run.
-                        {}, config=config, accepted_exit_codes=(0, 1),
+                            {"thread_id": thread_id, "state_path": state_path},
+                            config=config,
+                        )
+                    observations[thread_id] = _normalize_observation(
+                        raw, thread_id, provider_name=config.provider(run.provider_id).dispatch.provider,
+                        now_epoch=now_epoch,
                     )
-                    rows = result.get("rows") if isinstance(result, dict) else None
-                    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
-                        raise AdapterError("router status returned malformed rows")
-                    observations[adapter.id] = rows
-                except AdapterError as exc:
-                    observations[adapter.id] = str(exc)
-            rows = observations[adapter.id]
-            if isinstance(rows, str):
-                report["reason"] = rows
+                except (T3StateError, AdapterError) as exc:
+                    observations[thread_id] = str(exc)
+            observed = observations[thread_id]
+            if isinstance(observed, str):
+                report["reason"] = observed
                 continue
-            matches = [row for row in rows if (
-                row.get("job_id") == run.router_job_id
-                and row.get("provider") == provider.dispatch.provider
-            )]
-            if len(matches) != 1:
-                report["reason"] = "job missing or duplicated in router status; operator reconciliation required"
+            if observed is None:
+                report["reason"] = "thread missing in T3 state; operator reconciliation required"
                 continue
-            state = matches[0].get("state")
-            abandoned = _abandoned_turn(matches[0], now_epoch)
-            if state not in ("completed", "failed") and abandoned is None:
-                report["reason"] = (
-                    "worker is running" if state == "running"
-                    else "worker state is unknown; operator reconciliation required"
-                )
+            if observed.hold_reason:
+                report["reason"] = observed.hold_reason
                 continue
             if queue.continuation_lacks_separate_liveness(run):
                 report["reason"] = (
-                    "shared router job is already terminal; "
+                    "shared thread is already terminal; "
                     "continuation liveness is not proven"
                 )
                 continue
-            if abandoned is None:
-                report["reason"] = f"router observed {state} execution without a terminal record"
-                signature = "unknown_launch:missing_terminal_record"
-            else:
-                run_status, activity = abandoned
-                report["reason"] = (
-                    "router observed turn_ended "
-                    f"run_status {run_status} last_activity_at {activity} "
-                    "without a terminal record"
-                )
-                signature = f"unknown_launch:t3_run_{run_status}"
+            signature = observed.signature
+            report["reason"] = observed.reason
             if dry_run:
                 report["action"] = "would_fail"
                 continue
-            # Another worker/scout may have recorded its result during the status probe.
             if not any(item.rowid_pk == run.rowid_pk for item in queue.inflight()):
                 report["action"] = "already_recorded"
                 continue
@@ -166,7 +219,5 @@ def reconcile_inflight(
             )
             report.update(action="failed", terminal_rowid=event.rowid_pk)
         except (ConfigError, QueueError, DispatchError) as exc:
-            # record() rejects conflicting terminal results atomically. Preserve the winner.
-            # Failed activation release retains ownership and remains a visible blocker.
             report["reason"] = str(exc)
     return tuple(reports)

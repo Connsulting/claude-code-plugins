@@ -914,7 +914,7 @@ def requeue_task(task_id: str) -> tuple[bool, str]:
 def finish_inflight_task(task_id: str, status: str) -> tuple[bool, str]:
     """Record a terminal event for an in-flight job so it no longer holds a dispatch slot.
 
-    Same claim/lease path as `bonus-drain record`. Does not stop the provider worker; agent-router
+    Same claim/lease path as `bonus-drain record`. Does not stop the provider worker; t3-thread
     has no job-cancel command. The worker may still run until it exits, and a later conflicting
     terminal record is a reconciliation error rather than a second event.
     """
@@ -1309,7 +1309,7 @@ PRI_TINT = {0: "var(--warn)", 1: "var(--acc)", 2: "var(--fg)", 3: "var(--dim)", 
 
 # Engine marks, taken from the agent-viewer repo's own logo set rather than redrawn, so the two
 # tools label an engine identically; that set carries the real Claude and OpenAI Codex marks plus
-# the official Grok mark and an agent router "auto" glyph. Emitted once as a <symbol> sprite and
+# the official Grok mark and an auto-route glyph. Emitted once as a <symbol> sprite and
 # referenced by <use>, because
 # the Claude path alone is ~2KB and this page draws an engine mark upward of forty times.
 #
@@ -1490,7 +1490,7 @@ def _run_buttons(t: dict) -> str:
     a rendering bug, while the reason makes the graph-backed routing constraint visible.
     run-now.sh refuses the same case server-side, so this is a hint, not the guard.
 
-    Auto asks agent-router which engine fits, then bonus-drain launches on it."""
+    Auto asks t3-thread which engine fits, then bonus-drain launches on it."""
     tid = esc(t["id"])
     providers = set(t.get("eligible_providers", _legacy_providers(t)))
     blocked = "Preview: execution disabled" if PREVIEW else (t.get("readiness", {}).get("reason", "Waiting") if not t.get("readiness", {}).get("ready", True) else "")
@@ -1521,7 +1521,7 @@ def _run_buttons(t: dict) -> str:
                 <button class="task-run ionly{grok_cls}" data-task-id="{tid}" data-engine="grok"
                         aria-label="{grok_aria}" {grok_attrs}>{busy_button(ico("grok"))}</button>
                 <button class="task-run ionly" {'disabled' if blocked else ''} data-task-id="{tid}" data-engine="auto"
-                        aria-label="Let agent-router pick the engine, then dispatch"
+                        aria-label="Let t3-thread pick the engine, then dispatch"
                         title="{esc(blocked) if blocked else 'Choose an engine automatically and run now'}">{busy_button(ico("auto"))}</button>
               </span>"""
 

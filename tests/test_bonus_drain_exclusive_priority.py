@@ -42,7 +42,7 @@ class ExclusivePriorityTests(unittest.TestCase):
             queue.add_task(reviewed(_task("portable-p1", 1)))
             queue.add_task(reviewed(_task("portable-p2", 2)))
             queue.add_task(reviewed(_task("claude-only-p3", 3, claude_only=True)))
-            router = config_module.AdapterConfig("router", "agent-router", ("/bin/true",))
+            router = config_module.AdapterConfig("router", "t3-thread", ("/bin/true",))
             config = config_module.RuntimeConfig(
                 schema_version=1,
                 source_path=None,

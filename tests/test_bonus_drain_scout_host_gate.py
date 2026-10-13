@@ -78,7 +78,7 @@ def _raw_config(root: Path, **top: object) -> dict[str, object]:
         "database": str(root / "state" / "queue.db"),
         "cache_dir": str(root / "cache"),
         "record_command": ["/bin/true"],
-        "adapters": [{"id": "router", "kind": "agent-router", "argv": ["/bin/true"]}],
+        "adapters": [{"id": "router", "kind": "t3-thread", "argv": ["/bin/true"]}],
         "providers": [{
             "id": "alpha", "account_mode": "single",
             "dispatch": {"adapter_id": "router", "provider": "alpha-engine"},

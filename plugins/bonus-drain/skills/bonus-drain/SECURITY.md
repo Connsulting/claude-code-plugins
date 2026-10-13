@@ -3,12 +3,12 @@
 ## Trust boundaries
 
 Bonus Drain accepts configuration and autonomous task content, reads usage through
-bounded adapters, writes normalized cache and SQLite state, and asks `agent-router` to
+bounded adapters, writes normalized cache and SQLite state, and asks `t3-thread` to
 launch a concrete provider. It does not execute a provider directly.
 
 Config rejects inline credential-shaped values, shell interpolation, relative or unsafe
 adapter executables, duplicate/dangling graph IDs, traversal, and dispatch adapters other
-than `agent-router`. Adapter subprocesses use argv arrays with `shell=False`, an allowlisted
+than `t3-thread`. Adapter subprocesses use argv arrays with `shell=False`, an allowlisted
 environment, time and output caps, and redacted diagnostics. Cache replacement is atomic,
 mode `0600`, and only a coherent normalized record replaces the last good value.
 

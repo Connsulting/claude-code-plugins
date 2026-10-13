@@ -59,7 +59,7 @@ export BONUS_MODEL="${BONUS_MODEL:-opus[1m]}"
 export CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
 export CODEX_BIN="${CODEX_BIN:-$HOME/.local/bin/codex}"
 export GROK_BIN="${GROK_BIN:-$HOME/.local/bin/grok}"
-export AGENT_ROUTER_BIN="${AGENT_ROUTER_BIN:-$HOME/.local/bin/agent-router}"
+export T3_THREAD_BIN="${T3_THREAD_BIN:-$HOME/.local/bin/t3-thread}"
 export SYSTEMCTL_BIN="${SYSTEMCTL_BIN:-systemctl}"
 export BONUS_PR_REPOS="${BONUS_PR_REPOS:-}"
 
@@ -89,7 +89,7 @@ export BONUS_USAGE_MAX_AGE="${BONUS_USAGE_MAX_AGE:-3600}"
 # override directories and never launch a provider here.
 bonus_ensure_provider_path() {
   local bin dir
-  for bin in "$AGENT_ROUTER_BIN" "$CLAUDE_BIN" "$CODEX_BIN" "$GROK_BIN"; do
+  for bin in "$T3_THREAD_BIN" "$CLAUDE_BIN" "$CODEX_BIN" "$GROK_BIN"; do
     [ -n "$bin" ] || continue
     dir="$(dirname -- "$bin")"
     [ -d "$dir" ] || continue

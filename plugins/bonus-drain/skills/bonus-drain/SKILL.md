@@ -1,6 +1,6 @@
 ---
 name: bonus-drain
-description: Queue, edit, and execute autonomous async work planned in threads. Use for "queue this", "park this for later", "add to my work queue", "run this queued task", and bonus-capacity work. Ready work is automatically eligible when Bonus capacity is available; an explicit start accelerates one task. Dependencies gate every launch; all execution uses agent-router. Use bg-schedule for exact calendar timing.
+description: Queue, edit, and execute autonomous async work planned in threads. Use for "queue this", "park this for later", "add to my work queue", "run this queued task", and bonus-capacity work. Ready work is automatically eligible when Bonus capacity is available; an explicit start accelerates one task. Dependencies gate every launch; all execution uses t3-thread. Use bg-schedule for exact calendar timing.
 ---
 
 # Async Work / Bonus Drain
@@ -26,12 +26,12 @@ source private helper functions or invent a second DB path.
 2. The refresher alone calls usage adapters. Scout, plan, viewers, and consumers read cache.
 3. Missing, stale, malformed, or resetless cache closes only that account. No data is not
    zero usage.
-4. Every accounted launch goes through the configured `agent-router` adapter. Direct provider
+4. Every accounted launch goes through the configured `t3-thread` adapter. Direct provider
    launch and `codex-bg-thread` are forbidden.
 5. `auto` classifies in a router dry run only. Validate the result, claim the task, and launch
    once with a concrete provider/account. Never persist `auto` or a null provider.
    `set-providers TASK auto` clears the provider pin; it stores an empty allowlist.
-6. Classifier uncertainty is pre-claim and retry-safe because `agent-router --dry-run` is
+6. Classifier uncertainty is pre-claim and retry-safe because `t3-thread --dry-run` is
    non-launching. Claiming creates a unique immutable attempt alongside
    `(task_id, eligibility_key)` before concrete activation/routing. Known-not-launched failure
    records that attempt as aborted and releases it; a post-launch ambiguity records the exact
@@ -508,7 +508,7 @@ to resolve the child start branch; historical commit OIDs and receipts are optio
 - Ten-minute scout: `bonus-drain-scout.timer`, plus `bonus-drain-scout.path`, which triggers an
   extra tick when a job frees its slot (see README "Scout cadence and host load gate").
 - Optional viewer: the established two-tab background-jobs UI. Run now is manual and delegates
-  only to the shared `kick_task` to `agent-router` path. In-flight Mark done / Mark failed
+  only to the shared `kick_task` to `t3-thread` path. In-flight Mark done / Mark failed
   records a terminal event through the same `record` path as the CLI and frees the dispatch
   slot; it does not stop the provider worker. Tailscale Serve is the sole access
   boundary; there is no application login. Exact Host/HTTPS Origin and JSON-only checks

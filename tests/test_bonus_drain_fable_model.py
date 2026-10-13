@@ -70,7 +70,7 @@ class FableModelCanonicalizationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             router = config_module.AdapterConfig(
-                "router", "agent-router", (str(root / "bin" / "agent-router"),),
+                "router", "t3-thread", (str(root / "bin" / "t3-thread"),),
                 timeout_seconds=0.2, max_output_bytes=1024,
             )
             config = config_module.RuntimeConfig(

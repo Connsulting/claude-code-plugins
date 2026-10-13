@@ -111,7 +111,7 @@ class RemainingHeadroomFloorTests(unittest.TestCase):
 def _two_account_config() -> RuntimeConfig:
     from bonus_drain import config as config_module
 
-    router = config_module.AdapterConfig("router", "agent-router", ("/bin/true",))
+    router = config_module.AdapterConfig("router", "t3-thread", ("/bin/true",))
     return config_module.RuntimeConfig(
         schema_version=1,
         source_path=None,

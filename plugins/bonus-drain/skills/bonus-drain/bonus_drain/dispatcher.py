@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -39,6 +39,7 @@ from .db import (
     task_invokes_implement,
     task_requires_legacy_exclusive,
 )
+from .t3_state import t3_engine
 
 
 class DispatchError(RuntimeError):
@@ -51,6 +52,10 @@ class InvalidRoute(DispatchError):
 
 class AlreadyClaimed(DispatchError):
     """The task became ineligible before the atomic claim."""
+
+
+class LaunchNotCreated(DispatchError):
+    """t3-thread exited 6. Nothing was created, so the launch can be retried."""
 
 
 class KnownDispatchFailure(DispatchError):
@@ -127,7 +132,7 @@ _CODEX_APP_SERVER_MISSING_RE = re.compile(
     re.IGNORECASE,
 )
 _CODEX_DAEMON_START_TIMEOUT_RE = re.compile(
-    r"^agent-router: [`'][^`'\n]*codex app-server daemon start[`'] "
+    r"^t3-thread: [`'][^`'\n]*codex app-server daemon start[`'] "
     r"timed out after \d+(?:\.\d+)?s$",
 )
 
@@ -160,7 +165,7 @@ class DispatchResult:
     factory_run_id: str | None = None
     attempt_id: str | None = None
     dependency_base: Mapping[str, Any] | None = None
-    surface: str = "background"
+    surface: str = "t3"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -1171,7 +1176,7 @@ def _materialize_mcp_config(config: RuntimeConfig, task: Task, _eligibility_key:
 
 
 def _uses_claude_mcp_scoping(provider: ProviderConfig) -> bool:
-    """Whether this agent-router provider accepts Claude's task MCP flags.
+    """Whether this t3-thread provider accepts Claude's task MCP flags.
 
     MCP selection is a Claude Code-only router contract.  Codex deliberately uses its
     configured connectors instead of a task-provided MCP file, so do not validate,
@@ -1267,6 +1272,8 @@ def _completed_router_result(
         if isinstance(completed.stdout, bytes) else str(completed.stdout or "")
     stderr = completed.stderr.decode("utf-8", errors="replace") \
         if isinstance(completed.stderr, bytes) else str(completed.stderr or "")
+    if completed.returncode == 6:
+        raise LaunchNotCreated("t3-thread exited 6 before creating a thread")
     try:
         value = _strict_json_loads(stdout)
     except (json.JSONDecodeError, _DuplicateJSONKey) as exc:
@@ -1292,15 +1299,15 @@ def _completed_router_result(
                 ) from exc
             raise _phase_uncertainty(
                 phase,
-                f"agent-router exited {completed.returncode} without validated JSON: "
+                f"t3-thread exited {completed.returncode} without validated JSON: "
                 f"{_router_diagnostic(config, adapter, detail)}; launch state is unknown",
             ) from exc
         raise _phase_uncertainty(
-            phase, "agent-router returned successful non-JSON output; launch state is unknown"
+            phase, "t3-thread returned successful non-JSON output; launch state is unknown"
         ) from exc
     if not isinstance(value, Mapping):
         raise _phase_uncertainty(
-            phase, "agent-router returned non-object output; launch state is unknown"
+            phase, "t3-thread returned non-object output; launch state is unknown"
         )
     if phase == "launch" and _explicitly_not_launched(value):
         detail = value.get("error")
@@ -1317,7 +1324,7 @@ def _completed_router_result(
         )
         raise _phase_uncertainty(
             phase,
-            f"agent-router exited {completed.returncode}: "
+            f"t3-thread exited {completed.returncode}: "
             f"{_router_diagnostic(config, adapter, detail)}; launch state is unknown",
         )
     return value
@@ -1338,8 +1345,8 @@ def _subprocess_call(
     except AdapterError as exc:
         # Nothing was spawned, so an unresolvable binding is known not launched on both phases.
         if phase == "classification":
-            raise ClassificationFailure(f"agent-router classifier environment: {exc}") from exc
-        raise KnownDispatchFailure(f"agent-router environment: {exc}") from exc
+            raise ClassificationFailure(f"t3-thread classifier environment: {exc}") from exc
+        raise KnownDispatchFailure(f"t3-thread environment: {exc}") from exc
     try:
         completed = run_bounded_process(
             list(argv), timeout=adapter.timeout_seconds,
@@ -1349,16 +1356,16 @@ def _subprocess_call(
     except subprocess.TimeoutExpired as exc:
         raise _phase_uncertainty(
             phase,
-            f"agent-router timed out after {adapter.timeout_seconds:g}s; launch state is unknown"
+            f"t3-thread timed out after {adapter.timeout_seconds:g}s; launch state is unknown"
         ) from exc
     except ProcessOutputLimit as exc:
         raise _phase_uncertainty(
-            phase, "agent-router output exceeded configured limit; launch state is unknown"
+            phase, "t3-thread output exceeded configured limit; launch state is unknown"
         ) from exc
     except OSError as exc:
         if phase == "classification":
-            raise ClassificationFailure(f"agent-router classifier could not start: {exc}") from exc
-        raise KnownDispatchFailure(f"agent-router could not start: {exc}") from exc
+            raise ClassificationFailure(f"t3-thread classifier could not start: {exc}") from exc
+        raise KnownDispatchFailure(f"t3-thread could not start: {exc}") from exc
     return _completed_router_result(completed, config=config, adapter=adapter, phase=phase)
 
 
@@ -1372,8 +1379,8 @@ def _call_router(
 ) -> Mapping[str, Any]:
     if phase not in {"classification", "launch"}:
         raise DispatchError(f"invalid router phase: {phase}")
-    if adapter.kind != "agent-router":
-        raise InvalidRoute(f"{phase} adapter {adapter.id} must be kind agent-router")
+    if adapter.kind != "t3-thread":
+        raise InvalidRoute(f"{phase} adapter {adapter.id} must be kind t3-thread")
     if phase == "classification" and "--dry-run" not in argv:
         raise DispatchError("router classification must use --dry-run")
     if phase == "launch" and "--dry-run" in argv:
@@ -1399,25 +1406,27 @@ def _call_router(
         raise
     except subprocess.TimeoutExpired as exc:
         raise _phase_uncertainty(
-            phase, "agent-router timed out; launch state is unknown"
+            phase, "t3-thread timed out; launch state is unknown"
         ) from exc
     except OSError as exc:
         if phase == "classification":
-            raise ClassificationFailure(f"agent-router classifier could not start: {exc}") from exc
-        raise KnownDispatchFailure(f"agent-router could not start: {exc}") from exc
+            raise ClassificationFailure(f"t3-thread classifier could not start: {exc}") from exc
+        raise KnownDispatchFailure(f"t3-thread could not start: {exc}") from exc
     except Exception as exc:
         from .adapters import ProcessOutputLimit
 
-        if isinstance(exc, ProcessOutputLimit):
+        if isinstance(exc, (ProcessOutputLimit, LaunchNotCreated)):
+            if isinstance(exc, LaunchNotCreated):
+                raise
             raise _phase_uncertainty(
-                phase, "agent-router output exceeded configured limit; launch state is unknown"
+                phase, "t3-thread output exceeded configured limit; launch state is unknown"
             ) from exc
         if phase == "classification":
             raise ClassificationFailure(
-                f"agent-router dry-run classification failed before claim and is retry-safe: {exc}"
+                f"t3-thread dry-run classification failed before claim and is retry-safe: {exc}"
             ) from exc
         raise AmbiguousDispatch(
-            "agent-router invocation failed after the launch attempt; launch state is unknown"
+            "t3-thread invocation failed after the launch attempt; launch state is unknown"
         ) from exc
     if isinstance(result, subprocess.CompletedProcess):
         return _completed_router_result(result, config=config, adapter=adapter, phase=phase)
@@ -1426,11 +1435,11 @@ def _call_router(
             result = _strict_json_loads(result)
         except (json.JSONDecodeError, _DuplicateJSONKey) as exc:
             raise _phase_uncertainty(
-                phase, "agent-router returned successful non-JSON output; launch state is unknown"
+                phase, "t3-thread returned successful non-JSON output; launch state is unknown"
             ) from exc
     if not isinstance(result, Mapping):
         raise _phase_uncertainty(
-            phase, "agent-router returned successful non-object output; launch state is unknown"
+            phase, "t3-thread returned successful non-object output; launch state is unknown"
         )
     if phase == "launch" and _explicitly_not_launched(result):
         detail = result.get("error")
@@ -1448,7 +1457,7 @@ def _classified_provider(config: RuntimeConfig, raw: Mapping[str, Any]) -> Provi
     for provider in config.providers:
         if candidate in {provider.id, provider.dispatch.provider}:
             return provider
-    raise InvalidRoute(f"agent-router classified unknown provider: {candidate!r}")
+    raise InvalidRoute(f"t3-thread classified unknown provider: {candidate!r}")
 
 
 def _provider(config: RuntimeConfig, provider_id: str) -> ProviderConfig:
@@ -1517,6 +1526,61 @@ def _activation(
         raise DispatchError(f"account activation {action} failed: {exc}") from exc
 
 
+def _no_usage_gate(gate: Any) -> bool:
+    reason = str(getattr(gate, "reason", "") or "")
+    return (not gate.open) and (
+        reason == "missing usage cache"
+        or "No such file" in reason
+        or "Not a directory" in reason
+    )
+
+
+def select_auto_provider(
+    config: RuntimeConfig, task: Task, now_epoch: int | None,
+) -> ProviderConfig:
+    """Pick a compatible provider by the open gate whose reset is soonest.
+
+    Providers with no usage gate rank after every open gate. A provider whose
+    gates are all closed is not selected.
+    """
+
+    from . import usage
+    from .planner import build_gates
+
+    compatible = [provider for provider in config.providers if provider_compatible(task, provider)]
+    if not compatible:
+        needs = (
+            f": it invokes the implement skill and needs capability {IMPLEMENT_CAPABILITY}"
+            if task_invokes_implement(task) else ""
+        )
+        raise InvalidRoute(f"no configured provider is compatible with task {task.id}{needs}")
+    gates = build_gates(
+        config, usage.read_all(config), eligible_count=1,
+        now_epoch=int(time.time() if now_epoch is None else now_epoch),
+    )
+    by_id: dict[str, list[Any]] = {}
+    for gate in gates:
+        by_id.setdefault(gate.provider_id, []).append(gate)
+
+    def rank(item: tuple[int, ProviderConfig]) -> tuple[int, int, int]:
+        index, provider = item
+        rows = by_id.get(provider.id)
+        if rows is None or all(_no_usage_gate(gate) for gate in rows):
+            return (1, 0, index)
+        open_resets = [
+            int(gate.resets_at) for gate in rows
+            if gate.open and gate.resets_at is not None
+        ]
+        if open_resets:
+            return (0, min(open_resets), index)
+        return (2, 0, index)
+
+    chosen = min(enumerate(compatible), key=rank)
+    if rank(chosen)[0] == 2:
+        raise InvalidRoute(f"no open usage gate for task {task.id}")
+    return chosen[1]
+
+
 def dispatch(
     config: RuntimeConfig,
     queue: QueueDB,
@@ -1530,8 +1594,9 @@ def dispatch(
     trigger: str = "manual",
     now_epoch: int | None = None,
     check_runner: checks.CheckRunner | None = None,
+    retry_sleep: Callable[[float], None] | None = None,
 ) -> DispatchResult:
-    """Classify if requested, claim, activate, and launch through agent-router once.
+    """Classify if requested, claim, activate, and launch through t3-thread once.
 
     ``telemetry_call`` is a test seam for the factory run row; runtime callers leave it
     unset so the row is written through ``factory-telemetry.py``.
@@ -1563,41 +1628,14 @@ def dispatch(
     except QueueError as exc:
         raise DispatchError(str(exc)) from exc
     if requested_provider == "auto":
-        if not config.providers:
-            raise InvalidRoute("auto classification requires at least one provider")
-        classifier_adapter = config.adapter(config.providers[0].dispatch.adapter_id)
-        classifier_argv = list(classifier_adapter.argv) + [
-            "run", "--provider", "auto", "--dry-run", "--dir", task.cwd,
-            "--name", f"Classify: {task.title}", "--json", classification_prompt(task),
-        ]
-        classified = _call_router(
-            router_call, classifier_argv, config, classifier_adapter, phase="classification",
-        )
-        provider = _classified_provider(config, classified)
-        if not provider_compatible(task, provider) and provider_compatible(
-            task, replace(provider, capabilities=provider.capabilities | {IMPLEMENT_CAPABILITY}),
-        ):
-            # The classifier picked a provider that only lacks the implement capability: fall
-            # through to the first compatible provider in configuration order. Any other
-            # mismatch keeps the incompatibility refusal below. Both are pre-claim.
-            provider = next(
-                (item for item in config.providers if provider_compatible(task, item)), None,
-            )
-            if provider is None:
-                needs = (
-                    f": it invokes the implement skill and needs capability {IMPLEMENT_CAPABILITY}"
-                    if task_invokes_implement(task) else ""
-                )
-                raise InvalidRoute(
-                    f"no configured provider is compatible with task {task.id}{needs}"
-                )
+        provider = select_auto_provider(config, task, now_epoch)
     else:
         provider = _provider(config, requested_provider)
     if provider.id == "auto" or not provider_compatible(task, provider):
         raise InvalidRoute(f"provider {provider.id} is incompatible with task {task.id}")
     adapter = config.adapter(provider.dispatch.adapter_id)
-    if adapter.kind != "agent-router":
-        raise InvalidRoute(f"launch adapter {adapter.id} must be kind agent-router")
+    if adapter.kind != "t3-thread":
+        raise InvalidRoute(f"launch adapter {adapter.id} must be kind t3-thread")
 
     account = _account_for(
         config,
@@ -1809,36 +1847,42 @@ def dispatch(
                 else None
             ),
         )
-        launch_argv = list(adapter.argv) + [
-            "run", "--provider", provider.dispatch.provider, "--dir", task.cwd,
-            "--name", task.title,
+        prompt_dir = config.state_dir / "prompts"
+        prompt_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        prompt_path = prompt_dir / f"{attempt.id}.txt"
+        prompt_path.write_text(prompt, encoding="utf-8")
+        prompt_path.chmod(0o600)
+        launch_argv = [
+            *adapter.argv,
+            "--project", task.cwd,
+            "--engine", t3_engine(provider.dispatch.provider),
+            "--prompt-file", str(prompt_path),
+            "--title", task.title,
         ]
         model = canonical_model(task.model)
         if model:
             launch_argv.extend(["--model", model])
-        surface = config.launch_surface_for(provider)
+        launch_argv.append("--json")
+        surface = "t3"
         run_summary: str | None = None
-        if surface == "t3":
-            launch_argv.extend(["--surface", "t3"])
-        if _uses_claude_mcp_scoping(provider):
-            if surface == "t3":
-                # agent-router ignores MCP flags for T3 Code threads, so a scoped file would
-                # only pretend to restrict the thread. Record the dropped scope instead.
-                if task.mcp is not None and task.mcp.strip():
-                    run_summary = (
-                        f"t3 surface: task MCP scope {task.mcp.strip()!r} dropped; "
-                        "agent-router ignores --mcp-config for T3 Code threads"
-                    )[:500]
-            else:
-                mcp_path = _materialize_mcp_config(config, task, eligibility_key)
-                if mcp_path is not None:
-                    launch_argv.extend(["--mcp-config", str(mcp_path), "--strict-mcp-config"])
-        launch_argv.extend(["--json", prompt])
-        response = _call_router(router_call, launch_argv, config, adapter, phase="launch")
+        response: Mapping[str, Any] | None = None
+        sleeper = time.sleep if retry_sleep is None else retry_sleep
+        for launch_try in range(3):
+            try:
+                response = _call_router(router_call, launch_argv, config, adapter, phase="launch")
+                break
+            except LaunchNotCreated:
+                if launch_try == 2:
+                    raise
+                sleeper(60)
+        assert response is not None
         dispatch_data = response.get("dispatch")
-        job_id = dispatch_data.get("job_id") if isinstance(dispatch_data, Mapping) else response.get("job_id")
+        job_id = response.get("threadId") or response.get("job_id")
+        if (not isinstance(job_id, str) or not job_id) and isinstance(dispatch_data, Mapping):
+            nested = dispatch_data.get("threadId") or dispatch_data.get("job_id")
+            job_id = nested if isinstance(nested, str) else None
         if not isinstance(job_id, str) or not job_id:
-            raise AmbiguousDispatch("agent-router response did not contain a job identity")
+            raise AmbiguousDispatch("t3-thread response did not contain a thread id")
         try:
             queue.record(
                 task.id, eligibility_key, attempt_id=attempt.id,
@@ -1902,6 +1946,9 @@ def dispatch(
                 # Cleanup failures must preserve the original classification failure.
                 pass
         raise
+    except LaunchNotCreated as exc:
+        abort_known_nonlaunch(f"t3-thread exited 6 before creating a thread: {str(exc)[:300]}")
+        raise KnownDispatchFailure(str(exc)) from exc
     except ActivationUnavailable as exc:
         hold = (
             AccountHold(provider.id, account_id or "*", "activation_unswitched", str(exc)[:500])

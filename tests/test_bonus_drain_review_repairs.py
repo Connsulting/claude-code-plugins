@@ -51,7 +51,7 @@ def task(
 
 
 def runtime(database: Path, *, router_path: str = "/bin/true") -> config_module.RuntimeConfig:
-    router = config_module.AdapterConfig("router", "agent-router", (router_path,))
+    router = config_module.AdapterConfig("router", "t3-thread", (router_path,))
     return config_module.RuntimeConfig(
         schema_version=1,
         source_path=None,
@@ -277,7 +277,7 @@ class BonusDrainReviewRepairTests(unittest.TestCase):
 
     def test_scout_preflights_router_before_claiming_any_task(self) -> None:
         self.queue.add_task(reviewed(task("would-run")))
-        missing = str(self.root / "missing-agent-router")
+        missing = str(self.root / "missing-t3-thread")
 
         with (
             mock.patch.object(scout, "read_all", return_value=snapshots()),

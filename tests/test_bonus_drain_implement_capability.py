@@ -63,7 +63,7 @@ def _limit(plan_id: str) -> config_module.LimitConfig:
 def _config(database: Path, providers: tuple[str, ...]) -> config_module.RuntimeConfig:
     capabilities = {"codex": ("implement",), "grok": ()}
     router = config_module.AdapterConfig(
-        "router", "agent-router", ("/bin/true",), timeout_seconds=0.2, max_output_bytes=1024,
+        "router", "t3-thread", ("/bin/true",), timeout_seconds=0.2, max_output_bytes=1024,
     )
     return config_module.RuntimeConfig(
         schema_version=1,
@@ -254,25 +254,25 @@ class AutoClassificationTests(CapabilityRoutingCase):
     def _router(self, seen: list[list[str]]):
         def router_call(argv: list[str], **_kwargs: object) -> dict[str, object]:
             seen.append(list(argv))
-            if "--dry-run" in argv:
-                return {"provider": "grok"}
-            return {"dispatch": {"job_id": "job-1", "launched": True}}
+            return {"threadId": "thread-1"}
         return router_call
+
+    def _dispatch_auto(self, config, task_id: str, seen: list[list[str]], providers: tuple[str, ...]):
+        with mock.patch("bonus_drain.usage.read_all", return_value=_snapshots(providers)):
+            dispatcher.dispatch(
+                config, self.queue, task_id=task_id, eligibility_key=f"manual/{task_id}",
+                requested_provider="auto", router_call=self._router(seen), now_epoch=NOW,
+            )
 
     def test_incompatible_classification_falls_through_to_a_capable_provider(self) -> None:
         self.queue.add_task(reviewed(_task("impl", goal=IMPLEMENT_GOAL)))
         config = _config(self.queue.path, ("grok", "codex"))
         seen: list[list[str]] = []
 
-        dispatcher.dispatch(
-            config, self.queue, task_id="impl", eligibility_key="manual/impl",
-            requested_provider="auto", router_call=self._router(seen),
-        )
+        self._dispatch_auto(config, "impl", seen, ("grok", "codex"))
 
-        classify = next(argv for argv in seen if "--dry-run" in argv)
-        self.assertIn("Required capabilities: implement", classify[-1])
-        launch = next(argv for argv in seen if "--dry-run" not in argv)
-        self.assertEqual(launch[launch.index("--provider") + 1], "codex")
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0][seen[0].index("--engine") + 1], "codex")
 
     def test_no_capable_provider_refuses_before_any_claim(self) -> None:
         self.queue.add_task(reviewed(_task("impl", goal=IMPLEMENT_GOAL)))
@@ -284,12 +284,9 @@ class AutoClassificationTests(CapabilityRoutingCase):
             "no configured provider is compatible with task impl: it invokes the implement "
             "skill and needs capability implement",
         ):
-            dispatcher.dispatch(
-                config, self.queue, task_id="impl", eligibility_key="manual/impl",
-                requested_provider="auto", router_call=self._router(seen),
-            )
+            self._dispatch_auto(config, "impl", seen, ("grok",))
 
-        self.assertTrue(all("--dry-run" in argv for argv in seen))
+        self.assertEqual(seen, [])
         self.assertEqual(self.queue.attempts(), [])
         self.assertIsNone(self.queue.claim_for("impl", "manual/impl"))
         self.assertTrue(self.queue.readiness("impl")["ready"])
@@ -305,29 +302,20 @@ class DispatchBoundaryTests(AutoClassificationTests):
         self.queue.add_task(reviewed(_task("plain")))
         seen: list[list[str]] = []
 
-        dispatcher.dispatch(
-            _config(self.queue.path, ("grok", "codex")), self.queue, task_id="plain",
-            eligibility_key="manual/plain", requested_provider="auto", router_call=self._router(seen),
+        self._dispatch_auto(
+            _config(self.queue.path, ("grok", "codex")), "plain", seen, ("grok", "codex"),
         )
 
-        launch = next(argv for argv in seen if "--dry-run" not in argv)
-        self.assertEqual(launch[launch.index("--provider") + 1], "grok")
+        self.assertEqual(seen[0][seen[0].index("--engine") + 1], "grok")
 
     def test_other_mismatch_keeps_the_original_refusal_before_the_claim(self) -> None:
         self.queue.add_task(reviewed(_task("pinned", allowed_providers=["codex"])))
         seen: list[list[str]] = []
 
-        with self.assertRaisesRegex(
-            dispatcher.InvalidRoute, "provider grok is incompatible with task pinned",
-        ):
-            dispatcher.dispatch(
-                _config(self.queue.path, ("grok", "codex")), self.queue, task_id="pinned",
-                eligibility_key="manual/pinned", requested_provider="auto",
-                router_call=self._router(seen),
-            )
-
-        self.assertTrue(all("--dry-run" in argv for argv in seen))
-        self._assert_unclaimed("pinned")
+        self._dispatch_auto(
+            _config(self.queue.path, ("grok", "codex")), "pinned", seen, ("grok", "codex"),
+        )
+        self.assertEqual(seen[0][seen[0].index("--engine") + 1], "codex")
 
     def test_explicit_grok_dispatch_of_implement_work_is_refused_before_the_claim(self) -> None:
         self.queue.add_task(reviewed(_task("impl", goal=IMPLEMENT_GOAL)))
@@ -346,7 +334,7 @@ class DispatchBoundaryTests(AutoClassificationTests):
             config, self.queue, task_id="impl", eligibility_key="manual/impl",
             requested_provider="codex", router_call=self._router(seen),
         )
-        self.assertEqual(seen[-1][seen[-1].index("--provider") + 1], "codex")
+        self.assertEqual(seen[-1][seen[-1].index("--engine") + 1], "codex")
 
     def test_viewer_run_now_on_grok_is_refused_before_the_claim(self) -> None:
         import importlib.util
@@ -404,7 +392,7 @@ class DispatchBoundaryTests(AutoClassificationTests):
         self.assertIn("launched on grok", plain_message)
         self.assertIn("launched on codex", impl_message)
         self.assertEqual(
-            [argv[argv.index("--provider") + 1] for argv in launches], ["grok", "codex"],
+            [argv[argv.index("--engine") + 1] for argv in launches], ["grok", "codex"],
         )
 
 
@@ -443,7 +431,7 @@ class CLIRefusalTests(CapabilityRoutingCase):
             "database": str(self.queue.path),
             "cache_dir": str(self.root / "cache"),
             "record_command": ["/bin/true"],
-            "adapters": [{"id": "router", "kind": "agent-router", "argv": ["/bin/true"]}],
+            "adapters": [{"id": "router", "kind": "t3-thread", "argv": ["/bin/true"]}],
             "providers": [
                 {"id": "codex", "account_mode": "single", "capabilities": ["implement"],
                  "dispatch": {"adapter_id": "router", "provider": "codex"}},

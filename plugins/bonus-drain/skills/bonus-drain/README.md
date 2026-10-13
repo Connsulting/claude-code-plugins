@@ -6,7 +6,7 @@ that would otherwise expire. It is a Python-standard-library runtime with one st
 account activators are data in the validated JSON config; the planner contains no
 provider-name branches.
 
-Every launch goes through an `agent-router` adapter. `auto` is classification only:
+Every launch goes through an `t3-thread` adapter. `auto` is classification only:
 the router is queried with a dry run, Bonus Drain validates the result, then claims and
 launches once with a concrete provider and account. Missing, malformed, resetless, or
 stale cache data closes only the affected account. Leaving work queued is expected.
@@ -64,7 +64,7 @@ to one job, then subtracts already-running jobs on that provider. `batch_size` i
 the per-provider cap (3 in the example). Optional top-level `max_jobs` is a
 cross-provider ceiling including in-flight work; omit it for no global cap. Optional
 `launch_surface` (`background` by default, or `t3`, also settable per provider) launches work
-as T3 Code threads through `agent-router run --surface t3`; Claude MCP scopes are dropped on
+as T3 Code threads through `t3-thread run --surface t3`; Claude MCP scopes are dropped on
 t3 and the dropped scope is noted on the dispatched run. Bonus Drain is
 the last `urgency_seconds` (24 hours) and uses the same floor. For a provider with multiple
 accounts, Scout applies the complete gates to each account and prefers the proven active
@@ -75,7 +75,7 @@ key may run only once.
 ## Requirements
 
 - Python 3.10 or newer with the standard `sqlite3` module.
-- An executable `agent-router` configured as the dispatch adapter.
+- An executable `t3-thread` configured as the dispatch adapter.
 - One executable usage adapter for each account. The shipped stdlib-only
   `bonus-drain-account-usage` reads one explicitly named account snapshot and can map one or
   more source windows to configured limit IDs. `bonus-drain-grok-usage` invokes the shipped
@@ -129,7 +129,7 @@ The configuration graph is versioned and uses IDs for all relationships:
 - `recurrence_timezone` is the IANA timezone used for weekly boundaries. The default and
   example use `America/New_York`: weeks start Saturday at midnight, and Saturday through Sunday is the
   automatic dispatch window.
-- `adapters[]` declares argv arrays for `agent-router`, usage, optional separate reset,
+- `adapters[]` declares argv arrays for `t3-thread`, usage, optional separate reset,
   and optional activation adapters.
 - `providers[]` binds a provider ID to the router adapter and its router-facing name;
   `account_mode: single` explicitly constrains providers backed by one global identity.
@@ -153,7 +153,7 @@ There is no application-auth configuration or login flow.
 After installation, expand the operator home and replace every illustrative
 `/ABSOLUTE/PATH/TO` prefix in `config.example.json`. Adapter executables should use the
 stable `.../.local/lib/bonus-drain/current` path, never a marketplace cache path. The
-`agent-router` and account-store paths are host-owned dependencies and must also be absolute.
+`t3-thread` and account-store paths are host-owned dependencies and must also be absolute.
 
 The example shows four plans across three provider labels, account snapshots for personal
 and business plans, direct Grok collection, and optional rotator-backed activation. These
@@ -191,7 +191,7 @@ router outcomes retain both claim and lease. The last holder commits a `releasin
 removing the PIN and commits the lease deletion afterward; an interruption leaves durable
 reconciliation evidence. An ambiguous outcome never relinquishes its activation lease immediately.
 
-CLI `auto` is a non-launching, pre-claim `agent-router --dry-run`; its uncertainty is
+CLI `auto` is a non-launching, pre-claim `t3-thread --dry-run`; its uncertainty is
 retry-safe. After a concrete router launch has been attempted, any uncertainty is
 post-launch ambiguity: the claim and activation lease remain fail-closed until explicit
 reconciliation and no caller retries automatically.
@@ -254,7 +254,7 @@ The refresher is the only component that runs configured usage adapters. Scout, 
 nearest-reset drain summary represents this tick's paced scout allocation. Its remaining
 queue is the complete eligible provider/capability inventory, so stale or closed cache gates
 do not hide concrete Run now targets. Run now is manual and bypasses pacing only; it still checks
-active state, compatibility, atomic claims, and the configured `agent-router` path.
+active state, compatibility, atomic claims, and the configured `t3-thread` path.
 
 To run the remote service after its profile is reviewed:
 

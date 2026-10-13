@@ -44,7 +44,7 @@ def _limit(plan_id: str, ceiling: float = 95) -> config_module.LimitConfig:
 
 
 def _two_provider_config(queue: db.QueueDB, cache: Path) -> config_module.RuntimeConfig:
-    router = config_module.AdapterConfig("router", "agent-router", ("/bin/true",))
+    router = config_module.AdapterConfig("router", "t3-thread", ("/bin/true",))
     return config_module.RuntimeConfig(
         schema_version=1,
         source_path=None,
@@ -335,7 +335,7 @@ class ScoutActiveAccountSelectionTests(unittest.TestCase):
                 )
 
         def route(argv: list[str], **_kwargs: object) -> dict[str, object]:
-            router_providers.append(argv[argv.index("--provider") + 1])
+            router_providers.append(argv[argv.index("--engine") + 1])
             return {"dispatch": {"job_id": "beta-job", "launched": True}}
 
         with mock.patch.object(
