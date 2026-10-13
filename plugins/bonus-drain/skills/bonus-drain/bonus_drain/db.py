@@ -3607,6 +3607,13 @@ class QueueDB:
             and (attempt["state"] if attempt is not None else legacy["status"]) == "awaiting_human"
         ):
             state = "held"
+        elif source == "automatic" and self._queue_time_knowable(attempt) is True:
+            # The worker says the queue-time contract already carried this blocker, so another
+            # attempt on the same contract cannot clear it (1 of 7 such retries ever succeeded).
+            state, decision_code = "held", "queue_contract_conflict"
+            decision_detail = (
+                f"blocker was knowable at queue time; the contract must change: {detail}"
+            )[:1000]
         elif attempt is not None and attempt["recovery_of"] is not None:
             previous = connection.execute(
                 "SELECT reason_code, reason_signature, contract_hash FROM task_attempts WHERE id=?",
@@ -5103,7 +5110,7 @@ class QueueDB:
         return candidates
 
     def held_authority_report(self) -> list[dict[str, Any]]:
-        """List held authority, verification, and missing or stale review blockers with their dependents (read-only)."""
+        """List held authority, queue-contract-conflict, verification, and missing or stale review blockers with their dependents (read-only)."""
 
         self.initialize()
         with self._connect() as connection:
@@ -5141,7 +5148,8 @@ class QueueDB:
             listed: set[str] = set()
             for recovery in connection.execute(
                 """SELECT r.* FROM task_recovery r JOIN tasks t ON t.id=r.task_id
-                     WHERE r.state='held' AND r.reason_code='authority_required'""",
+                     WHERE r.state='held'
+                       AND r.reason_code IN ('authority_required','queue_contract_conflict')""",
             ).fetchall():
                 task_row = connection.execute(
                     "SELECT * FROM tasks WHERE id=?", (recovery["task_id"],),

@@ -61,12 +61,50 @@ class NoProgressOnUnchangedContract(RecoveryCase):
         self.assertEqual(self.automatic_attempts("schema-window"), 1)
 
     def test_first_verification_retry_is_still_scheduled(self) -> None:
+        # reason() reports queue_time_knowable False: the boundary of the knowable hold below.
         self.chain("first-retry", "verification_needed", ("verification_needed:fixture",))
 
         first = self.recovery("first-retry")
 
         self.assertEqual(first["state"], "backoff")
         self.assertIsNotNone(first["not_before"])
+
+    def test_knowable_conflict_holds_before_any_automatic_retry(self) -> None:
+        # curie-v0125-4467 and factory-tools-harness-docker each burned an automatic retry
+        # after the worker said the blocker was knowable at queue time; such retries on the
+        # same contract succeeded 1 of 7 across the queue's history.
+        self.add("scope-conflict")
+        self.add("scope-conflict-child", depends_on=["scope-conflict"])
+        attempt = self.claim("scope-conflict")
+        knowable = reason("verification_needed", "verification_needed:scope:conflict")
+        knowable["reason"]["queue_time_knowable"] = True
+        self.terminal("scope-conflict", attempt, "failed", knowable)
+        self.now = NOW
+
+        held = self.recovery("scope-conflict")
+
+        self.assertEqual((held["state"], held["reason_code"]), ("held", "queue_contract_conflict"))
+        self.assertIsNone(held["not_before"])
+        self.assertEqual(
+            held["detail"],
+            "blocker was knowable at queue time; the contract must change: "
+            "fixture verification_needed outcome",
+        )
+        self.assertEqual(self.automatic_attempts("scope-conflict"), 0)
+        listed = [
+            item for item in self.queue.held_authority_report()
+            if item["task_id"] == "scope-conflict"
+        ]
+        self.assertEqual(
+            [(item["source"], item["reason_code"], item["queue_time_knowable"]) for item in listed],
+            [("held_recovery", "queue_contract_conflict", True)],
+        )
+
+        operator = as_dict(self.queue.requeue(
+            "scope-conflict", attempt_id=attempt.id, now_epoch=NOW + 60,
+        ))
+
+        self.assertEqual(operator["state"], "scheduled")
 
     def test_reworded_retryable_failure_keeps_its_remaining_budget(self) -> None:
         self.chain("flaky-network", "retryable", (
