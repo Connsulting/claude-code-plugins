@@ -577,7 +577,7 @@
     });
   }
 
-  // -- Send feedback to the session that wrote this plan --
+  // -- Send feedback through T3 --
   initSendFeedback();
   function initSendFeedback() {
     const btn = document.querySelector(".send-feedback");
@@ -590,6 +590,9 @@
     function applyRoute(r) {
       route = r;
       labelEl.textContent = r.mode === "new_thread" ? "New thread" : "Send";
+      btn.setAttribute("aria-label", r.mode === "new_thread"
+        ? "Start a new T3 thread with feedback"
+        : "Send feedback to the authoring T3 thread");
       btn.title =
         r.mode === "new_thread"
           ? "Starts a new T3 thread in the plan's repository with all open feedback."
