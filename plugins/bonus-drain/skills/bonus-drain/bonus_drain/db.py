@@ -5124,6 +5124,12 @@ class QueueDB:
                     pending.extend(children.get(child, ()))
                 return sorted(found)
 
+            def waiting_on(task_id: str) -> list[str]:
+                return [
+                    child for child in descendants(task_id)
+                    if self._verified_done_row(connection, child) is None
+                ]
+
             def item(source: str, task_row: sqlite3.Row, held_since: str, detail: str | None,
                      attempt: sqlite3.Row | None, reason_code: str) -> dict[str, Any]:
                 resume = self._authority_resume(attempt) if attempt is not None else None
@@ -5146,13 +5152,21 @@ class QueueDB:
                 task_row = connection.execute(
                     "SELECT * FROM tasks WHERE id=?", (recovery["task_id"],),
                 ).fetchone()
+                # A deactivated hold retires once nothing waits on it; while work still
+                # waits, the active-only descendant counts miss it, so count directly.
+                waiting = None if task_row["active"] else waiting_on(task_row["id"])
+                if waiting == []:
+                    continue
                 attempt = connection.execute(
                     "SELECT * FROM task_attempts WHERE id=?", (recovery["after_attempt_id"],),
                 ).fetchone() if recovery["after_attempt_id"] is not None else None
-                report.append(item(
+                entry = item(
                     "held_recovery", task_row, recovery["updated_at"], recovery["detail"], attempt,
                     recovery["reason_code"],
-                ))
+                )
+                if waiting is not None:
+                    entry["blocked_descendants"] = len(waiting)
+                report.append(entry)
                 listed.add(recovery["task_id"])
             for task_row in connection.execute(
                 "SELECT * FROM tasks WHERE active=1 AND kind='oneoff'",
@@ -5182,10 +5196,9 @@ class QueueDB:
                 "SELECT * FROM tasks WHERE active=0 AND kind='oneoff' ORDER BY id",
             ).fetchall():
                 task_id = task_row["id"]
-                waiting = [
-                    child for child in descendants(task_id)
-                    if self._verified_done_row(connection, child) is None
-                ]
+                if task_id in listed:
+                    continue
+                waiting = waiting_on(task_id)
                 if not waiting or self._verified_done_row(connection, task_id) is not None:
                     continue
                 latest = self._latest_effective_attempt(connection, task_id)

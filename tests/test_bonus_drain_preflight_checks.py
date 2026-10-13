@@ -1941,6 +1941,21 @@ class RootBlockerTests(PreflightCase):
             "reason_code", "queue_time_knowable",
         })
 
+    def test_held_report_omits_inactive_hold_that_blocks_nothing(self) -> None:
+        # Deactivating a hold retires it from held-report once nothing still waits on it,
+        # and a deactivated hold that still blocks work is listed once with its real count.
+        self.held_chain()
+        self.queue.set_active("A", False)
+
+        report = self.queue.held_authority_report()
+
+        self.assertEqual([(item["task_id"], item["source"]) for item in report], [("A", "held_recovery")])
+        self.assertEqual(report[0]["blocked_descendants"], 2)
+
+        self.queue.set_active("B", False)
+        self.queue.set_active("C", False)
+        self.assertEqual(self.queue.held_authority_report(), [])
+
     def test_held_report_includes_standalone_failed_blocker(self) -> None:
         self.add("S")
         attempt = self.block("S", authority("Production deploy key is not provisioned"))
