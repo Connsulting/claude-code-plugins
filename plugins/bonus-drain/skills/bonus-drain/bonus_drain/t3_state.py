@@ -14,7 +14,7 @@ BUSY_TIMEOUT_SECONDS = 2.0
 
 LATEST_RUN = (
     "SELECT r.run_id FROM orchestration_v2_projection_runs r "
-    "WHERE r.thread_id = ?1 "
+    "WHERE r.thread_id = :thread_id "
     "AND NOT (r.status = 'queued' AND json_extract(r.payload_json, '$.queueHeld') IS 1) "
     "ORDER BY r.ordinal DESC, r.run_id DESC LIMIT 1"
 )
@@ -48,7 +48,7 @@ SELECT latest.status,
 FROM orchestration_v2_projection_threads t
 LEFT JOIN orchestration_v2_projection_runs latest
   ON latest.run_id = ({LATEST_RUN})
-WHERE t.thread_id = ?1 AND t.deleted_at IS NULL
+WHERE t.thread_id = :thread_id AND t.deleted_at IS NULL
 """
 
 TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "cancelled", "interrupted"})
@@ -95,7 +95,7 @@ def lookup_thread(thread_id: str, path: Path | None = None) -> T3Thread | None:
         raise T3StateError(f"T3 state database could not be opened: {exc}") from exc
     try:
         connection.execute("PRAGMA query_only=ON")
-        row = connection.execute(LOOKUP_SQL, (thread_id,)).fetchone()
+        row = connection.execute(LOOKUP_SQL, {"thread_id": thread_id}).fetchone()
     except sqlite3.Error as exc:
         raise T3StateError(f"T3 state query failed: {exc}") from exc
     finally:
