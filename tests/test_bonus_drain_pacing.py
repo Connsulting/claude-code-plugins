@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sys
+import tempfile
+from dataclasses import replace
 import unittest
 from pathlib import Path
 
@@ -109,23 +111,114 @@ class RemainingHeadroomFloorTests(unittest.TestCase):
 
 
 class SameProviderPoolTests(unittest.TestCase):
-    def test_shared_threshold_contains_failure_to_one_account(self):
-        import tempfile
+    def setUp(self) -> None:
+        from bonus_drain import db
+        from tests.test_bonus_drain_scout_inflight import _multi_account_config
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        root = Path(self.temporary.name)
+        self.config = _multi_account_config(db.QueueDB(root / "queue.db"), root / "cache", root / "unused")
 
-        from bonus_drain import db, planner
+    def plan(self, personal: float, business: float, **kwargs):
+        from tests.test_bonus_drain_scout_inflight import _multi_snapshots
+        return build_plan(self.config, _multi_snapshots(personal, business, **kwargs),
+                          eligible_count=20, now_epoch=NOW)
 
-        from tests.test_bonus_drain_scout_inflight import (
-            _multi_account_config,
-            _multi_snapshots,
+    def test_positive_mean_includes_negative_subscription_and_sums_job_budget(self) -> None:
+        result = self.plan(80, 65)
+        self.assertEqual([(b.provider_id, b.account_id, b.batch_size) for b in result.batches],
+                         [("alpha", "alpha", 5)])
+        gate = next(g for g in result.to_dict()["gates"] if g["provider_id"] == "alpha")
+        self.assertTrue(gate["open"])
+        self.assertEqual(gate["surplus"], 2.5)
+        readings = {row["account_id"]: row for row in gate["subscriptions"]}
+        self.assertEqual(set(readings), {"alpha-personal", "alpha-business"})
+        self.assertEqual(readings["alpha-personal"]["pacing"]["alpha-weekly"]["surplus"], -5)
+        self.assertEqual(readings["alpha-business"]["pacing"]["alpha-weekly"]["surplus"], 10)
+        self.assertEqual(readings["alpha-personal"]["pacing"]["alpha-weekly"]["reserve"], 20)
+        self.assertEqual(readings["alpha-personal"]["limits"]["seven_day"]["used_percent"], 80)
+        self.assertEqual(result.batches[0].eligibility_key, f"alpha/alpha-weekly/{NOW + 40 * HOUR}")
+
+    def test_zero_and_negative_means_close_whole_pool(self) -> None:
+        for personal, business in ((80, 70), (80, 75)):
+            with self.subTest(personal=personal, business=business):
+                result = self.plan(personal, business)
+                self.assertEqual(result.batches, ())
+                self.assertIn(("alpha", "alpha"), result.closed)
+                gate = next(g for g in result.gates if g.provider_id == "alpha")
+                self.assertFalse(gate.open)
+                self.assertEqual(len(gate.to_dict()["subscriptions"]), 2)
+
+    def test_earliest_reset_sets_pool_cycle_and_sum_is_capped_at_batch_size(self) -> None:
+        result = self.plan(70, 70, personal_reset=NOW + 36 * HOUR,
+                           business_reset=NOW + 40 * HOUR)
+        self.assertEqual(len(result.batches), 1)
+        self.assertEqual(result.batches[0].resets_at, NOW + 36 * HOUR)
+        self.assertEqual(result.batches[0].batch_size, 6)
+        self.assertEqual(result.batches[0].eligibility_key, f"alpha/alpha-weekly/{NOW + 36 * HOUR}")
+
+    def test_stale_sibling_closes_whole_pool_and_fresh_recovery_reopens_it(self) -> None:
+        from tests.test_bonus_drain_scout_inflight import _multi_snapshots
+        records = _multi_snapshots(70, 70)
+        records[("alpha", "alpha-personal")] = replace(
+            records[("alpha", "alpha-personal")], captured_at=NOW - 3_601,
         )
-        with tempfile.TemporaryDirectory() as work:
-            root = Path(work)
-            config = _multi_account_config(db.QueueDB(root / "queue.db"), root / "cache", root / "unused")
-            result = build_plan(config, _multi_snapshots(80, 70), eligible_count=4, now_epoch=NOW)
-            self.assertEqual([batch.account_id for batch in result.batches], ["alpha-business"])
-            self.assertEqual(result.closed[("alpha", "alpha-personal")], "at reserve target for limit alpha-weekly")
-            final = planner.finalize_plan(config, result, eligible_count=4)
-            self.assertEqual(final.batches[0].batch_size, 4)
+        result = build_plan(self.config, records, eligible_count=20, now_epoch=NOW)
+        self.assertEqual(result.batches, ())
+        self.assertIn("stale", result.closed[("alpha", "alpha")])
+        gate = next(g for g in result.gates if g.provider_id == "alpha")
+        self.assertEqual(len(gate.to_dict()["subscriptions"]), 2)
+        self.assertEqual(self.plan(70, 70).batches[0].account_id, "alpha")
+
+    def test_invalid_or_before_lead_sibling_closes_whole_pool(self) -> None:
+        from tests.test_bonus_drain_scout_inflight import _multi_snapshots
+        for reading in ({"used_percent": None, "resets_at": NOW + 40 * HOUR},
+                        {"used_percent": 10, "resets_at": NOW + 80 * HOUR}):
+            with self.subTest(reading=reading):
+                records = _multi_snapshots(70, 70)
+                records[("alpha", "alpha-personal")] = replace(
+                    records[("alpha", "alpha-personal")], limits={"seven_day": reading},
+                )
+                result = build_plan(self.config, records, eligible_count=20, now_epoch=NOW)
+                self.assertEqual(result.batches, ())
+                self.assertIn(("alpha", "alpha"), result.closed)
+
+    def test_multiple_limits_keep_tightest_pool_budget(self) -> None:
+        from bonus_drain.config import LimitConfig
+        from tests.test_bonus_drain_scout_inflight import _multi_snapshots
+        short = LimitConfig("alpha-short", "alpha", 18_000, 80, 20_000, 6,
+                            estimated_percent_per_job=1)
+        cfg = replace(self.config, limits=(*self.config.limits, short))
+        records = _multi_snapshots(70, 70)
+        for key in (("alpha", "alpha-personal"), ("alpha", "alpha-business")):
+            records[key] = replace(records[key], limits={**records[key].limits,
+                "five_hour": {"used_percent": 79, "resets_at": NOW + 1_000}})
+        result = build_plan(cfg, records, eligible_count=20, now_epoch=NOW)
+        self.assertEqual(result.batches[0].batch_size, 2)
+        self.assertEqual(result.batches[0].surplus, 1)
+        self.assertEqual(result.batches[0].eligibility_key, f"alpha/alpha-short/{NOW + 1_000}")
+
+    def test_unmetered_pool_uses_configured_cap_and_hour_cycle(self) -> None:
+        from tests.test_bonus_drain_scout_inflight import _multi_snapshots
+        records = {key: replace(row, unmetered=True, limits={})
+                   for key, row in _multi_snapshots(70, 70).items() if key[0] == "alpha"}
+        cfg = replace(self.config, unmetered_max_inflight=3)
+        result = build_plan(cfg, records, eligible_count=20, now_epoch=NOW)
+        self.assertEqual(result.batches[0].batch_size, 3)
+        self.assertTrue(result.batches[0].unmetered)
+        self.assertEqual(result.batches[0].account_id, "alpha")
+        self.assertEqual(result.batches[0].eligibility_key, f"alpha/unmetered/{NOW // HOUR * HOUR}")
+        self.assertIsNone(result.batches[0].to_dict()["resets_at"])
+
+    def test_mixed_metering_and_no_inventory_fail_closed(self) -> None:
+        from tests.test_bonus_drain_scout_inflight import _multi_snapshots
+        records = _multi_snapshots(70, 70)
+        records[("alpha", "alpha-business")] = replace(records[("alpha", "alpha-business")],
+                                                        unmetered=True, limits={})
+        self.assertEqual(build_plan(self.config, records, eligible_count=20, now_epoch=NOW).batches, ())
+        absent = build_plan(self.config, {}, eligible_count=20, now_epoch=NOW)
+        self.assertEqual(absent.batches, ())
+        self.assertEqual(absent.closed[("alpha", "alpha")], "no proxy subscriptions")
 
 
 class RecurringCycleEligibilityTests(unittest.TestCase):

@@ -75,7 +75,7 @@ def _runtime_config(database: Path) -> config_module.RuntimeConfig:
         "router", "t3-thread", ("/bin/true",),
     )
     return proxy_fixture(config_module.RuntimeConfig(schema_version=1, source_path=None, database=database, record_command=("/bin/true",), secret_refs=(), adapters=(router,), providers=(
-            config_module.ProviderConfig("alpha", config_module.DispatchBinding("router", "alpha"), frozenset({"cpu"})),
+            config_module.ProviderConfig("alpha", config_module.DispatchBinding("router", "alpha"), "huge", frozenset({"cpu"})),
         ), limits=(
             config_module.LimitConfig(
                 "alpha-weekly", "alpha", 604_800, 95, 20_000, 3,
@@ -335,7 +335,7 @@ class TaskSizeContractTests(unittest.TestCase):
         self.queue.add_task(reviewed(_task_values("claimed")))
         spent_attempt = self.queue.claim(
             "spent", f"alpha-account/alpha-weekly/{cycle}", "alpha", "alpha-account",
-            provider_capabilities=("cpu",), now_epoch=cycle,
+            provider_max_size="huge", provider_capabilities=("cpu",), now_epoch=cycle,
         )
         self.assertIsNotNone(spent_attempt)
         self.queue.record(
@@ -360,7 +360,7 @@ class TaskSizeContractTests(unittest.TestCase):
         )
         self.assertTrue(self.queue.claim(
             "claimed", f"alpha-account/alpha-weekly/{cycle}", "alpha", "alpha-account",
-            provider_capabilities=("cpu",),
+            provider_max_size="huge", provider_capabilities=("cpu",),
         ))
 
         for size in SIZES:
@@ -457,7 +457,7 @@ class TaskSizeContractTests(unittest.TestCase):
         self.queue.record("monthly", status="skipped", cycle=456, timestamp=timestamp(27 * 24 * 60 * 60))
         with mock.patch.object(db.time, "time", return_value=now):
             self.assertEqual(
-                self.queue.eligible_tasks(now + 604_800, provider_id="alpha", capabilities=("cpu",)),
+                self.queue.eligible_tasks(now + 604_800, max_size="huge", provider_id="alpha", capabilities=("cpu",)),
                 [],
             )
 
@@ -466,7 +466,7 @@ class TaskSizeContractTests(unittest.TestCase):
             self.assertEqual(
                 {
                     task.id for task in self.queue.eligible_tasks(
-                        now + 1_209_600, provider_id="alpha", capabilities=("cpu",),
+                        now + 1_209_600, max_size="huge", provider_id="alpha", capabilities=("cpu",),
                     )
                 },
                 {"monthly"},
@@ -546,83 +546,109 @@ class TaskSizeContractTests(unittest.TestCase):
             [("sized", "medium"), ("legacy", None)],
         )
 
-    def test_size_is_neutral_to_order_eligibility_routing_planning_and_prompts(self) -> None:
-        legacy_queue = db.QueueDB(self.root / "legacy.db")
-        sized_queue = db.QueueDB(self.root / "sized.db")
-        assignments = {"alpha": "huge", "beta": "tiny", "gamma": "medium"}
-        for task_id, size in assignments.items():
-            legacy_queue.add_task(reviewed(_task_values(task_id)))
-            sized_queue.add_task(reviewed(_task_values(task_id, size=size)))
-
-        legacy_eligible = legacy_queue.eligible_tasks(
-            NOW, provider_id="alpha", capabilities=("cpu",),
-        )
-        sized_eligible = sized_queue.eligible_tasks(
-            NOW, provider_id="alpha", capabilities=("cpu",),
-        )
-        self.assertEqual(
-            [task.id for task in legacy_eligible],
-            ["alpha", "beta", "gamma"],
-        )
-        self.assertEqual(
-            [task.id for task in sized_eligible],
-            [task.id for task in legacy_eligible],
-            "size must not alter eligibility or equal-priority drain order",
-        )
-
-        config = _runtime_config(sized_queue.path)
-        provider = config.provider("alpha")
-        for legacy_task, sized_task in zip(legacy_eligible, sized_eligible):
-            with self.subTest(task=sized_task.id):
-                self.assertEqual(
-                    db.QueueDB._provider_compatible(
-                        legacy_task, "alpha", ("cpu",),
-                    ),
-                    db.QueueDB._provider_compatible(
-                        sized_task, "alpha", ("cpu",),
-                    ),
-                )
-                self.assertEqual(
-                    dispatcher.provider_compatible(legacy_task, provider),
-                    dispatcher.provider_compatible(sized_task, provider),
-                )
-                self.assertEqual(
-                    dispatcher.render_prompt(
-                        config, legacy_task, f"alpha-account/alpha-weekly/{NOW + 1_000}",
-                        "alpha", "alpha-account",
-                    ),
-                    dispatcher.render_prompt(
-                        config, sized_task, f"alpha-account/alpha-weekly/{NOW + 1_000}",
-                        "alpha", "alpha-account",
-                    ),
-                )
-                self.assertEqual(
-                    dispatcher.classification_prompt(legacy_task),
-                    dispatcher.classification_prompt(sized_task),
-                )
-
+    def _size_config(self, max_size: str = "medium") -> config_module.RuntimeConfig:
+        cfg = _runtime_config(self.database)
+        cfg = replace(cfg, providers=(replace(cfg.providers[0], max_size=max_size),))
         snapshot = usage.UsageSnapshot(
             "alpha", "alpha-account", NOW,
             {"seven_day": {"used_percent": 20, "resets_at": NOW + 1_000}},
         )
-        snapshots = {("alpha", "alpha-account"): snapshot}
-        with mock.patch.object(scout, "read_all", return_value=snapshots):
-            legacy_tick = scout.plan_tick(
-                replace(config, database=legacy_queue.path), legacy_queue, now_epoch=NOW,
-            )
-            sized_tick = scout.plan_tick(config, sized_queue, now_epoch=NOW)
-        self.assertEqual(sized_tick.plan.to_dict(), legacy_tick.plan.to_dict())
-        self.assertEqual(
-            {
-                key: [task.id for task in tasks]
-                for key, tasks in sized_tick.allocations.items()
-            },
-            {
-                key: [task.id for task in tasks]
-                for key, tasks in legacy_tick.allocations.items()
-            },
-            "size must not alter planner capacity or scout allocation",
+        usage.write_cache(usage.cache_path(cfg.usage_cache_dir, "alpha", "alpha-account"), snapshot.cache_dict())
+        return cfg
+
+    def test_provider_size_ceiling_filters_real_plan_and_keeps_queue_visibility(self) -> None:
+        cfg = self._size_config()
+        for task_id, size in (("smaller", "small"), ("equal", "medium"),
+                              ("greater", "large"), ("unsized", None)):
+            self.queue.add_task(reviewed(_task_values(task_id, size=size)))
+        self.assertCountEqual([task.id for task in self.queue.eligible_tasks(NOW)],
+                              ["smaller", "equal", "greater", "unsized"])
+        eligible = self.queue.eligible_tasks(
+            NOW, provider_id="alpha", capabilities=("cpu",), max_size="medium",
+            now_epoch=NOW,
         )
+        self.assertCountEqual([task.id for task in eligible], ["smaller", "equal"])
+        tick = scout.plan_tick(cfg, self.queue, now_epoch=NOW)
+        self.assertCountEqual([task.id for tasks in tick.allocations.values() for task in tasks],
+                              ["smaller", "equal"])
+        holds = {item["task_id"]: item for item in tick.dependency_holds
+                 if item.get("kind") == "provider_size"}
+        self.assertEqual(set(holds), {"greater", "unsized"})
+        self.assertEqual(holds["unsized"]["size"], "huge")
+        self.assertEqual(holds["greater"]["max_size"], "medium")
+        self.assertIn("task size large exceeds provider alpha max_size medium",
+                      holds["greater"]["reason"])
+
+    def test_atomic_claim_accepts_smaller_and_equal_and_refuses_greater_or_unsized(self) -> None:
+        for task_id, size, accepted in (("smaller", "small", True), ("equal", "medium", True),
+                                       ("greater", "large", False), ("unsized", None, False)):
+            with self.subTest(size=size):
+                self.queue.add_task(reviewed(_task_values(task_id, size=size)))
+                attempt = self.queue.claim(
+                    task_id, f"alpha/manual/{NOW}", "alpha", "alpha",
+                    provider_capabilities=("cpu",), provider_max_size="medium", now_epoch=NOW,
+                )
+                self.assertEqual(attempt is not None, accepted)
+                self.assertEqual(self.queue.claim_for(task_id) is not None, accepted)
+        self.assertIsNotNone(self.queue.claim(
+            "unsized", f"alpha/manual/{NOW + 1}", "alpha", "alpha",
+            provider_capabilities=("cpu",), provider_max_size="huge", now_epoch=NOW,
+        ))
+
+    def test_explicit_dispatch_applies_size_ceiling_before_any_launch_or_claim(self) -> None:
+        cfg = self._size_config()
+        for task_id, size, accepted in (("smaller", "small", True), ("equal", "medium", True),
+                                       ("greater", "large", False), ("unsized", None, False)):
+            with self.subTest(size=size):
+                self.queue.add_task(reviewed(_task_values(task_id, size=size)))
+                launch = mock.Mock(return_value={"threadId": f"thread-{task_id}"})
+                if accepted:
+                    result = dispatcher.dispatch(
+                        cfg, self.queue, task_id=task_id, eligibility_key=f"alpha/manual/{NOW}",
+                        requested_provider="alpha", router_call=launch, now_epoch=NOW,
+                    )
+                    self.assertEqual(result.account_id, "alpha")
+                    launch.assert_called_once()
+                else:
+                    with self.assertRaises(dispatcher.InvalidRoute):
+                        dispatcher.dispatch(
+                            cfg, self.queue, task_id=task_id, eligibility_key=f"alpha/manual/{NOW}",
+                            requested_provider="alpha", router_call=launch, now_epoch=NOW,
+                        )
+                    launch.assert_not_called()
+                    self.assertIsNone(self.queue.claim_for(task_id))
+
+    def test_auto_dispatch_selects_provider_that_can_fit_task_and_refuses_if_none_fit(self) -> None:
+        cfg = self._size_config("small")
+        cfg = replace(cfg, providers=(cfg.providers[0], config_module.ProviderConfig(
+            "beta", config_module.DispatchBinding("router", "beta"), "medium", frozenset({"cpu"}),
+        )), limits=(*cfg.limits, replace(cfg.limits[0], id="beta-weekly", provider_id="beta")))
+        proxy_fixture(cfg, (("alpha", "alpha-account"), ("beta", "beta-account")), now=NOW)
+        usage.write_cache(usage.cache_path(cfg.usage_cache_dir, "beta", "beta-account"),
+                          usage.UsageSnapshot("beta", "beta-account", NOW,
+                              {"seven_day": {"used_percent": 20, "resets_at": NOW + 1_000}}).cache_dict())
+        for task_id, size, expected in (("small", "small", "alpha"), ("equal", "medium", "beta"),
+                                       ("greater", "large", None), ("unsized", None, None)):
+            values = _task_values(task_id, size=size)
+            values["allowed_providers"] = ("alpha", "beta")
+            self.queue.add_task(reviewed(values))
+            launch = mock.Mock(return_value={"threadId": f"thread-{task_id}"})
+            if expected:
+                result = dispatcher.dispatch(
+                    cfg, self.queue, task_id=task_id, eligibility_key=f"manual/{task_id}",
+                    requested_provider="auto", router_call=launch, now_epoch=NOW,
+                )
+                self.assertEqual(result.provider_id, expected)
+                self.assertEqual(result.account_id, expected)
+                launch.assert_called_once()
+            else:
+                with self.assertRaises(dispatcher.InvalidRoute):
+                    dispatcher.dispatch(
+                        cfg, self.queue, task_id=task_id, eligibility_key=f"manual/{task_id}",
+                        requested_provider="auto", router_call=launch, now_epoch=NOW,
+                    )
+                launch.assert_not_called()
+                self.assertIsNone(self.queue.claim_for(task_id))
 
 
 if __name__ == "__main__":
