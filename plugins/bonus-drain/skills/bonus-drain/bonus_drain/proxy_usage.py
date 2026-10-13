@@ -34,7 +34,7 @@ TARGETS = {
 }
 # CPA uses vendor names for some auth files; routing uses the configured pool ids.
 PROVIDERS = {"anthropic": "claude", "claude": "claude", "openai": "codex",
-             "codex": "codex", "grok": "xai", "xai": "xai", "meta": "meta"}
+             "codex": "codex", "grok": "grok", "xai": "grok", "meta": "muse"}
 MAX_RESPONSE_BYTES = 1_048_576
 
 

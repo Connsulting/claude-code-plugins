@@ -62,11 +62,10 @@ class JobsViewerContractTests(unittest.TestCase):
             connection.close()
 
     def test_existing_ui_is_preserved_without_login_or_generic_viewer_copy(self) -> None:
-        # This branch intentionally changes layout, copy and editor behavior. Keep the
-        # established icon system and assert the new behavior in test_async_work_viewer.
+        # Muse adds one symbol to the existing icon sprite.
         self.assertEqual(
             hashlib.sha256(self.viewer.ICON_SPRITE.encode()).hexdigest(),
-            "333ef2163122e3450f95ea008ef6eaaad6ecb8f2562244bfb02e6317a4c06a03",
+            "562da9e32e511ef6f74f8a21745e98a734390629eac7fdb60a913bdd729200be",
         )
         with (
             mock.patch.object(self.viewer, "render_bonus_body", return_value='<button class="task-run" data-engine="claude">force</button>'),
@@ -83,42 +82,49 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertNotIn("independent provider capacity console", page)
 
     def test_provider_pool_cards_preserve_css_script_and_page_template(self) -> None:
+        # PAGE embeds the sprite, so its hash changes only for the added Muse symbol.
         for name, expected in (
             ("CSS", "460cdff8a219ca0d0c892aa550e4292ece711346d632b7abb1a1e7802d7e82bd"),
             ("SCRIPT", "a5e2fb4eb4398d5b760feaa27158869e354523847580030f36b924bb8f8c902a"),
-            ("PAGE", "fc17be63240b9671dd878baf52c32611b2dd24f2bf7d5d8e084253396bb06598"),
+            ("PAGE", "7429b35b6a07a7eee4549a8dabaf88b8948928e56c51fb7e28db59ecde696c5f"),
         ):
             with self.subTest(component=name):
                 self.assertEqual(hashlib.sha256(getattr(self.viewer, name).encode()).hexdigest(), expected)
 
-    def test_active_stripes_and_dispatching_bar_shimmer_have_distinct_meanings(self) -> None:
-        """A gold stripe is active; a shimmering bar is an actual dispatch."""
+    def test_open_pool_keeps_subscription_cards_idle_until_jobs_are_running(self) -> None:
         claude = self.viewer._claude_cards(
-            {"acct": [{"label": "Business", "u7": 22}], "active": "Business"}, None, 0, "", 0,
+            {"acct": [{"label": "Business", "account_id": "claude-business", "u7": 22}],
+             "provider_gates": {"claude": {"provider_id": "claude", "open": True}}}, None, 0, "", 0,
         )[0]
         codex = self.viewer._codex_cards(
-            {"codex_acct": [{"label": "Personal", "u7": 22}], "codex_active": "Personal"}, None, 0, "", 0,
+            {"codex_acct": [{"label": "Personal", "account_id": "codex-personal", "u7": 22}],
+             "provider_gates": {"codex": {"provider_id": "codex", "open": True}}}, None, 0, "", 0,
         )[0]
-        grok = self.viewer._grok_cards({}, {"weekly_percent": 22}, 0, "", 0)[0]
+        grok_gates = {"subscriptions": [{"provider_id": "grok", "account_id": "grok-d", "unmetered": True}],
+                      "provider_gates": {"grok": {"provider_id": "grok", "open": True}}}
+        grok = self.viewer._grok_cards(grok_gates, None, 0, "", 0)[0]
 
         self.assertEqual(claude["name"], "Claude · Business")
         self.assertEqual(codex["name"], "Codex · Personal")
         self.assertEqual(grok["name"], "Grok")
         for card in (claude, codex):
             with self.subTest(account=card["name"]):
-                self.assertTrue(card["active"])
+                self.assertFalse(card["active"])
+                self.assertTrue(card["live"])
+                self.assertFalse(card["draining"])
                 row = self.viewer._account_row(card)
-                self.assertIn('<i class="stripe on"></i>', row)
+                self.assertNotIn('<i class="stripe on"></i>', row)
                 self.assertIn('bar lg idle', row)
 
         window_draining = self.viewer._grok_cards(
-            {}, {"weekly_percent": 22}, 0, "grok", 0,
+            grok_gates, None, 0, "grok", 0,
         )[0]
         self.assertIn("unmetered", self.viewer._account_row(window_draining).lower())
         self.assertIsNone(grok["u7"])
 
         draining = self.viewer._claude_cards(
-            {"acct": [{"label": "Business", "u7": 22}], "active": "Business", "selected": "Business"},
+            {"acct": [{"label": "Business", "account_id": "claude-business", "u7": 22}],
+             "provider_gates": {"claude": {"provider_id": "claude", "open": True}}},
             None, 0, "claude", 1,
         )[0]
         self.assertIn('bar lg draining', self.viewer._account_row(draining))
@@ -182,28 +188,33 @@ class JobsViewerContractTests(unittest.TestCase):
             self.assertEqual(self.viewer._card_surplus(disabled), 40.0)
             self.assertIsNone(self.viewer._floor_usage(disabled))
 
-    def test_next_tick_plan_shimmers_codex_even_when_claude_is_coordinator(self) -> None:
-        """A planned Codex batch is a real next-tick dispatch, not a Claude-only coordinator."""
+    def test_next_tick_capacity_keeps_codex_idle_until_actual_pool_dispatch(self) -> None:
         gates = {
-            "codex_acct": [{"label": "Personal", "u7": 70}],
-            "codex_active": "Personal",
-            "account_gates": {
-                "codex-personal": {
-                    "account_id": "codex-personal", "provider_id": "codex",
+            "codex_acct": [{"label": "Personal", "account_id": "codex-personal", "u7": 70}],
+            "provider_gates": {
+                "codex": {
+                    "account_id": "codex", "provider_id": "codex",
                     "open": True, "batch_size": 2,
                 },
             },
         }
         card = self.viewer._codex_cards(gates, None, 4, "claude", 0)[0]
         self.assertEqual(card["name"], "Codex · Personal")
-        self.assertTrue(card["draining"])
-        self.assertIn("tag acc", card["tag"])
-        self.assertIn("draining", card["tag"])
-        self.assertIn('bar lg draining', self.viewer._account_row(card))
+        self.assertTrue(card["pool_open"])
+        self.assertFalse(card["draining"])
+        self.assertEqual(card["pool_batch"], 0)
+        self.assertIn('bar lg idle', self.viewer._account_row(card))
+        running = self.viewer._codex_cards(gates, None, 4, "claude", 2)[0]
+        self.assertTrue(running["draining"])
+        self.assertEqual(running["pool_batch"], 2)
+        self.assertEqual(running["batch"], 0)
+        self.assertIn("pool running", running["tag"])
+        self.assertIn('bar lg draining', self.viewer._account_row(running))
 
     def test_live_grok_unmetered_batch_drives_the_verdict(self) -> None:
         grok = self.viewer._grok_cards(
-            {}, {"weekly_percent": 50, "weekly_reset": 2_000_000_000}, 4, "grok", 2,
+            {"provider_gates": {"grok": {"provider_id": "grok", "open": True, "unmetered": True}}},
+            None, 4, "grok", 2,
         )[0]
         self.assertIn("unmetered", self.viewer._account_row(grok).lower())
         tone, label, text, _sub = self.viewer._verdict([grok], "grok", 30 * 3600)
@@ -212,19 +223,20 @@ class JobsViewerContractTests(unittest.TestCase):
 
     def test_verdict_lists_every_dispatching_provider(self) -> None:
         grok = self.viewer._grok_cards(
-            {}, {"weekly_percent": 50, "weekly_reset": 2_000_000_000}, 4, "grok", 1,
+            {"provider_gates": {"grok": {"provider_id": "grok", "open": True, "unmetered": True}}},
+            None, 4, "grok", 1,
         )[0]
         claude = self.viewer._claude_cards(
-            {"acct": [{"label": "Business", "u7": 48, "r7": 2_000_000_000}],
-             "active": "Business", "selected": "Business"},
+            {"acct": [{"label": "Business", "account_id": "claude-business", "u7": 48, "r7": 2_000_000_000}],
+             "batch_n": 4, "provider_gates": {"claude": {"provider_id": "claude", "open": True}}},
             None, 3, "claude", 4,
         )[0]
         tone, label, text, sub = self.viewer._verdict([grok, claude], "grok", 30 * 3600)
         self.assertEqual((tone, label), ("live", "dispatching"))
         self.assertIn("dchip", text)
         self.assertIn("Grok", text)
-        self.assertIn("Business", text)
-        self.assertIn("1/4", text)
+        self.assertIn("Claude", text)
+        self.assertIn("1/2", text)
         self.assertIn("4/4", sub)
 
     def test_ready_status_uses_planner_reserve_and_next_scout_is_systemd_backed(self) -> None:

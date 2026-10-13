@@ -164,10 +164,10 @@ class AccountHoldDispatchTests(PreflightCase):
         self.assertIsInstance(raised.exception, dispatcher.KnownDispatchFailure)
         self.assertIn("codex app-server daemon start", str(raised.exception))
         hold = raised.exception.account_hold
-        self.assertEqual((hold.provider_id, hold.account_id, hold.cause), ("codex", "*", "codex_daemon_start"))
+        self.assertEqual((hold.provider_id, hold.account_id, hold.cause), ("codex", "codex", "codex_daemon_start"))
         self.assertEqual(self.queue.attempts(task_id="daemon"), [])
         self.assertIsNone(self.queue.claim_for("daemon"))
-        self.assertEqual(backoff_rows(self.queue), [("codex", "*", "codex_daemon_start", 1)])
+        self.assertEqual(backoff_rows(self.queue), [("codex", "codex", "codex_daemon_start", 1)])
 
 
 
@@ -236,7 +236,7 @@ class AccountHoldScoutTests(PreflightCase):
         self.assertEqual(report.errors, ())
         self.assertEqual(
             [(hold["provider_id"], hold["account_id"], hold["cause"]) for hold in report.account_holds],
-            [("alpha", "alpha-account", "codex_daemon_start")],
+            [("alpha", "alpha", "codex_daemon_start")],
         )
         for task_id in ("alpha-one", "alpha-two"):
             self.assertEqual(self.queue.attempts(task_id=task_id), [])

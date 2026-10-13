@@ -517,15 +517,19 @@ class GoalScoutTests(unittest.TestCase):
         queue = fixture.queue
         queue.set_active('portable', False)
         config = replace(fixture.config, adapters=(replace(fixture.config.adapters[0], argv=('/bin/true',)),),
-                         providers=tuple(replace(p, capabilities=p.capabilities | set(IMPLEMENT))
-                                         for p in fixture.config.providers))
+                         providers=tuple(replace(p, id='codex' if p.id == 'beta' else p.id,
+                             dispatch=replace(p.dispatch, provider='codex' if p.id == 'beta' else p.dispatch.provider),
+                             capabilities=p.capabilities | set(IMPLEMENT)) for p in fixture.config.providers),
+                         limits=tuple(replace(limit, id=limit.id.replace('beta', 'codex'),
+                             provider_id='codex' if limit.provider_id == 'beta' else limit.provider_id)
+                             for limit in fixture.config.limits))
         store = goals.GoalStore(queue)
         store.create({'id': 'goal', 'title': 'Goal', 'cwd': str(fixture.root), 'outcome': 'Assembled proof',
                           'authority': 'Fixture only', 'acceptance': [{'id': 'check', 'proof': 'Exercise the fixture'}],
                           'merge_policy': 'stack', 'max_turns': 5, 'max_inflight': 2, 'deadline': NOW+3600,
                           'coordinator': {'model': 'gpt-6-astra'}}, now=NOW)
         snapshots = {(provider, provider+'-account'): usage.UsageSnapshot(provider, provider+'-account', NOW,
-                     {"seven_day": {'used_percent': 20, 'resets_at': NOW+1000}}) for provider in ('claude', 'beta')}
+                     {"seven_day": {'used_percent': 20, 'resets_at': NOW+1000}}) for provider in ('claude', 'codex')}
         calls = []
 
         def router(argv, **kwargs):

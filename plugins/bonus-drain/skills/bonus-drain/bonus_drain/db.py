@@ -2191,18 +2191,30 @@ class QueueDB:
         return [self._task_from_row(row) for row in rows]
 
     @staticmethod
-    def _provider_compatible(task: Task, provider_id: str | None, capabilities: Iterable[str] = ()) -> bool:
+    def _provider_compatible(
+        task: Task, provider_id: str | None, capabilities: Iterable[str] = (),
+        *, max_size: str | None = None,
+    ) -> bool:
+        if provider_id is not None and max_size is None:
+            raise QueueError("provider-aware eligibility requires max_size")
+        if max_size is not None:
+            ceiling = require_task_size(max_size)
+            if TASK_SIZES.index(task.size or "huge") > TASK_SIZES.index(ceiling):
+                return False
         capability_set = set(capabilities)
         if provider_id and task.allowed_providers and provider_id not in task.allowed_providers:
             return False
         if (
-            provider_id and task_requires_legacy_exclusive(task)
-            and LEGACY_EXCLUSIVE_CAPABILITY not in capability_set
+            provider_id and (
+                task_requires_legacy_exclusive(task)
+                or LEGACY_EXCLUSIVE_CAPABILITY in task.required_capabilities
+            ) and (provider_id != "claude" or LEGACY_EXCLUSIVE_CAPABILITY not in capability_set)
         ):
             return False
         if (
-            provider_id and task_invokes_implement(task)
-            and IMPLEMENT_CAPABILITY not in capability_set
+            provider_id and (
+                task_invokes_implement(task) or IMPLEMENT_CAPABILITY in task.required_capabilities
+            ) and (provider_id not in {"claude", "codex"} or IMPLEMENT_CAPABILITY not in capability_set)
         ):
             return False
         return set(task.required_capabilities).issubset(capability_set)
@@ -2349,10 +2361,13 @@ class QueueDB:
 
     def eligible_tasks(
         self, cycle: int, *, provider_id: str | None = None, capabilities: Iterable[str] = (),
+        max_size: str | None = None,
         portable_only: bool = False, exclusive_only: bool = False, task_id: str | None = None,
         claude_priority: bool = False, limit: int | None = None, automatic: bool = False,
         now_epoch: float | None = None,
     ) -> list[Task]:
+        if provider_id is not None and max_size is None:
+            raise QueueError("provider-aware eligibility requires max_size")
         now = float(time.time() if now_epoch is None else now_epoch)
         self.initialize()
         with self._connect() as connection:
@@ -2368,7 +2383,7 @@ class QueueDB:
                     continue
                 if exclusive_only and not exclusive:
                     continue
-                if not self._provider_compatible(task, provider_id, capabilities):
+                if not self._provider_compatible(task, provider_id, capabilities, max_size=max_size):
                     continue
                 if self._eligible_in_connection(
                     connection, task, int(cycle), now_epoch=now, automatic=automatic,
@@ -2398,7 +2413,8 @@ class QueueDB:
 
     def claim(
         self, task_id: str, eligibility_key: str, provider_id: str, account_id: str | None,
-        *, provider_capabilities: Iterable[str] = (), automatic: bool = False, expected_task: Task | None = None,
+        *, provider_max_size: str, provider_capabilities: Iterable[str] = (),
+        automatic: bool = False, expected_task: Task | None = None,
         now_epoch: float | None = None,
     ) -> DispatchAttempt | None:
         if not eligibility_key or not provider_id or provider_id == "auto":
@@ -2419,7 +2435,9 @@ class QueueDB:
                 task = self._task_from_row(row)
                 if expected_task is not None and task != expected_task:
                     return None
-                if not self._provider_compatible(task, provider_id, provider_capabilities):
+                if not self._provider_compatible(
+                    task, provider_id, provider_capabilities, max_size=provider_max_size,
+                ):
                     return None
                 if not self._eligible_in_connection(
                     connection, task, cycle, now_epoch=now, automatic=automatic,
@@ -2893,10 +2911,10 @@ class QueueDB:
                 if update.rowcount != 1:
                     raise QueueError("attempt record lost its state CAS")
                 if status == "dispatched":
-                    # A proven launch clears the account hold for this exact account.
+                    # The proxy owns subscription selection, so a launch clears the pool hold.
                     connection.execute(
-                        "DELETE FROM account_backoff WHERE provider_id=? AND account_id=?",
-                        (provider_id, account_id or "*"),
+                        "DELETE FROM account_backoff WHERE provider_id=?",
+                        (provider_id,),
                     )
                 if status in TERMINAL_STATUSES:
                     deleted = connection.execute(

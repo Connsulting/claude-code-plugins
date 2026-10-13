@@ -22,14 +22,15 @@ source private helper functions or invent a second DB path.
 
 1. Providers, pacing limits, and dispatch behavior come from the validated configuration.
    Enabled accounts come from the proxy auth-file cache. A task that invokes the implement
-   skill runs only on providers declaring the reserved `implement` capability.
+   skill runs only on Claude or Codex declaring the reserved `implement` capability.
+   Provider `max_size` ceilings also apply, with an absent task size treated as `huge`.
 2. The refresher alone calls CLIProxyAPI management. Scout, plan, and viewers read cache.
-3. Missing, stale, malformed, or resetless cache closes only that account. No data is not
+3. Missing, stale, malformed, or resetless subscription cache closes its entire provider pool. No data is not
    zero usage.
 4. Every accounted launch opens a T3 thread through the configured dispatch adapter. Direct provider
    launch and `codex-bg-thread` are forbidden.
 5. `auto` selects a compatible provider from cached proxy usage, preferring the soonest
-   open reset. Claim the task and launch with that concrete provider/account. Never persist `auto` or a null provider.
+   open reset. Claim the task and launch with that concrete provider pool. The stored `account_id` is the provider ID. Never persist `auto` or a null provider.
    `set-providers TASK auto` clears the provider pin; it stores an empty allowlist.
 6. Provider selection reads cached usage before claiming and does not launch a worker. Claiming creates a unique immutable attempt alongside
    `(task_id, eligibility_key)` before routing. Known-not-launched failure records that attempt
@@ -315,7 +316,7 @@ failed/skipped parent eligible for the bounded recovery policy described below. 
 cycles, missing IDs, and recurring prerequisites are rejected. Both automatic and explicit
 launches enforce dependencies. Each edge is `done` or `merged` (`--depends-on parent-id:merged,other-id:done`); an unsuffixed edge defaults to `merged` when the parent runs in a repository configured to open pull requests, and to `done` otherwise. A `merged` edge is satisfied only when the parent is verified done and its recorded branch is merged into the child's base, so a pull request that is open or green does not count as dependency completion. Readiness names the root blocker of a waiting chain, and `bonus-drain held-report --json` lists held authority-required and verification-needed work, and work held for a stale readiness review, with its blocked dependents and a `queue_time_knowable` measurement, read-only (see Terminal contract). Nothing re-examines a hold, so `held-report --observe` also checks each listed task's issue checks and recorded handoff branch live, storing nothing, and adds a `cleared` list naming a closed issue or a merged handoff pull request; it releases nothing, so recover-complete, requeue, or deactivate stays Brian's call. Deactivating a hold retires it from `held-report` once nothing waits on it; while unfinished dependents still wait, it stays listed once with their count.
 
-Provider and account failures hold the account, not the task. A proved Codex launcher startup failure deletes the never-launched attempt, spends nothing on the task, and backs off that provider account for 30 minutes, doubling to a 4 hour cap, while the scout uses a sibling account. Tasks that share the same `source_ref` issue run one at a time; goal-managed tasks use the goal's own concurrency bound. Work groups are display labels and do not limit concurrency. Installing a release migrates an existing queue database before the new release becomes current.
+Provider and subscription failures hold the provider pool, not the task. A proved Codex launcher startup failure deletes the never-launched attempt, spends nothing on the task, and backs off that provider pool for 30 minutes, doubling to a 4 hour cap. A proven launch clears all historical subscription backoffs for that provider. Tasks that share the same `source_ref` issue run one at a time; goal-managed tasks use the goal's own concurrency bound. Work groups are display labels and do not limit concurrency. Installing a release migrates an existing queue database before the new release becomes current.
 
 Use `bonus-drain readiness TASK_ID --json` to explain readiness and
 `bonus-drain edit TASK_ID --changes '{"depends_on":["PARENT_ID"],"readiness_review":{...}}' --json`
@@ -331,13 +332,13 @@ An explicit request to run a queued task uses `run-now TASK_ID`, not a scout tic
 "Run bonus drain" means one normal scout tick:
 
 1. Read eligible count without provider I/O.
-2. Read normalized cached account snapshots and build independent gates.
-3. Fail closed per affected account; do not close healthy siblings.
+2. Read all original subscription snapshots and build one gate per provider pool.
+3. Close a provider pool if any subscription reading is missing, stale, or invalid; include negative surpluses in its signed mean and summed budget.
 4. Order open batches by nearest exact reset.
 5. Pick only tasks compatible with the concrete provider.
 6. Claim before routing.
-7. Activate the selected account only when configured.
-8. Route once and record the concrete provider/account/job identity.
+7. Leave subscription selection and credential activation to CLIProxyAPI.
+8. Route once and record the concrete provider/job identity with `account_id` equal to the provider ID.
 
 Use:
 
@@ -369,7 +370,7 @@ Use the stable CLI's shared dispatch path; never call a provider command or a le
 directly:
 
 ```sh
-bonus-drain dispatch TASK_ID [PROVIDER_ID_OR_auto] [--account ACCOUNT_ID] --json
+bonus-drain dispatch TASK_ID [PROVIDER_ID_OR_auto] --json
 ```
 
 ## Terminal contract

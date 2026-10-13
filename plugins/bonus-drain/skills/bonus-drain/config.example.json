@@ -40,6 +40,7 @@
         "adapter_id": "router",
         "provider": "claude"
       },
+      "max_size": "huge",
       "capabilities": [
         "legacy-exclusive",
         "implement"
@@ -51,30 +52,33 @@
         "adapter_id": "router",
         "provider": "codex"
       },
+      "max_size": "large",
       "capabilities": [
         "implement"
       ]
     },
     {
-      "id": "xai",
+      "id": "grok",
       "dispatch": {
         "adapter_id": "router",
         "provider": "grok"
-      }
+      },
+      "max_size": "small"
     },
     {
-      "id": "meta",
+      "id": "muse",
       "dispatch": {
         "adapter_id": "router",
-        "provider": "meta"
-      }
+        "provider": "muse"
+      },
+      "max_size": "medium"
     }
   ],
   "limits": [
     {
       "id": "claude-weekly",
       "window_seconds": 604800,
-      "ceiling_percent": 98,
+      "ceiling_percent": 95,
       "lead_seconds": 604800,
       "batch_size": 3,
       "max_percent_per_window": 0.5,
@@ -86,7 +90,7 @@
     {
       "id": "codex-weekly",
       "window_seconds": 604800,
-      "ceiling_percent": 98,
+      "ceiling_percent": 95,
       "lead_seconds": 604800,
       "batch_size": 3,
       "max_percent_per_window": 0.5,

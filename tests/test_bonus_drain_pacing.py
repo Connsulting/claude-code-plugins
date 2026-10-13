@@ -14,7 +14,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
 
-from bonus_drain.config import DispatchBinding, LimitConfig, ProviderConfig, RuntimeConfig
+from bonus_drain.config import (
+    DispatchBinding,
+    LimitConfig,
+    ProviderConfig,
+    RuntimeConfig,
+)
 from bonus_drain.planner import build_plan, limit_window
 from bonus_drain.usage import UsageSnapshot
 

@@ -1,9 +1,9 @@
 # Async Work / Bonus Drain
 
 Bonus Drain is a self-contained queue, planner, scout, usage-cache refresher, dispatcher,
-and viewer for autonomous async work, with optional opportunistic Bonus scheduling. Provider names, plans, accounts,
-limits, reset windows, usage readers, activation rules, and dispatch bindings are validated
-JSON data. The planner does not contain provider-name branches.
+and viewer for autonomous async work, with optional opportunistic Bonus scheduling. Provider
+size ceilings, pacing limits, reset windows, and dispatch bindings are validated JSON data.
+CLIProxyAPI supplies subscription inventory and owns credential selection. The planner does not contain provider-name branches.
 
 Installing this marketplace plugin only makes its skill available. It does not switch a
 live Bonus Drain installation, enable a systemd unit, migrate a database, change a router,
@@ -14,17 +14,13 @@ starting services. Cutover remains an explicit manual operation.
 
 Required runtime dependencies are:
 
-- Python 3.10 or newer with the standard-library `sqlite3` module;
-- an executable `t3-thread`, referenced by an absolute argv in the JSON configuration;
-- one executable usage adapter per account, reporting every configured limit and reset in one
-  coherent normalized response.
+1. Python 3.10 or newer with the standard-library `sqlite3` module.
+2. An executable `t3-thread` or `agent-router`, referenced by absolute argv in configuration.
+3. CLIProxyAPI management access through a private dotenv file containing `CPA_BASE_URL`
+   and `CPA_MGMT_KEY`, referenced by `proxy_secret_ref`.
 
-The core runtime has no third-party Python package, `uv`, `bg-schedule`, or
-`codex-bg-thread` dependency. The included account-snapshot, Grok-normalization, and
-activation adapters use only Python's standard library. The direct Grok collector uses
-Bash, `jq`, `curl`, and GNU utilities as documented in its header; replace any provider-edge
-adapter with an executable that implements the normalized JSON contract.
-`ai-token-rotator` is optional and can be configured as an account activation adapter.
+The core runtime has no third-party Python package, provider usage adapter, or credential
+activation adapter. The proxy owns subscription routing.
 systemd user services are optional. For the explicitly configured remote viewer, tailnet-only
 Tailscale Serve is the sole access boundary, including for explicitly enabled mutations.
 
@@ -75,77 +71,61 @@ export BONUS_DRAIN_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/bonus-drain/config.
 bonus-drain doctor --json
 ```
 
-Provider and account labels are arbitrary data. For example, a configuration can define
-personal and business accounts across Claude, Codex, and Grok without changing core code:
+The routable provider pools are Claude, Codex, Grok, and Muse. Each provider declares
+`max_size` from `tiny`, `small`, `medium`, `large`, or `huge`:
 
 ```json
 {
   "providers": [
-    {"id": "claude", "dispatch": {"adapter_id": "router", "provider": "claude"}, "capabilities": ["legacy-exclusive", "implement"]},
-    {"id": "codex", "dispatch": {"adapter_id": "router", "provider": "codex"}, "capabilities": ["implement"]},
-    {"id": "grok", "dispatch": {"adapter_id": "router", "provider": "grok"}}
-  ],
-  "plans": [
-    {"id": "claude-personal-plan", "provider_id": "claude"},
-    {"id": "claude-business-plan", "provider_id": "claude"},
-    {"id": "codex-personal-plan", "provider_id": "codex"},
-    {"id": "grok-personal-plan", "provider_id": "grok"}
-  ],
-  "accounts": [
-    {"id": "claude-personal", "provider_id": "claude", "plan_id": "claude-personal-plan", "usage_adapter_id": "usage", "activation_adapter_id": "claude-personal-activator"},
-    {"id": "claude-business", "provider_id": "claude", "plan_id": "claude-business-plan", "usage_adapter_id": "usage", "activation_adapter_id": "account-activator"},
-    {"id": "codex-personal", "provider_id": "codex", "plan_id": "codex-personal-plan", "usage_adapter_id": "usage", "activation_adapter_id": "codex-personal-activator"},
-    {"id": "grok-personal", "provider_id": "grok", "plan_id": "grok-personal-plan", "usage_adapter_id": "usage"}
+    {"id": "claude", "dispatch": {"adapter_id": "router", "provider": "claude"}, "max_size": "huge", "capabilities": ["legacy-exclusive", "implement"]},
+    {"id": "codex", "dispatch": {"adapter_id": "router", "provider": "codex"}, "max_size": "large", "capabilities": ["implement"]},
+    {"id": "grok", "dispatch": {"adapter_id": "router", "provider": "grok"}, "max_size": "small"},
+    {"id": "muse", "dispatch": {"adapter_id": "router", "provider": "muse"}, "max_size": "medium"}
   ]
 }
 ```
 
-This is an illustrative fragment; retain the required adapters, limits, record command,
-viewer, and schema version from `config.example.json`. Give each plan its own limits and
-reset data. Bonus Drain keeps those windows independent and dispatches the eligible batch
-whose reset is nearest. Missing, malformed, resetless, or stale usage closes only the
-affected account. The refresher owns provider reads and writes normalized cache; scout,
-planner, and viewer consume cache and do not call provider APIs on page load.
+Retain the required adapters, limits, record command, viewer, and schema version from
+`config.example.json`. Do not configure subscription accounts or plans. The proxy cache
+provides those observations, and each provider gets one gate and at most one batch.
+Every enabled subscription must have fresh, valid readings. A missing, malformed,
+resetless, or stale reading closes its entire provider pool because the proxy can serve
+any of its subscriptions. The refresher owns provider reads; scout, planner, and viewer
+consume cache without calling provider APIs on page load.
+
+For each configured metered limit, calculate every subscription's signed surplus as
+`ceiling_percent - used_percent - reserve`. A positive mean opens the pool. The budget is
+`min(batch_size, floor(sum(surplus) / estimated_percent_per_job))`; negative surpluses
+remain in that sum. Multiple limits use the tightest budget and the earliest reset for the
+provider's eligibility key. Grok and Muse use `unmetered_max_inflight` and an hourly cycle.
+Task size must fit the provider ceiling at planning, dispatch, and atomic claim. A task
+without a size is treated as `huge`; an oversized pinned task remains queued with a reason.
 
 The JSON graph owns the configured runtime database and cache. `BONUS_DB` is deprecated
 queue-only compatibility for graph-free legacy commands; it cannot retarget configured
 viewer, refresh, scout, planner, or dispatch state. A graph command rejects a differing
 `--database` value.
 
-The shipped example uses the stable installed `.../.local/lib/bonus-drain/current` path and
-explicit provider, account, source-label, snapshot, and limit IDs. Replace every
-`/ABSOLUTE/PATH/TO` prefix with an absolute path for the target host. The snapshot adapter
-reads one account file and can map multiple windows in one call. The Grok adapter invokes
-the collector's dedicated direct mode so generic configuration cannot recurse. The optional
-activation adapter atomically pins a literal account label, sanitizes the rotator environment,
-verifies a configured active-label file, rolls back failed switches, and releases only its
-matching pin.
+Replace every `/ABSOLUTE/PATH/TO` prefix in the example with an absolute host path.
+The example has one weekly pacing limit for each of Claude and Codex, each with a 95 percent
+ceiling. Proxy vendor spellings `xai` and `grok` map to the Grok pool; `meta` maps to Muse.
 
-The reserved `legacy-exclusive` capability preserves migrated `claude_only` and recognized
-legacy-exclusive model rows without hard-coding a provider name. Declare it only on providers
-that can run those tasks. Explicit provider allowlists and required capabilities remain
-independent.
+The reserved `legacy-exclusive` capability applies only to Claude, including migrated
+`claude_only` and recognized legacy-exclusive model rows. The reserved `implement`
+capability applies only to Claude and Codex. Protected tasks still require the respective
+capability declaration; a Grok or Muse declaration cannot override the identity rule.
+Explicit provider allowlists and other required capabilities continue to apply.
 
-The reserved `implement` capability marks providers that can drive the implement skill. A
-task that sets `use_implement` or names `/implement`, `$implement`, or the implement skill in
-its goal, context, constraints, precondition, or done-when runs only on providers declaring
-it. Grok configurations omit it. `add`, `edit`, and `set-providers` refuse to pin such a task
-to a configured provider without it; `bonus-drain set-providers TASK auto` clears the pin.
-
-Every account of a multi-account provider must use the shipped verified activation form with
-a literal expected account, PIN path, active-label proof, and one provider-wide activation
-scope. Claims hold durable SQLite
-activation leases: same-account launches share one switch, cross-account launches wait,
-and ambiguous outcomes retain both claim and lease. Run scope holds through terminal. Launch
-scope releases only after a proven router job identity and durable dispatched record, allowing
-a credential rotator to enforce five-hour thresholds during the run. A failed or interrupted
-release remains durable and requires explicit reconciliation; it must never be treated as
-immediately released.
+Dispatch records the provider ID in the historical `account_id` field. Historical claims
+and terminal receipts retain their stored account identities. Subscription selection and
+activation are owned by the proxy; `dispatch` and `run-now` have no `--account` option.
+Unexpired historical subscription backoffs hold the entire provider pool, and a proven
+launch clears its provider's backoffs.
 
 CLI `auto` classification is a non-launching `t3-thread --dry-run` before a claim, so its
 uncertainty is retry-safe. Once a concrete launch has been attempted, timeout, malformed
 output, missing job identity, or bookkeeping uncertainty is ambiguous: no caller retries it,
-and the claim and applicable activation lease stay fail-closed until reconciliation.
+and the claim stays fail-closed until reconciliation.
 
 Top-level `launch_surface` chooses where concrete launches run: `background` (the default,
 and the unchanged argv) or `t3`, which adds `--surface t3` so t3-thread opens a T3 Code
@@ -175,24 +155,22 @@ SQLite. An active parent run or any recursive subagent descendant with an active
 nonterminal latest run keeps the task running. A terminal parent run that ended less than
 900 seconds ago also stays running. Once the thread settles and that grace period ends,
 a missing queue terminal event is recorded as `failed` through the record CLI's lifecycle
-path. This releases its claim and applicable activation lease without asserting task
+path. This releases its claim without asserting task
 completion or retrying it. Missing or unreadable T3 state remains held; age alone never
 proves that a worker ended. Scout JSON includes the decisions in `reconciliation`,
-and `--dry-run` reports `would_fail` without changing the queue or releasing activation.
+and `--dry-run` reports `would_fail` without changing the queue.
 Existing ambiguous claims still stop the scout before any automatic reconciliation.
 Normalized usage requires explicit provider/account identity and capture time. Missing Grok
 utilization stays unknown. Source and installed wrappers ignore caller `PYTHONPATH`/cwd
 packages; timed-out collector and rotator process groups are terminated with descendants.
 
 File-backed secret references must be current-user-owned, non-symlink regular files with mode
-`0600` and a maximum size of 65536 bytes. Activation does not inherit unrelated account usage
-secret bindings.
+`0600` and a maximum size of 65536 bytes.
 
 Secrets are references only. Declare an environment-variable or file reference in
 `secret_refs` and map it by ID from an adapter. Never place a secret value in the
 JSON, an argv, a unit, a log, or the repository. Every launch goes through an explicit
-`t3-thread` adapter. Multi-account activation is optional; `ai-token-rotator` is one
-possible activation adapter, not a core dependency.
+`t3-thread` or `agent-router` adapter. CLIProxyAPI owns subscription selection.
 
 ## Viewer
 

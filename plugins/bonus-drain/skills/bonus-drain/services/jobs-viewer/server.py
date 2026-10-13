@@ -63,18 +63,8 @@ DRAIN_LEAD_MAX_HOURS = int(os.environ.get("DRAIN_LEAD_MAX_HOURS", "30"))
 
 
 def _gate_for_card(gates: dict, account_id: str, engine: str, label: str) -> dict:
-    table = gates.get("account_gates") or {}
-    if not isinstance(table, dict):
-        return {}
-    for key in (account_id, f"{engine}-{str(label).lower()}", str(label).lower()):
-        gate = table.get(key)
-        if isinstance(gate, dict):
-            return gate
-    needle = str(label).lower().replace(" ", "-")
-    for gate in table.values():
-        if isinstance(gate, dict) and str(gate.get("account_id") or "").endswith(needle):
-            return gate
-    return {}
+    table = gates.get("provider_gates") or {}
+    return table.get(engine, {}) if isinstance(table, dict) else {}
 
 
 def _config_urgency_hours(provider_id: str) -> int | None:
@@ -215,7 +205,7 @@ def _provider_usage(provider_id: str) -> dict | None:
     try:
         cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
         snapshots = graph_usage.read_all(cfg)
-    except (graph_config.ConfigError, OSError, ValueError):
+    except (graph_config.ConfigError, graph_usage.UsageError, OSError, ValueError):
         return None
     candidates: list[tuple[int, int, float, int]] = []
     for (provider, _account_id), snapshot in snapshots.items():
@@ -295,20 +285,26 @@ _gates_cache: dict = {"t": 0.0, "key": None, "val": None}
 
 
 def _preview_account_gates(cfg, gates: dict) -> None:
-    """Display account windows from the normalized proxy cache."""
-    snapshots = graph_usage.read_all(cfg)
+    """Display the planner's original subscription readings independently."""
+    subscriptions = gates["subscriptions"]
     for provider, field in (("claude", "acct"), ("codex", "codex_acct")):
         limits = cfg.limits_for_provider(provider)
-        ceiling = max((limit.ceiling_percent for limit in limits), default=100)
+        weekly_limit = max(limits, key=lambda limit: limit.window_seconds) if limits else None
         accounts = []
-        for (provider_id, account_id), snapshot in snapshots.items():
-            if provider_id != provider:
+        for snapshot in subscriptions:
+            if snapshot.get("provider_id") != provider:
                 continue
-            weekly = snapshot.limits.get("seven_day", {}) if snapshot.fresh else {}
-            short = snapshot.limits.get("five_hour", {}) if snapshot.fresh else {}
-            accounts.append({"label": account_id, "ceiling": ceiling,
-                             "u5": short.get("used_percent"), "u7": weekly.get("used_percent"),
-                             "r7": weekly.get("resets_at")})
+            readings = snapshot.get("limits", {}) if snapshot.get("fresh", True) else {}
+            weekly, short = readings.get("seven_day", {}), readings.get("five_hour", {})
+            account_id = snapshot["account_id"]
+            pacing = snapshot.get("pacing", {}).get(weekly_limit.id, {}) if weekly_limit else {}
+            accounts.append({
+                "label": account_id.removeprefix(provider + "-"), "account_id": account_id,
+                "ceiling": weekly_limit.ceiling_percent if weekly_limit else 100,
+                "u5": short.get("used_percent"), "u7": weekly.get("used_percent"),
+                "r7": weekly.get("resets_at"), "reserve": pacing.get("reserve"),
+                "surplus": pacing.get("surplus"),
+            })
         gates[field] = accounts
 
 
@@ -340,7 +336,7 @@ def get_gates(n_elig: int, n_codex: int, n_grok: int,
     key = (n_elig, n_codex, n_grok, grok_json, codex_json)
     if _gates_cache["val"] is not None and _gates_cache["key"] == key and now - _gates_cache["t"] < 60:
         return _gates_cache["val"]
-    out: dict = {"acct": [], "codex_acct": [], "allocations": {}}
+    out: dict = {"acct": [], "codex_acct": [], "allocations": {}, "subscriptions": [], "provider_gates": {}}
     try:
         cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
         result = subprocess.run(
@@ -349,6 +345,7 @@ def get_gates(n_elig: int, n_codex: int, n_grok: int,
             env={**os.environ, "PYTHONPATH": str(BONUS_SKILL_DIR)},
         )
         gate_payload = json.loads(result.stdout) if result.returncode == 0 else None
+        out["subscriptions"] = gate_payload.get("subscriptions", []) if gate_payload else []
         _preview_account_gates(cfg, out)
         for provider in ("claude", "codex"):
             limits = cfg.limits_for_provider(provider)
@@ -356,6 +353,7 @@ def get_gates(n_elig: int, n_codex: int, n_grok: int,
             if limits:
                 weekly = max(limits, key=lambda limit: limit.window_seconds)
                 out[prefix + "ceiling"] = weekly.ceiling_percent
+                out[prefix + "batch_n"] = weekly.batch_size
                 out[prefix + "lead_hours"] = weekly.lead_seconds // 3600
                 out[prefix + "pct_per_window"] = weekly.max_percent_per_window
                 out[prefix + "est_pct_per_job"] = weekly.estimated_percent_per_job
@@ -364,14 +362,14 @@ def get_gates(n_elig: int, n_codex: int, n_grok: int,
         # `gates --json` is the current planning boundary. These fields preserve the viewer's
         # display metadata, while shimmer remains driven by durable in-flight runs below.
         gates = gate_payload.get("gates", []) if gate_payload else []
-        account_gates = {}
+        provider_gates = {}
         candidates = []
         for gate in gates:
             if not isinstance(gate, dict):
                 continue
-            account_id = gate.get("account_id")
-            if isinstance(account_id, str) and account_id:
-                account_gates[account_id] = gate
+            provider_id = gate.get("provider_id")
+            if isinstance(provider_id, str) and provider_id:
+                provider_gates[provider_id] = gate
             if not gate.get("open"):
                 continue
             provider = gate.get("provider_id")
@@ -381,7 +379,7 @@ def get_gates(n_elig: int, n_codex: int, n_grok: int,
             out[f"{provider}_batch"] = max(int(_f(out.get(f"{provider}_batch"))), batch)
             if batch > 0:
                 candidates.append(gate)
-        out["account_gates"] = account_gates
+        out["provider_gates"] = provider_gates
         out["host_pressure"] = gate_payload.get("host_pressure") if gate_payload else None
         if candidates:
             next_gate = min(candidates, key=lambda gate: _f(gate.get("resets_at")) or float("inf"))
@@ -396,7 +394,7 @@ def get_gates(n_elig: int, n_codex: int, n_grok: int,
                 provider = item.get("provider_id")
                 if (
                     isinstance(task_id, str) and task_id
-                    and provider in ("claude", "codex", "grok")
+                    and provider in ("claude", "codex", "grok", "muse")
                 ):
                     planned[task_id] = provider
         out["allocations"] = planned
@@ -427,7 +425,7 @@ def _claude_multi_active() -> bool:
     try:
         cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
         return sum(account.provider_id == "claude" for account in graph_usage.read_accounts(cfg)) >= 2
-    except (graph_config.ConfigError, OSError, ValueError):
+    except (graph_config.ConfigError, graph_usage.UsageError, OSError, ValueError):
         return False
 
 
@@ -716,7 +714,7 @@ def _last_line(text: str, fallback: str) -> str:
     return lines[-1] if lines else fallback
 
 
-RUN_ENGINES = ("claude", "codex", "grok", "auto")
+RUN_ENGINES = ("claude", "codex", "grok", "muse", "auto")
 
 
 def run_task_now(task_id: str, engine: str) -> tuple[bool, str]:
@@ -741,7 +739,7 @@ def run_task_now(task_id: str, engine: str) -> tuple[bool, str]:
         return False, "launch state is ambiguous; reconcile it before retrying"
     except graph_dispatcher.DispatchError as exc:
         return False, str(exc)[:500] or "could not launch this job"
-    except (graph_config.ConfigError, OSError, ValueError):
+    except (graph_config.ConfigError, graph_usage.UsageError, OSError, ValueError):
         return False, "could not launch this job"
     surface = " (t3)" if result.surface == "t3" else ""
     return True, f"launched on {result.provider_id} as {result.job_id}{surface}"
@@ -758,7 +756,7 @@ def requeue_task(task_id: str) -> tuple[bool, str]:
         ).requeue(task_id)
     except QueueError as exc:
         return False, str(exc)[:500] or "could not requeue this job"
-    except (graph_config.ConfigError, OSError, ValueError):
+    except (graph_config.ConfigError, graph_usage.UsageError, OSError, ValueError):
         return False, "could not requeue this job"
     if not decision:
         return False, "this job could not be requeued"
@@ -787,7 +785,7 @@ def finish_inflight_task(task_id: str, status: str) -> tuple[bool, str]:
     try:
         cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
         queue = QueueDB(cfg.database, recurrence_timezone=cfg.recurrence_timezone)
-    except (graph_config.ConfigError, OSError, ValueError):
+    except (graph_config.ConfigError, graph_usage.UsageError, OSError, ValueError):
         return False, "could not finish this job"
     matches = [run for run in queue.inflight() if run.task == task_id]
     if not matches:
@@ -1189,7 +1187,7 @@ _ARROW_SYMBOL = (
 )
 ICON_SPRITE = ICON_SPRITE.replace(
     '<symbol id="i-auto"',
-    _GROK_SYMBOL + _CALENDAR_SYMBOL + _CYCLE_SYMBOL + _ARROW_SYMBOL + '<symbol id="i-auto"', 1,
+    _GROK_SYMBOL + '<symbol id="i-muse" viewBox="0 0 24 24"><path d="M4 18V6l8 8 8-8v12" fill="none" stroke="currentColor" stroke-width="2"/></symbol>' + _CALENDAR_SYMBOL + _CYCLE_SYMBOL + _ARROW_SYMBOL + '<symbol id="i-auto"', 1,
 )
 
 
@@ -1213,7 +1211,7 @@ def _kick_chip(task: dict, planned: dict, scout_at: float | None) -> str:
     """Next-scout snapshot for a queued job the current tick has actually reserved."""
 
     engine = planned.get(task.get("id") or "")
-    if engine not in ("claude", "codex", "grok"):
+    if engine not in ("claude", "codex", "grok", "muse"):
         return ""
     when = rel(scout_at) if scout_at else "at next scout"
     return (
@@ -1357,6 +1355,7 @@ def _run_buttons(t: dict) -> str:
     claude_cls, claude_attrs, claude_aria = attrs("claude", "Claude")
     codex_cls, codex_attrs, codex_aria = attrs("codex", "Codex")
     grok_cls, grok_attrs, grok_aria = attrs("grok", "Grok")
+    muse_cls, muse_attrs, muse_aria = attrs("muse", "Muse")
     return f"""
               <span class="runset">
                 <span class="runlbl">run now</span>
@@ -1366,6 +1365,8 @@ def _run_buttons(t: dict) -> str:
                         aria-label="{codex_aria}" {codex_attrs}>{busy_button(ico("codex"))}</button>
                 <button class="task-run ionly{grok_cls}" data-task-id="{tid}" data-engine="grok"
                         aria-label="{grok_aria}" {grok_attrs}>{busy_button(ico("grok"))}</button>
+                <button class="task-run ionly{muse_cls}" data-task-id="{tid}" data-engine="muse"
+                        aria-label="{muse_aria}" {muse_attrs}>{busy_button(ico("muse"))}</button>
                 <button class="task-run ionly" {'disabled' if blocked else ''} data-task-id="{tid}" data-engine="auto"
                         aria-label="Let t3-thread pick the engine, then dispatch"
                         title="{esc(blocked) if blocked else 'Choose an engine automatically and run now'}">{busy_button(ico("auto"))}</button>
@@ -1464,6 +1465,8 @@ def _floor_rate(c: dict) -> tuple[float, float] | None:
 
 def _reserve_points(c: dict) -> float:
     """Weekly-percent points that must remain until reset. Matches planner._surplus_above_floor."""
+    if c.get("reserve") is not None:
+        return float(c["reserve"])
     rate = _floor_rate(c)
     if rate is None or not _f(c.get("r7")):
         return 0.0
@@ -1480,6 +1483,8 @@ def _floor_usage(c: dict) -> float | None:
 
 
 def _card_surplus(c: dict) -> float | None:
+    if c.get("surplus") is not None:
+        return float(c["surplus"])
     if c.get("u7") is None or not _f(c.get("r7")):
         return None
     remaining = max(0.0, _f(c["ceiling"]) - _f(c["u7"]))
@@ -1497,6 +1502,14 @@ def _card_state(c: dict) -> tuple[str, str]:
     if c.get("host_pressure"):
         return "waiting · host pressure", "warn"
     # Unknown is not zero. A missing reading must never render as a full budget.
+    if "pool_open" in c:
+        if c.get("pool_batch"):
+            return f"{kind} · pool running {c['pool_batch']}", "acc"
+        if not c["pool_open"]:
+            return "waiting · " + str(c.get("pool_reason") or "pool closed"), "dim"
+        if c.get("unmetered"):
+            return "async · unmetered pool", "acc"
+        return f"{kind} · pool mean {_f(c.get('pool_surplus')):g} pts surplus", "acc"
     if c["u7"] is None:
         return "unknown · no usage reading", "dim"
     if _f(c["u7"]) >= 100:
@@ -1711,6 +1724,20 @@ def _account_row(c: dict) -> str:
     Everything that is identical across accounts - the eligible-task counts - has moved to the
     section header. Printed per card it read as a per-account number, which it never was.
     """
+    if c.get("unmetered"):
+        state, tone = _card_state(c)
+        return f"""
+          <details class="arow"><summary class="asum">
+            <i class="stripe{' on' if c.get('draining') else ''}"></i>
+            <span class="aname"><span class="n1">{ico(c['engine'])}{esc(c['name'])}{c['tag']}</span>
+              <span class="n2 {tone}">{esc(state)}</span></span>
+            <span class="abudget"><span class="fig"><b>unmetered</b> provider pool</span>
+              <span class="paceline">{c['eligible']} eligible jobs · {c['pool_batch']} running</span></span>
+            <span class="awhen"><span class="t">{c['batch_n']}</span><span class="l">concurrent cap</span></span>
+            <i class="caret"></i></summary>
+            <div class="adet"><div class="dgroup"><div class="dh">provider pool</div>
+              <div class="dl"><span>subscriptions</span><b>{c['subscription_count']}</b></div>
+            </div></div></details>"""
     state, tone = _card_state(c)
     p = _week(c)
     known = c["u7"] is not None
@@ -1818,8 +1845,16 @@ def _verdict(cards: list[dict], coord: str, lead_secs: int) -> tuple[str, str, s
             for c in items
         )
 
-    bonus = [c for c in cards if c.get("urgent") and c["batch"] > 0]
-    async_disp = [c for c in cards if not c.get("urgent") and c["batch"] > 0]
+    running = [c for c in cards if "pool_batch" not in c]
+    running_pools = {}
+    for card in cards:
+        if card.get("pool_batch"):
+            running_pools[card["engine"]] = {
+                **card, "batch": card["pool_batch"], "name": card["engine"].title(), "u7": None,
+            }
+    running.extend(running_pools.values())
+    bonus = [c for c in running if c.get("urgent") and c["batch"] > 0]
+    async_disp = [c for c in running if not c.get("urgent") and c["batch"] > 0]
     if bonus or async_disp:
         shown = bonus + async_disp
         subs = []
@@ -1847,6 +1882,15 @@ def _verdict(cards: list[dict], coord: str, lead_secs: int) -> tuple[str, str, s
                 f'<span class="dchips">{_chips(async_disp)}</span></div>'
             )
         return ("live", "dispatching", "".join(lines), sub)
+
+    open_pools = {card["engine"]: card for card in cards if card.get("pool_open")}
+    if open_pools:
+        names = ", ".join(engine.title() for engine in open_pools)
+        return "hold", "ready", esc(names) + " ready for the next scout.", "Provider pools have available capacity."
+    pool_cards = [card for card in cards if "pool_open" in card]
+    if pool_cards:
+        reasons = dict.fromkeys(str(card.get("pool_reason") or "pool closed") for card in pool_cards)
+        return "hold", "holding", "Provider pools are waiting.", esc("; ".join(reasons))
 
     live = [c for c in cards if c["windows"] > 0 and c["u7"] is not None]
     # Prefer an open account that still has budget: if one exists it is the account the next tick
@@ -1878,30 +1922,15 @@ def _verdict(cards: list[dict], coord: str, lead_secs: int) -> tuple[str, str, s
 
 
 def _claude_cards(gates: dict, usage: dict | None, n_elig: int, coord: str, batch: int) -> list[dict]:
-    """One card per Claude account when the proxy holds 2+ (each has its own reset, its own
-    ceiling, and therefore its own end-of-week drain window - collapsing them into a single
-    "claude" number would show a weekly percentage that belongs to neither). One card from
-    usage.sh otherwise."""
+    """One card per original subscription, sharing its provider pool gate."""
     lead = _config_lead_hours("claude") or int(_f(gates.get("lead_hours"), DRAIN_LEAD_MAX_HOURS))
     floor_fields = _card_floor_fields("claude")
     win_h = int(_f(gates.get("window_hours"), 5))
     hot = _f(gates.get("five_hour_max"), 75)
     ppw = _f(gates.get("pct_per_window"), 2.5)
-    selected = gates.get("selected") or ""
-    active = gates.get("active") or ""
     accounts = gates.get("acct") or []
 
-    if not accounts:
-        if not usage:
-            return []
-        accounts = [{"label": "claude", "ceiling": _f(gates.get("ceiling"), 98),
-                     "u5": usage.get("u5"), "u7": usage.get("u7"), "r7": usage.get("r7")}]
-        active = "claude"
-        # With one account there is nowhere else the drain could be landing, so when the
-        # store has no `selected` label to match against in this shape, and without this the
-        # card never carries the batch: it would render "did not dispatch" mid-dispatch.
-        if coord == "claude" or batch > 0:
-            selected = "claude"
+    pool_gate = _gate_for_card(gates, "", "claude", "")
 
     cards = []
     for a in accounts:
@@ -1910,32 +1939,28 @@ def _claude_cards(gates: dict, usage: dict | None, n_elig: int, coord: str, batc
         if windows <= 0 and a.get("r7"):
             ahead = _f(a["r7"]) - time.time() - lead * 3600
             opens = ahead if ahead > 0 else None
-        is_sel = a["label"] == selected
-        is_active = a["label"] == active
-        account_id = f"claude-{str(a['label']).lower()}"
-        draining = _account_draining(
-            gates, account_id, "claude", a["label"],
-            selected=is_sel, coord=coord, inflight=batch,
-        )
-        # "active" beside it only wraps the header row and knocks the cards out of alignment.
+        pool_open = bool(pool_gate.get("open"))
+        account_id = a["account_id"]
+        draining = batch > 0
         tag = ""
         if draining:
-            tag = '<span class="tag acc">draining</span>'
-        elif is_active and len(accounts) > 1:
-            tag = '<span class="tag">active</span>'
+            tag = '<span class="tag acc">pool running</span>'
         cards.append({
             "name": _card_name("claude", a["label"]), "account_id": account_id,
             "tag": tag, "engine": "claude",
             "u5": a.get("u5"), "u7": a.get("u7"), "ceiling": _f(a.get("ceiling"), 98),
             "hot": hot, "r7": a.get("r7"), "windows": windows, "opens_in": opens,
-            "ppw": ppw, "batch": batch if is_sel else 0,
-            "batch_n": int(_f(gates.get("batch_n"), 4)),
+            "ppw": ppw, "batch": 0, "pool_batch": batch,
+            "batch_n": int(_f(gates.get("batch_n"), 3)),
             "eligible": n_elig, "elig_label": "eligible", "lead_h": lead,
-            "active": is_active,
-            "live": is_sel or a["label"] == active,
+            "active": False,
+            "live": pool_open or draining,
             "draining": draining,
-            "behind": selected if (selected and not is_sel and windows > 0) else "",
-            "urgent": bool(_gate_for_card(gates, f"claude-{str(a['label']).lower()}", "claude", a["label"]).get("urgent")),
+            "behind": "",
+            "urgent": bool(pool_gate.get("urgent")),
+            "pool_open": pool_open, "pool_reason": pool_gate.get("reason"),
+            "pool_surplus": pool_gate.get("surplus"),
+            "reserve": a.get("reserve"), "surplus": a.get("surplus"),
             "urgency_h": _config_urgency_hours("claude") or 0,
             **floor_fields,
         })
@@ -1943,31 +1968,13 @@ def _claude_cards(gates: dict, usage: dict | None, n_elig: int, coord: str, batc
 
 
 def _codex_cards(gates: dict, cx: dict | None, n_codex: int, coord: str, batch: int) -> list[dict]:
-    """One card per Codex account when the proxy holds 2+ - each ChatGPT subscription has its
-    own weekly allowance, its own reset, and its own ceiling, so a single collapsed "codex"
-    number would belong to neither. Falls back to the one card from codex-usage.sh (rollout-file
-    scraping) when the proxy store is absent or holds a single account.
-
-    Only the ACTIVE account can carry a batch: bonus-drain dispatches Codex through whatever
-    the provider credential store holds, which is the account the configured activator selected.
-    Drawing the batch on both cards would claim work is landing somewhere it cannot."""
+    """One card per original subscription, sharing its provider pool gate."""
     lead = _config_lead_hours("codex") or int(_f(gates.get("codex_lead_hours"), DRAIN_LEAD_MAX_HOURS))
     floor_fields = _card_floor_fields("codex")
     win_h = int(_f(gates.get("window_hours"), 5))
     accounts = gates.get("codex_acct") or []
-    active = gates.get("codex_active") or ""
-    selected = gates.get("codex_selected") or ""
 
-    if not accounts:
-        if not cx:
-            return []
-        accounts = [{"label": "codex", "ceiling": _f(gates.get("codex_ceiling"), 98),
-                     "u7": cx.get("u7"), "r7": cx.get("r7")}]
-        active = "codex"
-        # Same single-account reasoning as _claude_cards: no `selected` label exists in this
-        # shape, so without this the one card never carries the batch it is actually running.
-        if coord == "codex" or batch > 0:
-            selected = "codex"
+    pool_gate = _gate_for_card(gates, "", "codex", "")
 
     cards = []
     for a in accounts:
@@ -1976,18 +1983,11 @@ def _codex_cards(gates: dict, cx: dict | None, n_codex: int, coord: str, batch: 
         if windows <= 0 and a.get("r7"):
             ahead = _f(a["r7"]) - time.time() - lead * 3600
             opens = ahead if ahead > 0 else None
-        is_active = a["label"] == active
-        is_sel = a["label"] == selected
-        account_id = f"codex-{str(a['label']).lower()}"
-        draining = _account_draining(
-            gates, account_id, "codex", a["label"],
-            selected=is_sel, coord=coord, inflight=batch,
-        )
-        # At most ONE tag, same rule as the Claude cards: "draining" already implies the
+        pool_open = bool(pool_gate.get("open"))
+        account_id = a["account_id"]
+        draining = batch > 0
         if draining:
-            tag = '<span class="tag acc">draining</span>'
-        elif is_active and len(accounts) > 1:
-            tag = '<span class="tag">active</span>'
+            tag = '<span class="tag acc">pool running</span>'
         else:
             tag = ""
         cards.append({
@@ -1999,61 +1999,55 @@ def _codex_cards(gates: dict, cx: dict | None, n_codex: int, coord: str, batch: 
             "u7": a.get("u7"), "ceiling": _f(a.get("ceiling"), 98),
             "r7": a.get("r7"), "windows": windows, "opens_in": opens,
             "ppw": _f(gates.get("codex_pct_per_window"), 2.5),
-            "batch": batch if is_sel else 0,
-            "batch_n": int(_f(gates.get("batch_n"), 4)),
+            "batch": 0, "pool_batch": batch,
+            "batch_n": int(_f(gates.get("codex_batch_n"), 3)),
             "eligible": n_codex, "elig_label": "jobs", "lead_h": lead,
-            "active": is_active,
-            # The usage bar is gold for the active subscription. A live batch is separately
-            # represented by `batch`/the draining tag, so a closed drain window must not make
-            # the active Codex account look inactive.
-            "live": is_sel or is_active,
+            "active": False,
+            "live": pool_open or draining,
             "draining": draining,
-            "behind": selected if (selected and not is_sel and windows > 0) else "",
-            "urgent": bool(_gate_for_card(gates, f"codex-{str(a['label']).lower()}", "codex", a["label"]).get("urgent")),
+            "behind": "",
+            "urgent": bool(pool_gate.get("urgent")),
+            "pool_open": pool_open, "pool_reason": pool_gate.get("reason"),
+            "pool_surplus": pool_gate.get("surplus"),
+            "reserve": a.get("reserve"), "surplus": a.get("surplus"),
             "urgency_h": _config_urgency_hours("codex") or 0,
             **floor_fields,
         })
     return cards
 
 
-def _grok_cards(gates: dict, grok: dict | None, n_grok: int,
-                coord: str, batch: int) -> list[dict]:
-    """Adapt Grok's single weekly subscription signal to the shared account card."""
-    # Grok is a configured bonus-drain engine, not a conditional visual. Keep its lane in the
-    # top rotation while the durable snapshot is absent or a refresh is still in flight; the
-    # normal unknown-reading state explains the missing telemetry without hiding the engine.
-    grok = grok or {}
-    lead = _config_lead_hours("grok") or int(_f(gates.get("grok_lead_hours", gates.get("lead_hours")),
-                                               DRAIN_LEAD_MAX_HOURS))
-    floor_fields = _card_floor_fields("grok")
-    reset = grok.get("weekly_reset")
-    windows = windows_until_reset(reset, lead, int(_f(gates.get("window_hours"), 5)))
-    opens = None
-    if windows <= 0 and reset:
-        ahead = _f(reset) - time.time() - lead * 3600
-        opens = ahead if ahead > 0 else None
-    draining = _account_draining(
-        gates, "grok-personal", "grok", "Grok",
-        selected=coord == "grok" or batch > 0, coord=coord, inflight=batch,
-    )
+def _unmetered_card(gates: dict, provider: str, eligible: int, batch: int) -> list[dict]:
+    pool = _gate_for_card(gates, provider, provider, provider)
+    configured = any(row.get("provider_id") == provider for row in gates.get("subscriptions", [])) or bool(pool)
+    if not configured:
+        return []
+    try:
+        cfg = graph_config.load_config(os.environ.get("BONUS_DRAIN_CONFIG"))
+        cap = cfg.unmetered_max_inflight
+    except graph_config.ConfigError:
+        cap = 2
     return [{
-        "name": "Grok", "account_id": "grok-personal",
-        "tag": '<span class="tag acc">draining</span>' if draining else "",
-        "engine": "grok",
-        "u5": None, "hot": None, "u7": grok.get("weekly_percent"),
-        "ceiling": _f(gates.get("grok_ceiling"), 98), "r7": reset,
-        "windows": windows, "opens_in": opens,
-        "ppw": _f(gates.get("grok_pct_per_window"), 2.5),
-        "batch": batch,
-        "batch_n": int(_f(gates.get("batch_n"), 4)),
-        "eligible": n_grok, "elig_label": "jobs", "lead_h": lead,
-        # Grok has one configured subscription, so it is always the active account. Whether
-        # a batch is currently landing on it is separately represented by `live`/`batch`.
-        "active": True, "live": True, "draining": draining, "behind": "",
-        "urgent": bool(_gate_for_card(gates, "grok-personal", "grok", "Grok").get("urgent")),
-        "urgency_h": _config_urgency_hours("grok") or 0,
-        **floor_fields,
+        "name": provider.title(), "account_id": provider, "engine": provider,
+        "tag": '<span class="tag acc">pool running</span>' if batch else "",
+        "u5": None, "u7": None, "hot": None, "ceiling": 100, "r7": None,
+        "windows": 0, "opens_in": None, "ppw": 0, "batch": 0, "pool_batch": batch,
+        "batch_n": cap, "eligible": eligible, "elig_label": "jobs", "lead_h": 0,
+        "active": False, "live": bool(pool.get("open")) or batch > 0,
+        "draining": batch > 0, "behind": "", "urgent": False, "urgency_h": 0,
+        "unmetered": True, "pool_open": bool(pool.get("open")), "pool_reason": pool.get("reason"),
+        "pool_surplus": 0, "subscription_count": sum(
+            row.get("provider_id") == provider for row in gates.get("subscriptions", [])
+        ),
     }]
+
+
+def _grok_cards(gates: dict, grok: dict | None, n_grok: int, coord: str, batch: int) -> list[dict]:
+    """Grok has a provider concurrency cap and no metered usage window."""
+    return _unmetered_card(gates, "grok", n_grok, batch)
+
+
+def _muse_cards(gates: dict, n_muse: int, batch: int) -> list[dict]:
+    return _unmetered_card(gates, "muse", n_muse, batch)
 
 
 def _pacing_strip(anchor, gates: dict, dispatches: list[float], batch: int) -> str:
@@ -2246,6 +2240,7 @@ def render_bonus_body() -> str:
     n_claude = sum("claude" in set(r.get("eligible_providers", _legacy_providers(r))) for r in remaining)
     n_codex = sum("codex" in set(r.get("eligible_providers", _legacy_providers(r))) for r in remaining)
     n_grok = sum("grok" in set(r.get("eligible_providers", _legacy_providers(r))) for r in remaining)
+    n_muse = sum("muse" in set(r.get("eligible_providers", _legacy_providers(r))) for r in remaining)
     n_weekly = sum(
         1 for r in remaining
         if r.get("kind") == "recurring" and r.get("cadence") == "weekly"
@@ -2268,6 +2263,7 @@ def render_bonus_body() -> str:
     cards = _claude_cards(gates, usage, len(remaining), coord, c_batch)
     cards.extend(_codex_cards(gates, codex, n_codex, coord, x_batch))
     cards.extend(_grok_cards(gates, grok, n_grok, coord, g_batch))
+    cards.extend(_muse_cards(gates, n_muse, live_batches.get("muse", 0)))
     if gates.get("host_pressure"):
         for card in cards:
             card["host_pressure"] = gates["host_pressure"]
@@ -2275,7 +2271,7 @@ def render_bonus_body() -> str:
     when = f"async scheduler {rel(scout_at)}" if scout_at else "async scheduler timing unavailable"
     nxt = " ".join(
         f'<span class="nxt">{ico(engine)}{int(_f(gates.get(f"{engine}_batch")))}</span>'
-        for engine in ("claude", "codex", "grok")
+        for engine in ("claude", "codex", "grok", "muse")
     )
 
     cards = _drain_order(cards)
@@ -2461,7 +2457,7 @@ def render_bonus_body() -> str:
       <div class="sech"><span>results / run history</span>
         <span class="note">{this_cycle} ran this cycle · {len(remaining)} queued
           ({ico("claude")}{n_claude} Claude · {ico("codex")}{n_codex} Codex ·
-          {ico("grok")}{n_grok} Grok)</span></div>
+          {ico("grok")}{n_grok} Grok · {ico("muse")}{n_muse} Muse)</span></div>
       <div class="card flat">{runlog}</div>
     </div>
     {disabled_sec}
@@ -3435,7 +3431,14 @@ class Handler(BaseHTTPRequestHandler):
                     json.dumps({"error": str(exc)}).encode(), "application/json",
                 )
                 return
-            payload = {"usage": usage, "cycle": cycle, "remaining": remaining,
+            codex, grok = get_codex_usage(), get_grok_usage()
+            gates = get_gates(
+                len(remaining),
+                sum("codex" in set(row.get("eligible_providers", ())) for row in remaining),
+                sum("grok" in set(row.get("eligible_providers", ())) for row in remaining),
+                grok, codex,
+            )
+            payload = {"usage": gates["subscriptions"], "cycle": cycle, "remaining": remaining,
                        "disabled": get_disabled(), "recent": get_recent_runs()}
             self._send(HTTPStatus.OK, json.dumps(payload).encode(), "application/json")
         elif self.path == "/api/schedule":

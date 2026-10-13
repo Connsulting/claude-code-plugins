@@ -85,7 +85,7 @@ def main():
                                                              'environment': 'worker'}],
                                     'findings': [], 'reviewer': 'preview'}))
         attempt = queue.claim('preview-01-plan', 'preview/manual/2000000000', 'preview', 'preview-account',
-                              now_epoch=2000000000)
+                              provider_max_size='huge', now_epoch=2000000000)
         queue.record('preview-01-plan', 'preview/manual/2000000000', attempt_id=attempt.id, status='done',
                      outcome={'reason': {'code': 'done_when_verified', 'detail': 'Demo fixture.',
                                          'signature': 'done_when_verified:preview'},

@@ -11,7 +11,7 @@ import os
 import re
 import stat
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
@@ -131,7 +131,12 @@ class DispatchBinding:
 class ProviderConfig:
     id: str
     dispatch: DispatchBinding
+    max_size: str
     capabilities: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        if self.max_size not in ("tiny", "small", "medium", "large", "huge"):
+            raise ConfigError("provider max_size must be one of: tiny, small, medium, large, huge")
 
 
 @dataclass(frozen=True)
@@ -470,7 +475,7 @@ def validate_config(
     providers: list[ProviderConfig] = []
     for index, row in enumerate(provider_rows):
         _reject_unknown(
-            row, {"id", "dispatch", "capabilities"},
+            row, {"id", "dispatch", "max_size", "capabilities"},
             f"providers[{index}]",
         )
         item_id = _identifier(row.get("id"), f"providers[{index}].id")
@@ -484,7 +489,7 @@ def validate_config(
         capabilities_raw = _require_list(row.get("capabilities", []), f"providers[{index}].capabilities")
         capabilities = frozenset(_identifier(value, f"providers[{index}].capabilities") for value in capabilities_raw)
         providers.append(ProviderConfig(
-            item_id, DispatchBinding(adapter_id, router_provider), capabilities,
+            item_id, DispatchBinding(adapter_id, router_provider), row.get("max_size"), capabilities,
         ))
     provider_ids = {provider.id for provider in providers}
 
@@ -668,6 +673,35 @@ def load_config(
         source_dir=config_path.parent,
         source_path=config_path,
         environ=env,
+    )
+
+
+def load_terminal_config(
+    path: str | os.PathLike[str] | Path,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> RuntimeConfig:
+    """Read receipt authority without interpreting the current provider graph."""
+    env = os.environ if environ is None else environ
+    config_path = Path(path).expanduser().resolve(strict=False)
+    try:
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise ConfigError(f"cannot read terminal config {config_path}") from exc
+    data = _require_mapping(raw, "terminal config")
+    database_value = data.get("database")
+    database = (
+        _safe_path(database_value, "database", config_path.parent)
+        if database_value is not None else default_state_dir(env) / "queue.db"
+    )
+    timezone = _string(data.get("recurrence_timezone", "America/New_York"), "recurrence_timezone")
+    try:
+        ZoneInfo(timezone)
+    except (ValueError, ZoneInfoNotFoundError) as exc:
+        raise ConfigError("recurrence_timezone must be an IANA timezone") from exc
+    return replace(
+        minimal_config(database=database, environ=env),
+        source_path=config_path, recurrence_timezone=timezone,
     )
 
 

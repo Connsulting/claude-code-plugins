@@ -407,7 +407,7 @@ class LongHorizonCoordinatorTests(CapabilityRoutingCase):
 
         def eligible(*capabilities: str) -> list[str]:
             return [item.id for item in self.queue.eligible_tasks(
-                0, max_size="huge", provider_id="grok", capabilities=capabilities, now_epoch=NOW,
+                0, max_size="huge", provider_id="claude", capabilities=capabilities, now_epoch=NOW,
             )]
 
         self.assertNotIn(coordinator, eligible())

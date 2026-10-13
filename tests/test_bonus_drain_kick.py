@@ -182,7 +182,7 @@ class KickContractTests(unittest.TestCase):
             mock.patch.object(cli, "_queue") as opened,
             mock.patch("builtins.print"),
         ):
-            self.assertEqual(isolated_cli(["accounts"]), 0)
+            self.assertEqual(isolated_cli(["accounts", "labels"]), 0)
         opened.assert_not_called()
 
     def test_runtime_injected_non_router_classifier_and_launcher_are_rejected_before_execution(self) -> None:
@@ -500,7 +500,7 @@ class KickContractTests(unittest.TestCase):
         ):
             dispatcher.dispatch(
                 cfg, self.queue, task_id="portable", eligibility_key="manual/bound-secret",
-                requested_provider="auto",
+                requested_provider="claude",
             )
 
         phases = [("--dry-run" in call.args[0], call.kwargs["env"]) for call in spawned.call_args_list]
@@ -525,6 +525,9 @@ class KickContractTests(unittest.TestCase):
 
     def test_unresolvable_bound_router_secret_is_known_not_launched_and_retry_safe(self) -> None:
         cfg = self._router_with_bound_secret()
+        usage.write_cache(usage.cache_path(cfg.usage_cache_dir, "claude", "claude-account"),
+                          usage.UsageSnapshot("claude", "claude-account", NOW,
+                              {"seven_day": {"used_percent": 20, "resets_at": NOW + 1_000}}).cache_dict())
         environ = {key: value for key, value in os.environ.items() if key != "BONUS_TEST_CLASSIFIER_KEY"}
         for requested, failure in (
             ("auto", dispatcher.KnownDispatchFailure),
@@ -538,7 +541,7 @@ class KickContractTests(unittest.TestCase):
             ):
                 dispatcher.dispatch(
                     cfg, self.queue, task_id="portable", eligibility_key=key,
-                    requested_provider=requested,
+                    requested_provider=requested, now_epoch=NOW,
                 )
             self.assertNotIsInstance(raised.exception, dispatcher.AmbiguousDispatch)
             self.assertIn("classifier-key", str(raised.exception))

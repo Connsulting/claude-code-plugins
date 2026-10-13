@@ -252,7 +252,7 @@
         },
         "kind": {
           "enum": [
-              "t3-thread"
+            "t3-thread"
           ]
         },
         "argv": {
@@ -286,7 +286,8 @@
       "additionalProperties": false,
       "required": [
         "id",
-        "dispatch"
+        "dispatch",
+        "max_size"
       ],
       "properties": {
         "id": {
@@ -309,12 +310,23 @@
             }
           }
         },
+        "max_size": {
+          "type": "string",
+          "enum": [
+            "tiny",
+            "small",
+            "medium",
+            "large",
+            "huge"
+          ],
+          "description": "Largest task size this provider may plan, claim, or dispatch. A task without a size is treated as huge."
+        },
         "capabilities": {
           "type": "array",
           "items": {
             "$ref": "#/$defs/id"
           },
-          "description": "Capabilities this provider offers. Reserved: legacy-exclusive runs migrated claude_only and legacy-exclusive model rows; implement means the provider can drive the implement skill, and a task that invokes it (use_implement, or a /implement, $implement, or implement skill reference in its prompt text) runs only on providers declaring it. Omit implement on providers that cannot drive the skill."
+          "description": "Capabilities this provider offers. Reserved: legacy-exclusive is restricted to claude; implement is restricted to claude and codex. Reserved capabilities also require these declarations and cannot be granted to other provider identities."
         }
       }
     },

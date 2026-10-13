@@ -31,10 +31,9 @@ from .planner import (
     build_plan,
     close_providers,
     finalize_plan,
-    preferred_provider_batches,
 )
 from .reconcile import reconcile_inflight
-from .usage import read_all
+from .usage import UsageError, read_all
 
 # Held for a whole tick so a timer run and a slot-freed path run never overlap.
 TICK_LOCK_NAME = "scout.lock"
@@ -390,21 +389,16 @@ def _apply_inflight_caps(
             gates_by_key[key] = replace(gates_by_key[key], batch_size=cap)
         kept.append(batch)
     gates = tuple(gates_by_key[(gate.provider_id, gate.account_id)] for gate in plan.gates)
-    return PlanResult(tuple(kept), closed, gates, plan.generated_at)
+    return replace(plan, batches=tuple(kept), closed=closed, gates=gates)
 
 
 def _apply_account_backoff(
     plan: PlanResult, backoffs: list[dict[str, Any]],
 ) -> PlanResult:
-    """Close each batch whose account (or whole provider launcher) is in backoff.
-
-    A proved account or launcher failure holds the account, not the task, so the
-    planner can still pick an open sibling account of the same provider.
-    """
-
-    held: dict[tuple[str, str], dict[str, Any]] = {}
+    """An unexpired historical subscription hold closes its whole provider pool."""
+    held: dict[str, dict[str, Any]] = {}
     for row in backoffs:
-        held.setdefault((str(row["provider_id"]), str(row["account_id"])), row)
+        held.setdefault(str(row["provider_id"]), row)
     if not held:
         return plan
     closed = dict(plan.closed)
@@ -412,17 +406,17 @@ def _apply_account_backoff(
     kept = []
     for batch in plan.batches:
         key = (batch.provider_id, batch.account_id)
-        row = held.get(key) or held.get((batch.provider_id, "*"))
+        row = held.get(batch.provider_id)
         if row is None:
             kept.append(batch)
             continue
-        reason = f"account backoff until {row['not_before']}: {row['cause']}"
+        reason = f"provider backoff until {row['not_before']}: {row['cause']}"
         closed[key] = reason
         gates_by_key[key] = replace(
             gates_by_key[key], open=False, reason=reason, batch_size=0,
         )
     gates = tuple(gates_by_key[(gate.provider_id, gate.account_id)] for gate in plan.gates)
-    return PlanResult(tuple(kept), closed, gates, plan.generated_at)
+    return replace(plan, batches=tuple(kept), closed=closed, gates=gates)
 
 
 
@@ -448,43 +442,24 @@ def _apply_global_cap(
     remaining = max(0, config.max_jobs - sum(by_provider.values()))
     closed = dict(plan.closed)
     gates_by_key = {(gate.provider_id, gate.account_id): gate for gate in plan.gates}
-    preferred = preferred_provider_batches(config, plan)
-    ranked = sorted(
-        preferred,
-        key=lambda batch: (
-            not batch.urgent, batch.resets_at, batch.provider_id, batch.account_id,
-        ),
-    )
-    batches_by_provider: dict[str, list[Any]] = {}
-    for batch in plan.batches:
-        batches_by_provider.setdefault(batch.provider_id, []).append(batch)
-    kept: list[Any] = []
-    for preferred_batch in ranked:
-        provider_batches = batches_by_provider[preferred_batch.provider_id]
+    ranked = sorted(plan.batches, key=lambda batch: (not batch.urgent, batch.resets_at, batch.provider_id))
+    kept = []
+    for batch in ranked:
+        key = (batch.provider_id, batch.account_id)
         if remaining <= 0:
             reason = "global job cap reached"
-            for batch in provider_batches:
-                key = (batch.provider_id, batch.account_id)
-                closed[key] = reason
-                gates_by_key[key] = replace(
-                    gates_by_key[key], open=False, reason=reason, batch_size=0,
-                )
+            closed[key] = reason
+            gates_by_key[key] = replace(gates_by_key[key], open=False, reason=reason, batch_size=0)
             continue
-        cap = min(preferred_batch.batch_size, remaining)
-        preferred_key = (
-            preferred_batch.provider_id, preferred_batch.account_id,
-        )
-        for batch in provider_batches:
-            if batch.account_id == preferred_batch.account_id and cap != batch.batch_size:
-                batch = replace(batch, batch_size=cap)
-                gates_by_key[preferred_key] = replace(
-                    gates_by_key[preferred_key], batch_size=cap,
-                )
-            kept.append(batch)
+        cap = min(batch.batch_size, remaining)
+        if cap != batch.batch_size:
+            batch = replace(batch, batch_size=cap)
+            gates_by_key[key] = replace(gates_by_key[key], batch_size=cap)
+        kept.append(batch)
         remaining -= cap
     kept.sort(key=lambda batch: (batch.resets_at, batch.provider_id, batch.account_id))
     gates = tuple(gates_by_key[(gate.provider_id, gate.account_id)] for gate in plan.gates)
-    return PlanResult(tuple(kept), closed, gates, plan.generated_at)
+    return replace(plan, batches=tuple(kept), closed=closed, gates=gates)
 
 
 def plan_tick(
@@ -503,7 +478,12 @@ def plan_tick(
 
     now = int(time.time() if now_epoch is None else now_epoch)
     reader = _initialized_queue_reader(queue)
-    snapshots = read_all(config, cache_root, now_epoch=now)
+    inventory_error = None
+    try:
+        snapshots = read_all(config, cache_root, now_epoch=now)
+    except UsageError as exc:
+        snapshots = {}
+        inventory_error = str(exc)
     anchor = _cycle_anchor(config, snapshots, now)
     dependency_checks: dict[str, bool] = {}
     dependency_holds: dict[str, dict[str, Any]] = {}
@@ -526,29 +506,36 @@ def plan_tick(
         return dependency_checks[task.id]
 
     availability: dict[tuple[str, str], int] = {}
-    # Per provider lacking the implement capability: dependency-ready implement-skill tasks
-    # that would be eligible there with that capability and are not eligible without it.
     implement_only: dict[str, tuple[Any, ...]] = {}
-    for account in accounts_from_snapshots(config, snapshots):
-        provider = config.provider(account.provider_id)
+    size_candidates: dict[str, tuple[Any, ...]] = {}
+    all_capabilities = set().union(
+        *(set(task.required_capabilities) for task in reader.tasks()),
+        *(set(provider.capabilities) for provider in config.providers),
+    )
+    neutral = reader.eligible_tasks(anchor, capabilities=all_capabilities, automatic=True, now_epoch=now)
+    for provider in config.providers:
         eligible = reader.eligible_tasks(
-            anchor,
-            provider_id=provider.id,
-            capabilities=provider.capabilities, automatic=True, now_epoch=now,
+            anchor, provider_id=provider.id, capabilities=provider.capabilities,
+            max_size=provider.max_size, automatic=True, now_epoch=now,
         )
-        availability[(account.provider_id, account.id)] = sum(
-            dependency_ready(task) for task in eligible
+        availability[(provider.id, provider.id)] = sum(dependency_ready(task) for task in eligible)
+        size_candidates[provider.id] = tuple(
+            task for task in neutral
+            if not reader._provider_compatible(task, provider.id, provider.capabilities, max_size=provider.max_size)
+            and reader._provider_compatible(task, provider.id, provider.capabilities, max_size="huge")
+            and dependency_ready(task)
         )
-        if IMPLEMENT_CAPABILITY in provider.capabilities or provider.id in implement_only:
+        if provider.id in {"claude", "codex"} and IMPLEMENT_CAPABILITY in provider.capabilities:
             continue
-        eligible_ids = {task.id for task in eligible}
         implement_only[provider.id] = tuple(
-            task for task in reader.eligible_tasks(
-                anchor, provider_id=provider.id,
-                capabilities={*provider.capabilities, IMPLEMENT_CAPABILITY},
-                automatic=True, now_epoch=now,
-            )
-            if task.id not in eligible_ids and task_invokes_implement(task)
+            task for task in neutral
+            if task_invokes_implement(task)
+            and (not task.allowed_providers or provider.id in task.allowed_providers)
+            and db.TASK_SIZES.index(task.size or "huge") <= db.TASK_SIZES.index(provider.max_size)
+            and (not task_requires_legacy_exclusive(task) or (
+                provider.id == "claude" and db.LEGACY_EXCLUSIVE_CAPABILITY in provider.capabilities
+            ))
+            and (set(task.required_capabilities) - {IMPLEMENT_CAPABILITY}).issubset(provider.capabilities)
             and dependency_ready(task)
         )
     account_backoffs = reader.account_backoffs(now_epoch=now)
@@ -563,6 +550,8 @@ def plan_tick(
         """Apply every gate closure to one availability map; reads only."""
 
         result = build_plan(config, snapshots, eligible_count=eligible_count, now_epoch=now)
+        if inventory_error is not None:
+            result = close_providers(result, {provider.id: inventory_error for provider in config.providers})
         result = _apply_account_backoff(result, account_backoffs)
         result = _apply_inflight_caps(
             result, queue, now_epoch=now, provider_holds=provider_holds,
@@ -597,7 +586,7 @@ def plan_tick(
         candidates = list(reader.eligible_tasks(
             batch.resets_at,
             provider_id=provider.id,
-            capabilities=provider.capabilities, automatic=True, now_epoch=now,
+            capabilities=provider.capabilities, max_size=provider.max_size, automatic=True, now_epoch=now,
         ))
         candidates = [task for task in candidates if dependency_ready(task)]
         batch_slots: list[int] = []
@@ -731,15 +720,19 @@ def plan_tick(
             adjusted_gates.append(replace(gate, batch_size=adjusted.batch_size))
         else:
             adjusted_gates.append(gate)
-    adjusted_plan = PlanResult(
-        adjusted_batches,
-        adjusted_closed,
-        tuple(adjusted_gates),
-        plan.generated_at,
+    adjusted_plan = replace(
+        plan, batches=adjusted_batches, closed=adjusted_closed, gates=tuple(adjusted_gates),
+    )
+    size_holds = tuple(
+        {"kind": "provider_size", "task_id": task.id, "provider_id": provider.id,
+         "size": task.size or "huge", "max_size": provider.max_size,
+         "reason": f"task size {task.size or 'huge'} exceeds provider {provider.id} max_size {provider.max_size}"}
+        for provider in config.providers for task in size_candidates.get(provider.id, ())
+        if task.id not in allocated_ids
     )
     return TickPlan(
         anchor, snapshots, adjusted_plan, allocations,
-        tuple(dependency_holds.values()) + tuple(capability_holds.values()),
+        tuple(dependency_holds.values()) + tuple(capability_holds.values()) + size_holds,
         blocker, frozenset(dispatch_last),
     )
 

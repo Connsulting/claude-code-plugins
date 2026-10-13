@@ -27,8 +27,8 @@ from .config import (
 from .db import (
     COMPLETION_MECHANISMS,
     IMPLEMENT_CAPABILITY,
-    LEGACY_EXCLUSIVE_CAPABILITY,
     REASON_CODES,
+    TASK_SIZES,
     AccountHold,
     QueueDB,
     QueueError,
@@ -36,7 +36,6 @@ from .db import (
     canonical_model,
     cycle_from_key,
     task_invokes_implement,
-    task_requires_legacy_exclusive,
 )
 from .t3_state import t3_engine
 
@@ -314,14 +313,9 @@ def replay_factory_terminal(
 
 
 def provider_compatible(task: Task, provider: ProviderConfig) -> bool:
-    if task.allowed_providers and provider.id not in task.allowed_providers:
-        return False
-    if task_requires_legacy_exclusive(task) and \
-       LEGACY_EXCLUSIVE_CAPABILITY not in provider.capabilities:
-        return False
-    if task_invokes_implement(task) and IMPLEMENT_CAPABILITY not in provider.capabilities:
-        return False
-    return set(task.required_capabilities).issubset(provider.capabilities)
+    return QueueDB._provider_compatible(
+        task, provider.id, provider.capabilities, max_size=provider.max_size,
+    )
 
 
 def implement_provider_refusal(config: RuntimeConfig, task: Task) -> str | None:
@@ -334,7 +328,9 @@ def implement_provider_refusal(config: RuntimeConfig, task: Task) -> str | None:
     if not task.allowed_providers or not task_invokes_implement(task):
         return None
     for provider in config.providers:
-        if provider.id in task.allowed_providers and IMPLEMENT_CAPABILITY not in provider.capabilities:
+        if provider.id in task.allowed_providers and (
+            provider.id not in {"claude", "codex"} or IMPLEMENT_CAPABILITY not in provider.capabilities
+        ):
             return (
                 f"provider {provider.id} lacks the {IMPLEMENT_CAPABILITY} capability, so it cannot "
                 "run a task that invokes the implement skill; drop it from providers or use auto"
@@ -1446,15 +1442,6 @@ def _provider(config: RuntimeConfig, provider_id: str) -> ProviderConfig:
 
 
 
-def _no_usage_gate(gate: Any) -> bool:
-    reason = str(getattr(gate, "reason", "") or "")
-    return (not gate.open) and (
-        reason == "missing usage cache"
-        or "No such file" in reason
-        or "Not a directory" in reason
-    )
-
-
 def select_auto_provider(
     config: RuntimeConfig, task: Task, now_epoch: int | None,
 ) -> ProviderConfig:
@@ -1469,15 +1456,20 @@ def select_auto_provider(
 
     compatible = [provider for provider in config.providers if provider_compatible(task, provider)]
     if not compatible:
+        size = task.size or "huge"
+        if all(TASK_SIZES.index(size) > TASK_SIZES.index(provider.max_size) for provider in config.providers):
+            ceilings = ", ".join(f"{provider.id} max_size {provider.max_size}" for provider in config.providers)
+            raise InvalidRoute(f"task size {size} exceeds configured provider ceilings: {ceilings}")
         needs = (
             f": it invokes the implement skill and needs capability {IMPLEMENT_CAPABILITY}"
             if task_invokes_implement(task) else ""
         )
         raise InvalidRoute(f"no configured provider is compatible with task {task.id}{needs}")
-    gates = build_gates(
-        config, usage.read_all(config, now_epoch=now_epoch), eligible_count=1,
-        now_epoch=int(time.time() if now_epoch is None else now_epoch),
-    )
+    try:
+        snapshots = usage.read_all(config, now_epoch=now_epoch)
+    except usage.UsageError as exc:
+        raise InvalidRoute("proxy account inventory unavailable") from exc
+    gates = build_gates(config, snapshots, eligible_count=1, now_epoch=now_epoch)
     by_id: dict[str, list[Any]] = {}
     for gate in gates:
         by_id.setdefault(gate.provider_id, []).append(gate)
@@ -1485,7 +1477,7 @@ def select_auto_provider(
     def rank(item: tuple[int, ProviderConfig]) -> tuple[int, int, int]:
         index, provider = item
         rows = by_id.get(provider.id)
-        if rows is None or all(_no_usage_gate(gate) for gate in rows):
+        if rows and all(gate.reason == "no proxy subscriptions" for gate in rows):
             return (1, 0, index)
         open_resets = [
             int(gate.resets_at) for gate in rows
@@ -1550,23 +1542,22 @@ def dispatch(
         provider = select_auto_provider(config, task, now_epoch)
     else:
         provider = _provider(config, requested_provider)
+    size = task.size or "huge"
+    if TASK_SIZES.index(size) > TASK_SIZES.index(provider.max_size):
+        raise InvalidRoute(f"task size {size} exceeds provider {provider.id} max_size {provider.max_size}")
     if provider.id == "auto" or not provider_compatible(task, provider):
         raise InvalidRoute(f"provider {provider.id} is incompatible with task {task.id}")
     adapter = config.adapter(provider.dispatch.adapter_id)
     if adapter.kind not in {"agent-router", "t3-thread"}:
         raise InvalidRoute(f"launch adapter {adapter.id} must be kind agent-router or t3-thread")
 
-    from .usage import read_accounts
-    accounts = tuple(item for item in read_accounts(config, now_epoch=now_epoch)
-                     if item.provider_id == provider.id)
-    hint = eligibility_key.split("/", 1)[0]
-    account = next((item for item in accounts if item.id == hint), None)
-    if account is None and accounts:
-        account = accounts[0]
-    account_id = account.id if account else None
+    account_id = provider.id
+    if eligibility_key.startswith("manual/manual/"):
+        eligibility_key = provider.id + eligibility_key[len("manual"):]
     attempt = queue.claim(
         task.id, eligibility_key, provider.id, account_id,
-        provider_capabilities=provider.capabilities, automatic=trigger == "bonus", expected_task=task,
+        provider_max_size=provider.max_size, provider_capabilities=provider.capabilities,
+        automatic=trigger == "bonus", expected_task=task,
         now_epoch=now_epoch,
     )
     if attempt is None:

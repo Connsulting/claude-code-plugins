@@ -75,8 +75,8 @@ With old writers masked and the backup verified:
 3. If needed, import markdown/jsonl once with `bonus-drain import-legacy`; otherwise copy or
    transform the quiesced DB using the separately reviewed operator procedure.
 4. Run `bonus-drain doctor --json`, `status --json`, `queue --json`, and `runs --json`.
-5. Run one `bonus-drain refresh --json`; verify every account independently and ensure a
-   failed reader did not replace a last-good cache.
+5. Run one `bonus-drain refresh --json`; verify every subscription and ensure a
+   failed or stale reader closes its whole provider pool.
 6. Run `gates --json` and `plan --json`. Do not dispatch until provider/account identities,
    reset times, and closed/open reasons are expected.
 7. Enable only `bonus-drain-refresh.timer`. Observe one successful refresh, then enable
@@ -92,7 +92,7 @@ For an existing SQLite queue, copy the quiesced database into the separate XDG s
 never repoint the new runtime at an old hard link. Run `bonus-drain init` only against that
 copy so additive columns and claims are created without rewriting task or run identity. Verify
 task/run/status counts before and after initialization. Migrated `claude_only` and recognized
-legacy-exclusive model rows remain restricted to providers declaring the reserved
+legacy-exclusive model rows remain restricted to Claude declaring the reserved
 `legacy-exclusive` capability in JSON.
 
 Schema migration 5 drops the removed account ownership table and changes historical account
@@ -102,6 +102,12 @@ quiesced database before upgrading; the prior runtime cannot use the removed tab
 
 Remove configured plans, accounts, and provider usage/reset readers. Bind every pacing limit
 to `provider_id`, declare the private dotenv file in `secret_refs`, and set `proxy_secret_ref`.
+Add required `max_size` to each provider; the example uses Grok `small`, Muse `medium`, Codex
+`large`, and Claude `huge`. Use routable IDs `grok` and `muse`; proxy vendor spellings are
+normalized during refresh. New dispatches store the provider ID in `account_id`, while old
+claims keep their original subscription ID. Terminal commands read database authority without
+validating the provider graph, so existing workers can finish during this config upgrade.
+Remove `--account` from manual starts and any `accounts select` calls.
 Refresh populates the proxy account inventory before automated planning. `doctor` must report
 no ambiguous dispatch claim before enabling scout.
 

@@ -194,16 +194,24 @@ def read_accounts(
     try:
         raw = json.loads((root / "auth-files.json").read_text(encoding="utf-8"))
         _epoch(raw["captured_at"], "captured_at")
+        if not isinstance(raw["accounts"], list):
+            raise UsageError("invalid proxy account inventory")
         accounts = []
+        seen = set()
         providers = {provider.id for provider in config.providers}
         for item in raw["accounts"]:
             provider = _identifier(item["provider_id"], "provider_id")
             account_id = _identifier(item["id"], "account_id")
+            if not isinstance(item["unmetered"], bool) or (provider, account_id) in seen:
+                raise UsageError("invalid proxy account inventory")
+            seen.add((provider, account_id))
             if provider in providers:
-                accounts.append(ProxyAccount(account_id, provider, bool(item["unmetered"])))
+                accounts.append(ProxyAccount(account_id, provider, item["unmetered"]))
         return tuple(accounts)
-    except (OSError, UnicodeError, ValueError, KeyError, TypeError, UsageError):
+    except FileNotFoundError:
         return ()
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError, UsageError):
+        raise UsageError("proxy account inventory unavailable") from None
 
 
 def read_all(

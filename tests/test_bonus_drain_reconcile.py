@@ -260,7 +260,7 @@ class ScoutReconciliationTests(unittest.TestCase):
                 self.assertEqual(dispatch.call_count, 1)
                 self.assertEqual(dispatch.call_args.kwargs["task_id"], "healthy-beta")
                 self.assertEqual(dispatch.call_args.kwargs["requested_provider"], "beta")
-                self.assertIn(("alpha", "alpha-account"), report.plan.closed)
+                self.assertIn(("alpha", "alpha"), report.plan.closed)
                 self.assertEqual(len(self.queue.claims()), 1)
                 self.assertEqual(len(self.queue.runs()), 1)
 

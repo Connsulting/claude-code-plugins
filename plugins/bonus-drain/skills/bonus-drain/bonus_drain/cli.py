@@ -153,12 +153,16 @@ def _queue(args: argparse.Namespace, *, graph_required: bool = False) -> tuple[c
 
 
 def _terminal_queue(args: argparse.Namespace) -> tuple[config_module.RuntimeConfig, db.QueueDB]:
-    """Bind terminal commands to a supplied config's authoritative database."""
-
-    explicit_config = bool(
-        getattr(args, "config", None) or os.environ.get("BONUS_DRAIN_CONFIG")
-    )
-    return _queue(args, graph_required=explicit_config)
+    """Bind receipts to database authority independently of the provider graph."""
+    path = _config_path(args)
+    database = getattr(args, "database", None)
+    if path is None:
+        cfg = config_module.minimal_config(database=database)
+    else:
+        cfg = config_module.load_terminal_config(path)
+        if database and Path(database).expanduser().resolve(strict=False) != cfg.database:
+            raise CLIError("--database must match config database for terminal receipts")
+    return cfg, db.QueueDB(cfg.database, recurrence_timezone=cfg.recurrence_timezone)
 
 
 def _outcome(args: argparse.Namespace, cfg: config_module.RuntimeConfig) -> tuple[Mapping[str, Any] | None, Path | None]:
@@ -361,13 +365,15 @@ def _legacy_filter(cfg: config_module.RuntimeConfig, args: argparse.Namespace) -
     }
     flag = "codex" if getattr(args, "codex", False) else "grok" if getattr(args, "grok", False) else None
     if flag is not None:
-        # The legacy flag names a provider; apply that provider's compatibility gate. An
-        # unconfigured flag declares no capabilities, so capability-gated work stays excluded.
+        # The legacy flag names a configured provider and its explicit size ceiling.
         provider = next(
             (item for item in cfg.providers if flag in {item.id, item.dispatch.provider}), None,
         )
-        filters["provider_id"] = provider.id if provider is not None else flag
-        filters["capabilities"] = provider.capabilities if provider is not None else ()
+        if provider is None:
+            raise CLIError(f"provider {flag} is not configured")
+        filters["provider_id"] = provider.id
+        filters["capabilities"] = provider.capabilities
+        filters["max_size"] = provider.max_size
     return filters
 
 
@@ -583,6 +589,7 @@ def _command(args: argparse.Namespace) -> int:
                 provider.id: {
                     task.id for task in queue.eligible_tasks(
                         cycle, provider_id=provider.id, capabilities=provider.capabilities,
+                        max_size=provider.max_size,
                         now_epoch=now,
                     )
                 }
@@ -608,7 +615,9 @@ def _command(args: argparse.Namespace) -> int:
             snapshot["compatible_provider_ids"] = {
                 task.id: [
                     provider.id for provider in cfg.providers
-                    if queue._provider_compatible(task, provider.id, provider.capabilities)
+                    if queue._provider_compatible(
+                        task, provider.id, provider.capabilities, max_size=provider.max_size,
+                    )
                 ]
                 for task in tasks_by_id.values()
             }
@@ -723,6 +732,7 @@ def _command(args: argparse.Namespace) -> int:
         _json({
             "generated_at": tick.plan.generated_at,
             "gates": [gate.to_dict() for gate in tick.plan.gates],
+            "subscriptions": [dict(subscription) for subscription in tick.plan.subscriptions],
             "host_pressure": tick.host_pressure,
             "allocations": [
                 {
@@ -736,9 +746,8 @@ def _command(args: argparse.Namespace) -> int:
         })
         return 0
     if command == "plan":
-        cfg, _queue_obj, result = _plan(args)
+        _cfg, _queue_obj, result = _plan(args)
         payload = result.to_dict()
-        payload["accounts"] = [record.to_dict() for record in usage.read_all(cfg, now_epoch=_now(args)).values()]
         _json(payload)
         return 0
     if command == "usage":
@@ -810,7 +819,6 @@ def _command(args: argparse.Namespace) -> int:
         result = kick_task(
             cfg, queue, task_id=args.task, requested_provider=args.provider,
             eligibility_key=getattr(args, "eligibility_key", None), now_epoch=_now(args),
-            account_id=getattr(args, "account", None),
         )
         _json({"dispatch": result.to_dict()}) if args.json else print(result.job_id)
         return 0
@@ -867,12 +875,8 @@ def _command(args: argparse.Namespace) -> int:
         ))
         return 0
     if command == "accounts":
-        if args.accounts_command == "select":
-            cfg, queue = _queue(args, graph_required=True)
-            queue.initialize()
-            return _accounts_command(cfg, args, queue)
         cfg = _load_config(args, graph_required=True)
-        return _accounts_command(cfg, args, None)
+        return _accounts_command(cfg, args)
     if command == "held-report":
         _cfg, queue = _queue(args)
         report = queue.held_authority_report()
@@ -1020,7 +1024,6 @@ def _command(args: argparse.Namespace) -> int:
 def _accounts_command(
     cfg: config_module.RuntimeConfig,
     args: argparse.Namespace,
-    queue: db.QueueDB | None,
 ) -> int:
     action = args.accounts_command
     accounts = list(usage.read_accounts(cfg, now_epoch=_now(args)))
@@ -1048,21 +1051,6 @@ def _accounts_command(
         record = usage.read_all(cfg, now_epoch=_now(args))[(account.provider_id, account.id)]
         print(usage.legacy_window_line(cfg, record))
         return 0 if record.fresh else 1
-    if action == "select":
-        if queue is None:
-            raise CLIError("accounts select requires the authoritative queue")
-        now = _now(args)
-        records = usage.read_all(cfg, now_epoch=now)
-        result = planner.build_plan(cfg, records, eligible_count=1, now_epoch=now)
-        result = planner.finalize_plan(
-            cfg,
-            result,
-            eligible_count=1,
-        )
-        if result.batches:
-            batch = result.batches[0]
-            print(f"{batch.account_id} {batch.resets_at}")
-        return 0
     raise CLIError(f"unknown accounts subcommand: {action}")
 
 
@@ -1185,11 +1173,11 @@ def build_parser() -> argparse.ArgumentParser:
     scout_parser = sub.add_parser("scout"); _add_common(scout_parser); _add_json(scout_parser); scout_parser.add_argument("--now", type=int); scout_parser.add_argument("--dry-run", action="store_true")
 
     for name in ("dispatch", "run-now"):
-        item = sub.add_parser(name); _add_common(item); _add_json(item); item.add_argument("task"); item.add_argument("provider", nargs="?", default="auto"); item.add_argument("--account"); item.add_argument("--eligibility-key"); item.add_argument("--now", type=int)
+        item = sub.add_parser(name); _add_common(item); _add_json(item); item.add_argument("task"); item.add_argument("provider", nargs="?", default="auto"); item.add_argument("--eligibility-key"); item.add_argument("--now", type=int)
     render = sub.add_parser("render-prompt"); _add_common(render); render.add_argument("task"); render.add_argument("--provider", required=True); render.add_argument("--account"); render.add_argument("--eligibility-key", required=True)
     render_json = sub.add_parser("render-prompt-json"); _add_common(render_json); render_json.add_argument("--task-json", required=True); render_json.add_argument("--cycle", type=int, required=True); render_json.add_argument("--provider", required=True); render_json.add_argument("--account")
 
-    accounts = sub.add_parser("accounts"); _add_common(accounts); accounts.add_argument("accounts_command", choices=("labels", "count", "multi", "cycle", "canonical-cycle", "usage", "select")); accounts.add_argument("account", nargs="?"); accounts.add_argument("epoch", type=int, nargs="?"); accounts.add_argument("--now", type=int)
+    accounts = sub.add_parser("accounts"); _add_common(accounts); accounts.add_argument("accounts_command", choices=("labels", "count", "multi", "cycle", "canonical-cycle", "usage")); accounts.add_argument("account", nargs="?"); accounts.add_argument("epoch", type=int, nargs="?"); accounts.add_argument("--now", type=int)
     doctor = sub.add_parser("doctor"); _add_common(doctor); _add_json(doctor)
     held = sub.add_parser("held-report"); _add_common(held); _add_json(held); held.add_argument("--observe", action="store_true", help="observe each hold's source issue and handoff PR live; stores nothing"); held.add_argument("--now", type=int)
     backfill = sub.add_parser("readiness-backfill"); _add_common(backfill); _add_json(backfill); backfill.add_argument("--now", type=int)

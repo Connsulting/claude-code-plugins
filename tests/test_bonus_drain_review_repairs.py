@@ -253,7 +253,7 @@ class BonusDrainReviewRepairTests(unittest.TestCase):
         self.assertEqual(dispatch_mock.call_count, 1)
         self.assertEqual(dispatch_mock.call_args.kwargs["task_id"], "would-run")
         self.assertEqual(dispatch_mock.call_args.kwargs["requested_provider"], "beta")
-        self.assertIn(("alpha", "alpha-account"), report.plan.closed)
+        self.assertIn(("alpha", "alpha"), report.plan.closed)
         self.assertEqual(self.queue.claim_for("running").attempt_id, attempt.id)
         self.assertEqual(self.queue.inflight_details(now_epoch=NOW)[0]["age_seconds"], 125)
         self.assertEqual(len(self.queue.runs(task_id="running")), 1)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -219,16 +220,34 @@ class ProxyUsageTests(unittest.TestCase):
         usage.refresh_all(self.config, now_epoch=self.now)
         db.QueueDB(self.config.database).initialize()
         viewer = _load_server()
+        viewer.BONUS_SKILL_DIR = SKILL
+        viewer.BONUSDB_SH = SKILL / "bonusdb.sh"
+        viewer.DB_PATH = self.config.database
         server = ThreadingHTTPServer(("127.0.0.1", 0), viewer.Handler)
+        authority = "fixture-viewer.example"
+        origin = f"https://{authority}"
+        self.config_path.write_text(json.dumps(dict(self.raw, viewer={
+            "bind": "127.0.0.1", "remote": {"trusted_loopback_proxy": True,
+                "allowed_hosts": [authority], "allowed_origins": [origin]},
+        })))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(thread.join, 5)
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
-        with (mock.patch.dict(os.environ, {"BONUS_DRAIN_CONFIG": str(self.config_path)}),
+        with (mock.patch.dict(os.environ, {"BONUS_DRAIN_CONFIG": str(self.config_path),
+                                          "BONUS_DRAIN_BIN": str(SKILL / "bin/bonus-drain"),
+                                          "BONUS_SKILL_DIR": str(SKILL)}),
               mock.patch.object(viewer, "list_timers", return_value=[])):
+            viewer.configure_request_boundary()
             body = viewer.render_bonus_body()
-            status, _headers, payload = JobsViewerContractTests._request(server, "GET", "/api/bonus")
+            rejected, _headers, _payload = JobsViewerContractTests._request(
+                server, "GET", "/api/bonus", headers={"Host": "other.example.test"},
+            )
+            self.assertEqual(rejected, 403)
+            status, _headers, payload = JobsViewerContractTests._request(
+                server, "GET", "/api/bonus", headers={"Host": authority, "Origin": origin},
+            )
         self.assertEqual(status, 200)
         inventory = json.loads(payload)["usage"]
         self.assertIsInstance(inventory, list)
@@ -236,11 +255,12 @@ class ProxyUsageTests(unittest.TestCase):
         self.assertEqual(sum(row["provider_id"] == "codex" for row in inventory), 2)
         unmetered = {row["provider_id"] for row in inventory if row["unmetered"]}
         self.assertEqual(unmetered, {"grok", "muse"})
-        self.assertEqual(body.count("Claude ·"), 2)
-        self.assertEqual(body.count("Codex ·"), 2)
-        self.assertIn("Grok", body)
-        self.assertIn("Muse", body)
-        self.assertGreaterEqual(body.lower().count("unmetered"), 2)
+        cards = re.findall(r'<details class="arow">.*?</details>', body, re.DOTALL)
+        self.assertEqual(len(cards), 6)
+        self.assertEqual(sum("Claude ·" in card for card in cards), 2)
+        self.assertEqual(sum("Codex ·" in card for card in cards), 2)
+        self.assertTrue(any("Grok" in card and "unmetered" in card for card in cards))
+        self.assertTrue(any("Muse" in card and "unmetered" in card for card in cards))
 
     def test_max_size_is_required_and_rejects_unknown_values(self):
         for value in (None, "unknown", "gigantic", 2, True):
@@ -288,7 +308,7 @@ class ProxyUsageTests(unittest.TestCase):
                 claim = queue.claim_for(task_id, key)
                 self.assertEqual((claim.provider_id, claim.account_id, claim.attempt_id),
                                  (provider, account, attempt_id))
-                result = self.cli("record", task_id, "--status", "failed",
+                result = self.cli("record", "--task", task_id, "--status", "failed",
                                   "--eligibility-key", key, "--provider-id", provider,
                                   "--account-id", account, "--attempt-id", attempt_id,
                                   "--summary", "historical worker terminal")
@@ -313,7 +333,7 @@ class ProxyUsageTests(unittest.TestCase):
         old["providers"] = [{key: value for key, value in item.items() if key != "max_size"}
                             for item in old["providers"]]
         self.config_path.write_text(json.dumps(old))
-        args = ("old-worker", "--status", "failed", "--eligibility-key", key,
+        args = ("--task", "old-worker", "--status", "failed", "--eligibility-key", key,
                 "--provider-id", "claude", "--account-id", "claude-personal",
                 "--attempt-id", attempt.id, "--summary", "old worker terminal")
         mismatch = self.cli("record", *args, "--database", str(self.root / "other.db"))

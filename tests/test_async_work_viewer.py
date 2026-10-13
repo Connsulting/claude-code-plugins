@@ -72,7 +72,7 @@ class AsyncViewerTests(unittest.TestCase):
         self.assertEqual(self.viewer._facet_providers(tasks[0]), ['claude'])
         self.viewer.PREVIEW = False
         buttons = self.viewer._run_buttons(tasks[0])
-        self.assertEqual(buttons.count(' disabled'), 4)
+        self.assertEqual(buttons.count(' disabled'), 5)
         self.assertIn('Waiting for parent', buttons)
 
     def test_viewer_preserves_local_dependency_hold_and_structured_start_ref(self):
@@ -349,7 +349,7 @@ class AsyncViewerTests(unittest.TestCase):
     def test_explicit_empty_compatibility_does_not_enable_fallback_providers(self):
         self.viewer.PREVIEW = False
         buttons = self.viewer._run_buttons({'id': 'x', 'eligible_providers': [], 'readiness': {'ready': True}})
-        self.assertEqual(buttons.count(' disabled'), 4)
+        self.assertEqual(buttons.count(' disabled'), 5)
         self.assertIn('No compatible provider', buttons)
 
     def test_source_and_group_render_as_text_without_script_links(self):
@@ -380,7 +380,7 @@ class AsyncViewerTests(unittest.TestCase):
 
     def test_preview_usage_comes_from_normalized_subscriptions_without_rereading_cache(self):
         cfg = mock.Mock()
-        cfg.limits_for_provider.return_value = [SimpleNamespace(ceiling_percent=95)]
+        cfg.limits_for_provider.return_value = [SimpleNamespace(id='weekly', window_seconds=604800, ceiling_percent=95)]
         gates = {'subscriptions': [
             {'provider_id': provider, 'account_id': provider + '-account', 'fresh': True,
              'captured_at': 2000000000, 'error': None, 'unmetered': False,

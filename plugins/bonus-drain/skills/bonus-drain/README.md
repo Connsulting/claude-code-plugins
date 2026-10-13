@@ -7,7 +7,7 @@ supplies enabled accounts and their capacity readings.
 
 Every launch opens a T3 thread through a `t3-thread` or `agent-router` adapter. `auto` selects a compatible provider
 from cached proxy usage before claiming and launching a T3 thread. Missing, malformed, resetless, or
-stale cache data closes only the affected account. Leaving work queued is expected.
+stale subscription data closes its entire provider pool. Leaving work queued is expected.
 
 Set `scout_ntfy_url` in the config to a full ntfy topic URL such as
 `https://ntfy.sh/your-topic` to receive scout health notices. Omit it or set it to
@@ -34,25 +34,35 @@ also consume a later provider slot, while exclusive work remains available to a 
 with the required capability. Legacy-exclusive tasks drain before portable tasks regardless
 of provider batch order; normal queue priority remains authoritative within each class.
 
-Accounts come from CLIProxyAPI's enabled auth files. A metered provider pool opens when
-at least one account passes its provider pacing limits, and its reset is the earliest reset
-among accounts with headroom. Unmetered pools follow metered pools and admit at most
-`unmetered_max_inflight` concurrent runs per provider, defaulting to 2.
+Subscriptions come from CLIProxyAPI's enabled auth files. A provider has one gate and at
+most one batch. Every subscription must have fresh, valid readings for every configured
+limit; otherwise the provider pool closes because the proxy may serve any subscription.
+For each metered limit, compute signed `surplus = ceiling_percent - used_percent - reserve`
+for every subscription, including negative values. A positive mean opens the pool and
+`min(batch_size, floor(sum(surplus) / estimated_percent_per_job))` determines its job budget.
+Multiple limits restrict the tightest budget. The earliest valid reset sets the provider's
+`<provider>/<limit>/<cycle>` eligibility key.
 
-Manual dispatch records an account from the proxy inventory when available. CLIProxyAPI owns
-credential selection for provider requests; the planner's account is a capacity observation.
+Manual and automatic dispatch record the provider ID in the historical `account_id` field.
+CLIProxyAPI owns credential selection. Unexpired historical subscription backoffs hold the
+whole provider, and a proven launch clears all of that provider's backoffs. Existing workers
+can record terminal receipts against their stored claims even when their account IDs are no
+longer in inventory. Manual starts have no account-selection argument.
 
-Async Work runs all week: `lead_seconds` equals the weekly window, and admission is
-the remaining-headroom floor (`max_percent_per_window` points per
-`pacing_window_seconds` still left). Each provider sizes its tick as
-`min(batch_size, floor(surplus / estimated_percent_per_job))` with one point equal
-to one job, then subtracts already-running jobs on that provider. `batch_size` is
-the per-provider cap (3 in the example). Optional top-level `max_jobs` is a
-cross-provider ceiling including in-flight work; omit it for no global cap. Every run
-launches as a T3 Code thread. Task MCP scopes do not restrict these threads. The last
-`urgency_seconds` (24 hours) uses the same remaining-headroom floor. For a provider with multiple
-accounts, Scout applies the complete gates to each account and chooses the earliest reset
-with headroom. Recurring tasks still cool down, and each weekly reset key may run only once.
+Async Work runs all week: `lead_seconds` equals the weekly window, and reserve is
+`max_percent_per_window` points per `pacing_window_seconds` still left, capped at the ceiling.
+The planner subtracts already-running jobs once per provider. `batch_size` is the per-provider
+cap (3 in the example). Optional `max_jobs` caps total in-flight plus new work. The final
+`urgency_seconds` (24 hours) uses the same reserve rule. Grok and Muse are unmetered pools
+with at most `unmetered_max_inflight` concurrent runs each, defaulting to 2, and hourly keys.
+Recurring task cooldowns and weekly cycle deduplication still apply.
+
+Each provider requires `max_size` on the ordered scale `tiny`, `small`, `medium`, `large`,
+`huge`. The example ceilings are Grok `small`, Muse `medium`, Codex `large`, and Claude `huge`.
+Planning, explicit or automatic dispatch, and atomic claiming enforce that ceiling. A task
+without a size is conservatively `huge`. Oversized pinned tasks may be queued but remain held
+with a `provider_size` reason. Every launch opens a T3 Code thread; task MCP scopes do not
+restrict these threads.
 
 ## Requirements
 
@@ -103,7 +113,7 @@ The configuration graph is versioned and uses IDs for all relationships:
   example use `America/New_York`: weeks start Saturday at midnight, and Saturday through Sunday is the
   automatic dispatch window.
 1. `adapters[]` declares argv arrays for `t3-thread` and `agent-router`.
-1. `providers[]` binds a provider ID to the router adapter and its router-facing name;
+1. `providers[]` binds a provider ID to the router adapter, router-facing name, and required `max_size`;
   The proxy inventory supplies enabled account identities.
 1. `limits[]` binds pacing thresholds to `provider_id`. Weekly windows use `seven_day` and
   five-hour windows use `five_hour` in the normalized cache.
@@ -130,33 +140,30 @@ After installation, expand the operator home and replace every illustrative
 stable `.../.local/lib/bonus-drain/current` path, never a marketplace cache path. The
 `t3-thread` and proxy dotenv paths are host-owned dependencies and must also be absolute.
 
-The example configures Claude and Codex weekly pacing, plus unmetered xAI and Meta pools.
+The example configures Claude and Codex weekly pacing, plus unmetered Grok and Muse pools.
 Refresh obtains enabled accounts from `GET /v0/management/auth-files` and reads Claude or
 Codex windows through `POST /v0/management/api-call`. Only the two provider usage URLs
 specified in `proxy_usage.py` are allowed. Disabled accounts are removed from inventory.
 Unknown configured providers are unmetered and receive no usage request.
 
-Providers that are allowed to run migrated `claude_only` tasks or legacy-exclusive model
-rows must explicitly declare the reserved `legacy-exclusive` capability. The name is a
-compatibility semantic, not a provider identity: any configured provider may declare it.
-Explicit `allowed_providers` and `required_capabilities` continue to apply independently.
+Only Claude may run migrated `claude_only`, recognized legacy-exclusive model tasks, or
+work requiring `legacy-exclusive`; its configuration must declare that capability. Only
+Claude and Codex may run work invoking the implement skill or requiring `implement`, and
+must declare it. Declaring either protected capability on another provider does not grant
+permission. Explicit `allowed_providers` and other `required_capabilities` still apply.
+When open capacity cannot run implement work, scout reports a `provider_capability` blocker.
 
-The reserved `implement` capability works the same way for tasks that invoke the implement
-skill (`use_implement`, or `/implement`, `$implement`, or "implement skill" in the prompt
-text). Only providers declaring it plan, claim, or launch that work; a provider that cannot
-drive the skill, such as Grok, omits it. When the only open gate lacks it, the scout reports
-a `provider_capability` blocker naming the task. Auto selection excludes incapable providers before any claim.
-
-CLI `auto` chooses a compatible provider with the soonest reset among open proxy
-usage gates. Providers missing usage cache rank after providers with open gates. After a concrete router launch has been attempted, any uncertainty is
-post-launch ambiguity: the claim remains fail-closed until explicit
-reconciliation and no caller retries automatically.
+CLI `auto` chooses a compatible provider with the soonest reset among open pool gates.
+A manual auto-start may use a compatible provider with no subscriptions, after open pools.
+A listed subscription with unavailable usage or a malformed inventory cannot use this
+fallback. Scout always requires an open pool gate. After a concrete launch has been attempted,
+uncertainty retains the claim until reconciliation; no caller retries automatically.
 
 Normalized usage always includes explicit `provider_id`, `account_id`, and `captured_at`.
 Claude snapshots keep `five_hour`, `seven_day`, and available per-model `seven_day_*`
 windows. Codex snapshots keep the primary five-hour and secondary weekly windows; an
 explicit window duration determines the mapping when supplied. Missing or invalid metered
-usage closes that account. Per-account request failures are cached as unavailable without
+usage closes the whole provider pool. Per-account request failures are cached as unavailable without
 storing response bodies or credential data.
 
 File-backed secret references must be current-user-owned, non-symlink regular files with
@@ -250,8 +257,8 @@ the frozen frontend through the real handler and proves the controls render with
 it does not exercise systemd, product TLS, or Tailscale.
 
 Proxy integration should use a local HTTP fixture and a disposable DB/cache.
-Proof must include a failed sibling refresh closing only that account, a stale account
-closing independently, one atomic claim under a race, and no adapter call from a viewer or
+Proof must include a failed or stale sibling closing the whole pool, signed mean and summed
+budget calculations, one atomic claim under a race, and no adapter call from a viewer or
 scout request path.
 
 The normalized usage cache contract is:
@@ -261,7 +268,11 @@ The normalized usage cache contract is:
 ```
 
 The refresher stores only normalized account identity, capture time and window values.
-`plan --json` includes an `accounts` array so readers can display the same cached windows.
+`plan --json` and `gates --json` include a `subscriptions` array containing the same original
+readings and per-limit `pacing` fields (`ceiling_percent`, `used_percent`, `reserve`, `surplus`,
+`resets_at`) so readers can check the pool calculation independently. The viewer keeps each
+Claude and Codex subscription separate and shows Grok and Muse as unmetered pools.
+`/api/bonus` reports those subscription records in `usage`.
 The source and installed wrappers start Python in isolated mode and insert only their owned
 runtime path. Requests have bounded response sizes and timeouts, and management redirects
 are refused so credentials cannot follow a redirect.
