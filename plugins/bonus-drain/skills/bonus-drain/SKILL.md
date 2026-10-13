@@ -389,6 +389,9 @@ error. Prior attempts stay immutable.
   exact authorized epic branch. Pending or failing checks and an unmerged epic PR are not done.
   Record `completion.mechanism: artifact` with evidence of the PR, passing checks, and any required
   merge. Pending human review or merge alone does not block normal completion once checks pass.
+  A done-when saying the PR is not merged forbids the run from merging; it is not an outcome to
+  preserve. A PR someone else merges mid-run is verified on the merged head and recorded `done`
+  citing the merge commit, never `failed` for the external merge alone.
   Its outcome uses reason code `done_when_verified`, `completion.verified: true`,
   one of `command`, `artifact`, `operator_receipt`, or `goal_acceptance`, and nonempty evidence.
 - `skipped`: the work is already complete, or a genuine precondition is false. That means
