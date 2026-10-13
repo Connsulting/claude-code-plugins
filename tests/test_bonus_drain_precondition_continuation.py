@@ -223,7 +223,7 @@ class ContinuationTests(RecoveryCase):
         attempt = self.claim("unlaunched")
         self.terminal("unlaunched", attempt, "skipped", reason(), now=NOW + 1)
 
-        with self.assertRaisesRegex(db.QueueError, "original router job"):
+        with self.assertRaisesRegex(db.QueueError, "original T3 thread"):
             self.queue.open_same_thread_continuation(
                 "unlaunched", expected_attempt_id=attempt.id, now_epoch=NOW + 2,
             )
