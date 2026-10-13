@@ -2214,7 +2214,7 @@ class QueueDB:
         if (
             provider_id and (
                 task_invokes_implement(task) or IMPLEMENT_CAPABILITY in task.required_capabilities
-            ) and (provider_id not in {"claude", "codex"} or IMPLEMENT_CAPABILITY not in capability_set)
+            ) and IMPLEMENT_CAPABILITY not in capability_set
         ):
             return False
         return set(task.required_capabilities).issubset(capability_set)

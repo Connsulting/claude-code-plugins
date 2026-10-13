@@ -525,7 +525,7 @@ def plan_tick(
             and reader._provider_compatible(task, provider.id, provider.capabilities, max_size="huge")
             and dependency_ready(task)
         )
-        if provider.id in {"claude", "codex"} and IMPLEMENT_CAPABILITY in provider.capabilities:
+        if IMPLEMENT_CAPABILITY in provider.capabilities:
             continue
         implement_only[provider.id] = tuple(
             task for task in neutral

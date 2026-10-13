@@ -57,12 +57,13 @@ def _limit(provider_id: str) -> config_module.LimitConfig:
     )
 
 
-def _config(database: Path, providers: tuple[str, ...]) -> config_module.RuntimeConfig:
-    capabilities = {"codex": ("implement",), "grok": ()}
+def _config(
+    database: Path, providers: tuple[str, ...], *, implement_providers: tuple[str, ...] = ("codex",),
+) -> config_module.RuntimeConfig:
     router = config_module.AdapterConfig(
         "router", "t3-thread", ("/bin/true",), timeout_seconds=0.2, max_output_bytes=1024,
     )
-    return config_module.RuntimeConfig(schema_version=1, source_path=None, database=database, record_command=("/bin/true",), secret_refs=(), adapters=(router,), providers=tuple(_provider(item, *capabilities[item]) for item in providers), limits=tuple(_limit(item) for item in providers), viewer={}, pr_exceptions=(), usage_max_age_seconds=3600, cache_dir=database.parent / "cache", proxy_secret_ref=None)
+    return config_module.RuntimeConfig(schema_version=1, source_path=None, database=database, record_command=("/bin/true",), secret_refs=(), adapters=(router,), providers=tuple(_provider(item, *(("implement",) if item in implement_providers else ())) for item in providers), limits=tuple(_limit(item) for item in providers), viewer={}, pr_exceptions=(), usage_max_age_seconds=3600, cache_dir=database.parent / "cache", proxy_secret_ref=None)
 
 
 def _snapshots(providers: tuple[str, ...]) -> dict[tuple[str, str], usage.UsageSnapshot]:
@@ -123,8 +124,10 @@ class CapabilityRoutingCase(unittest.TestCase):
 
 
 class PlanningTests(CapabilityRoutingCase):
-    def _plan(self, providers: tuple[str, ...]) -> scout.TickPlan:
-        config = _config(self.queue.path, providers)
+    def _plan(
+        self, providers: tuple[str, ...], *, implement_providers: tuple[str, ...] = ("codex",),
+    ) -> scout.TickPlan:
+        config = _config(self.queue.path, providers, implement_providers=implement_providers)
         with mock.patch.object(scout, "read_all", return_value=_snapshots(providers)):
             return scout.plan_tick(config, self.queue, now_epoch=NOW)
 
@@ -136,7 +139,7 @@ class PlanningTests(CapabilityRoutingCase):
             for task in tasks
         }
 
-    def test_implement_task_goes_to_codex_never_grok(self) -> None:
+    def test_implement_task_goes_to_codex_when_grok_lacks_the_capability(self) -> None:
         self.queue.add_task(reviewed(_task("impl", goal=IMPLEMENT_GOAL)))
         self.queue.add_task(reviewed(_task("flag", use_implement=True)))
 
@@ -144,7 +147,57 @@ class PlanningTests(CapabilityRoutingCase):
 
         self.assertEqual(allocated, {"impl": "codex", "flag": "codex"})
 
-    def test_only_grok_open_holds_implement_work_with_a_named_blocker(self) -> None:
+    def test_declared_implement_capability_opens_planning_for_any_provider(self) -> None:
+        self.queue.add_task(reviewed(_task("impl", goal=IMPLEMENT_GOAL)))
+        self.queue.add_task(reviewed(_task("flag", use_implement=True)))
+        self.queue.add_task(reviewed(_task("required", required_capabilities=["implement"])))
+
+        for provider in ("claude", "codex", "grok", "muse", "future"):
+            with self.subTest(provider=provider):
+                tick = self._plan((provider,), implement_providers=(provider,))
+
+                self.assertEqual(self._allocated(tick), {
+                    "impl": provider, "flag": provider, "required": provider,
+                })
+                self.assertFalse([
+                    item for item in tick.dependency_holds if item["kind"] == "provider_capability"
+                ])
+
+    def test_capable_grok_above_its_size_ceiling_has_only_a_size_blocker(self) -> None:
+        self.queue.add_task(reviewed(_task("small", goal=IMPLEMENT_GOAL, size="small")))
+        self.queue.add_task(reviewed(_task("large", goal=IMPLEMENT_GOAL, size="large")))
+        config = _config(self.queue.path, ("grok",), implement_providers=("grok",))
+        config = replace(config, providers=(replace(config.provider("grok"), max_size="small"),))
+
+        with mock.patch.object(scout, "read_all", return_value=_snapshots(("grok",))):
+            tick = scout.plan_tick(config, self.queue, now_epoch=NOW)
+
+        self.assertEqual(self._allocated(tick), {"small": "grok"})
+        self.assertFalse([
+            item for item in tick.dependency_holds if item["kind"] == "provider_capability"
+        ])
+        self.assertTrue(any(
+            item["task_id"] == "large" and item["kind"] == "provider_size"
+            for item in tick.dependency_holds
+        ))
+
+    def test_capable_provider_at_batch_capacity_reports_no_missing_capability(self) -> None:
+        self.queue.add_task(reviewed(_task("first", goal=IMPLEMENT_GOAL)))
+        self.queue.add_task(reviewed(_task("second", goal=IMPLEMENT_GOAL)))
+
+        for provider in ("grok", "muse", "future"):
+            with self.subTest(provider=provider):
+                config = _config(self.queue.path, (provider,), implement_providers=(provider,))
+                config = replace(config, limits=(replace(_limit(provider), batch_size=1),))
+                with mock.patch.object(scout, "read_all", return_value=_snapshots((provider,))):
+                    tick = scout.plan_tick(config, self.queue, now_epoch=NOW)
+
+                self.assertEqual(len(self._allocated(tick)), 1)
+                self.assertFalse([
+                    item for item in tick.dependency_holds if item["kind"] == "provider_capability"
+                ])
+
+    def test_grok_without_capability_holds_implement_work_with_a_named_blocker(self) -> None:
         self.queue.add_task(reviewed(_task("impl", goal=IMPLEMENT_GOAL)))
         self.queue.add_task(reviewed(_task("plain")))
         config = _config(self.queue.path, ("grok",))
@@ -162,7 +215,7 @@ class PlanningTests(CapabilityRoutingCase):
         self.assertIn("lacks the implement capability", holds[0]["reason"])
         self.assertIn("provider_capability", json.dumps(report.to_dict()))
 
-    def test_only_implement_work_with_only_grok_reports_the_blocker(self) -> None:
+    def test_only_implement_work_with_incapable_grok_reports_the_blocker(self) -> None:
         # grok would otherwise have no eligible work, so its gate never opens on its own.
         self.queue.add_task(reviewed(_task("impl", goal=IMPLEMENT_GOAL)))
 
@@ -228,16 +281,94 @@ class ClaimTwinTests(CapabilityRoutingCase):
         self.assertIsNotNone(plain)
         self.assertIsNotNone(capable)
 
-    def test_spoofed_capability_cannot_enable_implement_on_other_providers(self) -> None:
-        self.queue.add_task(reviewed(_task("impl", goal=IMPLEMENT_GOAL)))
-        for provider in ("grok", "muse", "future"):
+    def test_eligibility_count_and_claim_require_only_the_declared_implement_capability(self) -> None:
+        forms = {
+            "slash": {"goal": IMPLEMENT_GOAL},
+            "flag": {"use_implement": True},
+            "required": {"required_capabilities": ["implement"]},
+        }
+        for provider in ("claude", "codex", "grok", "muse", "future"):
+            for form, values in forms.items():
+                with self.subTest(provider=provider, form=form):
+                    task_id = f"{provider}-{form}"
+                    self.queue.add_task(reviewed(_task(task_id, **values)))
+                    task = self.queue.task(task_id)
+                    filters = {
+                        "provider_id": provider, "max_size": "huge", "task_id": task_id,
+                        "now_epoch": NOW,
+                    }
+                    self.assertFalse(dispatcher.provider_compatible(task, _provider(provider)))
+                    self.assertEqual(self.queue.count_eligible(0, **filters), 0)
+                    self.assertIsNone(self.queue.claim(
+                        task_id, f"{provider}/manual/{NOW}", provider, provider,
+                        provider_max_size="huge", now_epoch=NOW,
+                    ))
+
+                    self.assertTrue(dispatcher.provider_compatible(task, _provider(provider, "implement")))
+                    self.assertEqual([
+                        item.id for item in self.queue.eligible_tasks(
+                            0, capabilities=("implement",), **filters,
+                        )
+                    ], [task_id])
+                    self.assertEqual(self.queue.count_eligible(0, capabilities=("implement",), **filters), 1)
+                    self.assertIsNotNone(self.queue.claim(
+                        task_id, f"{provider}/manual/{NOW}", provider, provider,
+                        provider_capabilities=("implement",), provider_max_size="huge", now_epoch=NOW,
+                    ))
+
+    def test_implement_capability_does_not_bypass_provider_size_ceilings(self) -> None:
+        for provider, ceiling in (("grok", "small"), ("muse", "medium"), ("future", "large")):
             with self.subTest(provider=provider):
-                self.assertFalse(dispatcher.provider_compatible(
-                    self.queue.task("impl"), _provider(provider, "implement"),
+                ids = {label: f"{provider}-{label}" for label in ("fits", "oversized", "unsized")}
+                for label, size in (("fits", ceiling), ("oversized", "huge"), ("unsized", None)):
+                    self.queue.add_task(reviewed(_task(
+                        ids[label], goal=IMPLEMENT_GOAL, size=size, allowed_providers=[provider],
+                    )))
+                configured = replace(_provider(provider, "implement"), max_size=ceiling)
+                filters = {
+                    "provider_id": provider, "max_size": ceiling, "capabilities": ("implement",),
+                    "now_epoch": NOW,
+                }
+                self.assertEqual([item.id for item in self.queue.eligible_tasks(0, **filters)], [ids["fits"]])
+                self.assertEqual(self.queue.count_eligible(0, **filters), 1)
+                for label in ("oversized", "unsized"):
+                    self.assertFalse(dispatcher.provider_compatible(self.queue.task(ids[label]), configured))
+                    self.assertIsNone(self.queue.claim(
+                        ids[label], f"{provider}/manual/{NOW}", provider, provider,
+                        provider_capabilities=("implement",), provider_max_size=ceiling, now_epoch=NOW,
+                    ))
+                self.assertTrue(dispatcher.provider_compatible(self.queue.task(ids["fits"]), configured))
+                self.assertIsNotNone(self.queue.claim(
+                    ids["fits"], f"{provider}/manual/{NOW}", provider, provider,
+                    provider_capabilities=("implement",), provider_max_size=ceiling, now_epoch=NOW,
                 ))
-                self.assertIsNone(self.queue.claim(
-                    "impl", f"{provider}/manual/{NOW}", provider, provider,
-                    provider_capabilities=("implement",), provider_max_size="huge", now_epoch=NOW,
+
+    def test_implement_capability_preserves_the_legacy_claude_identity_rule(self) -> None:
+        forms = {
+            "flag": {"claude_only": True},
+            "model": {"model": "opus"},
+            "required": {"required_capabilities": ["legacy-exclusive"]},
+        }
+        for form, values in forms.items():
+            with self.subTest(form=form):
+                task_id = f"legacy-{form}"
+                self.queue.add_task(reviewed(_task(task_id, goal=IMPLEMENT_GOAL, **values)))
+                task = self.queue.task(task_id)
+                for provider in ("codex", "grok", "muse", "future"):
+                    with self.subTest(provider=provider):
+                        self.assertFalse(dispatcher.provider_compatible(
+                            task, _provider(provider, "implement", "legacy-exclusive"),
+                        ))
+                        self.assertIsNone(self.queue.claim(
+                            task_id, f"{provider}/manual/{NOW}", provider, provider,
+                            provider_capabilities=("implement", "legacy-exclusive"),
+                            provider_max_size="huge", now_epoch=NOW,
+                        ))
+                self.assertFalse(dispatcher.provider_compatible(task, _provider("claude", "implement")))
+                self.assertIsNotNone(self.queue.claim(
+                    task_id, f"claude/manual/{NOW}", "claude", "claude",
+                    provider_capabilities=("implement", "legacy-exclusive"),
+                    provider_max_size="huge", now_epoch=NOW,
                 ))
 
 
@@ -245,7 +376,7 @@ class AutoClassificationTests(CapabilityRoutingCase):
     def _router(self, seen: list[list[str]]):
         def launch_call(argv: list[str], **_kwargs: object) -> dict[str, object]:
             seen.append(list(argv))
-            return {"threadId": "thread-1"}
+            return {"threadId": f"thread-{len(seen)}"}
         return launch_call
 
     def _dispatch_auto(self, config, task_id: str, seen: list[list[str]], providers: tuple[str, ...]):
@@ -264,6 +395,21 @@ class AutoClassificationTests(CapabilityRoutingCase):
 
         self.assertEqual(len(seen), 1)
         self.assertEqual(seen[0][seen[0].index("--engine") + 1], "codex")
+
+    def test_auto_dispatch_accepts_any_provider_declaring_implement(self) -> None:
+        seen: list[list[str]] = []
+        for provider in ("grok", "muse", "future"):
+            with self.subTest(provider=provider):
+                task_id = f"impl-{provider}"
+                self.queue.add_task(reviewed(_task(task_id, goal=IMPLEMENT_GOAL)))
+                config = _config(
+                    self.queue.path, ("codex", provider), implement_providers=(provider,),
+                )
+
+                self._dispatch_auto(config, task_id, seen, ("codex", provider))
+
+                self.assertEqual(seen[-1][seen[-1].index("--engine") + 1], provider)
+                self.assertEqual(self.queue.claim_for(task_id).provider_id, provider)
 
     def test_no_capable_provider_refuses_before_any_claim(self) -> None:
         self.queue.add_task(reviewed(_task("impl", goal=IMPLEMENT_GOAL)))
@@ -308,7 +454,7 @@ class DispatchBoundaryTests(AutoClassificationTests):
         )
         self.assertEqual(seen[0][seen[0].index("--engine") + 1], "codex")
 
-    def test_explicit_grok_dispatch_of_implement_work_is_refused_before_the_claim(self) -> None:
+    def test_explicit_grok_without_implement_is_refused_before_the_claim(self) -> None:
         self.queue.add_task(reviewed(_task("impl", goal=IMPLEMENT_GOAL)))
         config = _config(self.queue.path, ("grok", "codex"))
         seen: list[list[str]] = []
@@ -327,7 +473,23 @@ class DispatchBoundaryTests(AutoClassificationTests):
         )
         self.assertEqual(seen[-1][seen[-1].index("--engine") + 1], "codex")
 
-    def test_viewer_run_now_on_grok_is_refused_before_the_claim(self) -> None:
+    def test_explicit_dispatch_accepts_any_provider_declaring_implement(self) -> None:
+        seen: list[list[str]] = []
+        for provider in ("grok", "muse", "future"):
+            with self.subTest(provider=provider):
+                task_id = f"impl-{provider}"
+                self.queue.add_task(reviewed(_task(task_id, goal=IMPLEMENT_GOAL)))
+                config = _config(self.queue.path, (provider,), implement_providers=(provider,))
+
+                dispatcher.dispatch(
+                    config, self.queue, task_id=task_id, eligibility_key=f"manual/{task_id}",
+                    requested_provider=provider, launch_call=self._router(seen), now_epoch=NOW,
+                )
+
+                self.assertEqual(seen[-1][seen[-1].index("--engine") + 1], provider)
+                self.assertEqual(self.queue.claim_for(task_id).provider_id, provider)
+
+    def test_viewer_run_now_on_grok_without_implement_is_refused_before_the_claim(self) -> None:
         import importlib.util
         import os
 
@@ -386,6 +548,31 @@ class DispatchBoundaryTests(AutoClassificationTests):
             [argv[argv.index("--engine") + 1] for argv in launches], ["grok", "codex"],
         )
 
+    def test_viewer_run_now_accepts_grok_declaring_implement(self) -> None:
+        import importlib.util
+        import os
+
+        server = SKILL_ROOT / "services" / "jobs-viewer" / "server.py"
+        spec = importlib.util.spec_from_file_location("bonus_jobs_viewer_grok_implement_test", server)
+        assert spec is not None and spec.loader is not None
+        viewer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(viewer)
+        self.queue.add_task(reviewed(_task("impl", goal=IMPLEMENT_GOAL)))
+        config = _config(self.queue.path, ("grok",), implement_providers=("grok",))
+        launches: list[list[str]] = []
+
+        with (
+            mock.patch.object(viewer.graph_config, "load_config", return_value=config),
+            mock.patch.object(dispatcher, "_subprocess_call", side_effect=self._router(launches)),
+            mock.patch.dict(os.environ, {"BONUS_DRAIN_CONFIG": str(self.root / "config.json")}),
+        ):
+            ok, message = viewer.run_task_now("impl", "grok")
+
+        self.assertTrue(ok, message)
+        self.assertIn("launched on grok", message)
+        self.assertEqual(launches[0][launches[0].index("--engine") + 1], "grok")
+        self.assertEqual(self.queue.claim_for("impl").provider_id, "grok")
+
 
 class LongHorizonCoordinatorTests(CapabilityRoutingCase):
     def test_coordinator_turn_needs_the_implement_capability(self) -> None:
@@ -418,15 +605,22 @@ class CLIRefusalTests(CapabilityRoutingCase):
     def setUp(self) -> None:
         super().setUp()
         raw = {"schema_version": 1, "database": str(self.queue.path), "cache_dir": str(self.root / "cache"), "record_command": ["/bin/true"], "adapters": [{"id": "router", "kind": "t3-thread", "argv": ["/bin/true"]}], "providers": [
-                {"id": "codex", "capabilities": ["implement"],
-                 "max_size": "huge", "dispatch": {"adapter_id": "router", "provider": "codex"}},
-                {"id": "grok", "max_size": "huge", "dispatch": {"adapter_id": "router", "provider": "grok"}},
+                {"id": item, "capabilities": ["implement"] if item == "codex" else [],
+                 "max_size": "huge", "dispatch": {"adapter_id": "router", "provider": item}}
+                for item in ("codex", "grok", "muse", "future")
             ], "limits": [
                 {"id": f"{item}-weekly", "provider_id": item, "window_seconds": 604800,
                  "ceiling_percent": 95, "lead_seconds": 20000, "batch_size": 1}
-                for item in ("codex", "grok")
+                for item in ("codex", "grok", "muse", "future")
             ], "viewer": {}, "pr_exceptions": [], "secret_refs": [{"id": "proxy", "source": "file", "path": "/unused/proxy.env"}], "proxy_secret_ref": "proxy"}
         self.config_path = self.root / "config.json"
+        self.config_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    def declare_implement(self, provider_id: str) -> None:
+        raw = json.loads(self.config_path.read_text(encoding="utf-8"))
+        for provider in raw["providers"]:
+            if provider["id"] == provider_id:
+                provider["capabilities"] = ["implement"]
         self.config_path.write_text(json.dumps(raw), encoding="utf-8")
 
     def run_cli(self, *argv: str) -> tuple[int, str]:
@@ -455,7 +649,7 @@ class CLIRefusalTests(CapabilityRoutingCase):
             stderr,
         )
 
-    def test_add_refuses_implement_work_pinned_to_grok(self) -> None:
+    def test_add_refuses_implement_work_pinned_to_grok_without_capability(self) -> None:
         code, stderr_text = self.add("slash", IMPLEMENT_GOAL, "--providers", "grok")
         self.assert_refused(code, stderr_text)
         code, stderr_text = self.add("flagged", "Fix the parser", "--providers", "grok", "--use-implement", "1")
@@ -489,6 +683,16 @@ class CLIRefusalTests(CapabilityRoutingCase):
         self.assertEqual(code, 0, stderr)
         self.assertEqual(self.queue.task("plain-grant").allowed_providers, ("grok",))
 
+        self.declare_implement("grok")
+        code, stderr = self.add(
+            "granted", "Fix the parser", "--providers", "grok", "--grant", implement_grant,
+        )
+        self.assertEqual(code, 0, stderr)
+        stored = self.queue.task("granted")
+        assert stored is not None
+        self.assertTrue(db.task_invokes_implement(stored))
+        self.assertEqual(stored.allowed_providers, ("grok",))
+
     def test_add_accepts_implement_work_pinned_to_codex(self) -> None:
         code, _ = self.add("ok", IMPLEMENT_GOAL, "--providers", "codex")
 
@@ -497,7 +701,23 @@ class CLIRefusalTests(CapabilityRoutingCase):
         assert stored is not None
         self.assertEqual(stored.allowed_providers, ("codex",))
 
-    def test_edit_that_adds_implement_to_a_grok_pinned_task_is_refused(self) -> None:
+    def test_add_accepts_implement_work_pinned_to_any_capable_provider(self) -> None:
+        for provider in ("grok", "muse", "future"):
+            with self.subTest(provider=provider):
+                self.declare_implement(provider)
+                for form, goal, extra in (
+                    ("slash", IMPLEMENT_GOAL, ()),
+                    ("flag", "Fix the parser", ("--use-implement", "1")),
+                ):
+                    task_id = f"{provider}-{form}"
+                    code, stderr = self.add(task_id, goal, "--providers", provider, *extra)
+                    self.assertEqual(code, 0, stderr)
+                    stored = self.queue.task(task_id)
+                    assert stored is not None
+                    self.assertEqual(stored.allowed_providers, (provider,))
+                    self.assertTrue(db.task_invokes_implement(stored))
+
+    def test_edit_that_adds_implement_to_grok_without_capability_is_refused(self) -> None:
         self.assertEqual(self.add("pinned", "Fix the parser", "--providers", "grok")[0], 0)
         changes = {"goal": IMPLEMENT_GOAL, "readiness_review": json.loads(review_json(goal=IMPLEMENT_GOAL))}
 
@@ -508,7 +728,26 @@ class CLIRefusalTests(CapabilityRoutingCase):
         assert stored is not None
         self.assertEqual(stored.goal, "Fix the parser")
 
-    def test_set_providers_refuses_grok_and_auto_clears_the_pin(self) -> None:
+    def test_edit_accepts_implement_for_any_capable_pinned_provider(self) -> None:
+        for provider in ("grok", "muse", "future"):
+            with self.subTest(provider=provider):
+                task_id = f"pinned-{provider}"
+                self.assertEqual(self.add(task_id, "Fix the parser", "--providers", provider)[0], 0)
+                self.declare_implement(provider)
+                changes = {
+                    "goal": IMPLEMENT_GOAL,
+                    "readiness_review": json.loads(review_json(goal=IMPLEMENT_GOAL)),
+                }
+
+                code, stderr = self.run_cli("edit", task_id, "--changes", json.dumps(changes))
+
+                self.assertEqual(code, 0, stderr)
+                stored = self.queue.task(task_id)
+                assert stored is not None
+                self.assertEqual(stored.goal, IMPLEMENT_GOAL)
+                self.assertEqual(stored.allowed_providers, (provider,))
+
+    def test_set_providers_refuses_incapable_grok_and_auto_clears_the_pin(self) -> None:
         self.assertEqual(self.add("impl", IMPLEMENT_GOAL, "--providers", "codex")[0], 0)
 
         code, stderr = self.run_cli("set-providers", "impl", "grok")
@@ -534,6 +773,17 @@ class CLIRefusalTests(CapabilityRoutingCase):
         stored = self.queue.task("impl")
         assert stored is not None
         self.assertEqual(stored.allowed_providers, ())
+
+    def test_set_providers_accepts_any_provider_declaring_implement(self) -> None:
+        self.assertEqual(self.add("impl", IMPLEMENT_GOAL)[0], 0)
+
+        for provider in ("grok", "muse", "future"):
+            with self.subTest(provider=provider):
+                self.declare_implement(provider)
+                code, stderr = self.run_cli("set-providers", "impl", provider, "--json")
+
+                self.assertEqual(code, 0, stderr)
+                self.assertEqual(self.queue.task("impl").allowed_providers, (provider,))
 
     def test_set_providers_liveness(self) -> None:
         self.assertEqual(self.add("impl", IMPLEMENT_GOAL)[0], 0)
@@ -580,6 +830,11 @@ class CLIRefusalTests(CapabilityRoutingCase):
         self.assertEqual(picked("--codex"), ["impl", "plain"])
         self.assertEqual(counted("count-eligible", "--grok"), "1")
         self.assertEqual(counted("count-eligible", "--codex"), "2")
+        self.assertEqual(counted("eligible", "--grok"), "1")
+
+        self.declare_implement("grok")
+        self.assertEqual(picked("--grok"), ["impl", "plain"])
+        self.assertEqual(counted("count-eligible", "--grok"), "2")
         self.assertEqual(counted("eligible", "--grok"), "1")
 
 

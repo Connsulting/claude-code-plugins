@@ -114,8 +114,9 @@ ceiling. Proxy vendor spellings `xai` and `grok` map to the Grok pool; `meta` ma
 
 The reserved `legacy-exclusive` capability applies only to Claude, including migrated
 `claude_only` and recognized legacy-exclusive model rows. The reserved `implement`
-capability applies only to Claude and Codex. Protected tasks still require the respective
-capability declaration; a Grok or Muse declaration cannot override the identity rule.
+capability allows any provider that declares it to run tasks invoking the implement skill,
+including Grok, Muse, and newly configured provider IDs. Provider `max_size` ceilings still
+gate task complexity. Legacy-exclusive tasks still require Claude's capability declaration.
 Explicit provider allowlists and other required capabilities continue to apply.
 
 Dispatch records the provider ID in the historical `account_id` field. Historical claims

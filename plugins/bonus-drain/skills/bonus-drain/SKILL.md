@@ -22,7 +22,7 @@ source private helper functions or invent a second DB path.
 
 1. Providers, pacing limits, and dispatch behavior come from the validated configuration.
    Enabled accounts come from the proxy auth-file cache. A task that invokes the implement
-   skill runs only on Claude or Codex declaring the reserved `implement` capability.
+   skill runs on any provider declaring the reserved `implement` capability, subject to its `max_size` ceiling.
    Provider `max_size` ceilings also apply, with an absent task size treated as `huge`.
 2. The refresher alone calls CLIProxyAPI management. Scout, plan, and viewers read cache.
 3. Missing, stale, malformed, or resetless subscription cache closes its entire provider pool. No data is not

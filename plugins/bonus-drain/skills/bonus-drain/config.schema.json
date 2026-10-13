@@ -326,7 +326,7 @@
           "items": {
             "$ref": "#/$defs/id"
           },
-          "description": "Capabilities this provider offers. Reserved: legacy-exclusive is restricted to claude; implement is restricted to claude and codex. Reserved capabilities also require these declarations and cannot be granted to other provider identities."
+          "description": "Capabilities this provider offers. Any provider declaring implement may run implement work, subject to max_size complexity limits. The legacy-exclusive capability is restricted to claude and requires its capability declaration."
         }
       }
     },

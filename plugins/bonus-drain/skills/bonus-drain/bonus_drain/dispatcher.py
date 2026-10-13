@@ -310,7 +310,7 @@ def implement_provider_refusal(config: RuntimeConfig, task: Task) -> str | None:
         return None
     for provider in config.providers:
         if provider.id in task.allowed_providers and (
-            provider.id not in {"claude", "codex"} or IMPLEMENT_CAPABILITY not in provider.capabilities
+            IMPLEMENT_CAPABILITY not in provider.capabilities
         ):
             return (
                 f"provider {provider.id} lacks the {IMPLEMENT_CAPABILITY} capability, so it cannot "

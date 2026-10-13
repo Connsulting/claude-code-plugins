@@ -147,10 +147,10 @@ specified in `proxy_usage.py` are allowed. Disabled accounts are removed from in
 Unknown configured providers are unmetered and receive no usage request.
 
 Only Claude may run migrated `claude_only`, recognized legacy-exclusive model tasks, or
-work requiring `legacy-exclusive`; its configuration must declare that capability. Only
-Claude and Codex may run work invoking the implement skill or requiring `implement`, and
-must declare it. Declaring either protected capability on another provider does not grant
-permission. Explicit `allowed_providers` and other `required_capabilities` still apply.
+work requiring `legacy-exclusive`; its configuration must declare that capability. Any
+provider declaring `implement` may run work invoking the implement skill or requiring
+that capability, subject to its `max_size` ceiling. Declaring `legacy-exclusive` on another
+provider does not grant permission. Explicit `allowed_providers` and other `required_capabilities` still apply.
 When open capacity cannot run implement work, scout reports a `provider_capability` blocker.
 
 CLI `auto` chooses a compatible provider with the soonest reset among open pool gates.
