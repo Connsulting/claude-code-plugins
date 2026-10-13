@@ -254,7 +254,8 @@ class FactoryRunRowTests(unittest.TestCase):
         self.assertEqual(before[0]["run_id"], run_id)
         self.assertEqual(before[0]["status"], "dispatched")
         self.assertEqual(before[0]["tier"], "quick")
-        self.assertEqual(before[0]["router_decision_id"], 4242)
+        # The installed telemetry schema no longer persists retired router decision IDs.
+        self.assertNotIn("router_decision_id", before[0].keys())
 
         payload = self.root / "driver-run.json"
         payload.write_text(json.dumps({
@@ -278,7 +279,7 @@ class FactoryRunRowTests(unittest.TestCase):
         self.assertEqual(after[0]["repo"], "driver-repo")
         self.assertEqual(after[0]["session_id"], "driver-session")
         self.assertEqual(after[0]["drain_task_id"], "real-writer")
-        self.assertEqual(after[0]["router_decision_id"], 4242)
+        self.assertNotIn("router_decision_id", after[0].keys())
 
 
 if __name__ == "__main__":
