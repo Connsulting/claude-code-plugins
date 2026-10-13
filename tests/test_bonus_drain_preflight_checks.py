@@ -1057,8 +1057,8 @@ class MergedEdgeTests(PreflightCase):
         self.assertEqual(work[0].context, {})
 
     def test_lapsed_merge_check_never_masks_a_child_that_cannot_launch(self) -> None:
-        # The scout re-checks merged edges only for work that could launch, so a
-        # child whose own last attempt failed keeps a lapsed result forever.
+        # The scout re-checks merged edges only for work that could launch. A stored
+        # pass keyed by the merged PR number still reads done for a child that cannot refresh.
         self.merged_child()
         self.complete("parent", handoff())
         merged = self.runner({gh_pr("task/x", "owner/repo"): ok(TASK_X_PR_MERGED)})
@@ -1069,18 +1069,43 @@ class MergedEdgeTests(PreflightCase):
 
         status = self.ready("child", now=lapsed)
 
-        self.assertEqual(self.edge(status)["status"], "merge_check_pending")
+        self.assertEqual(self.edge(status)["status"], "done")
         self.assertEqual((status["state"], status["reason"]), ("failed", "Last run: failed"))
         self.assertIsNone(status["root_blocker"])
         self.assertTrue(status["requeue"]["allowed"], status)
 
-        # Once requeued the child could launch again: the lapsed edge gates it until refreshed.
+        # A merged parent pass is permanent, so requeue does not reopen the edge.
         self.queue.requeue("child", now_epoch=lapsed + 1)
         requeued = self.ready("child", now=lapsed + 2)
-        self.assertEqual(requeued["state"], "waiting")
-        self.assertIn("waiting for merge check of task/x into main", requeued["reason"])
+        self.assertEqual(self.edge(requeued)["status"], "done")
+        work = self.queue.check_work(now_epoch=lapsed + 2, task_ids=["child"])
+        self.assertEqual([item for item in work if item.origin == "dependency"], [])
+
+    def test_merged_parent_pass_does_not_lapse_for_a_child_that_cannot_refresh(self) -> None:
+        self.merged_child()
+        self.complete("parent", handoff())
+        merged = self.runner({gh_pr("task/x", "owner/repo"): ok(TASK_X_PR_MERGED)})
+        self.refresh(merged, now=NOW + 20)
+        self.fail_task("child", now=NOW + 30)
+        lapsed = NOW + 30 + checks.RESULT_TTL_SECONDS + 1
+
+        status = self.ready("child", now=lapsed)
+
+        self.assertEqual(self.edge(status)["status"], "done")
+        self.assertEqual(self.queue.check_work(now_epoch=lapsed, task_ids=["child"]), [])
+
+    def test_unmerged_parent_head_check_still_lapses(self) -> None:
+        self.merged_child()
+        self.complete("parent", handoff())
+        opened = self.runner({gh_pr("task/x", "owner/repo"): ok(TASK_X_PR_OPEN)})
+        self.refresh(opened, now=NOW + 20)
+        lapsed = NOW + 20 + checks.RESULT_TTL_SECONDS + 1
+
+        status = self.ready("child", now=lapsed)
+
+        self.assertEqual(self.edge(status)["status"], "merge_check_pending")
         self.assertEqual(
-            [item.origin for item in self.queue.check_work(now_epoch=lapsed + 2, task_ids=["child"])],
+            [item.origin for item in self.queue.check_work(now_epoch=lapsed, task_ids=["child"])],
             ["dependency"],
         )
 

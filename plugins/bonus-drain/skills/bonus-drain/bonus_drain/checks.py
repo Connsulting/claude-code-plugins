@@ -100,6 +100,7 @@ CheckRunner = Callable[[Sequence[str], "str | None", float], RunnerResult]
 class CheckResult:
     status: Literal["pass", "fail", "unknown"]
     detail: str
+    pr: int | None = None
 
 
 @dataclass(frozen=True)
@@ -577,7 +578,8 @@ def _evaluate_pr(spec: Mapping[str, Any], runner: CheckRunner) -> CheckResult:
     merged_into = value.get("baseRefName")
     if base and merged_into != base:
         return CheckResult("fail", f"PR #{number} merged into {merged_into}, not {base}")
-    return CheckResult("pass", f"PR #{number} merged into {merged_into}")
+    pr = number if isinstance(number, int) and not isinstance(number, bool) else None
+    return CheckResult("pass", f"PR #{number} merged into {merged_into}", pr)
 
 
 def _evaluate_release(spec: Mapping[str, Any], runner: CheckRunner) -> CheckResult:
@@ -840,6 +842,22 @@ def _components(
     return [groups[root] for root in sorted(groups)]
 
 
+def observed_context(
+    item: CheckWork, result: CheckResult, runner: CheckRunner,
+) -> dict[str, Any] | None:
+    """Context a caller stores with this observation, or None when nothing was observed.
+
+    A base_ref_exists result records the checkout and its origin URL. A pr_merged pass
+    that resolved a pull request number records that number. Anything else stores nothing.
+    """
+
+    if item.spec.get("type") == "base_ref_exists":
+        return {**item.context, "origin": origin_url(item.cwd, runner)}
+    if result.status == "pass" and result.pr is not None:
+        return {"pr": result.pr}
+    return None
+
+
 def evaluate_items(
     items: Iterable[CheckWork], *, runner: CheckRunner,
 ) -> list[tuple[CheckWork, CheckResult, dict[str, Any] | None]]:
@@ -853,10 +871,7 @@ def evaluate_items(
     results: list[tuple[CheckWork, CheckResult, dict[str, Any] | None]] = []
     for item in items:
         result = evaluate(item.spec, cwd=item.cwd, runner=memo)
-        observed = None
-        if item.spec.get("type") == "base_ref_exists":
-            observed = {**item.context, "origin": origin_url(item.cwd, memo)}
-        results.append((item, result, observed))
+        results.append((item, result, observed_context(item, result, memo)))
     return results
 
 
@@ -955,9 +970,7 @@ def refresh(
         generations = [queue.begin_check(item, now_epoch=now_epoch) for item in component]
         for item, generation in zip(component, generations):
             result = evaluate(item.spec, cwd=item.cwd, runner=memo)
-            observed = None
-            if item.spec.get("type") == "base_ref_exists":
-                observed = {**item.context, "origin": origin_url(item.cwd, memo)}
+            observed = observed_context(item, result, memo)
             stored = queue.store_check_result(
                 item, result.status, result.detail, generation=generation,
                 observed_context=observed, now_epoch=now_epoch,

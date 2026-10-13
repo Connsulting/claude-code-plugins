@@ -701,7 +701,7 @@ class _StoredCheck:
         assert self.row is not None
         return (
             self.age(now) < checks.RESULT_TTL_SECONDS
-            or QueueDB._permanent_pass(spec, self.row["status"])
+            or QueueDB._permanent_pass(spec, self.row)
         )
 
 
@@ -4665,9 +4665,16 @@ class QueueDB:
         ).fetchone()
 
     @staticmethod
-    def _permanent_pass(spec: Mapping[str, Any], status: str | None) -> bool:
+    def _permanent_pass(spec: Mapping[str, Any], row: sqlite3.Row | None) -> bool:
         # A merged numbered pull request cannot become unmerged; a head name can be reused.
-        return status == "pass" and spec.get("type") == "pr_merged" and "pr" in spec
+        # A dependency edge stores the number it observed, because its spec names only head and base.
+        if row is None or row["status"] != "pass" or spec.get("type") != "pr_merged":
+            return False
+        if "pr" in spec:
+            return True
+        context = json.loads(row["context_json"] or "{}")
+        pr = context.get("pr") if isinstance(context, dict) else None
+        return isinstance(pr, int) and not isinstance(pr, bool)
 
     @staticmethod
     def _check_block(verdicts: Iterable[Mapping[str, Any]]) -> tuple[str, str] | None:
@@ -4885,7 +4892,7 @@ class QueueDB:
                     else:
                         checked = _timestamp_epoch(result["checked_at"])
                         age = now - checked
-                        permanent = self._permanent_pass(spec, result["status"])
+                        permanent = self._permanent_pass(spec, result)
                         if result["status"] == "pass":
                             due = not permanent and age >= checks.PASS_REFRESH_SECONDS
                         else:
@@ -4941,9 +4948,13 @@ class QueueDB:
         if status not in {"pass", "fail", "unknown"}:
             raise QueueError(f"invalid check status: {status}")
         context: dict[str, Any] = {}
+        observed = dict(observed_context or {})
         if work.spec.get("type") == "base_ref_exists":
-            observed = dict(observed_context or {})
             context = {"cwd": work.context.get("cwd"), "origin": observed.get("origin")}
+        elif work.origin == "dependency" and status == "pass":
+            pr = observed.get("pr")
+            if isinstance(pr, int) and not isinstance(pr, bool):
+                context = {"pr": pr}
         stamp = _epoch_iso(float(now_epoch))
         self.initialize()
         with self._transaction() as connection:
