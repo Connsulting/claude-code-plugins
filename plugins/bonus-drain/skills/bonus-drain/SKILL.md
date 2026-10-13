@@ -436,7 +436,10 @@ recorded with the field null as unreported, rather than being rewritten. `bonus-
 shows the value per held item (`yes`, `no`, or empty) and ends with
 `queue-time knowable: authority_required K/N, verification_needed K/N (U unreported)`;
 `--json` returns `{"held": [...], "measurement": {code: {"knowable", "not_knowable", "unreported"}}}`.
-A high knowable count means reviews are missing findings.
+A high knowable count means reviews are missing findings. A failed attempt reporting `true` gets
+no automatic retry: its recovery is held at once as `queue_contract_conflict` ("blocker was
+knowable at queue time; the contract must change"), listed by `held-report`, because another
+attempt on the same contract cannot clear it. An operator requeue still schedules one.
 
 For repository work, the required handoff identity is `remote`, `target_ref`, `branch_ref`, and
 `integration_state`. `target_base_oid`, `head_oid`, and `merge_receipt` may be retained as audit
