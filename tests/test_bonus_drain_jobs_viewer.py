@@ -7,12 +7,14 @@ import http.client
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,6 +27,63 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 SERVER_PATH = SKILL_ROOT / "services" / "jobs-viewer" / "server.py"
 sys.path.insert(0, str(SKILL_ROOT))
+
+from bonus_drain import planner, usage
+from bonus_drain.config import (
+    DispatchBinding,
+    LimitConfig,
+    ProviderConfig,
+    RuntimeConfig,
+)
+
+NOW = 2_000_000_000
+EMPTY_PLAN = {"subscriptions": [], "gates": [], "allocations": [], "host_pressure": None}
+
+
+def _viewer_config() -> RuntimeConfig:
+    return RuntimeConfig(
+        schema_version=1, source_path=None, database=Path("/unused/queue.db"),
+        record_command=("/bin/true",), secret_refs=(), adapters=(),
+        providers=tuple(
+            ProviderConfig(provider, DispatchBinding("unused", provider), size)
+            for provider, size in (("claude", "huge"), ("codex", "large"),
+                                   ("grok", "small"), ("muse", "medium"))
+        ),
+        limits=tuple(
+            LimitConfig(provider + "-weekly", provider, 604800, 95, 604800, 3,
+                        max_percent_per_window=0.5, estimated_percent_per_job=1,
+                        pacing_window_seconds=3600)
+            for provider in ("claude", "codex")
+        ),
+        viewer={}, pr_exceptions=(), cache_dir=Path("/unused/cache"),
+        proxy_secret_ref=None, unmetered_max_inflight=2,
+    )
+
+
+def _subscription(provider: str, label: str, *, used=22, reset=NOW + 36000,
+                  fresh=True, short=None, unmetered=False) -> usage.UsageSnapshot:
+    readings = {} if unmetered or used is None else {
+        "seven_day": {"used_percent": used, "resets_at": reset},
+    }
+    if short is not None:
+        readings["five_hour"] = {"used_percent": short, "resets_at": NOW + 18000}
+    return usage.UsageSnapshot(
+        provider, provider + "-" + label, NOW, readings,
+        fresh=fresh, unmetered=unmetered,
+    )
+
+
+def _plan(*subscriptions, config=None, cycle_anchor=123, allocations=None, host_pressure=None):
+    built = planner.build_plan(
+        config or _viewer_config(),
+        {(row.provider_id, row.account_id): row for row in subscriptions},
+        eligible_count=20, now_epoch=NOW,
+    ).to_dict()
+    return {
+        "generated_at": built["generated_at"], "gates": built["gates"],
+        "subscriptions": built["subscriptions"], "allocations": allocations or [],
+        "host_pressure": host_pressure, "cycle_anchor": cycle_anchor,
+    }
 
 
 def _load_server():
@@ -41,6 +100,10 @@ class JobsViewerContractTests(unittest.TestCase):
 
     def setUp(self) -> None:
         self.viewer = _load_server()
+        self.config = _viewer_config()
+        config_patch = mock.patch.object(self.viewer.graph_config, "load_config", return_value=self.config)
+        config_patch.start()
+        self.addCleanup(config_patch.stop)
 
     def _server(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), self.viewer.Handler)
@@ -92,56 +155,59 @@ class JobsViewerContractTests(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(getattr(self.viewer, name).encode()).hexdigest(), expected)
 
     def test_open_pool_keeps_subscription_cards_idle_until_jobs_are_running(self) -> None:
-        claude = self.viewer._claude_cards(
-            {"acct": [{"label": "Business", "account_id": "claude-business", "u7": 22}],
-             "provider_gates": {"claude": {"provider_id": "claude", "open": True}}}, None, 0, "", 0,
-        )[0]
-        codex = self.viewer._codex_cards(
-            {"codex_acct": [{"label": "Personal", "account_id": "codex-personal", "u7": 22}],
-             "provider_gates": {"codex": {"provider_id": "codex", "open": True}}}, None, 0, "", 0,
-        )[0]
-        grok_gates = {"subscriptions": [{"provider_id": "grok", "account_id": "grok-d", "limits": {"seven_day": {"used_percent": 3}}}],
-                      "provider_gates": {"grok": {"provider_id": "grok", "open": True}}}
-        grok = self.viewer._grok_cards(grok_gates, None, 0, "", 0)[0]
+        plan = _plan(
+            _subscription("claude", "Business"), _subscription("codex", "Personal"),
+            _subscription("grok", "d", unmetered=True),
+        )
+        claude = self.viewer._pool_cards(plan, "claude", 0, 0, config=self.config)[0]
+        codex = self.viewer._pool_cards(plan, "codex", 0, 0, config=self.config)[0]
+        grok = self.viewer._pool_cards(plan, "grok", 0, 0, config=self.config)[0]
 
         self.assertEqual(claude["name"], "Claude · Business")
         self.assertEqual(codex["name"], "Codex · Personal")
-        self.assertEqual(grok["name"], "Grok · d")
+        self.assertEqual(grok["name"], "Grok")
         for card in (claude, codex):
             with self.subTest(account=card["name"]):
-                self.assertFalse(card["active"])
-                self.assertTrue(card["live"])
                 self.assertFalse(card["draining"])
                 row = self.viewer._account_row(card)
                 self.assertNotIn('<i class="stripe on"></i>', row)
                 self.assertIn('bar lg idle', row)
 
-        window_draining = self.viewer._grok_cards(
-            grok_gates, None, 0, "grok", 0,
-        )[0]
-        self.assertIn("<b>3%</b>", self.viewer._account_row(window_draining))
-        self.assertEqual(grok["u7"], 3)
+        self.assertIn("unmetered", self.viewer._account_row(grok).lower())
+        self.assertIsNone(grok["u7"])
 
-        draining = self.viewer._claude_cards(
-            {"acct": [{"label": "Business", "account_id": "claude-business", "u7": 22}],
-             "provider_gates": {"claude": {"provider_id": "claude", "open": True}}},
-            None, 0, "claude", 1,
-        )[0]
+        draining = self.viewer._pool_cards(plan, "claude", 0, 1, config=self.config)[0]
         self.assertIn('bar lg draining', self.viewer._account_row(draining))
         self.assertIn('@keyframes drainshimmer', self.viewer.CSS)
 
-    def test_usage_bar_marks_floor_below_and_keeps_week_gone_in_the_pace_line(self) -> None:
-        """Floor caret sits below; week elapsed is copy under the bar, not a second tick."""
-        now = 1_000_000
-        reset = now + 84 * 3600  # half a 168h week left
-        card = {
-            "name": "Grok", "engine": "grok", "tag": "",
-            "u7": 40, "ceiling": 90, "r7": reset,
-            "windows": 3, "opens_in": None, "batch": 0, "batch_n": 4,
-            "eligible": 1, "behind": "", "urgent": False, "active": True,
-            "draining": False, "floor_ppw": 0.5, "pacing_s": 3600,
-        }
-        with mock.patch.object(self.viewer.time, "time", return_value=now):
+    def test_account_rows_preserve_planner_usage_and_running_bar_markup(self) -> None:
+        plan = _plan(_subscription("claude", "Personal", used=20))
+        with mock.patch.object(self.viewer.time, "time", return_value=NOW):
+            idle = self.viewer._account_row(self.viewer._pool_cards(plan, "claude", 1, 0, config=self.config)[0])
+            running = self.viewer._account_row(self.viewer._pool_cards(plan, "claude", 1, 1, config=self.config)[0])
+        self.assertIn("pts surplus", idle)
+        self.assertIn("<b>20%</b>", idle)
+        self.assertIn('<i class="stripe"></i>', idle)
+        self.assertNotIn('<i class="stripe on"></i>', idle)
+        self.assertIn('bar lg idle', idle)
+        self.assertIn('bar lg draining', running)
+        self.assertIn("pool running 1", running)
+        self.assertIn('<i class="stripe"></i>', running)
+        self.assertNotIn('<i class="stripe on"></i>', running)
+
+    def test_usage_bar_marks_planner_floor_and_keeps_week_gone_in_the_pace_line(self) -> None:
+        config = replace(self.config, limits=tuple(
+            replace(limit, ceiling_percent=90) if limit.provider_id == "claude" else limit
+            for limit in self.config.limits
+        ))
+        plan = _plan(_subscription("claude", "Personal", used=40, reset=NOW + 84 * 3600),
+                     config=config)
+        with (
+            mock.patch.object(self.viewer.graph_config, "load_config", return_value=config),
+            mock.patch.object(self.viewer.time, "time", return_value=NOW),
+        ):
+            card = self.viewer._pool_cards(plan, "claude", 1, 0, config=config)[0]
+            self.assertEqual(card["reserve"], 42)
             row = self.viewer._account_row(card)
         self.assertNotIn('class="wk"', row)
         self.assertNotIn('title="week elapsed"', row)
@@ -156,79 +222,131 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertIn("border-bottom:4px solid var(--floor)", self.viewer.CSS)
         self.assertIn("--floor:oklch(0.72 0.08 230)", self.viewer.CSS)
 
-    def test_card_surplus_uses_configured_floor_rate(self) -> None:
-        now = 1_000_000
-        reset = now + 10 * 3600
-        card = {"u7": 50, "ceiling": 90, "r7": reset, "floor_ppw": 1.0, "pacing_s": 3600}
-        with mock.patch.object(self.viewer.time, "time", return_value=now):
-            self.assertEqual(self.viewer._card_surplus(card), 30.0)
-        disabled = dict(card, floor_ppw=0)
-        with mock.patch.object(self.viewer.time, "time", return_value=now):
-            self.assertEqual(self.viewer._card_surplus(disabled), 40.0)
-            self.assertIsNone(self.viewer._floor_usage(disabled))
+    def test_rendered_floor_uses_planner_pacing_and_omits_disabled_floor(self) -> None:
+        for rate, expected_surplus in ((1.0, 30.0), (0.0, 40.0)):
+            with self.subTest(floor_rate=rate):
+                config = replace(self.config, limits=tuple(
+                    replace(limit, ceiling_percent=90, max_percent_per_window=rate)
+                    if limit.provider_id == "claude" else limit for limit in self.config.limits
+                ))
+                plan = _plan(_subscription("claude", "Personal", used=50), config=config)
+                with (
+                    mock.patch.object(self.viewer.graph_config, "load_config", return_value=config),
+                    mock.patch.object(self.viewer.time, "time", return_value=NOW),
+                ):
+                    card = self.viewer._pool_cards(plan, "claude", 1, 0, config=config)[0]
+                    self.assertEqual(card["surplus"], expected_surplus)
+                    row = self.viewer._account_row(card)
+                self.assertIn(f"pool mean {expected_surplus:g} pts surplus", row)
+                if rate:
+                    self.assertIn("floor 80%", row)
+                    self.assertIn('title="floor"', row)
+                else:
+                    self.assertNotIn('title="floor"', row)
 
     def test_next_tick_capacity_keeps_codex_idle_until_actual_pool_dispatch(self) -> None:
-        gates = {
-            "codex_acct": [{"label": "Personal", "account_id": "codex-personal", "u7": 70}],
-            "provider_gates": {
-                "codex": {
-                    "account_id": "codex", "provider_id": "codex",
-                    "open": True, "batch_size": 2,
-                },
-            },
-        }
-        card = self.viewer._codex_cards(gates, None, 4, "claude", 0)[0]
+        plan = _plan(_subscription("codex", "Personal", used=70))
+        card = self.viewer._pool_cards(plan, "codex", 4, 0, config=self.config)[0]
         self.assertEqual(card["name"], "Codex · Personal")
         self.assertTrue(card["pool_open"])
         self.assertFalse(card["draining"])
         self.assertEqual(card["pool_batch"], 0)
         self.assertIn('bar lg idle', self.viewer._account_row(card))
-        running = self.viewer._codex_cards(gates, None, 4, "claude", 2)[0]
+        running = self.viewer._pool_cards(plan, "codex", 4, 2, config=self.config)[0]
         self.assertTrue(running["draining"])
         self.assertEqual(running["pool_batch"], 2)
-        self.assertEqual(running["batch"], 0)
         self.assertIn("pool running", running["tag"])
         self.assertIn('bar lg draining', self.viewer._account_row(running))
 
-    def test_live_grok_metered_batch_drives_the_verdict(self) -> None:
-        grok = self.viewer._grok_cards(
-            {"subscriptions": [{"provider_id": "grok", "account_id": "grok-d",
-                                "limits": {"seven_day": {"used_percent": 3}}}],
-             "provider_gates": {"grok": {"provider_id": "grok", "open": True}}},
-            None, 4, "grok", 2,
-        )[0]
-        self.assertIn("<b>3%</b>", self.viewer._account_row(grok))
-        tone, label, text, _sub = self.viewer._verdict([grok], "grok", 30 * 3600)
-        self.assertEqual((tone, label), ("live", "draining"))
-        self.assertIn("Grok", text)
+    def test_grok_and_muse_metered_usage_stays_numeric_when_idle_and_running(self) -> None:
+        config = replace(self.config, limits=self.config.limits + tuple(
+            LimitConfig(provider + "-weekly", provider, 604800, 95, 604800, 3,
+                        max_percent_per_window=0.5, estimated_percent_per_job=1,
+                        pacing_window_seconds=3600)
+            for provider in ("grok", "muse")
+        ))
+        plan = _plan(
+            _subscription("claude", "Business", used=48, reset=NOW + 7200),
+            _subscription("grok", "d", used=3, reset=NOW + 14400),
+            _subscription("muse", "e", used=9, reset=NOW + 18000, short=8),
+            config=config,
+        )
+        with (
+            mock.patch.object(self.viewer.graph_config, "load_config", return_value=config),
+            mock.patch.object(self.viewer.time, "time", return_value=NOW),
+        ):
+            for provider, label, percent in (("grok", "d", 3), ("muse", "e", 9)):
+                for live_batch in (0, 2):
+                    with self.subTest(provider=provider, live_batch=live_batch):
+                        cards = self.viewer._pool_cards(plan, provider, 4, live_batch, config=config)
+                        self.assertEqual(len(cards), 1)
+                        self.assertEqual(cards[0]["name"], provider.title() + " · " + label)
+                        self.assertEqual(cards[0]["u7"], percent)
+                        row = self.viewer._account_row(cards[0])
+                        self.assertIn(f"<b>{percent}%</b>", row)
+                        self.assertNotIn("unmetered", row)
+                        self.assertIn('bar lg ' + ("draining" if live_batch else "idle"), row)
+                        if live_batch:
+                            self.assertIn("pool running 2", row)
+            inflight = [
+                {"ts": "2033-05-18T03:33:20Z", "task": provider + "-job",
+                 "title": provider.title() + " job", "engine": provider, "cwd": "/unused"}
+                for provider in ("claude", "grok", "muse")
+            ]
+            body = self._bonus_body(self.QUEUE_FIXTURE, plan=plan, inflight=inflight)
+        cards = re.findall(r'<details class="arow">.*?</details>', body, re.DOTALL)
+        self.assertEqual(len(cards), 3)
+        for name, percent in (("Claude · Business", 48), ("Grok · d", 3), ("Muse · e", 9)):
+            row = next(row for row in cards if name in row)
+            self.assertIn(f"<b>{percent}%</b>", row)
+            self.assertIn("pool running 1", row)
+            self.assertIn('bar lg draining', row)
+            self.assertNotIn("unmetered", row)
 
-    def test_verdict_lists_every_dispatching_provider(self) -> None:
-        grok = self.viewer._grok_cards(
-            {"subscriptions": [{"provider_id": "grok", "account_id": "grok-d",
-                                "limits": {"seven_day": {"used_percent": 3}}}],
-             "provider_gates": {"grok": {"provider_id": "grok", "open": True}}},
-            None, 4, "grok", 1,
-        )[0]
-        claude = self.viewer._claude_cards(
-            {"acct": [{"label": "Business", "account_id": "claude-business", "u7": 48, "r7": 2_000_000_000}],
-             "batch_n": 4, "provider_gates": {"claude": {"provider_id": "claude", "open": True}}},
-            None, 3, "claude", 4,
-        )[0]
-        tone, label, text, sub = self.viewer._verdict([grok, claude], "grok", 30 * 3600)
-        self.assertEqual((tone, label), ("live", "dispatching"))
-        self.assertIn("dchip", text)
-        self.assertIn("Grok", text)
-        self.assertIn("Claude", text)
-        self.assertIn("1/3", text)
-        self.assertIn("4/4", sub)
+    def test_unmetered_subscriptions_share_one_provider_card_and_live_batch(self) -> None:
+        for provider in ("grok", "muse"):
+            with self.subTest(provider=provider):
+                plan = _plan(_subscription(provider, "a", unmetered=True),
+                             _subscription(provider, "b", unmetered=True))
+                cards = self.viewer._pool_cards(plan, provider, 4, 1, config=self.config)
+                self.assertEqual(len(cards), 1)
+                card = cards[0]
+                self.assertEqual(card["name"], provider.title())
+                self.assertEqual(card["subscription_count"], 2)
+                self.assertEqual(card["pool_batch"], 1)
+                self.assertEqual(card["batch_n"], 2)
+                self.assertTrue(card["draining"])
+                self.assertIsNone(card["u7"])
+                row = self.viewer._account_row(card)
+                self.assertIn("unmetered", row)
+                self.assertIn("1 running", row)
+                self.assertIn('<i class="stripe on"></i>', row)
 
-    def test_ready_status_uses_planner_reserve_and_next_scout_is_systemd_backed(self) -> None:
-        with mock.patch.object(self.viewer.time, "time", return_value=1_000):
-            card = {
-                "batch": 0, "u7": 68, "ceiling": 99, "windows": 3,
-                "opens_in": None, "hot": None, "eligible": 1, "behind": "",
-            }
-        self.assertEqual(self.viewer._card_state(card), ("async · 31 pts remaining", "acc"))
+    def test_configured_empty_unmetered_pools_render_closed_cards_and_absent_pools_do_not(self) -> None:
+        plan = _plan(config=self.config)
+        for provider in ("grok", "muse"):
+            with self.subTest(provider=provider):
+                cards = self.viewer._pool_cards(plan, provider, 4, 0, config=self.config)
+                self.assertEqual(len(cards), 1)
+                row = self.viewer._account_row(cards[0])
+                self.assertIn(provider.title(), row)
+                self.assertIn("waiting · no proxy subscriptions", row)
+                self.assertIn("unmetered", row)
+                self.assertIn('<span>subscriptions</span><b>0</b>', row)
+                self.assertNotIn('<i class="stripe on"></i>', row)
+                self.assertEqual(
+                    self.viewer._pool_cards(EMPTY_PLAN, provider, 4, 0, config=self.config), [],
+                )
+        body = self._bonus_body([], plan=plan)
+        cards = re.findall(r'<details class="arow">.*?</details>', body, re.DOTALL)
+        self.assertEqual(len(cards), 2)
+        self.assertEqual(body.count("waiting · no proxy subscriptions"), 2)
+        for provider in ("Grok", "Muse"):
+            self.assertTrue(any(provider in row and "unmetered" in row for row in cards))
+        absent = self._bonus_body([], plan=EMPTY_PLAN)
+        self.assertNotIn('<details class="arow">', absent)
+
+    def test_next_scout_is_systemd_backed(self) -> None:
         with mock.patch.object(self.viewer, "list_timers", return_value=[
             {"unit": "other.timer", "next": 1},
             {"unit": "bonus-drain-scout.timer", "next": 2_000},
@@ -238,7 +356,8 @@ class JobsViewerContractTests(unittest.TestCase):
     def test_remaining_and_force_buttons_use_graph_provider_eligibility(self) -> None:
         pick = [{"id": "claude-codex", "title": "Claude and Codex", "kind": "oneoff",
                  "priority": 2, "cwd": "/tmp", "goal": "test",
-                 "eligible_providers": ["claude", "codex"]}]
+                 "eligible_providers": ["claude", "codex"],
+                 "compatible_providers": ["claude", "codex"]}]
         with (
             mock.patch.object(self.viewer, "_remaining_snapshot", return_value=pick),
             mock.patch.object(self.viewer, "_last_runs", return_value={}),
@@ -253,22 +372,211 @@ class JobsViewerContractTests(unittest.TestCase):
         grok = buttons[buttons.index('data-engine="grok"'):]
         self.assertIn('disabled title="This task is not eligible for Grok"', grok)
 
-    def test_gates_uses_the_current_json_cli_protocol(self) -> None:
-        self.viewer._gates_cache.update(t=0.0, key=None, val=None)
-        response = SimpleNamespace(returncode=0, stdout=json.dumps({
-            "gates": [{"provider_id": "grok", "open": True, "batch_size": 6, "resets_at": 2000000000}],
-            "allocations": [{"task_id": "t1", "provider_id": "grok", "account_id": "grok-personal"}],
-        }))
-        cfg = mock.Mock()
-        cfg.limits_for_provider.return_value = ()
-        with (mock.patch.object(self.viewer.subprocess, "run", return_value=response) as run,
-              mock.patch.object(self.viewer.graph_config, "load_config", return_value=cfg),
-              mock.patch.object(self.viewer.graph_usage, "read_all", return_value={})):
-            gates = self.viewer.get_gates(4, 4, 4, None, None)
-        self.assertEqual(run.call_args.args[0][-3:], ["gates", "--json", "--local"])
-        self.assertEqual(gates["grok_batch"], 6)
-        self.assertEqual(gates["coordinator"], "grok")
-        self.assertEqual(gates["allocations"], {"t1": "grok"})
+    def test_viewer_is_slim_and_retired_helpers_are_absent(self) -> None:
+        self.assertLessEqual(len(SERVER_PATH.read_text().splitlines()), 2600)
+        for name in (
+            "get_usage", "get_codex_usage", "get_grok_usage", "get_gates",
+            "_provider_usage", "_preview_account_gates", "_claude_multi_active",
+            "_canonical_cycle", "_legacy_providers", "_rotation", "_verdict",
+            "_pacing_strip", "get_dispatch_times", "_claude_cards", "_codex_cards",
+            "_grok_cards", "_muse_cards", "_unmetered_card",
+        ):
+            with self.subTest(helper=name):
+                self.assertFalse(hasattr(self.viewer, name))
+        self.assertFalse(any(name.startswith("_normalize") for name in vars(self.viewer)))
+
+    def test_read_plan_returns_raw_local_cli_payload_without_usage_cache_reads(self) -> None:
+        payload = _plan(
+            _subscription("claude", "Business"), _subscription("grok", "d", unmetered=True),
+            allocations=[{"task_id": "t1", "provider_id": "grok", "account_id": "grok"}],
+            host_pressure={"reason": "fixture pressure"}, cycle_anchor=NOW + 101,
+        )
+        self.assertEqual(set(self.viewer._plan_cache), {"t", "val"})
+        self.viewer._plan_cache.update(t=0.0, val=None)
+        response = SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+        with (
+            mock.patch.object(self.viewer.subprocess, "run", return_value=response) as run,
+            mock.patch.object(usage, "read_all") as read,
+            mock.patch.object(usage, "read_accounts") as accounts,
+        ):
+            plan = self.viewer.read_plan()
+        self.assertEqual(run.call_args.args[0],
+                         [sys.executable, "-m", "bonus_drain", "gates", "--json", "--local"])
+        self.assertEqual(plan, payload)
+        self.assertIsInstance(plan["gates"], list)
+        self.assertIsInstance(plan["allocations"], list)
+        self.assertEqual(plan["cycle_anchor"], NOW + 101)
+        self.assertNotIn("provider_gates", plan)
+        self.assertNotIn("acct", plan)
+        read.assert_not_called()
+        accounts.assert_not_called()
+
+    def test_read_plan_cache_expires_at_sixty_seconds(self) -> None:
+        first, second = _plan(cycle_anchor=101), _plan(cycle_anchor=202)
+        self.viewer._plan_cache.update(t=0.0, val=None)
+        responses = [SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
+                     for payload in (first, second)]
+        with (
+            mock.patch.object(self.viewer.subprocess, "run", side_effect=responses) as run,
+            mock.patch.object(self.viewer.time, "time", return_value=1000) as clock,
+        ):
+            self.assertEqual(self.viewer.read_plan(), first)
+            clock.return_value = 1059.999
+            self.assertEqual(self.viewer.read_plan(), first)
+            self.assertEqual(run.call_count, 1)
+            clock.return_value = 1060
+            self.assertEqual(self.viewer.read_plan(), second)
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(self.viewer._plan_cache, {"t": 1060, "val": second})
+
+    def test_failed_read_plan_returns_empty_sanitized_plan_instead_of_old_open_gates(self) -> None:
+        previous = _plan(_subscription("claude", "Business"))
+        failures = (
+            SimpleNamespace(returncode=7, stdout=json.dumps(previous), stderr="credential=do_not_expose"),
+            SimpleNamespace(returncode=0, stdout="credential=do_not_expose", stderr=""),
+            SimpleNamespace(returncode=0, stdout=json.dumps([]), stderr=""),
+            subprocess.TimeoutExpired(cmd=["do_not_expose"], timeout=25),
+        )
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                self.viewer._plan_cache.update(t=1.0, val=previous)
+                kwargs = ({"side_effect": failure} if isinstance(failure, Exception)
+                          else {"return_value": failure})
+                with (
+                    mock.patch.object(self.viewer.subprocess, "run", **kwargs) as run,
+                    mock.patch.object(self.viewer.time, "time", return_value=1000),
+                    mock.patch.object(usage, "read_all") as read,
+                ):
+                    plan = self.viewer.read_plan()
+                self.assertEqual(plan, EMPTY_PLAN)
+                self.assertNotIn("do_not_expose", json.dumps(plan))
+                self.assertEqual(run.call_count, 1)
+                read.assert_not_called()
+
+    def test_metered_cards_keep_original_account_readings_and_shared_pool_gate(self) -> None:
+        plan = _plan(
+            _subscription("claude", "Personal", used=80, reset=NOW + 40 * 3600, short=17),
+            _subscription("claude", "Business", used=65, reset=NOW + 10 * 3600, short=71),
+            _subscription("codex", "Other", used=99),
+        )
+        original = json.loads(json.dumps(plan))
+        with mock.patch.object(usage, "read_all") as read:
+            cards = self.viewer._pool_cards(plan, "claude", 7, 2, config=self.config)
+        read.assert_not_called()
+        self.assertEqual(plan, original)
+        self.assertEqual(len(cards), 2)
+        by_account = {card["account_id"]: card for card in cards}
+        for label, used, hours, reserve, surplus in (
+            ("Personal", 80, 40, 20, -5), ("Business", 65, 10, 5, 25),
+        ):
+            card = by_account["claude-" + label]
+            self.assertEqual(card["name"], "Claude · " + label)
+            self.assertEqual((card["u7"], card["r7"]),
+                             (used, NOW + hours * 3600))
+            self.assertEqual((card["reserve"], card["surplus"]), (reserve, surplus))
+            self.assertEqual(card["ceiling"], 95)
+            self.assertTrue(card["pool_open"])
+            self.assertEqual(card["pool_surplus"], 10)
+            self.assertEqual(card["pool_batch"], 2)
+            self.assertTrue(card["draining"])
+
+    def test_stale_or_missing_subscription_readings_render_unknown(self) -> None:
+        for subscription in (
+            _subscription("claude", "stale", used=86, fresh=False),
+            _subscription("claude", "missing", used=None),
+        ):
+            with self.subTest(account=subscription.account_id):
+                plan = _plan(subscription)
+                if not subscription.fresh:
+                    self.assertEqual(plan["subscriptions"][0]["pacing"]["claude-weekly"]["used_percent"], 86)
+                card = self.viewer._pool_cards(plan, "claude", 1, 0, config=self.config)[0]
+                self.assertIsNone(card["u7"])
+                self.assertFalse(card["pool_open"])
+                row = self.viewer._account_row(card)
+                self.assertIn('bar lg unknown', row)
+                self.assertIn("no spend reading", row)
+                self.assertNotIn("<b>0%</b>", row)
+                self.assertIn(card["pool_reason"], row)
+                running = self.viewer._pool_cards(plan, "claude", 1, 1, config=self.config)[0]
+                running_row = self.viewer._account_row(running)
+                self.assertIn("pool running 1", running_row)
+                self.assertIn('bar lg unknown', running_row)
+                self.assertIn('<i class="stripe unk"></i>', running_row)
+                self.assertIn('<span class="n2 unk">', running_row)
+                self.assertNotIn('<i class="stripe on"></i>', running_row)
+
+    def test_generic_cards_use_each_providers_own_limit_and_pacing(self) -> None:
+        config = replace(self.config, limits=tuple(
+            replace(limit, ceiling_percent=90, lead_seconds=86400, batch_size=5,
+                    max_percent_per_window=2, pacing_window_seconds=7200)
+            if limit.provider_id == "codex" else limit for limit in self.config.limits
+        ))
+        plan = _plan(_subscription("claude", "Personal", used=50, reset=NOW + 43200),
+                     _subscription("codex", "Personal", used=50, reset=NOW + 43200),
+                     config=config)
+        with mock.patch.object(self.viewer.graph_config, "load_config", return_value=config):
+            claude = self.viewer._pool_cards(plan, "claude", 2, 0, config=config)[0]
+            codex = self.viewer._pool_cards(plan, "codex", 2, 0, config=config)[0]
+        self.assertEqual((claude["ceiling"], claude["reserve"], claude["surplus"]), (95, 6, 39))
+        self.assertEqual((codex["ceiling"], codex["reserve"], codex["surplus"]), (90, 12, 28))
+        with mock.patch.object(self.viewer.time, "time", return_value=NOW):
+            self.assertIn("floor 89%", self.viewer._account_row(claude))
+            self.assertIn("floor 78%", self.viewer._account_row(codex))
+
+    def test_closed_pool_reason_does_not_override_durable_running_state(self) -> None:
+        plan = _plan(_subscription("codex", "Personal", used=99))
+        closed = self.viewer._pool_cards(plan, "codex", 4, 0, config=self.config)[0]
+        gate = next(gate for gate in plan["gates"] if gate["provider_id"] == "codex")
+        self.assertFalse(closed["pool_open"])
+        self.assertEqual(closed["pool_reason"], gate["reason"])
+        self.assertIn(gate["reason"], self.viewer._account_row(closed))
+        running = self.viewer._pool_cards(plan, "codex", 4, 1, config=self.config)[0]
+        self.assertFalse(running["pool_open"])
+        self.assertTrue(running["draining"])
+        self.assertIn("pool running 1", self.viewer._account_row(running))
+
+    def test_drain_order_keeps_reset_priority_and_unknown_last_in_a_running_shared_pool(self) -> None:
+        for include_unknown in (False, True):
+            with self.subTest(include_unknown=include_unknown):
+                subscriptions = [
+                    _subscription("claude", "Personal", reset=NOW + 7200),
+                    _subscription("claude", "Business", reset=NOW + 10800),
+                    _subscription("codex", "Personal", reset=NOW + 14400),
+                    _subscription("codex", "Business", reset=NOW + 18000),
+                ]
+                expected = ["claude-Personal", "claude-Business", "codex-Personal", "codex-Business"]
+                if include_unknown:
+                    subscriptions.append(_subscription("codex", "Unknown", used=None))
+                    expected.append("codex-Unknown")
+                plan = _plan(*subscriptions, config=self.config)
+                with mock.patch.object(self.viewer.time, "time", return_value=NOW):
+                    cards = self.viewer._pool_cards(plan, "codex", 4, 2, config=self.config)
+                    cards.extend(self.viewer._pool_cards(plan, "claude", 4, 0, config=self.config))
+                    ordered = self.viewer._drain_order(cards)
+                self.assertEqual([card["account_id"] for card in ordered], expected)
+
+    def test_current_cycle_uses_exact_shared_planner_anchor_without_reconstruction(self) -> None:
+        plan = _plan(_subscription("claude", "Personal", reset=NOW + 7200),
+                     _subscription("claude", "Business", reset=NOW + 10800),
+                     _subscription("codex", "Other", reset=NOW + 3600),
+                     cycle_anchor=NOW + 101)
+        with mock.patch.object(self.viewer, "_db") as database:
+            self.assertEqual(self.viewer.current_cycle(plan), NOW + 101)
+            self.assertEqual(self.viewer.current_cycle(dict(plan, cycle_anchor=0)), 0)
+        database.assert_not_called()
+
+    def test_missing_plan_anchor_falls_back_to_database_history_or_zero(self) -> None:
+        plan = _plan(_subscription("claude", "Personal"))
+        del plan["cycle_anchor"]
+        for row, expected in (((NOW + 77,), NOW + 77), ((None,), 0)):
+            with self.subTest(history=row), mock.patch.object(self.viewer, "_db") as database:
+                database.return_value.__enter__.return_value.execute.return_value.fetchone.return_value = row
+                self.assertEqual(self.viewer.current_cycle(plan), expected)
+                database.return_value.__enter__.return_value.execute.assert_called_once_with(
+                    "SELECT MAX(cycle) FROM runs",
+                )
+        with mock.patch.object(self.viewer, "_db", side_effect=OSError("missing history")):
+            self.assertEqual(self.viewer.current_cycle(EMPTY_PLAN), 0)
 
     def test_secretless_force_requires_exact_browser_boundary_and_json(self) -> None:
         self.viewer.ALLOWED_HOSTS = (self.HOST,)
@@ -734,22 +1042,25 @@ class JobsViewerContractTests(unittest.TestCase):
             {
                 "id": "medium-job", "title": "Medium upcoming", "kind": "recurring",
                 "priority": 2, "cadence": "weekly", "cwd": "/tmp/medium", "goal": "medium goal",
-                "engine_class": "codex-ok", "last_ts": "2026-08-23T12:00:00Z", "size": "medium",
+                "eligible_providers": ["claude", "codex", "grok", "muse"],
+                "compatible_providers": ["claude", "codex", "grok", "muse"], "last_ts": "2026-08-23T12:00:00Z", "size": "medium",
             },
             {
                 "id": "legacy-job", "title": "Legacy upcoming", "kind": "oneoff",
                 "priority": 2, "cadence": None, "cwd": "/tmp/legacy", "goal": "legacy goal",
-                "engine_class": "codex-ok", "last_ts": "2026-08-24T12:00:00Z", "size": None,
+                "eligible_providers": ["claude", "codex", "grok", "muse"],
+                "compatible_providers": ["claude", "codex", "grok", "muse"], "last_ts": "2026-08-24T12:00:00Z", "size": None,
             },
             {
                 "id": "new-recurring", "title": "New recurring", "kind": "recurring",
                 "priority": 2, "cadence": "weekly", "cwd": "/tmp/scheduled", "goal": "new goal",
-                "engine_class": "claude-only", "last_ts": None, "size": "small",
+                "eligible_providers": ["claude"], "compatible_providers": ["claude"], "last_ts": None, "size": "small",
             },
             {
                 "id": "unexpected-job", "title": "Unexpected upcoming", "kind": "oneoff",
                 "priority": 2, "cadence": None, "cwd": "/tmp/unexpected", "goal": "unexpected goal",
-                "engine_class": "codex-ok", "last_ts": None, "size": unexpected,
+                "eligible_providers": ["claude", "codex", "grok", "muse"],
+                "compatible_providers": ["claude", "codex", "grok", "muse"], "last_ts": None, "size": unexpected,
             },
         ]
         history = [{
@@ -764,24 +1075,12 @@ class JobsViewerContractTests(unittest.TestCase):
             "goal": "disabled goal", "size": "huge",
         }]
         with (
-            mock.patch.object(self.viewer, "get_usage", return_value=None),
-            mock.patch.object(self.viewer, "get_codex_usage", return_value=None),
-            mock.patch.object(self.viewer, "get_grok_usage", return_value=None),
+            mock.patch.object(self.viewer, "read_plan", return_value=dict(EMPTY_PLAN, cycle_anchor=123)),
             mock.patch.object(self.viewer, "current_cycle", return_value=123),
             mock.patch.object(self.viewer, "get_remaining", return_value=remaining),
             mock.patch.object(self.viewer, "get_recent_runs", return_value=history),
             mock.patch.object(self.viewer, "get_disabled", return_value=disabled),
             mock.patch.object(self.viewer, "get_inflight", return_value=[]),
-            mock.patch.object(self.viewer, "get_gates", return_value={"coordinator": "none"}),
-            mock.patch.object(self.viewer, "_claude_cards", return_value=[]),
-            mock.patch.object(self.viewer, "_codex_cards", return_value=[]),
-            mock.patch.object(self.viewer, "_grok_cards", return_value=[]),
-            mock.patch.object(
-                self.viewer, "_verdict",
-                return_value=("idle", "nothing draining", "idle", ""),
-            ),
-            mock.patch.object(self.viewer, "_rotation", return_value=""),
-            mock.patch.object(self.viewer, "get_dispatch_times", return_value=[]),
             mock.patch.object(
                 self.viewer.time, "time",
                 return_value=self.viewer._iso_epoch("2026-08-26T12:00:00Z"),
@@ -843,44 +1142,88 @@ class JobsViewerContractTests(unittest.TestCase):
         {
             "id": "weekly-claude", "title": "Weekly Claude sweep", "kind": "recurring",
             "priority": 1, "cadence": "weekly", "cwd": "/tmp/one", "goal": "sweep",
-            "size": "small", "last_ts": None, "eligible_providers": ["claude"],
+            "size": "small", "last_ts": None, "eligible_providers": ["claude"], "compatible_providers": ["claude"],
         },
         {
             "id": "oneoff-codex", "title": "One-off Codex refactor", "kind": "oneoff",
             "priority": 2, "cadence": None, "cwd": "/tmp/two", "goal": "refactor",
-            "size": "large", "last_ts": None, "eligible_providers": ["codex", "grok"],
+            "size": "large", "last_ts": None, "eligible_providers": ["codex", "grok"], "compatible_providers": ["codex", "grok"],
         },
         {
             "id": "oneoff-claude", "title": "One-off Claude audit", "kind": "oneoff",
             "priority": 2, "cadence": None, "cwd": "/tmp/three", "goal": "audit",
-            "size": "small", "last_ts": None, "eligible_providers": ["claude", "codex"],
+            "size": "small", "last_ts": None, "eligible_providers": ["claude", "codex"], "compatible_providers": ["claude", "codex"],
         },
     ]
 
-    def _bonus_body(self, remaining, runs=None, gates=None, inflight=None):
+    def _bonus_body(self, remaining, runs=None, plan=None, inflight=None):
         with (
-            mock.patch.object(self.viewer, "get_usage", return_value=None),
-            mock.patch.object(self.viewer, "get_codex_usage", return_value=None),
-            mock.patch.object(self.viewer, "get_grok_usage", return_value=None),
-            mock.patch.object(self.viewer, "current_cycle", return_value=123),
+            mock.patch.object(self.viewer, "read_plan",
+                              return_value=plan if plan is not None else dict(EMPTY_PLAN, cycle_anchor=123)),
             mock.patch.object(self.viewer, "get_remaining", return_value=remaining),
             mock.patch.object(self.viewer, "get_recent_runs", return_value=runs or []),
             mock.patch.object(self.viewer, "get_disabled", return_value=[]),
             mock.patch.object(self.viewer, "get_inflight", return_value=inflight or []),
-            mock.patch.object(
-                self.viewer, "get_gates",
-                return_value=gates if gates is not None else {"coordinator": "none"},
-            ),
-            mock.patch.object(self.viewer, "_claude_cards", return_value=[]),
-            mock.patch.object(self.viewer, "_codex_cards", return_value=[]),
-            mock.patch.object(self.viewer, "_grok_cards", return_value=[]),
-            mock.patch.object(
-                self.viewer, "_verdict",
-                return_value=("idle", "nothing draining", "idle", ""),
-            ),
-            mock.patch.object(self.viewer, "get_dispatch_times", return_value=[]),
         ):
             return self.viewer.render_bonus_body()
+
+    def test_rendered_capacity_uses_inflight_counts_and_keeps_planned_batches_idle(self) -> None:
+        plan = _plan(
+            _subscription("claude", "Personal"), _subscription("claude", "Business"),
+            _subscription("codex", "Other"), _subscription("grok", "d", unmetered=True),
+        )
+        inflight = [
+            {"ts": "2033-05-18T03:33:20Z", "task": provider + "-job",
+             "title": provider.title() + " job", "engine": provider, "cwd": "/unused"}
+            for provider in ("claude", "grok")
+        ]
+        with mock.patch.object(usage, "read_all") as read:
+            body = self._bonus_body(self.QUEUE_FIXTURE, plan=plan, inflight=inflight)
+        read.assert_not_called()
+        cards = re.findall(r'<details class="arow">.*?</details>', body, re.DOTALL)
+        self.assertEqual(len(cards), 5)
+        for name in ("Claude · Personal", "Claude · Business"):
+            row = next(row for row in cards if name in row)
+            self.assertIn("pool running 1", row)
+            self.assertIn('bar lg draining', row)
+            self.assertIn('<i class="stripe"></i>', row)
+            self.assertNotIn('<i class="stripe on"></i>', row)
+        codex = next(row for row in cards if "Codex · Other" in row)
+        self.assertIn('bar lg idle', codex)
+        self.assertNotIn("pool running", codex)
+        grok = next(row for row in cards if "Grok" in row)
+        self.assertIn("1 running", grok)
+        self.assertIn("unmetered", grok)
+        self.assertIn('<i class="stripe on"></i>', grok)
+        muse = next(row for row in cards if "Muse" in row)
+        self.assertIn("waiting · no proxy subscriptions", muse)
+        self.assertIn("unmetered", muse)
+        self.assertIn('<span>subscriptions</span><b>0</b>', muse)
+        self.assertIn("0 running", muse)
+        self.assertNotIn("pool running", muse)
+        self.assertNotIn('<i class="stripe on"></i>', muse)
+        self.assertNotIn('data-fold="rotation"', body)
+
+    def test_rendered_capacity_preserves_host_pressure_and_queued_work(self) -> None:
+        plan = _plan(_subscription("claude", "Personal"),
+                     _subscription("grok", "d", unmetered=True),
+                     host_pressure={"reason": "fixture pressure"})
+        inflight = [
+            {"ts": "2033-05-18T03:33:20Z", "task": provider + "-job",
+             "title": provider.title() + " job", "engine": provider, "cwd": "/unused"}
+            for provider in ("claude", "grok")
+        ]
+        body = self._bonus_body(self.QUEUE_FIXTURE, plan=plan, inflight=inflight)
+        self.assertIn("waiting · host pressure", body)
+        self.assertIn('id="qlist"', body)
+        self.assertIn("Weekly Claude sweep", body)
+        cards = re.findall(r'<details class="arow">.*?</details>', body, re.DOTALL)
+        for name in ("Claude · Personal", "Grok"):
+            row = next(row for row in cards if name in row)
+            self.assertIn('<span class="n2 warn">waiting · host pressure</span>', row)
+            self.assertNotIn("pool running 1", row)
+        claude = next(row for row in cards if "Claude · Personal" in row)
+        self.assertIn('bar lg draining', claude)
 
     def test_queue_filter_chips_cover_the_facets_present_in_the_queue(self) -> None:
         body = self._bonus_body(self.QUEUE_FIXTURE)
@@ -1032,7 +1375,8 @@ class JobsViewerContractTests(unittest.TestCase):
 
     def test_single_value_facets_and_an_empty_queue_render_no_dead_controls(self) -> None:
         uniform = [dict(t, priority=2, kind="oneoff", cadence=None, size="small",
-                        eligible_providers=["claude"]) for t in self.QUEUE_FIXTURE]
+                        eligible_providers=["claude"], compatible_providers=["claude"])
+                   for t in self.QUEUE_FIXTURE]
         # Nothing here can be filtered, so the bar itself is dropped rather than rendered as
         # four controls that cannot change the list.
         uniform_body = self._bonus_body(uniform)
@@ -1144,29 +1488,27 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertNotIn('id="qnone" hidden', nothing)
         self.assertIn(">0 of 3 jobs<", nothing)
 
-    def test_mobile_folds_wrap_the_header_rotation_chart_and_drain_order(self) -> None:
-        """Phone: those three blocks start closed behind their own headers. Desktop CSS
+    def test_mobile_folds_preserve_header_and_usage_with_no_rotation(self) -> None:
+        """Phone: the header and usage start closed behind their own headers. Desktop CSS
         never hides the bodies, so the wrappers must not become the layout."""
         body = self._bonus_body(self.QUEUE_FIXTURE)
         self.assertIn('class="mfold mfold-wrap" data-fold="header"', body)
         self.assertIn('class="hd mfold-sum"', body)
         self.assertNotIn('class="work-summary"', body)
-        self.assertIn('class="tl mfold" data-fold="rotation"', body)
+        self.assertNotIn('data-fold="rotation"', body)
         self.assertIn('class="rows mfold" data-fold="drain"', body)
         self.assertIn('class="rowhd mfold-sum"', body)
         header_at = body.index('data-fold="header"')
-        rotation_at = body.index('data-fold="rotation"')
         drain_at = body.index('data-fold="drain"')
         remaining_at = body.index("queued · priority order")
         self.assertNotIn('class="vbar', body)
-        self.assertLess(header_at, rotation_at)
-        self.assertLess(rotation_at, drain_at)
+        self.assertLess(header_at, drain_at)
         self.assertLess(drain_at, remaining_at)
         self.assertNotIn('class="sec capacity-fold"', body)
         self.assertNotIn('class="task-edit"', body)
         self.assertNotIn('id="work-editor"', body)
         self.assertIn("<i class=\"caret\"></i>usage · provider capacity", body)
-        self.assertIn("<i class=\"caret\"></i>rotation", body)
+        self.assertNotIn("<i class=\"caret\"></i>rotation", body)
         self.assertIn("async scheduler", body)
         self.assertNotIn("bonus scheduler", body)
         self.assertIn("next ", body)
@@ -1184,12 +1526,14 @@ class JobsViewerContractTests(unittest.TestCase):
     def test_queued_jobs_show_a_next_scout_chip_when_planned(self) -> None:
         now = 2_000_000_000
         scout_at = now + 30 * 60
-        gates = {"coordinator": "none", "allocations": {"weekly-claude": "claude"}}
+        plan = _plan(allocations=[{
+            "task_id": "weekly-claude", "provider_id": "claude", "account_id": "claude",
+        }])
         with (
             mock.patch.object(self.viewer.time, "time", return_value=now),
             mock.patch.object(self.viewer, "next_scout", return_value=scout_at),
         ):
-            body = self._bonus_body(self.QUEUE_FIXTURE, gates=gates)
+            body = self._bonus_body(self.QUEUE_FIXTURE, plan=plan)
         claude_row = body[body.index("Weekly Claude sweep"):body.index("One-off Codex refactor")]
         self.assertIn('class="qkick"', claude_row)
         self.assertIn('href="#i-claude"', claude_row)
@@ -1270,12 +1614,12 @@ class JobsViewerContractTests(unittest.TestCase):
             hit = dom.index(marker, body_at)
             start = dom.rfind("<div", body_at, hit)
             later = [dom.find(f'data-fold="{other}"', hit + 1) for other in
-                     ("header", "rotation", "drain") if other != name]
+                     ("header", "drain") if other != name]
             later = [i for i in later if i >= 0]
             return dom[start:min(later) if later else hit + 400]
 
         closed = dump("")
-        for name in ("header", "rotation", "drain"):
+        for name in ("header", "drain"):
             with self.subTest(fold=name, state="closed"):
                 markup = fold(closed, name)
                 self.assertNotRegex(markup, r'class="[^"]*\bopen\b')
@@ -1283,9 +1627,9 @@ class JobsViewerContractTests(unittest.TestCase):
 
         opened = dump("".join(
             f"document.querySelector('.mfold[data-fold=\"{name}\"]>.mfold-sum').click();"
-            for name in ("header", "rotation", "drain")
+            for name in ("header", "drain")
         ))
-        for name in ("header", "rotation", "drain"):
+        for name in ("header", "drain"):
             with self.subTest(fold=name, state="open"):
                 markup = fold(opened, name)
                 self.assertRegex(markup, r'class="[^"]*\bopen\b')

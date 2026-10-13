@@ -31,6 +31,7 @@ EXACT_EXCLUDES = {
     "register-implement-factory-review.sh",
     "test-factory-review.sh",
 }
+RETIRED_MIGRATION_PATHS = {"bonus_drain/cutover.py", "migrate.py", "MIGRATION.md"}
 PERSONAL_TEXT = {
     r"/home/": "a machine-specific home directory",
     r"\btheconnman\b": "the source checkout owner",
@@ -262,6 +263,60 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             report.diagnostics,
         )
 
+
+    def test_top_level_install_accepts_git_suffix_version_in_either_argument_order(self) -> None:
+        database, _lifecycle = _runtime_modules()
+        version = "0.3.15+main.fixture"
+        for reversed_order in (False, True):
+            with self.subTest(reversed_order=reversed_order), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                home, caller_home = root / "target", root / "caller"
+                caller_home.mkdir()
+                environment = {
+                    **os.environ, "HOME": str(caller_home), "PYTHONDONTWRITEBYTECODE": "1",
+                    "XDG_CONFIG_HOME": str(caller_home / ".config"),
+                    "XDG_STATE_HOME": str(caller_home / ".local/state"),
+                    "XDG_CACHE_HOME": str(caller_home / ".cache"),
+                    "BONUS_DRAIN_CONFIG": str(caller_home / "missing.json"),
+                    "BONUS_DB": str(caller_home / "untouched.db"),
+                }
+                arguments = ["--home", str(home), "--install-version", version]
+                if reversed_order:
+                    arguments = ["--install-version", version, "--home", str(home)]
+                result = subprocess.run(
+                    [str(SKILL_ROOT / "install.sh"), *arguments], env=environment,
+                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                installed = json.loads(result.stdout)
+                self.assertEqual(installed["version"], version)
+                current = home / ".local/lib/bonus-drain/current"
+                self.assertEqual(os.readlink(current), version)
+                self.assertEqual(current.resolve(), Path(installed["version_dir"]))
+                metadata = json.loads((current.parent / ".bonus-drain-install.json").read_text())
+                ownership = json.loads((current / ".bonus-drain-owned.json").read_text())
+                self.assertEqual(metadata["version"], version)
+                self.assertEqual(ownership["version"], version)
+
+                config_path = home / ".config/bonus-drain/config.json"
+                config_path.parent.mkdir(parents=True)
+                self.installed_config(home, config_path)
+                database.QueueDB(home / ".local/state/bonus-drain/queue.db").initialize()
+                environment.update({
+                    "HOME": str(home), "BONUS_DRAIN_CONFIG": str(config_path),
+                    "BONUS_DB": str(home / ".local/state/bonus-drain/queue.db"),
+                    "XDG_CONFIG_HOME": str(home / ".config"),
+                    "XDG_STATE_HOME": str(home / ".local/state"),
+                    "XDG_CACHE_HOME": str(home / ".cache"),
+                })
+                doctor = subprocess.run(
+                    [str(home / ".local/bin/bonus-drain"), "doctor", "--json"], env=environment,
+                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15, check=False,
+                )
+                self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+                self.assertTrue(json.loads(doctor.stdout)["ok"])
+                self.assertFalse((caller_home / ".local").exists())
+                self.assertFalse((caller_home / "untouched.db").exists())
 
     def test_same_version_install_rejects_changed_source_without_changing_current(self) -> None:
         sys.path.insert(0, str(SKILL_ROOT))
@@ -516,6 +571,8 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             for path in self.plugin_files()
             if path.is_relative_to(SKILL_ROOT)
         }
+        self.assertFalse(included & RETIRED_MIGRATION_PATHS)
+        self.assertFalse(actual & RETIRED_MIGRATION_PATHS)
         self.assertEqual(
             included,
             actual,
@@ -566,7 +623,6 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             "skills/bonus-drain/SKILL.md",
             "skills/bonus-drain/systemd/bonus-drain-scout.path",
             "skills/bonus-drain/README.md",
-            "skills/bonus-drain/MIGRATION.md",
             "skills/bonus-drain/SECURITY.md",
             "skills/bonus-drain/config.schema.json",
             "skills/bonus-drain/config.example.json",
@@ -586,7 +642,6 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             "skills/bonus-drain/bonus_drain/kick.py",
             "skills/bonus-drain/bonus_drain/scout.py",
             "skills/bonus-drain/bonus_drain/lifecycle.py",
-            "skills/bonus-drain/bonus_drain/cutover.py",
             "skills/bonus-drain/services/jobs-viewer/server.py",
             "skills/bonus-drain/systemd/bonus-drain-refresh.service",
             "skills/bonus-drain/systemd/bonus-drain-refresh.timer",
@@ -603,11 +658,13 @@ class BonusDrainPackageContractTests(unittest.TestCase):
         )
         retired = {
             path for path in actual
-            if path == "skills/bonus-drain/VIEWER_FOLLOW_UP.md" or path.endswith(("services/jobs-viewer/usage.sh", "services/jobs-viewer/codex-usage.sh", "services/jobs-viewer/grok-usage.sh"))
+            if path in {"skills/bonus-drain/" + retired for retired in RETIRED_MIGRATION_PATHS}
+            or path == "skills/bonus-drain/VIEWER_FOLLOW_UP.md"
+            or path.endswith(("services/jobs-viewer/usage.sh", "services/jobs-viewer/codex-usage.sh", "services/jobs-viewer/grok-usage.sh"))
         }
         self.assertFalse(
             retired,
-            f"retired copied collector assets must not ship: {sorted(retired)}",
+            f"retired migration and collector assets must not ship: {sorted(retired)}",
         )
 
         for relative_path in (
@@ -808,7 +865,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             "viewer mutations must default off",
         )
 
-    def test_package_readme_has_manual_operations_and_dependency_guidance(self) -> None:
+    def test_package_readme_has_supported_operations_and_dependency_guidance(self) -> None:
         self.require_plugin()
         readme = (PLUGIN_ROOT / "README.md").read_text(encoding="utf-8")
         headings = [
@@ -816,7 +873,6 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             for match in re.finditer(r"(?m)^#{1,6}\s+(.+?)\s*$", readme)
         ]
         required_heading_terms = {
-            "manual cutover": ("manual", "cutover"),
             "backup": ("backup",),
             "rollback": ("rollback",),
             "tailscale": ("tailscale",),
@@ -827,6 +883,95 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                 any(all(term in heading for term in terms) for heading in headings),
                 f"README needs a {section} section",
             )
+
+    def test_package_docs_do_not_advertise_retired_migration_commands_or_files(self) -> None:
+        for path in (PLUGIN_ROOT / "README.md", SKILL_ROOT / "README.md", SKILL_ROOT / "SKILL.md"):
+            with self.subTest(document=path.relative_to(PLUGIN_ROOT).as_posix()):
+                text = path.read_text(encoding="utf-8")
+                for retired in (
+                    "MIGRATION.md", "migrate.py", "bonus-drain migrate",
+                    "bonus-drain import-legacy", "`import-legacy`", "`migrate --dry-run`",
+                ):
+                    self.assertNotIn(retired, text)
+
+
+class RemovedMigrationCLIContractTests(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.environment = {
+            **os.environ, "HOME": str(self.home), "PYTHONDONTWRITEBYTECODE": "1",
+            "XDG_CONFIG_HOME": str(self.home / ".config"),
+            "XDG_STATE_HOME": str(self.home / ".local/state"),
+            "XDG_CACHE_HOME": str(self.home / ".cache"),
+            "BONUS_DRAIN_CONFIG": str(self.home / "missing-config.json"),
+            "BONUS_DRAIN_STATE_DIR": str(self.home / ".local/state/bonus-drain"),
+            "BONUS_DRAIN_CACHE_DIR": str(self.home / ".cache/bonus-drain"),
+            "BONUS_USAGE_CACHE_DIR": str(self.home / ".cache/bonus-drain/usage"),
+            "BONUS_DB": str(self.home / ".local/state/bonus-drain/queue.db"),
+            "BONUS_DRAIN_BIN": str(SKILL_ROOT / "bin/bonus-drain"),
+        }
+
+    def run_cli(self, *arguments, shell_entrypoint=False):
+        entrypoint = SKILL_ROOT / ("bonusdb.sh" if shell_entrypoint else "bin/bonus-drain")
+        return subprocess.run(
+            [str(entrypoint), *arguments], env=self.environment,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15, check=False,
+        )
+
+    def test_help_lists_supported_commands_without_legacy_migration(self) -> None:
+        for shell_entrypoint in (False, True):
+            with self.subTest(shell_entrypoint=shell_entrypoint):
+                help_result = self.run_cli("--help", shell_entrypoint=shell_entrypoint)
+                self.assertEqual(help_result.returncode, 0, help_result.stderr)
+                self.assertIn("gates", help_result.stdout)
+                self.assertIn("doctor", help_result.stdout)
+                self.assertNotRegex(help_result.stdout, r"\b(?:migrate|import-legacy)\b")
+        supported = self.run_cli("gates", "--help")
+        self.assertEqual(supported.returncode, 0, supported.stderr)
+        self.assertIn("--local", supported.stdout)
+        self.assertFalse((self.home / ".local").exists())
+
+    def test_removed_commands_refuse_before_config_reads_or_state_changes(self) -> None:
+        source = self.root / "source.db"
+        source.write_bytes(b"retained source fixture\n")
+        backlog, runs = self.root / "backlog.md", self.root / "runs.jsonl"
+        backlog.write_text("# Retained backlog\n")
+        runs.write_text("")
+        destination = self.root / "destination"
+        invocations = (
+            ("migrate", "--from-db", str(source), "--from-units", str(self.root),
+             "--destination", str(destination), "--dry-run", "--json"),
+            ("import-legacy", "--backlog", str(backlog), "--runs", str(runs), "--json"),
+        )
+        for invocation in invocations:
+            with self.subTest(command=invocation[0]):
+                result = self.run_cli(*invocation)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertEqual(result.stdout, "")
+                self.assertIn(f"invalid choice: '{invocation[0]}'", result.stderr)
+                self.assertNotIn("missing-config.json", result.stderr)
+        self.assertEqual(source.read_bytes(), b"retained source fixture\n")
+        self.assertEqual(backlog.read_text(), "# Retained backlog\n")
+        self.assertEqual(runs.read_text(), "")
+        self.assertFalse(destination.exists())
+        self.assertFalse((self.home / ".local").exists())
+
+    def test_shell_migrate_entrypoint_refuses_without_translating_to_import_legacy(self) -> None:
+        backlog, runs = self.root / "backlog.md", self.root / "runs.jsonl"
+        backlog.write_text("# Retained backlog\n")
+        runs.write_text("")
+        result = self.run_cli("migrate", str(backlog), str(runs), shell_entrypoint=True)
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("invalid choice: 'migrate'", result.stderr)
+        self.assertNotIn("invalid choice: 'import-legacy'", result.stderr)
+        self.assertEqual(backlog.read_text(), "# Retained backlog\n")
+        self.assertEqual(runs.read_text(), "")
+        self.assertFalse((self.home / ".local").exists())
 
 
 class PreflightDocsTests(unittest.TestCase):

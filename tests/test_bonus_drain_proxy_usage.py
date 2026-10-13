@@ -178,6 +178,42 @@ class ProxyUsageTests(unittest.TestCase):
                               "private-muse-personal-field", "private-auth-field"):
                 self.assertNotIn(sensitive, text)
 
+    def test_gates_cli_and_viewer_share_scout_cycle_anchor_from_earliest_provider_reset(self):
+        from tests.test_bonus_drain_jobs_viewer import _load_server
+
+        # The Codex short window wins even with two Claude subscriptions present.
+        # The second case proves the neighboring Claude weekly reset still wins.
+        for earlier_codex in (True, False):
+            with self.subTest(earlier_codex=earlier_codex):
+                reset = self.now + (1101 if earlier_codex else 18000)
+                self.bodies["c"]["rate_limit"]["primary_window"]["reset_at"] = reset
+                usage.refresh_all(self.config, now_epoch=self.now)
+                db.QueueDB(self.config.database).initialize()
+                network_count = len(self.requests)
+                result = self.cli("gates", "--local", "--now", str(self.now))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                payload = json.loads(result.stdout)
+                earliest_reset = self.now + (1101 if earlier_codex else 3600)
+                expected = int((earliest_reset + 1800) // 3600 * 3600)
+                self.assertEqual(payload["cycle_anchor"], expected)
+                self.assertIsInstance(payload["gates"], list)
+                self.assertIsInstance(payload["subscriptions"], list)
+                self.assertIsInstance(payload["allocations"], list)
+                self.assertEqual(len(self.requests), network_count)
+
+                viewer = _load_server()
+                viewer.DB_PATH = self.config.database
+                with (
+                    mock.patch.dict(os.environ, {"BONUS_DRAIN_CONFIG": str(self.config_path)}),
+                    mock.patch.object(usage, "read_all") as reread,
+                ):
+                    plan = viewer.read_plan()
+                    self.assertEqual(plan["cycle_anchor"], expected)
+                    self.assertEqual(viewer.current_cycle(plan), expected)
+                    self.assertEqual(plan["subscriptions"], payload["subscriptions"])
+                reread.assert_not_called()
+                self.assertEqual(len(self.requests), network_count)
+
     def test_all_four_providers_call_allowed_endpoints_with_fixed_headers(self):
         usage.refresh_all(self.config, now_epoch=self.now)
         self.assertEqual(self.requests[0], ("GET", "/v0/management/auth-files", None))
@@ -282,6 +318,9 @@ class ProxyUsageTests(unittest.TestCase):
                                           "BONUS_SKILL_DIR": str(SKILL)}),
               mock.patch.object(viewer, "list_timers", return_value=[])):
             viewer.configure_request_boundary()
+            gates = self.cli("gates", "--local")
+            self.assertEqual(gates.returncode, 0, gates.stderr)
+            expected_anchor = json.loads(gates.stdout)["cycle_anchor"]
             body = viewer.render_bonus_body()
             rejected, _headers, _payload = JobsViewerContractTests._request(
                 server, "GET", "/api/bonus", headers={"Host": "other.example.test"},
@@ -291,7 +330,9 @@ class ProxyUsageTests(unittest.TestCase):
                 server, "GET", "/api/bonus", headers={"Host": authority, "Origin": origin},
             )
         self.assertEqual(status, 200)
-        inventory = json.loads(payload)["usage"]
+        api = json.loads(payload)
+        self.assertEqual(api["cycle"], expected_anchor)
+        inventory = api["usage"]
         self.assertIsInstance(inventory, list)
         self.assertEqual(sum(row["provider_id"] == "claude" for row in inventory), 2)
         self.assertEqual(sum(row["provider_id"] == "codex" for row in inventory), 2)

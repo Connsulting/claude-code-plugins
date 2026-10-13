@@ -22,13 +22,11 @@ const fs = require('node:fs');
  for(const chip of await page.locator('.fchip').all())assert(await chip.isVisible());
  const alignment=await page.locator('.fchip[data-value="cooldown"]').evaluate(el=>{const count=el.querySelector(':scope > i');return {label:getComputedStyle(el).fontSize,count:getComputedStyle(count).fontSize}});
  assert.equal(alignment.label,alignment.count);
- const rotation=page.locator('[data-fold="rotation"]');
+ assert.equal(await page.locator('[data-fold="rotation"]').count(),0);
  const capacity=page.locator('[data-fold="drain"]');
- assert(await rotation.isVisible());assert(await capacity.isVisible());
- assert(await rotation.locator('.mfold-body').isVisible());
+ assert(await capacity.isVisible());
  assert(await capacity.locator('.mfold-body').isVisible());
  assert.equal(await capacity.locator('.arow').count(),5);
- assert((await rotation.boundingBox()).y<(await page.locator('#qlist').boundingBox()).y);
  assert((await capacity.boundingBox()).y<(await page.locator('#qlist').boundingBox()).y);
  assert.equal(await row('preview-03-review').getAttribute('data-state'),'waiting');
  assert.equal(await page.locator('.task-run:not([disabled])').count(),0);
@@ -41,13 +39,16 @@ const fs = require('node:fs');
  await page.screenshot({path:root+'/screenshots/mobile.png'});
  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
  for(const chip of await page.locator('.fchip').all())assert(await chip.isVisible());
- assert(await rotation.isVisible());assert(await capacity.isVisible());
- for(const section of [rotation,capacity]){
-   if(!await section.locator('.mfold-body').isVisible())await section.locator(':scope > .mfold-sum').click();
-   assert(await section.locator('.mfold-body').isVisible());
- }
+ assert.equal(await page.locator('[data-fold="rotation"]').count(),0);
+ assert(await capacity.isVisible());
+ if(!await capacity.locator('.mfold-body').isVisible())await capacity.locator(':scope > .mfold-sum').click();
+ assert(await capacity.locator('.mfold-body').isVisible());
+ const header=page.locator('[data-fold="header"] > .mfold-sum');
+ assert(await header.isVisible());
+ if(await header.getAttribute('aria-expanded')==='false')await header.click();
+ assert.equal(await header.getAttribute('aria-expanded'),'true');
  await page.screenshot({path:root+'/screenshots/mobile-capacity.png'});
  assert.deepEqual(errors,[]);
- console.log(JSON.stringify({https:true,rotation_and_usage_visible:true,no_job_editor:true,dependency_readiness:true,dispatch_disabled:true,cross_origin_rejected:true,mobile_no_overflow:true,page_errors:errors,screenshots:root+'/screenshots'}));
+ console.log(JSON.stringify({https:true,rotation_absent:true,usage_visible:true,no_job_editor:true,dependency_readiness:true,dispatch_disabled:true,cross_origin_rejected:true,mobile_no_overflow:true,page_errors:errors,screenshots:root+'/screenshots'}));
  } finally { await browser.close(); }
 })().catch(e=>{console.error(e);process.exit(1)});

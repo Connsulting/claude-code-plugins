@@ -7,7 +7,7 @@ from http.server import ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest import mock
 
-from bonus_drain import dispatcher
+from bonus_drain import dispatcher, usage
 
 from tests import test_bonus_drain_jobs_viewer as viewer_tests
 from tests import test_bonus_drain_kick as kick_tests
@@ -186,7 +186,7 @@ class AsyncViewerTests(unittest.TestCase):
         self.assertIn('scheduled body', page)
 
         with (
-            mock.patch.object(self.viewer, 'get_usage', return_value=None),
+            mock.patch.object(self.viewer, 'read_plan', return_value=viewer_tests.EMPTY_PLAN),
             mock.patch.object(self.viewer, 'current_cycle', return_value=0),
             mock.patch.object(self.viewer, 'get_remaining', side_effect=error),
         ):
@@ -318,20 +318,11 @@ class AsyncViewerTests(unittest.TestCase):
             },
         ]
         with (
-            mock.patch.object(self.viewer, 'get_usage', return_value=None),
-            mock.patch.object(self.viewer, 'get_codex_usage', return_value=None),
-            mock.patch.object(self.viewer, 'get_grok_usage', return_value=None),
-            mock.patch.object(self.viewer, 'current_cycle', return_value=1),
+            mock.patch.object(self.viewer, 'read_plan', return_value=dict(viewer_tests.EMPTY_PLAN, cycle_anchor=1)),
             mock.patch.object(self.viewer, 'get_remaining', return_value=[]),
             mock.patch.object(self.viewer, 'get_recent_runs', return_value=runs),
             mock.patch.object(self.viewer, 'get_disabled', return_value=[]),
             mock.patch.object(self.viewer, 'get_inflight', return_value=[]),
-            mock.patch.object(self.viewer, 'get_gates', return_value={'coordinator': 'none'}),
-            mock.patch.object(self.viewer, '_claude_cards', return_value=[]),
-            mock.patch.object(self.viewer, '_codex_cards', return_value=[]),
-            mock.patch.object(self.viewer, '_grok_cards', return_value=[]),
-            mock.patch.object(self.viewer, '_verdict', return_value=('idle', 'idle', 'idle', '')),
-            mock.patch.object(self.viewer, 'get_dispatch_times', return_value=[]),
         ):
             body = self.viewer.render_bonus_body()
 
@@ -379,16 +370,79 @@ class AsyncViewerTests(unittest.TestCase):
         launch.assert_not_called()
 
     def test_preview_usage_comes_from_normalized_subscriptions_without_rereading_cache(self):
-        cfg = mock.Mock()
-        cfg.limits_for_provider.return_value = [SimpleNamespace(id='weekly', window_seconds=604800, ceiling_percent=95)]
-        gates = {'subscriptions': [
-            {'provider_id': provider, 'account_id': provider + '-account', 'fresh': True,
-             'captured_at': 2000000000, 'error': None, 'unmetered': False,
-             'limits': {'seven_day': {'used_percent': 42, 'resets_at': 2000000000}}}
-            for provider in ('claude', 'codex')
-        ]}
-        with mock.patch.object(self.viewer.graph_usage, 'read_all') as read:
-            self.viewer._preview_account_gates(cfg, gates)
+        plan = viewer_tests._plan(
+            viewer_tests._subscription('claude', 'Personal', used=42),
+            viewer_tests._subscription('codex', 'Business', used=57),
+        )
+        with (
+            mock.patch.object(self.viewer.graph_config, 'load_config', return_value=viewer_tests._viewer_config()),
+            mock.patch.object(usage, 'read_all') as read,
+        ):
+            claude = self.viewer._pool_cards(plan, 'claude', 2, 0)
+            codex = self.viewer._pool_cards(plan, 'codex', 2, 0)
         read.assert_not_called()
-        self.assertEqual(gates['acct'][0]['u7'], 42)
-        self.assertEqual(gates['codex_acct'][0]['r7'], 2000000000)
+        self.assertEqual(claude[0]['u7'], 42)
+        self.assertEqual(codex[0]['u7'], 57)
+        self.assertEqual(codex[0]['r7'], viewer_tests.NOW + 36000)
+
+    def test_failed_and_valid_planner_reads_keep_queue_visible_on_page_and_api(self):
+        plan = viewer_tests._plan(
+            viewer_tests._subscription('claude', 'Personal', used=42),
+            cycle_anchor=viewer_tests.NOW + 101,
+        )
+        failures_and_neighbor = (
+            ('nonzero', SimpleNamespace(returncode=7, stdout=json.dumps(plan), stderr='credential=do_not_expose'),
+             viewer_tests.EMPTY_PLAN),
+            ('bad_json', SimpleNamespace(returncode=0, stdout='credential=do_not_expose', stderr=''),
+             viewer_tests.EMPTY_PLAN),
+            ('timeout', self.viewer.subprocess.TimeoutExpired(cmd=['do_not_expose'], timeout=25),
+             viewer_tests.EMPTY_PLAN),
+            ('valid', SimpleNamespace(returncode=0, stdout=json.dumps(plan), stderr=''), plan),
+        )
+        remaining = [dict(viewer_tests.JobsViewerContractTests.QUEUE_FIXTURE[0],
+                          readiness={'state': 'ready', 'ready': True, 'reason': 'Ready'})]
+        with (
+            mock.patch.object(self.viewer.graph_config, 'load_config', return_value=viewer_tests._viewer_config()),
+            mock.patch.object(self.viewer, 'get_remaining', return_value=remaining) as queue,
+            mock.patch.object(self.viewer, 'get_recent_runs', return_value=[]),
+            mock.patch.object(self.viewer, 'get_disabled', return_value=[]),
+            mock.patch.object(self.viewer, 'get_inflight', return_value=[]),
+            mock.patch.object(self.viewer, 'list_timers', return_value=[]),
+            mock.patch.object(self.viewer, 'render_schedule_body', return_value='scheduled body'),
+            mock.patch.object(usage, 'read_all') as cache,
+            mock.patch.object(usage, 'read_accounts') as inventory,
+        ):
+            for name, response, expected in failures_and_neighbor:
+                with self.subTest(planner_read=name):
+                    self.viewer._plan_cache.update(t=0.0, val=None)
+                    kwargs = ({'side_effect': response} if isinstance(response, Exception)
+                              else {'return_value': response})
+                    with mock.patch.object(self.viewer.subprocess, 'run', **kwargs) as run:
+                        self.assertEqual(self.viewer.read_plan(), expected)
+                        body = self.viewer.render_bonus_body()
+                        page_status, _, page = viewer_tests.JobsViewerContractTests._request(
+                            self.server, 'GET', '/', headers={'Host': 'viewer.example.test'},
+                        )
+                        api_status, _, api = viewer_tests.JobsViewerContractTests._request(
+                            self.server, 'GET', '/api/bonus', headers={'Host': 'viewer.example.test'},
+                        )
+                    self.assertEqual(run.call_count, 1)
+                    self.assertEqual(page_status, 200)
+                    self.assertIn('Weekly Claude sweep', body)
+                    self.assertIn(b'Weekly Claude sweep', page)
+                    self.assertIn(b'scheduled body', page)
+                    self.assertNotIn('do_not_expose', body)
+                    self.assertNotIn(b'do_not_expose', page + api)
+                    self.assertEqual(api_status, 200)
+                    data = json.loads(api)
+                    self.assertEqual(data['usage'], expected['subscriptions'])
+                    self.assertEqual(data['remaining'], remaining)
+                    self.assertEqual(data['cycle'], expected.get('cycle_anchor', 0))
+                    queue.assert_any_call(expected.get('cycle_anchor', 0))
+                    if name == 'valid':
+                        self.assertIn('Claude · Personal', body)
+                        self.assertIn('<b>42%</b>', body)
+                    else:
+                        self.assertNotIn('bar lg draining', body)
+            cache.assert_not_called()
+            inventory.assert_not_called()
