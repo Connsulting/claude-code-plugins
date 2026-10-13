@@ -24,7 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
 
-from bonus_drain import adapters, cli, db, dispatcher
+from bonus_drain import adapters, cli, db, dispatcher, usage
 from bonus_drain import config as config_module
 
 NOW = 2_000_000_000
@@ -66,12 +66,12 @@ class KickContractTests(unittest.TestCase):
             timeout_seconds=0.2, max_output_bytes=1024,
         )
         self.config = proxy_fixture(config_module.RuntimeConfig(schema_version=1, source_path=self.root / "config.json", database=self.root / "state" / "queue.db", record_command=("/bin/true",), secret_refs=(), adapters=(router,), providers=(
-                config_module.ProviderConfig("alpha", config_module.DispatchBinding("router", "alpha-engine"), frozenset({"legacy-exclusive", "cpu"})),
-                config_module.ProviderConfig("beta", config_module.DispatchBinding("router", "beta-engine"), frozenset()),
+                config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude-engine"), "huge", frozenset({"legacy-exclusive", "cpu"})),
+                config_module.ProviderConfig("beta", config_module.DispatchBinding("router", "beta-engine"), "huge", frozenset()),
             ), limits=(
-                config_module.LimitConfig("alpha-weekly", "alpha", 604800, 95, 20000, 1),
+                config_module.LimitConfig("claude-weekly", "claude", 604800, 95, 20000, 1),
                 config_module.LimitConfig("beta-weekly", "beta", 604800, 95, 20000, 1),
-            ), viewer={}, pr_exceptions=(), usage_max_age_seconds=3600, cache_dir=self.root / "cache", proxy_secret_ref=None), (("alpha", "alpha-account"), ("beta", "beta-account"),))
+            ), viewer={}, pr_exceptions=(), usage_max_age_seconds=3600, cache_dir=self.root / "cache", proxy_secret_ref=None), (("claude", "claude-account"), ("beta", "beta-account"),))
         self.queue = db.QueueDB(self.config.database)
         self.queue.initialize()
         self.queue.add_task(reviewed(_task("portable")))
@@ -82,7 +82,7 @@ class KickContractTests(unittest.TestCase):
     @staticmethod
     def _router(argv: list[str], **_kwargs: object) -> dict[str, object]:
         if "--dry-run" in argv:
-            return {"provider_id": "alpha"}
+            return {"provider_id": "claude"}
         return {"dispatch": {"job_id": "job-1", "launched": True}}
 
 
@@ -103,7 +103,7 @@ class KickContractTests(unittest.TestCase):
         self.assertIs(viewer_service, kick.kick_task)
 
         result = dispatcher.DispatchResult(
-            "portable", "manual/key", "alpha", "alpha-account", "job-shared", "prompt",
+            "portable", "manual/key", "claude", "claude-account", "job-shared", "prompt",
         )
         owner = cli if getattr(cli, "kick_task", None) is not None else cli.kick
         with (
@@ -111,8 +111,8 @@ class KickContractTests(unittest.TestCase):
             mock.patch.object(owner, "kick_task", return_value=result) as shared,
             _capture_cli_json() as payloads,
         ):
-            self.assertEqual(isolated_cli(["dispatch", "portable", "alpha", "--json"]), 0)
-            self.assertEqual(isolated_cli(["run-now", "portable", "alpha", "--json"]), 0)
+            self.assertEqual(isolated_cli(["dispatch", "portable", "claude", "--json"]), 0)
+            self.assertEqual(isolated_cli(["run-now", "portable", "claude", "--json"]), 0)
         self.assertEqual(
             [payload["dispatch"]["job_id"] for payload in payloads],
             ["job-shared", "job-shared"],
@@ -124,7 +124,7 @@ class KickContractTests(unittest.TestCase):
                 if "requested_provider" in call.kwargs else call.args[3]
                 for call in shared.call_args_list
             ],
-            ["alpha", "alpha"],
+            ["claude", "claude"],
         )
 
 
@@ -133,8 +133,8 @@ class KickContractTests(unittest.TestCase):
             self.config,
             self.queue.task("portable"),
             "manual/terminal-before-blocked",
-            "alpha",
-            "alpha-account",
+            "claude",
+            "claude-account",
         )
 
         self.assertIn(
@@ -176,20 +176,20 @@ class KickContractTests(unittest.TestCase):
 
 
 
-    def test_nonselect_accounts_action_does_not_open_queue(self) -> None:
+    def test_read_only_accounts_inventory_does_not_open_queue(self) -> None:
         with (
             mock.patch.object(cli, "_load_config", return_value=self.config),
             mock.patch.object(cli, "_queue") as opened,
             mock.patch("builtins.print"),
         ):
-            self.assertEqual(isolated_cli(["accounts", "labels"]), 0)
+            self.assertEqual(isolated_cli(["accounts"]), 0)
         opened.assert_not_called()
 
     def test_runtime_injected_non_router_classifier_and_launcher_are_rejected_before_execution(self) -> None:
         bad = config_module.AdapterConfig("bad", "usage", ("/bin/false",))
         bad_provider = replace(
             self.config.providers[0],
-            dispatch=config_module.DispatchBinding("bad", "alpha-engine"),
+            dispatch=config_module.DispatchBinding("bad", "claude-engine"),
         )
         cfg = replace(
             self.config,
@@ -200,9 +200,9 @@ class KickContractTests(unittest.TestCase):
 
         def must_not_run(argv: list[str], **_kwargs: object) -> dict[str, object]:
             called.append(argv)
-            return {"provider_id": "alpha", "dispatch": {"job_id": "unexpected"}}
+            return {"provider_id": "claude", "dispatch": {"job_id": "unexpected"}}
 
-        for requested in ("auto", "alpha"):
+        for requested in ("auto", "claude"):
             with (
                 self.subTest(requested=requested),
                 self.assertRaises(dispatcher.DispatchError),
@@ -215,7 +215,8 @@ class KickContractTests(unittest.TestCase):
         self.assertEqual(called, [])
         self.assertEqual(self.queue.claims(), [])
 
-    def test_auto_without_usage_cache_uses_first_compatible_provider(self) -> None:
+    def test_auto_with_no_proxy_subscriptions_uses_first_compatible_provider(self) -> None:
+        usage.write_cache(self.config.usage_cache_dir / "auth-files.json", {"captured_at": NOW, "accounts": []})
         self.queue.add_task(reviewed(_task("classify-none")))
         calls: list[list[str]] = []
 
@@ -228,7 +229,7 @@ class KickContractTests(unittest.TestCase):
             eligibility_key="manual/classify-none", requested_provider="auto",
             router_call=must_not_launch,
         )
-        self.assertEqual(result.provider_id, "alpha")
+        self.assertEqual(result.provider_id, "claude")
         self.assertEqual(len(calls), 1)
         self.assertNotIn("--dry-run", calls[0])
 
@@ -242,11 +243,11 @@ class KickContractTests(unittest.TestCase):
 
         result = dispatcher.dispatch(
             cfg, self.queue, task_id="portable", eligibility_key="manual/router",
-            requested_provider="alpha", router_call=route, now_epoch=NOW,
+            requested_provider="claude", router_call=route, now_epoch=NOW,
         )
         argv = seen[0]
         self.assertEqual(argv[1:3], ["run", "--provider"])
-        self.assertEqual(argv[argv.index("--provider") + 1], "alpha-engine")
+        self.assertEqual(argv[argv.index("--provider") + 1], "claude-engine")
         self.assertEqual(argv[argv.index("--surface") + 1], "t3")
         self.assertEqual(argv[-1], result.prompt)
         self.assertEqual(result.surface, "t3")
@@ -262,7 +263,7 @@ class KickContractTests(unittest.TestCase):
         with mock.patch("bonus_drain.adapters.run_bounded_process", side_effect=responses) as launched:
             result = dispatcher.dispatch(
                 self.config, self.queue, task_id="portable", eligibility_key="manual/retry",
-                requested_provider="alpha", now_epoch=NOW, retry_sleep=sleeps.append,
+                requested_provider="claude", now_epoch=NOW, retry_sleep=sleeps.append,
             )
         self.assertEqual(sleeps, [60, 60])
         self.assertEqual(launched.call_count, 3)
@@ -270,7 +271,7 @@ class KickContractTests(unittest.TestCase):
         self.assertEqual([attempt.state for attempt in self.queue.attempts()], ["dispatched"])
         self.assertEqual([run.status for run in self.queue.runs()], ["dispatched"])
         argv = launched.call_args.args[0]
-        self.assertEqual(argv[argv.index("--engine") + 1], "alpha-engine")
+        self.assertEqual(argv[argv.index("--engine") + 1], "claude-engine")
         self.assertEqual(Path(argv[argv.index("--prompt-file") + 1]).read_text(), result.prompt)
 
     def test_t3_noncreation_exhaustion_aborts_the_attempt(self) -> None:
@@ -282,7 +283,7 @@ class KickContractTests(unittest.TestCase):
         ):
             dispatcher.dispatch(
                 self.config, self.queue, task_id="portable", eligibility_key="manual/retry",
-                requested_provider="alpha", now_epoch=NOW, retry_sleep=sleeps.append,
+                requested_provider="claude", now_epoch=NOW, retry_sleep=sleeps.append,
             )
         self.assertEqual(sleeps, [60, 60])
         self.assertEqual(launched.call_count, 3)
@@ -294,7 +295,7 @@ class KickContractTests(unittest.TestCase):
     def test_auto_does_not_treat_malformed_cache_as_missing(self) -> None:
         from bonus_drain import usage
 
-        for provider in ("alpha", "beta"):
+        for provider in ("claude", "beta"):
             path = usage.cache_path(self.config.usage_cache_dir, provider, provider + "-account")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("malformed")
@@ -306,6 +307,35 @@ class KickContractTests(unittest.TestCase):
             )
         self.assertEqual(self.queue.claims(), [])
         self.assertEqual(self.queue.attempts(), [])
+
+    def test_auto_listed_missing_or_stale_subscriptions_never_fall_back(self) -> None:
+        for state in ("missing", "stale"):
+            with self.subTest(state=state):
+                if state == "stale":
+                    for provider in ("claude", "beta"):
+                        usage.write_cache(usage.cache_path(self.config.usage_cache_dir, provider, provider + "-account"),
+                                          usage.UsageSnapshot(provider, provider + "-account", NOW - 4_000,
+                                              {"seven_day": {"used_percent": 1, "resets_at": NOW + 1_000}}).cache_dict())
+                launch = mock.Mock(return_value={"threadId": "must-not-launch"})
+                with self.assertRaises(dispatcher.InvalidRoute):
+                    dispatcher.dispatch(
+                        self.config, self.queue, task_id="portable", eligibility_key=f"manual/{state}",
+                        requested_provider="auto", now_epoch=NOW, router_call=launch,
+                    )
+                launch.assert_not_called()
+                self.assertEqual(self.queue.claims(), [])
+                self.assertEqual(self.queue.attempts(), [])
+
+    def test_present_malformed_inventory_never_enables_auto_fallback(self) -> None:
+        (self.config.usage_cache_dir / "auth-files.json").write_text("malformed")
+        launch = mock.Mock(return_value={"threadId": "must-not-launch"})
+        with self.assertRaises((dispatcher.InvalidRoute, usage.UsageError)):
+            dispatcher.dispatch(
+                self.config, self.queue, task_id="portable", eligibility_key="manual/inventory",
+                requested_provider="auto", now_epoch=NOW, router_call=launch,
+            )
+        launch.assert_not_called()
+        self.assertEqual(self.queue.claims(), [])
 
     def test_post_spawn_uncertainty_retains_one_ambiguous_claim_and_never_relaunches(self) -> None:
         cases: dict[str, object] = {
@@ -329,7 +359,7 @@ class KickContractTests(unittest.TestCase):
                 with self.assertRaises(dispatcher.AmbiguousDispatch):
                     dispatcher.dispatch(
                         self.config, self.queue, task_id=task_id,
-                        eligibility_key=key, requested_provider="alpha",
+                        eligibility_key=key, requested_provider="claude",
                     )
                 claim = self.queue.claim_for(task_id, key)
                 self.assertIsNotNone(claim)
@@ -337,7 +367,7 @@ class KickContractTests(unittest.TestCase):
                 with self.assertRaises(dispatcher.AlreadyClaimed):
                     dispatcher.dispatch(
                         self.config, self.queue, task_id=task_id,
-                        eligibility_key=key, requested_provider="alpha",
+                        eligibility_key=key, requested_provider="claude",
                     )
                 self.assertEqual(launched.call_count, 1)
 
@@ -354,7 +384,7 @@ class KickContractTests(unittest.TestCase):
         ):
             dispatcher.dispatch(
                 self.config, self.queue, task_id=task_id,
-                eligibility_key=key, requested_provider="alpha",
+                eligibility_key=key, requested_provider="claude",
             )
         self.assertEqual(self.queue.claim_for(task_id, key).state, "ambiguous")
 
@@ -384,7 +414,7 @@ class KickContractTests(unittest.TestCase):
         ):
             dispatcher.dispatch(
                 cfg, self.queue, task_id="portable", eligibility_key=key,
-                requested_provider="alpha", router_call=lambda *_args, **_kwargs: completed,
+                requested_provider="claude", router_call=lambda *_args, **_kwargs: completed,
             )
 
         claim = self.queue.claim_for("portable", key)
@@ -413,7 +443,7 @@ class KickContractTests(unittest.TestCase):
     @staticmethod
     def _completed_router(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess:
         if "--dry-run" in argv:
-            return subprocess.CompletedProcess([], 0, b'{"provider_id":"alpha"}', b"")
+            return subprocess.CompletedProcess([], 0, b'{"provider_id":"claude"}', b"")
         return subprocess.CompletedProcess(
             [], 0, b'{"dispatch":{"job_id":"job-bound","launched":true}}', b"",
         )
@@ -489,7 +519,7 @@ class KickContractTests(unittest.TestCase):
         ):
             dispatcher.dispatch(
                 self.config, self.queue, task_id="portable", eligibility_key="manual/unbound",
-                requested_provider="alpha",
+                requested_provider="claude",
             )
         self.assertNotIn("TYPESAFE_API_KEY", spawned.call_args.kwargs["env"])
 
@@ -498,7 +528,7 @@ class KickContractTests(unittest.TestCase):
         environ = {key: value for key, value in os.environ.items() if key != "BONUS_TEST_CLASSIFIER_KEY"}
         for requested, failure in (
             ("auto", dispatcher.KnownDispatchFailure),
-            ("alpha", dispatcher.KnownDispatchFailure),
+            ("claude", dispatcher.KnownDispatchFailure),
         ):
             key = f"manual/unresolved-{requested}"
             with (
@@ -527,12 +557,12 @@ class KickContractTests(unittest.TestCase):
                 with self.assertRaises(dispatcher.KnownDispatchFailure):
                     dispatcher.dispatch(
                         self.config, self.queue, task_id=task_id,
-                        eligibility_key=key, requested_provider="alpha",
+                        eligibility_key=key, requested_provider="claude",
                     )
                 self.assertEqual(self.queue.claim_for(task_id, key), None)
 
     def test_router_missing_codex_executable_is_known_not_launched_and_retry_safe(self) -> None:
-        codex = config_module.ProviderConfig("codex", config_module.DispatchBinding("router", "codex"), frozenset())
+        codex = config_module.ProviderConfig("codex", config_module.DispatchBinding("router", "codex"), "huge", frozenset())
         cfg = replace(self.config, providers=(codex,), limits=())
         task_id = "missing-codex"
         key = "manual/missing-codex"
@@ -553,7 +583,7 @@ class KickContractTests(unittest.TestCase):
                 self.assertEqual(self.queue.claim_for(task_id, key), None)
 
     def test_codex_daemon_start_timeout_is_known_not_launched(self) -> None:
-        codex = config_module.ProviderConfig("codex", config_module.DispatchBinding("router", "codex"), frozenset())
+        codex = config_module.ProviderConfig("codex", config_module.DispatchBinding("router", "codex"), "huge", frozenset())
         cfg = replace(self.config, providers=(codex,), limits=())
         task_id = "daemon-timeout"
         key = "manual/daemon-timeout"
@@ -574,7 +604,7 @@ class KickContractTests(unittest.TestCase):
                 self.assertIsNone(self.queue.claim_for(task_id, key))
 
     def test_codex_ignores_task_mcp_scoping_for_explicit_and_auto_kicks(self) -> None:
-        codex = config_module.ProviderConfig("codex", config_module.DispatchBinding("router", "codex"), frozenset())
+        codex = config_module.ProviderConfig("codex", config_module.DispatchBinding("router", "codex"), "huge", frozenset())
         cfg = replace(self.config, providers=(codex,), limits=())
         cases = (
             ("codex-none-explicit", "none", "codex"),
@@ -605,7 +635,7 @@ class KickContractTests(unittest.TestCase):
                 self.assertNotIn("--strict-mcp-config", launch)
 
     def test_claude_preserves_task_mcp_scoping(self) -> None:
-        claude = config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), frozenset())
+        claude = config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), "huge", frozenset())
         cfg = replace(self.config, providers=(claude,), limits=())
         source_mcp = self.root / "claude-mcp.json"
         source_mcp.write_text(
@@ -629,7 +659,7 @@ class KickContractTests(unittest.TestCase):
         self.assertEqual(launch[launch.index("--engine") + 1], "claudeAgent")
 
     def test_named_mcp_selection_does_not_validate_unselected_server_secrets(self) -> None:
-        claude = config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), frozenset())
+        claude = config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), "huge", frozenset())
         cfg = replace(self.config, providers=(claude,), limits=())
         project = self.root / "project"
         project.mkdir()
@@ -682,7 +712,7 @@ class KickContractTests(unittest.TestCase):
         self.assertEqual(self.queue.task("portable").allowed_providers, ("beta",))
 
     def test_router_mcp_flag_parser_rejection_is_known_not_launched(self) -> None:
-        claude = config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), frozenset())
+        claude = config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), "huge", frozenset())
         cfg = replace(self.config, providers=(claude,), limits=())
         source_mcp = self.root / "rejected-mcp.json"
         source_mcp.write_text(
@@ -723,7 +753,7 @@ class KickContractTests(unittest.TestCase):
         def invoke() -> str:
             try:
                 return kick.kick_task(
-                    self.config, self.queue, task_id="portable", requested_provider="alpha",
+                    self.config, self.queue, task_id="portable", requested_provider="claude",
                     eligibility_key="manual/race", now_epoch=NOW, router_call=router,
                 ).job_id
             except dispatcher.AlreadyClaimed:
@@ -738,9 +768,9 @@ class KickContractTests(unittest.TestCase):
         configured_db = self.config.database
         poison_db = self.root / "poison" / "queue.db"
         raw = {"schema_version": 1, "database": str(configured_db), "cache_dir": str(self.config.cache_dir), "record_command": ["/bin/true"], "adapters": [{"id": "router", "kind": "t3-thread", "argv": ["/bin/true"]}], "providers": [{
-                "id": "alpha", "dispatch": {"adapter_id": "router", "provider": "alpha-engine"},
+                "id": "claude", "max_size": "huge", "dispatch": {"adapter_id": "router", "provider": "claude-engine"},
             }], "limits": [{
-                "id": "alpha-weekly", "provider_id": "alpha", "window_seconds": 604800,
+                "id": "claude-weekly", "provider_id": "claude", "window_seconds": 604800,
                 "ceiling_percent": 95, "lead_seconds": 20000, "batch_size": 1,
             }], "viewer": {}, "pr_exceptions": [], "secret_refs": [{"id": "proxy", "source": "file", "path": "/unused/proxy.env"}], "proxy_secret_ref": "proxy"}
         self.config.source_path.write_text(json.dumps(raw), encoding="utf-8")
@@ -780,7 +810,7 @@ class KickContractTests(unittest.TestCase):
             "viewer": ["viewer", "--config", str(self.config.source_path)],
             "scout": ["scout", "--config", str(self.config.source_path)],
             "refresh": ["refresh", "--config", str(self.config.source_path)],
-            "dispatch": ["dispatch", "portable", "alpha", "--config", str(self.config.source_path)],
+            "dispatch": ["dispatch", "portable", "claude", "--config", str(self.config.source_path)],
         }
         for command, argv in graph_commands.items():
             with self.subTest(command=command):
@@ -788,7 +818,7 @@ class KickContractTests(unittest.TestCase):
                     parser.parse_args(argv), graph_required=True,
                 )
                 self.assertEqual(graph_config.database, configured_db.resolve())
-                self.assertEqual(graph_config.provider("alpha").id, "alpha")
+                self.assertEqual(graph_config.provider("claude").id, "claude")
 
         for command, argv in graph_commands.items():
             if command == "refresh":

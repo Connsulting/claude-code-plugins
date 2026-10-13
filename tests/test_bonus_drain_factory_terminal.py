@@ -450,7 +450,7 @@ def _config(root: Path, database: Path):
         timeout_seconds=0.2, max_output_bytes=1024,
     )
     return proxy_fixture(config_module.RuntimeConfig(schema_version=1, source_path=root / "config.json", database=database, record_command=("/bin/true",), secret_refs=(), adapters=(router,), providers=(
-            config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), frozenset({"legacy-exclusive", "implement"})),
+            config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), "huge", frozenset({"legacy-exclusive", "implement"})),
         ), limits=(
             config_module.LimitConfig("claude-weekly", "claude", 604800, 95, 20000, 1),
         ), viewer={}, pr_exceptions=(), usage_max_age_seconds=3600, cache_dir=root / "cache", proxy_secret_ref=None), (("claude", "claude-account"),))

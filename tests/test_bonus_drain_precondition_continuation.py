@@ -66,7 +66,7 @@ class PreconditionPromptTests(RecoveryCase):
         queued = self.add(task_id, **changes)
         attempt = self.claim(task_id)
         return dispatcher.render_prompt(
-            runtime(self.queue.path), queued, KEY, "alpha", "alpha-account",
+            runtime(self.queue.path), queued, KEY, "claude", "claude-account",
             attempt=attempt, outcome_path=self.root / f"{task_id}-outcome.json",
         )
 
@@ -104,7 +104,7 @@ class ContinuationTests(RecoveryCase):
         attempt = self.claim(task_id)
         self.queue.record(
             task_id, KEY, attempt_id=attempt.id, status="dispatched",
-            provider_id="alpha", account_id="alpha-account",
+            provider_id="claude", account_id="claude-account",
             router_job_id=f"job-{task_id}",
             timestamp=iso(NOW), now_epoch=NOW,
         )
@@ -154,7 +154,7 @@ class ContinuationTests(RecoveryCase):
             "resume",
             [
                 task.id for task in self.queue.eligible_tasks(
-                    0, provider_id="alpha", now_epoch=NOW + 100_000,
+                    0, max_size="huge", provider_id="claude", now_epoch=NOW + 100_000,
                 )
             ],
         )
@@ -163,12 +163,12 @@ class ContinuationTests(RecoveryCase):
             dispatcher.dispatch(
                 runtime(self.queue.path), self.queue,
                 task_id="resume", eligibility_key=KEY,
-                requested_provider="alpha", router_call=router,
+                requested_provider="claude", router_call=router,
                 now_epoch=NOW + 100_000,
             )
         router.assert_not_called()
         self.assertIsNone(self.queue.claim(
-            "resume", KEY, "alpha", "alpha-account", now_epoch=NOW + 100_000,
+            "resume", KEY, "claude", "claude-account", provider_max_size="huge", now_epoch=NOW + 100_000,
         ))
 
         again = self.queue.open_same_thread_continuation(
@@ -181,7 +181,7 @@ class ContinuationTests(RecoveryCase):
         self.queue.record(
             "resume", KEY, attempt_id=opened["attempt_id"], status="done",
             outcome=verified(evidence="fixture://continued"),
-            provider_id="alpha", account_id="alpha-account",
+            provider_id="claude", account_id="claude-account",
             timestamp=iso(NOW + 5), now_epoch=NOW + 5,
             summary="continued work verified the checkout in its own worktree",
         )
@@ -286,7 +286,7 @@ class ContinuationTests(RecoveryCase):
         self.queue.record(
             "parked", KEY, attempt_id=opened["attempt_id"], status="failed",
             outcome=authority("need an explicit approval before continuing"),
-            provider_id="alpha", account_id="alpha-account",
+            provider_id="claude", account_id="claude-account",
             timestamp=iso(NOW + 4), now_epoch=NOW + 4,
             summary="continuation blocked on an external approval",
         )
@@ -314,7 +314,7 @@ class ContinuationTests(RecoveryCase):
         with mock.patch(
             "bonus_drain.reconcile.execute_adapter",
             return_value={"rows": [{
-                "provider": "alpha", "job_id": "job-live", "state": "running",
+                "provider": "claude", "job_id": "job-live", "state": "running",
             }]},
         ):
             reports = reconcile.reconcile_inflight(
@@ -328,7 +328,7 @@ class ContinuationTests(RecoveryCase):
         with mock.patch(
             "bonus_drain.reconcile.execute_adapter",
             return_value={"rows": [{
-                "provider": "alpha", "job_id": "job-live", "state": "completed",
+                "provider": "claude", "job_id": "job-live", "state": "completed",
             }]},
         ):
             reports = reconcile.reconcile_inflight(

@@ -223,7 +223,7 @@ class ScoutNotificationTests(unittest.TestCase):
         path.write_text(json.dumps(raw))
         queue = db.QueueDB(Path(raw["database"]))
         queue.add_task(reviewed(task("frozen-task")))
-        attempt = queue.claim("frozen-task", ELIGIBILITY_KEY, "alpha", "alpha-account", now_epoch=NOW)
+        attempt = queue.claim("frozen-task", ELIGIBILITY_KEY, "alpha", "alpha-account", provider_max_size="huge", now_epoch=NOW)
         queue.mark_ambiguous("frozen-task", ELIGIBILITY_KEY, detail="unknown launch secret")
 
         def run_tick(now):

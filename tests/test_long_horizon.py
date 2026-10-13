@@ -57,7 +57,7 @@ class GoalTests(unittest.TestCase):
         claim = self.queue.claim_for(task_id, key)
         attempt_id = claim.attempt_id if claim else None
         if status == 'done' and attempt_id is None:
-            attempt = self.queue.claim(task_id, key, 'alpha', 'account', provider_capabilities=IMPLEMENT)
+            attempt = self.queue.claim(task_id, key, 'claude', 'account', provider_max_size="huge", provider_capabilities=IMPLEMENT)
             self.assertIsNotNone(attempt)
             attempt_id = attempt.id
         kwargs = {'attempt_id': attempt_id} if attempt_id is not None else {}
@@ -68,17 +68,17 @@ class GoalTests(unittest.TestCase):
                 'reason': {'code': 'retryable', 'detail': 'fixture failure',
                            'signature': f'retryable:{task_id}'},
             }
-        self.queue.record(task_id, key, status=status, provider_id='alpha', **kwargs)
+        self.queue.record(task_id, key, status=status, provider_id='claude', **kwargs)
 
     def start_turn(self):
         self.store.tick(now=NOW)
         goal = self.store.show('release')
         task = goal['coordinator_task']
-        attempt = self.queue.claim(task, 'account/manual/2000000000', 'alpha', 'account', provider_capabilities=IMPLEMENT)
+        attempt = self.queue.claim(task, 'account/manual/2000000000', 'claude', 'account', provider_max_size="huge", provider_capabilities=IMPLEMENT)
         self.assertIsNotNone(attempt)
         self.queue.record(
             task, 'account/manual/2000000000', attempt_id=attempt.id,
-            status='dispatched', provider_id='alpha',
+            status='dispatched', provider_id='claude',
         )
         return task, goal['revision']
 
@@ -211,8 +211,8 @@ class GoalTests(unittest.TestCase):
         self.finish(turn)
         self.queue.add_task(reviewed({'id': 'other', 'title': 'Other', 'cwd': self.tmp.name}))
         self.store.tick(now=NOW + 3601)
-        self.assertFalse(self.queue.claim('a', 'account/manual/2000000000', 'alpha', 'account', provider_capabilities=IMPLEMENT))
-        self.assertTrue(self.queue.claim('other', 'account/manual/2000000000', 'alpha', 'account', provider_capabilities=IMPLEMENT))
+        self.assertFalse(self.queue.claim('a', 'account/manual/2000000000', 'claude', 'account', provider_max_size="huge", provider_capabilities=IMPLEMENT))
+        self.assertTrue(self.queue.claim('other', 'account/manual/2000000000', 'claude', 'account', provider_max_size="huge", provider_capabilities=IMPLEMENT))
 
     def test_goal_concurrency_is_enforced_by_claim_in_both_launch_paths(self):
         self.create(max_inflight=1)
@@ -221,7 +221,7 @@ class GoalTests(unittest.TestCase):
         self.finish(turn)
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda task: self.queue.claim(
-                task, 'account/manual/2000000000', 'alpha', 'account', provider_capabilities=IMPLEMENT), ['a', 'b']))
+                task, 'account/manual/2000000000', 'claude', 'account', provider_max_size="huge", provider_capabilities=IMPLEMENT), ['a', 'b']))
         self.assertEqual(sum(result is not None for result in results), 1)
 
     def test_explicit_membership_does_not_rewrite_existing_contract(self):
@@ -332,15 +332,15 @@ class GoalTests(unittest.TestCase):
         self.create(merge_policy='merge', authority='Merge verified PRs for this example goal.')
         turn, revision = self.start_turn()
         task = self.queue.task(turn)
-        prompt = dispatcher.render_prompt(config, task, 'account/manual/2000000000', 'alpha', None)
+        prompt = dispatcher.render_prompt(config, task, 'account/manual/2000000000', 'claude', None)
         self.assertIn('coordinator may merge', prompt)
         self.assertNotIn('never merge it', prompt)
         self.advance(turn, revision, tasks=[self.job('child')], wait_for=['child'])
-        child = dispatcher.render_prompt(config, self.queue.task('child'), 'account/manual/2000000000', 'alpha', None)
+        child = dispatcher.render_prompt(config, self.queue.task('child'), 'account/manual/2000000000', 'claude', None)
         self.assertNotIn('coordinator may merge', child)
         forged = replace(task, goal='different goal')
         self.assertNotIn('coordinator may merge', dispatcher.render_prompt(
-            config, forged, 'account/manual/2000000000', 'alpha', None))
+            config, forged, 'account/manual/2000000000', 'claude', None))
 
     def test_coordinator_commands_are_bound_to_this_queue_and_config(self):
         fixture = kick_tests.KickContractTests()
@@ -351,7 +351,7 @@ class GoalTests(unittest.TestCase):
         config = replace(fixture.config, database=self.queue.path)
         self.create()
         turn, _ = self.start_turn()
-        prompt = dispatcher.render_prompt(config, self.queue.task(turn), 'account/manual/2000000000', 'alpha', None)
+        prompt = dispatcher.render_prompt(config, self.queue.task(turn), 'account/manual/2000000000', 'claude', None)
         line = next(line for line in prompt.splitlines() if line.startswith('Goal read command: '))
         argv = shlex.split(line.removeprefix('Goal read command: '))
         self.assertEqual(argv[argv.index('--database') + 1], str(self.queue.path))
@@ -401,13 +401,13 @@ class GoalTests(unittest.TestCase):
         current = self.store.show('release')
         old = current['coordinator_task']
         paused = self.store.steer('release', current['revision'], 'Hold', pause=True)
-        self.assertFalse(self.queue.claim(old, 'account/manual/2000000000', 'alpha', 'account', provider_capabilities=IMPLEMENT))
+        self.assertFalse(self.queue.claim(old, 'account/manual/2000000000', 'claude', 'account', provider_max_size="huge", provider_capabilities=IMPLEMENT))
         self.store.resume('release', paused['revision'], 'Continue', now=NOW)
         self.store.tick(now=NOW)
         resumed = self.store.show('release')
         self.assertNotEqual(resumed['coordinator_task'], old)
         self.assertFalse(self.queue.task(old).active)
-        self.assertTrue(self.queue.claim(resumed['coordinator_task'], 'account/manual/2000000000', 'alpha', 'account', provider_capabilities=IMPLEMENT))
+        self.assertTrue(self.queue.claim(resumed['coordinator_task'], 'account/manual/2000000000', 'claude', 'account', provider_max_size="huge", provider_capabilities=IMPLEMENT))
 
     def test_resume_retires_an_undispatched_coordinator_after_deadline(self):
         self.create()
@@ -434,7 +434,7 @@ class GoalTests(unittest.TestCase):
 
     def test_bad_coordinator_routing_is_rejected_before_persisting_a_goal(self):
         for routing in ({'model': 'gpt-6-astra', 'required_capabilities': 42},
-                        {'model': []}, {'model': 'gpt-6-astra', 'allowed_providers': 'alpha'},
+                        {'model': []}, {'model': 'gpt-6-astra', 'allowed_providers': 'claude'},
                         {'model': 'gpt-6-astra', 'mcp': 12}):
             with self.subTest(routing=routing), self.assertRaises(db.QueueError):
                 self.create(coordinator=routing)
@@ -525,7 +525,7 @@ class GoalScoutTests(unittest.TestCase):
                           'merge_policy': 'stack', 'max_turns': 5, 'max_inflight': 2, 'deadline': NOW+3600,
                           'coordinator': {'model': 'gpt-6-astra'}}, now=NOW)
         snapshots = {(provider, provider+'-account'): usage.UsageSnapshot(provider, provider+'-account', NOW,
-                     {"seven_day": {'used_percent': 20, 'resets_at': NOW+1000}}) for provider in ('alpha', 'beta')}
+                     {"seven_day": {'used_percent': 20, 'resets_at': NOW+1000}}) for provider in ('claude', 'beta')}
         calls = []
 
         def router(argv, **kwargs):

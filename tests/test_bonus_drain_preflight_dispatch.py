@@ -81,10 +81,10 @@ CODEX_DAEMON_TIMEOUT = (
 )
 
 
-def alpha_snapshots(now: int = NOW) -> dict[tuple[str, str], usage.UsageSnapshot]:
+def claude_snapshots(now: int = NOW) -> dict[tuple[str, str], usage.UsageSnapshot]:
     return {
-        ("alpha", "alpha-account"): usage.UsageSnapshot(
-            "alpha", "alpha-account", now,
+        ("claude", "claude-account"): usage.UsageSnapshot(
+            "claude", "claude-account", now,
             {"seven_day": {"used_percent": 70, "resets_at": now + 5_000}},
         ),
     }
@@ -96,7 +96,7 @@ def launched_router(calls: list[list[str]] | None = None):
     def route(argv: list[str], **_kwargs: object) -> dict[str, object]:
         record.append(list(argv))
         if "--dry-run" in argv:
-            return {"provider_id": "alpha"}
+            return {"provider_id": "claude"}
         return {"dispatch": {"job_id": f"job-{len(record)}", "launched": True}}
 
     return route
@@ -140,13 +140,13 @@ class AccountHoldDispatchTests(PreflightCase):
         kwargs.setdefault("check_runner", self.runner())
         return dispatcher.dispatch(
             cfg, self.queue, task_id=task_id, eligibility_key=f"manual/{task_id}",
-            requested_provider=kwargs.pop("provider", "alpha"), **kwargs,
+            requested_provider=kwargs.pop("provider", "claude"), **kwargs,
         )
 
 
 
     def test_codex_daemon_timeout_holds_launcher(self) -> None:
-        codex = config_module.ProviderConfig("codex", config_module.DispatchBinding("router", "codex"), frozenset())
+        codex = config_module.ProviderConfig("codex", config_module.DispatchBinding("router", "codex"), "huge", frozenset())
         cfg = replace(runtime(self.queue.path), providers=(codex,), limits=())
         self.add("daemon")
         rejected = subprocess.CompletedProcess([], 1, b"", CODEX_DAEMON_TIMEOUT)
@@ -343,8 +343,8 @@ class EnqueueValidationCliTests(HermeticEnvironment, PreflightCase):
         base = runtime(self.queue.path)
         self.cfg = replace(base, providers=(
             *base.providers,
-            config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), frozenset()),
-            config_module.ProviderConfig("codex", config_module.DispatchBinding("router", "codex"), frozenset()),
+            config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), "huge", frozenset()),
+            config_module.ProviderConfig("codex", config_module.DispatchBinding("router", "codex"), "huge", frozenset()),
         ))
 
     def default_runner(self) -> FakeRunner:
@@ -822,7 +822,7 @@ class QueueTimeCheckCliTests(HermeticEnvironment, PreflightCase):
 class ScoutPreflightTests(HermeticEnvironment, PreflightCase):
     def scout(self, cfg=None, **kwargs: Any) -> scout.ScoutReport:
         now = kwargs.pop("now", NOW)
-        with mock.patch.object(scout, "read_all", return_value=alpha_snapshots(now)):
+        with mock.patch.object(scout, "read_all", return_value=claude_snapshots(now)):
             return scout.run_once(cfg or runtime(self.queue.path), self.queue, now_epoch=now, **kwargs)
 
     def test_queue_json_local_never_runs_tools(self) -> None:
@@ -875,7 +875,7 @@ class ScoutPreflightTests(HermeticEnvironment, PreflightCase):
 
         result = dispatcher.dispatch(
             runtime(self.queue.path), self.queue, task_id="gated", eligibility_key="manual/gated",
-            requested_provider="alpha", router_call=launched_router(calls), check_runner=fake,
+            requested_provider="claude", router_call=launched_router(calls), check_runner=fake,
             now_epoch=NOW,
         )
 
@@ -891,7 +891,7 @@ class ScoutPreflightTests(HermeticEnvironment, PreflightCase):
         with self.assertRaises(dispatcher.AlreadyClaimed) as raised:
             dispatcher.dispatch(
                 runtime(self.queue.path), self.queue, task_id="closed", eligibility_key="manual/closed",
-                requested_provider="alpha", router_call=router, check_runner=closed, now_epoch=NOW,
+                requested_provider="claude", router_call=router, check_runner=closed, now_epoch=NOW,
             )
         self.assertIn("issue is CLOSED", str(raised.exception))
         router.assert_not_called()
@@ -903,7 +903,7 @@ class ScoutPreflightTests(HermeticEnvironment, PreflightCase):
         with self.assertRaises(dispatcher.AlreadyClaimed):
             dispatcher.dispatch(
                 runtime(self.queue.path), self.queue, task_id="gated", eligibility_key=KEY,
-                requested_provider="alpha", trigger="bonus", router_call=launched_router(),
+                requested_provider="claude", trigger="bonus", router_call=launched_router(),
                 check_runner=idle, now_epoch=NOW,
             )
         self.assertEqual(idle.calls, [])
@@ -912,7 +912,7 @@ class ScoutPreflightTests(HermeticEnvironment, PreflightCase):
         self.refresh(self.runner({gh_issue(3815): ok(ISSUE_3815_OPEN)}), now=NOW)
         result = dispatcher.dispatch(
             runtime(self.queue.path), self.queue, task_id="gated", eligibility_key=KEY,
-            requested_provider="alpha", trigger="bonus", router_call=launched_router(),
+            requested_provider="claude", trigger="bonus", router_call=launched_router(),
             check_runner=idle, now_epoch=NOW + 10,
         )
         self.assertEqual(result.task_id, "gated")
@@ -934,7 +934,7 @@ class PromptPreflightTests(PreflightCase):
     def dispatch(self, task_id: str, fake: FakeRunner, *, now: int = NOW) -> str:
         result = dispatcher.dispatch(
             runtime(self.queue.path), self.queue, task_id=task_id,
-            eligibility_key=f"manual/{task_id}", requested_provider="alpha",
+            eligibility_key=f"manual/{task_id}", requested_provider="claude",
             router_call=launched_router(), check_runner=fake, now_epoch=now,
         )
         return result.prompt
@@ -1011,7 +1011,7 @@ class PromptPreflightTests(PreflightCase):
         self.assertNotIn("could not verify", prompt)
         self.assertEqual(
             dispatcher.render_prompt(
-                runtime(self.queue.path), self.queue.task("plain"), KEY, "alpha", "alpha-account",
+                runtime(self.queue.path), self.queue.task("plain"), KEY, "claude", "claude-account",
                 preflight_checks=(),
             ).count("Preflight"),
             0,
@@ -1060,7 +1060,7 @@ class CollisionAllocationTests(PreflightCase):
         self.assertTrue(self.ready("g1")["ready"])
         self.assertTrue(self.ready("g2")["ready"])
 
-        tick = self.tick(runtime(self.queue.path), alpha_snapshots())
+        tick = self.tick(runtime(self.queue.path), claude_snapshots())
 
         allocated = sorted(item for ids in self.allocated(tick).values() for item in ids)
         self.assertEqual(allocated, ["g1", "g2"])
@@ -1082,7 +1082,7 @@ class CollisionAllocationTests(PreflightCase):
         self.assertTrue(self.ready("g1")["ready"])
         self.assertTrue(self.ready("g2")["ready"])
 
-        tick = self.tick(runtime(self.queue.path), alpha_snapshots())
+        tick = self.tick(runtime(self.queue.path), claude_snapshots())
 
         allocated = sorted(item for ids in self.allocated(tick).values() for item in ids)
         self.assertEqual(allocated, ["g1", "g2"])
@@ -1102,7 +1102,7 @@ class CollisionAllocationTests(PreflightCase):
         self.add("solo", priority=3)
         self.refresh(self.runner({gh_issue(12, "owner/repo"): ok(ISSUE_3815_OPEN)}))
 
-        tick = self.tick(runtime(self.queue.path), alpha_snapshots())
+        tick = self.tick(runtime(self.queue.path), claude_snapshots())
 
         allocated = sorted(item for ids in self.allocated(tick).values() for item in ids)
         self.assertEqual(allocated, ["first", "solo"])
@@ -1267,7 +1267,7 @@ class GoalCollisionReservationTests(PreflightCase):
 
 class ResumeAndNoticeScoutTests(HermeticEnvironment, PreflightCase):
     def scout(self, now: int, *, cfg=None, runner: FakeRunner | None = None) -> scout.ScoutReport:
-        with mock.patch.object(scout, "read_all", return_value=alpha_snapshots(NOW)):
+        with mock.patch.object(scout, "read_all", return_value=claude_snapshots(NOW)):
             return scout.run_once(
                 cfg or runtime(self.queue.path), self.queue, now_epoch=now,
                 router_call=launched_router(), check_runner=runner or self.runner(),
@@ -1279,13 +1279,13 @@ class ResumeAndNoticeScoutTests(HermeticEnvironment, PreflightCase):
         attempt = self.claim("parked")
         self.queue.record(
             "parked", KEY, attempt_id=attempt.id, status="dispatched",
-            provider_id="alpha", account_id="alpha-account", router_job_id="job-parked",
+            provider_id="claude", account_id="claude-account", router_job_id="job-parked",
             timestamp=iso(NOW), now_epoch=NOW,
         )
         common = [
             "record", "--database", str(self.queue.path), "--task", "parked", "--kind", "oneoff",
             "--eligibility-key", KEY, "--attempt-id", attempt.id,
-            "--provider-id", "alpha", "--account-id", "alpha-account", "--json",
+            "--provider-id", "claude", "--account-id", "claude-account", "--json",
         ]
 
         with captured_json() as payloads:
@@ -1386,7 +1386,7 @@ class HeldReportCliTests(HermeticEnvironment, PreflightCase):
         self.add("child", depends_on=["a", "b"])
         self.add("independent", priority=3)
 
-        with mock.patch.object(scout, "read_all", return_value=alpha_snapshots()):
+        with mock.patch.object(scout, "read_all", return_value=claude_snapshots()):
             tick = scout.plan_tick(runtime(self.queue.path), self.queue, now_epoch=NOW, provider_holds=())
 
         holds = {item["task_id"]: item for item in tick.dependency_holds}

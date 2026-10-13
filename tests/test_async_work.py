@@ -44,7 +44,7 @@ class AsyncWorkTests(unittest.TestCase):
         claim = self.queue.claim_for(task_id, key)
         attempt_id = claim.attempt_id if claim else None
         if status == 'done' and attempt_id is None:
-            attempt = self.queue.claim(task_id, key, 'alpha', 'account')
+            attempt = self.queue.claim(task_id, key, 'alpha', 'account', provider_max_size="huge")
             self.assertIsNotNone(attempt)
             attempt_id = attempt.id
         kwargs = {'attempt_id': attempt_id} if attempt_id is not None else {}
@@ -56,7 +56,7 @@ class AsyncWorkTests(unittest.TestCase):
 
     def test_every_ready_task_is_eligible_for_automatic_capacity(self):
         self.assertEqual(self.queue.count_eligible(0, automatic=True), 1)
-        self.assertTrue(self.queue.claim('a', 'account/limit/2000000000', 'alpha', 'account', automatic=True))
+        self.assertTrue(self.queue.claim('a', 'account/limit/2000000000', 'alpha', 'account', provider_max_size="huge", automatic=True))
 
     def test_cli_new_work_has_no_execution_mode_contract(self):
         with mock.patch.object(cli, '_json'):
@@ -68,10 +68,10 @@ class AsyncWorkTests(unittest.TestCase):
         self.add('child', depends_on=['a', 'b'])
         self.finish('a')
         self.assertEqual(self.queue.readiness('child')['state'], 'waiting')
-        self.assertFalse(self.queue.claim('child', 'account/manual/2000000000', 'alpha', 'account'))
+        self.assertFalse(self.queue.claim('child', 'account/manual/2000000000', 'alpha', 'account', provider_max_size="huge"))
         self.finish('b')
         self.assertTrue(self.queue.readiness('child')['ready'])
-        self.assertTrue(self.queue.claim('child', 'account/manual/2000000000', 'alpha', 'account'))
+        self.assertTrue(self.queue.claim('child', 'account/manual/2000000000', 'alpha', 'account', provider_max_size="huge"))
 
     def test_failed_and_skipped_do_not_satisfy_dependencies(self):
         for status in ('failed', 'skipped'):
@@ -97,7 +97,7 @@ class AsyncWorkTests(unittest.TestCase):
         self.assertIsNone(self.queue.task('bad'))
 
     def test_edit_cannot_change_claimed_or_completed_contract(self):
-        self.assertTrue(self.queue.claim('a', 'account/manual/2000000000', 'alpha', 'account'))
+        self.assertTrue(self.queue.claim('a', 'account/manual/2000000000', 'alpha', 'account', provider_max_size="huge"))
         with self.assertRaises(db.QueueError):
             self.queue.edit_task('a', {'goal': 'different'})
         self.finish('a')
@@ -107,7 +107,7 @@ class AsyncWorkTests(unittest.TestCase):
     def test_stale_dispatch_contract_cannot_claim_after_edit(self):
         old = self.queue.task('a')
         self.queue.edit_task('a', rereviewed(old, {'goal': 'new contract'}))
-        self.assertFalse(self.queue.claim('a', 'account/manual/2000000000', 'alpha', 'account', expected_task=old))
+        self.assertFalse(self.queue.claim('a', 'account/manual/2000000000', 'alpha', 'account', provider_max_size="huge", expected_task=old))
 
     def test_handoff_roundtrip_and_validation(self):
         task = self.queue.edit_task('a', rereviewed(self.queue.task('a'), {'source_ref': 'https://example.test/plan', 'work_group': 'Release'}))
@@ -167,7 +167,7 @@ class AsyncWorkTests(unittest.TestCase):
         self.queue.edit_task('a', rereviewed(original, {'start_ref': 'epic/next'}))
         self.assertNotEqual(db._contract_hash(self.queue.task('a')), legacy_hash)
         self.assertFalse(self.queue.claim('a', 'account/manual/2000000000', 'alpha', 'account',
-            expected_task=original))
+            provider_max_size="huge", expected_task=original))
 
     def test_work_group_is_a_compact_navigation_label(self):
         self.queue.edit_task('a', {'work_group': 'Curie v0.8.7'})
@@ -178,7 +178,7 @@ class AsyncWorkTests(unittest.TestCase):
             self.add('long-group', work_group='Curie v0.8.7 hardening')
 
     def test_run_trigger_propagates_to_terminal_and_legacy_stays_unknown(self):
-        attempt = self.queue.claim('a', 'account/manual/2000000000', 'alpha', 'account')
+        attempt = self.queue.claim('a', 'account/manual/2000000000', 'alpha', 'account', provider_max_size="huge")
         self.assertIsNotNone(attempt)
         self.queue.record(
             'a', 'account/manual/2000000000', attempt_id=attempt.id,

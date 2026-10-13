@@ -378,13 +378,17 @@ class AsyncViewerTests(unittest.TestCase):
         self.assertEqual(status, 403)
         launch.assert_not_called()
 
-    def test_preview_usage_comes_from_copied_cache_without_account_credentials(self):
+    def test_preview_usage_comes_from_normalized_subscriptions_without_rereading_cache(self):
         cfg = mock.Mock()
         cfg.limits_for_provider.return_value = [SimpleNamespace(ceiling_percent=95)]
-        snapshots = {(p,p+'-account'): SimpleNamespace(fresh=True, limits={'seven_day': {'used_percent':42,'resets_at':2000000000}}) for p in ('claude','codex')}
-        gates = {}
-        with mock.patch.object(self.viewer.graph_usage, 'read_all', return_value=snapshots) as read:
+        gates = {'subscriptions': [
+            {'provider_id': provider, 'account_id': provider + '-account', 'fresh': True,
+             'captured_at': 2000000000, 'error': None, 'unmetered': False,
+             'limits': {'seven_day': {'used_percent': 42, 'resets_at': 2000000000}}}
+            for provider in ('claude', 'codex')
+        ]}
+        with mock.patch.object(self.viewer.graph_usage, 'read_all') as read:
             self.viewer._preview_account_gates(cfg, gates)
-        read.assert_called_once_with(cfg)
+        read.assert_not_called()
         self.assertEqual(gates['acct'][0]['u7'], 42)
         self.assertEqual(gates['codex_acct'][0]['r7'], 2000000000)

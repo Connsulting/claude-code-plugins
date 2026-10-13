@@ -74,7 +74,7 @@ def _calm() -> scout.HostLoad:
 
 def _raw_config(root: Path, **top: object) -> dict[str, object]:
     raw: dict[str, object] = {"schema_version": 1, "database": str(root / "state" / "queue.db"), "cache_dir": str(root / "cache"), "record_command": ["/bin/true"], "adapters": [{"id": "router", "kind": "t3-thread", "argv": ["/bin/true"]}], "providers": [{
-            "id": "alpha", "dispatch": {"adapter_id": "router", "provider": "alpha-engine"},
+            "id": "alpha", "max_size": "huge", "dispatch": {"adapter_id": "router", "provider": "alpha-engine"},
         }], "limits": [{
             "id": "alpha-weekly", "provider_id": "alpha", "window_seconds": 604800,
             "ceiling_percent": 95, "lead_seconds": 20000, "batch_size": 1,
@@ -349,7 +349,7 @@ class ScoutTickCase(unittest.TestCase):
 
         self.queue.add_task(reviewed(task("stale")))
         attempt = self.queue.claim(
-            "stale", ELIGIBILITY_KEY, "alpha", "alpha-account", now_epoch=NOW,
+            "stale", ELIGIBILITY_KEY, "alpha", "alpha-account", provider_max_size="huge", now_epoch=NOW,
         )
         self.assertIsNotNone(attempt)
         self.queue.record(
@@ -561,7 +561,7 @@ class SlotFreedMarkerTests(unittest.TestCase):
     def claim(self, task_id: str):
         self.queue.add_task(reviewed(task(task_id)))
         attempt = self.queue.claim(
-            task_id, ELIGIBILITY_KEY, "alpha", "alpha-account", now_epoch=NOW,
+            task_id, ELIGIBILITY_KEY, "alpha", "alpha-account", provider_max_size="huge", now_epoch=NOW,
         )
         self.assertIsNotNone(attempt)
         return attempt

@@ -737,7 +737,7 @@ class RoutingControlTests(ReviewCase):
 
         self.queue.set_model("routed", "claude-fable-5")
         self.queue.set_mcp("routed", "linear-cn")
-        self.queue.set_providers("routed", ["alpha"])
+        self.queue.set_providers("routed", ["claude"])
         self.queue.set_priority("routed", 0)
 
         self.assertIsNotNone(self.queue.task("routed").model)
@@ -892,7 +892,7 @@ CONTRACT_HEADER = "Execute this authorized asynchronous task within its stated c
 class PromptGrantTests(ReviewCase):
     def prompt(self, task_id: str, config=None) -> str:
         return dispatcher.render_prompt(
-            config or runtime(self.queue.path), self.queue.task(task_id), KEY, "alpha", "alpha-account",
+            config or runtime(self.queue.path), self.queue.task(task_id), KEY, "claude", "claude-account",
         )
 
     def pr_config(self):
@@ -1023,7 +1023,7 @@ class OutcomeMeasurementTests(ReviewCase):
         self.add("schema")
         attempt = self.claim("schema")
         prompt = dispatcher.render_prompt(
-            runtime(self.queue.path), self.queue.task("schema"), KEY, "alpha", "alpha-account",
+            runtime(self.queue.path), self.queue.task("schema"), KEY, "claude", "claude-account",
             attempt=attempt, outcome_path=self.root / "schema-outcome.json",
         )
         line = next(item for item in prompt.splitlines() if item.startswith("OUTCOME_SCHEMA="))

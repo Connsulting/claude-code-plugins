@@ -561,7 +561,7 @@ class TaskSizeContractTests(unittest.TestCase):
         for task_id, size in (("smaller", "small"), ("equal", "medium"),
                               ("greater", "large"), ("unsized", None)):
             self.queue.add_task(reviewed(_task_values(task_id, size=size)))
-        self.assertCountEqual([task.id for task in self.queue.eligible_tasks(NOW)],
+        self.assertCountEqual([task.id for task in self.queue.eligible_tasks(NOW, capabilities={"cpu"})],
                               ["smaller", "equal", "greater", "unsized"])
         eligible = self.queue.eligible_tasks(
             NOW, provider_id="alpha", capabilities=("cpu",), max_size="medium",

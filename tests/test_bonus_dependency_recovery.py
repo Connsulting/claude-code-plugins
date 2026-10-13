@@ -29,7 +29,7 @@ from bonus_drain import config as config_module
 from tests.test_bonus_drain_reconcile import T3StateFixture
 
 NOW = 2_000_000_000
-KEY = "alpha-account/alpha-weekly/2000001000"
+KEY = "claude-account/claude-weekly/2000001000"
 
 
 def iso(epoch: int) -> str:
@@ -134,12 +134,12 @@ def runtime(
 ) -> config_module.RuntimeConfig:
     adapters = [config_module.AdapterConfig("router", "t3-thread", (str(router),))]
     return proxy_fixture(config_module.RuntimeConfig(schema_version=1, source_path=source_path, database=database, record_command=(str(CLI), "record"), secret_refs=(), adapters=tuple(adapters), providers=(
-            config_module.ProviderConfig("alpha", config_module.DispatchBinding("router", "alpha"), frozenset({db.IMPLEMENT_CAPABILITY})),
+            config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), "huge", frozenset({db.IMPLEMENT_CAPABILITY})),
         ), limits=(
             config_module.LimitConfig(
-                "alpha-weekly", "alpha", 604_800, 95, 20_000, 6,
+                "claude-weekly", "claude", 604_800, 95, 20_000, 6,
             ),
-        ), viewer={}, pr_exceptions=(), usage_max_age_seconds=3_600, cache_dir=database.parent / "cache", proxy_secret_ref=None), (("alpha", "alpha-account"),))
+        ), viewer={}, pr_exceptions=(), usage_max_age_seconds=3_600, cache_dir=database.parent / "cache", proxy_secret_ref=None), (("claude", "claude-account"),))
 
 
 @contextlib.contextmanager
@@ -173,9 +173,9 @@ class RecoveryCase(unittest.TestCase):
         attempt = self.queue.claim(
             task_id,
             key or KEY,
-            "alpha",
-            "alpha-account",
-            provider_capabilities=(db.IMPLEMENT_CAPABILITY,),
+            "claude",
+            "claude-account",
+            provider_max_size="huge", provider_capabilities=(db.IMPLEMENT_CAPABILITY,),
             automatic=automatic,
             now_epoch=now,
         )
@@ -198,8 +198,8 @@ class RecoveryCase(unittest.TestCase):
             attempt_id=attempt.id,
             status=status,
             outcome=outcome,
-            provider_id="alpha",
-            account_id="alpha-account",
+            provider_id="claude",
+            account_id="claude-account",
             timestamp=iso(now),
             now_epoch=now,
             summary=f"{task_id} {status}",
@@ -244,7 +244,7 @@ class AttemptAndLegacyContracts(RecoveryCase):
         attempt = self.claim("dispatched-owner")
         self.queue.record(
             "dispatched-owner", KEY, attempt_id=attempt.id, status="dispatched",
-            provider_id="alpha", account_id="alpha-account", router_job_id="job-owner",
+            provider_id="claude", account_id="claude-account", router_job_id="job-owner",
             timestamp=iso(NOW), now_epoch=NOW,
         )
 
@@ -265,7 +265,7 @@ class AttemptAndLegacyContracts(RecoveryCase):
         attempt = self.claim("ambiguous-worker")
         self.queue.record(
             "ambiguous-worker", KEY, attempt_id=attempt.id, status="dispatched",
-            provider_id="alpha", account_id="alpha-account", router_job_id="job-unknown",
+            provider_id="claude", account_id="claude-account", router_job_id="job-unknown",
             timestamp=iso(NOW), now_epoch=NOW,
         )
         self.queue.mark_attempt_ambiguous(
@@ -274,7 +274,7 @@ class AttemptAndLegacyContracts(RecoveryCase):
 
         completed = self.queue.record(
             "ambiguous-worker", KEY, attempt_id=attempt.id, status="done",
-            outcome=verified(), provider_id="alpha", account_id="alpha-account", timestamp=iso(NOW + 1), now_epoch=NOW + 1,
+            outcome=verified(), provider_id="claude", account_id="claude-account", timestamp=iso(NOW + 1), now_epoch=NOW + 1,
         )
 
         self.assertEqual(completed.attempt_id, attempt.id)
@@ -293,13 +293,13 @@ class AttemptAndLegacyContracts(RecoveryCase):
         second = self.claim("parent", key=KEY, now=NOW)
         self.queue.record(
             "parent", KEY, attempt_id=second.id, status="dispatched",
-            provider_id="alpha", account_id="alpha-account", router_job_id="job-2",
+            provider_id="claude", account_id="claude-account", router_job_id="job-2",
             timestamp=iso(NOW),
         )
 
         replay = self.queue.record(
             "parent", KEY, attempt_id=first.id, status="failed",
-            outcome=reason(signature="retryable:first"), provider_id="alpha",
+            outcome=reason(signature="retryable:first"), provider_id="claude",
             timestamp=iso(NOW), summary="parent failed",
         )
 
@@ -321,10 +321,10 @@ class AttemptAndLegacyContracts(RecoveryCase):
         self.assertEqual(self.queue.claim_for("oneoff").attempt_id, attempt.id)
 
         self.add("weekly", kind="recurring", cadence="weekly")
-        recurring = self.claim("weekly", key="alpha-account/alpha-weekly/2000002000")
+        recurring = self.claim("weekly", key="claude-account/claude-weekly/2000002000")
         with self.assertRaisesRegex(db.QueueError, "attempt"):
             self.queue.record(
-                "weekly", "alpha-account/alpha-weekly/2000002000",
+                "weekly", "claude-account/claude-weekly/2000002000",
                 status="skipped", outcome=reason("verification_needed", "weekly:skip"),
             )
         self.assertEqual(self.queue.claim_for("weekly").attempt_id, recurring.id)
@@ -505,7 +505,7 @@ class AutomaticRecoveryContracts(RecoveryCase):
         self.assertEqual(as_dict(first_decision)["state"], "backoff")
         self.assertEqual(as_dict(first_decision)["not_before"], iso(NOW + 300))
         self.assertIsNone(self.queue.claim(
-            "unlocker", KEY, "alpha", "alpha-account", automatic=True, now_epoch=NOW + 299,
+            "unlocker", KEY, "claude", "claude-account", provider_max_size="huge", automatic=True, now_epoch=NOW + 299,
         ))
         first = self.claim("unlocker", automatic=True, now=NOW + 300)
         self.assertEqual((first.ordinal, first.mode, first.origin), (2, "retry", "automatic"))
@@ -533,7 +533,7 @@ class AutomaticRecoveryContracts(RecoveryCase):
             "exhausted",
         )
         self.assertIsNone(reopened.claim(
-            "unlocker", KEY, "alpha", "alpha-account", automatic=True, now_epoch=NOW + 99_999,
+            "unlocker", KEY, "claude", "claude-account", provider_max_size="huge", automatic=True, now_epoch=NOW + 99_999,
         ))
         readiness = reopened.readiness("unlocker", now_epoch=NOW + 99_999)
         latest_run = reopened.runs(task_id="unlocker")[0].to_dict()
@@ -602,8 +602,8 @@ class AutomaticRecoveryContracts(RecoveryCase):
         before = as_dict(self.queue.recovery_for("operator-owned"))
         self.assertEqual((before["origin"], before["state"]), ("operator", "scheduled"))
         snapshots = {
-            ("alpha", "alpha-account"): usage.UsageSnapshot(
-                "alpha", "alpha-account", NOW + 2_101,
+            ("claude", "claude-account"): usage.UsageSnapshot(
+                "claude", "claude-account", NOW + 2_101,
                 {"seven_day": {"used_percent": 95, "resets_at": NOW + 10_000}},
             ),
         }
@@ -684,8 +684,8 @@ class AutomaticRecoveryContracts(RecoveryCase):
             self.assertFalse(self.queue.readiness("unlocker", now_epoch=NOW + 299)["ready"])
             self.assertEqual(self.queue.eligible_tasks(0, task_id="unlocker", now_epoch=NOW + 299), [])
             self.assertIsNone(self.queue.claim(
-                "unlocker", KEY, "alpha", "alpha-account",
-                automatic=True, now_epoch=NOW + 299,
+                "unlocker", KEY, "claude", "claude-account",
+                provider_max_size="huge", automatic=True, now_epoch=NOW + 299,
             ))
         self.assertEqual(self.queue.snapshot(cycle=0, now_epoch=NOW), before)
 
@@ -698,7 +698,7 @@ class AutomaticRecoveryContracts(RecoveryCase):
         with self.assertRaises(dispatcher.AlreadyClaimed):
             dispatcher.dispatch(
                 runtime(self.queue.path), self.queue, task_id="unlocker",
-                eligibility_key="manual/too-early", requested_provider="alpha",
+                eligibility_key="manual/too-early", requested_provider="claude",
                 router_call=router,
             )
         router.assert_not_called()
@@ -747,7 +747,7 @@ class T3ClosureCompletionContracts(RecoveryCase):
         thread_id = f"{task_id}-thread"
         self.queue.record(
             task_id, KEY, attempt_id=source.id, status="dispatched",
-            provider_id="alpha", account_id="alpha-account", router_job_id=thread_id,
+            provider_id="claude", account_id="claude-account", router_job_id=thread_id,
             surface="t3", now_epoch=NOW,
         )
         # The terminal record can omit router_job_id; the dispatch retains the identity.
@@ -1140,8 +1140,8 @@ class DependencyPreflightTransactionContracts(RecoveryCase):
             "bonus_drain.handoff.resolve_dependency_base", side_effect=resolve,
         ) as resolver:
             claimed = self.queue.claim(
-                "claim-child", "manual/claim-child", "alpha", "alpha-account",
-                now_epoch=NOW,
+                "claim-child", "manual/claim-child", "claude", "claude-account",
+                provider_max_size="huge", now_epoch=NOW,
             )
 
         self.assertTrue(writer_opened)
@@ -1210,11 +1210,11 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
         key = KEY
         if kind == "recurring":
             changes["cadence"] = "weekly"
-            key = "alpha-account/alpha-weekly/2000002000"
+            key = "claude-account/claude-weekly/2000002000"
         queued = self.add(task_id, **changes)
         attempt = self.claim(task_id, key=key)
         return dispatcher.render_prompt(
-            runtime(self.queue.path), queued, key, "alpha", "alpha-account",
+            runtime(self.queue.path), queued, key, "claude", "claude-account",
             attempt=attempt, outcome_path=self.root / f"{task_id}-outcome.json",
         )
 
@@ -1251,7 +1251,7 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
         with self.assertRaises(dispatcher.DispatchError):
             dispatcher.dispatch(
                 cfg, self.queue, task_id=task_id, eligibility_key=f"manual/{task_id}",
-                requested_provider="alpha", router_call=callback,
+                requested_provider="claude", router_call=callback,
             )
         return callback
 
@@ -1267,7 +1267,7 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
         ):
             dispatcher.dispatch(
                 runtime(self.queue.path), self.queue, task_id="retry", eligibility_key=KEY,
-                requested_provider="alpha",
+                requested_provider="claude",
                 trigger="bonus",
                 router_call=lambda *_args, **_kwargs: {
                     "dispatch": {"launched": False}, "error": "admission refused",
@@ -1294,7 +1294,7 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
         attempt = self.claim("evidence-owner")
         self.queue.record(
             "evidence-owner", KEY, attempt_id=attempt.id, status="dispatched",
-            provider_id="alpha", account_id="alpha-account", router_job_id="job-evidence",
+            provider_id="claude", account_id="claude-account", router_job_id="job-evidence",
             timestamp=iso(NOW), now_epoch=NOW,
         )
         invalid = verified()
@@ -1346,7 +1346,7 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
                 with self.assertRaises(dispatcher.AlreadyClaimed):
                     dispatcher.dispatch(
                         runtime(self.queue.path), self.queue, task_id=name,
-                        eligibility_key=f"manual/{name}", requested_provider="alpha",
+                        eligibility_key=f"manual/{name}", requested_provider="claude",
                         router_call=callback,
                     )
                 self.assertEqual(callback.call_count, 1)
@@ -1357,7 +1357,7 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
         self.add("outcome")
         result = dispatcher.dispatch(
             runtime(self.queue.path), self.queue, task_id="outcome",
-            eligibility_key="manual/outcome", requested_provider="alpha",
+            eligibility_key="manual/outcome", requested_provider="claude",
             router_call=lambda *_args, **_kwargs: {
                 "dispatch": {"job_id": "job-outcome", "launched": True},
             },
@@ -1482,7 +1482,7 @@ class GoalRecoveryContracts(RecoveryCase):
         attempt = self.claim(turn, key=f"manual/{turn}")
         self.queue.record(
             turn, f"manual/{turn}", attempt_id=attempt.id, status="dispatched",
-            provider_id="alpha", router_job_id="coordinator-job",
+            provider_id="claude", router_job_id="coordinator-job",
         )
         candidate = {"commits": {"fixture": "a" * 40}, "runtime": {}}
         store.advance(
@@ -1635,7 +1635,7 @@ class GoalRecoveryContracts(RecoveryCase):
         peer = self.claim("integration", key="manual/integration", now=NOW)
         self.queue.record(
             "integration", "manual/integration", attempt_id=peer.id, status="dispatched",
-            provider_id="alpha", account_id="alpha-account", router_job_id="peer-job",
+            provider_id="claude", account_id="claude-account", router_job_id="peer-job",
             timestamp=iso(NOW), now_epoch=NOW,
         )
         held = self.queue.reconcile_recoveries(now_epoch=NOW, dry_run=False)[0]

@@ -143,7 +143,7 @@ class WeeklyRecurrenceTests(unittest.TestCase):
                 "alpha/weekly/2000000000",
                 "alpha",
                 None,
-                automatic=True,
+                provider_max_size="huge", automatic=True,
             ))
         with mock.patch.object(db.time, "time", return_value=epoch("2026-09-20T16:00:00Z")):
             self.assertTrue(self.queue.claim(
@@ -151,7 +151,7 @@ class WeeklyRecurrenceTests(unittest.TestCase):
                 "alpha/weekly/2000604800",
                 "alpha",
                 None,
-                automatic=True,
+                provider_max_size="huge", automatic=True,
             ))
 
     def test_spring_dst_week_uses_local_midnight_boundaries(self) -> None:

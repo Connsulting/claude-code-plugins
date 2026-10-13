@@ -74,7 +74,7 @@ class FableModelCanonicalizationTests(unittest.TestCase):
                 timeout_seconds=0.2, max_output_bytes=1024,
             )
             config = proxy_fixture(config_module.RuntimeConfig(schema_version=1, source_path=root / "config.json", database=root / "queue.db", record_command=("/bin/true",), secret_refs=(), adapters=(router,), providers=(
-                    config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), frozenset({"legacy-exclusive"})),
+                    config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), "huge", frozenset({"legacy-exclusive"})),
                 ), limits=(
                     config_module.LimitConfig(
                         "claude-weekly", "claude", 604800, 95, 20000, 1,

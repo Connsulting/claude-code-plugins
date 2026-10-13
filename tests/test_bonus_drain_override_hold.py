@@ -132,7 +132,7 @@ class OverrideRefuses(OverrideHoldCase):
         with sqlite3.connect(self.queue.path) as connection:
             connection.execute(
                 "INSERT INTO dispatch_claims(task_id,eligibility_key,provider_id,state,claimed_at)"
-                " VALUES('claimed','other-key','alpha','ambiguous',?)",
+                " VALUES('claimed','other-key','claude','ambiguous',?)",
                 (iso(NOW),),
             )
         self.assert_refused("claimed", "launch ownership")

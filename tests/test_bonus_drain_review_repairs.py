@@ -53,7 +53,7 @@ def task(
 def runtime(database: Path, *, router_path: str = "/bin/true") -> config_module.RuntimeConfig:
     router = config_module.AdapterConfig("router", "t3-thread", (router_path,))
     return proxy_fixture(config_module.RuntimeConfig(schema_version=1, source_path=None, database=database, record_command=("/bin/true",), secret_refs=(), adapters=(router,), providers=(
-            config_module.ProviderConfig("alpha", config_module.DispatchBinding("router", "alpha"), frozenset()),
+            config_module.ProviderConfig("alpha", config_module.DispatchBinding("router", "alpha"), "huge", frozenset()),
         ), limits=(config_module.LimitConfig("alpha-weekly", "alpha", 604_800, 95, 20_000, 6),), viewer={}, pr_exceptions=(), usage_max_age_seconds=3_600, cache_dir=database.parent / "cache", proxy_secret_ref=None), (("alpha", "alpha-account"),))
 
 
@@ -91,7 +91,7 @@ class BonusDrainReviewRepairTests(unittest.TestCase):
     def test_terminal_record_is_idempotent_and_rejects_a_conflicting_outcome(self) -> None:
         self.queue.add_task(reviewed(task("terminal-once")))
         attempt = self.queue.claim(
-            "terminal-once", ELIGIBILITY_KEY, "alpha", "alpha-account", now_epoch=NOW,
+            "terminal-once", ELIGIBILITY_KEY, "alpha", "alpha-account", provider_max_size="huge", now_epoch=NOW,
         )
         self.assertIsNotNone(attempt)
 
@@ -220,7 +220,7 @@ class BonusDrainReviewRepairTests(unittest.TestCase):
         self.queue.add_task(reviewed(task("running") | {"allowed_providers": ["alpha"]}))
         self.queue.add_task(reviewed(task("would-run") | {"allowed_providers": ["beta"]}))
         attempt = self.queue.claim(
-            "running", ELIGIBILITY_KEY, "alpha", "alpha-account", now_epoch=NOW,
+            "running", ELIGIBILITY_KEY, "alpha", "alpha-account", provider_max_size="huge", now_epoch=NOW,
         )
         self.assertIsNotNone(attempt)
         self.queue.record(
@@ -283,7 +283,7 @@ class BonusDrainReviewRepairTests(unittest.TestCase):
         self.queue.add_task(reviewed(task("would-run")))
         self.assertTrue(self.queue.claim(
             "ambiguous", ELIGIBILITY_KEY, "alpha", "alpha-account",
-        ))
+         provider_max_size="huge"))
         self.queue.mark_ambiguous("ambiguous", ELIGIBILITY_KEY, detail="activation unknown")
 
         with (

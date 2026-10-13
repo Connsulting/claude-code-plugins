@@ -300,7 +300,7 @@ class PreflightCase(RecoveryCase):
 
     def try_claim(self, task_id: str, now: int = NOW + 10):
         return self.queue.claim(
-            task_id, f"manual/{task_id}/{now}", "alpha", "alpha-account", now_epoch=now,
+            task_id, f"manual/{task_id}/{now}", "claude", "claude-account", provider_max_size="huge", now_epoch=now,
         )
 
     def eligible_ids(self, now: int = NOW + 10) -> list[str]:
@@ -898,7 +898,7 @@ class CheckGatingTests(PreflightCase):
         status = migrated.readiness("retained", now_epoch=NOW + 10)
         self.assertTrue(status["ready"], status)
         attempt = migrated.claim(
-            "retained", "manual/after-migration", "alpha", "alpha-account", now_epoch=NOW + 10,
+            "retained", "manual/after-migration", "claude", "claude-account", provider_max_size="huge", now_epoch=NOW + 10,
         )
         self.assertIsNotNone(attempt)
         self.assertEqual(attempt.recovery_of, source.id)
@@ -1566,10 +1566,10 @@ class CollisionTests(PreflightCase):
         self.assertIsNone(self.try_claim("second"))
 
     def test_unrelated_tasks_run_concurrently(self) -> None:
-        self.add("alpha-work", work_group="Alpha")
+        self.add("claude-work", work_group="Alpha")
         self.add("beta-work", work_group="Beta")
         self.add("loose")
-        self.assertIsNotNone(self.try_claim("alpha-work"))
+        self.assertIsNotNone(self.try_claim("claude-work"))
         self.assertIsNotNone(self.try_claim("beta-work"))
         self.assertIsNotNone(self.try_claim("loose"))
         self.assertEqual(self.queue.collision_keys(["loose"]), {"loose": frozenset()})
@@ -1593,7 +1593,7 @@ class CollisionTests(PreflightCase):
 
 class AccountBackoffStoreTests(PreflightCase):
     def hold(self, cause: str = "account_unavailable") -> db.AccountHold:
-        return db.AccountHold("alpha", "alpha-account", cause, "requested account did not become active")
+        return db.AccountHold("claude", "claude-account", cause, "requested account did not become active")
 
     def backoff_rows(self) -> list[dict[str, Any]]:
         return rows(self.queue, "SELECT * FROM account_backoff ORDER BY provider_id,account_id")
@@ -1612,7 +1612,7 @@ class AccountBackoffStoreTests(PreflightCase):
         stored = self.backoff_rows()
         self.assertEqual(
             [(row["provider_id"], row["account_id"], row["cause"], row["failures"]) for row in stored],
-            [("alpha", "alpha-account", "account_unavailable", 1)],
+            [("claude", "claude-account", "account_unavailable", 1)],
         )
         self.assertEqual(db._timestamp_epoch(stored[0]["not_before"]), NOW + 1_800)
         self.assertEqual(len(self.queue.account_backoffs(now_epoch=NOW + 1)), 1)
@@ -1669,7 +1669,7 @@ class AccountBackoffStoreTests(PreflightCase):
         launched = self.claim("held", now=NOW + 10)
         self.queue.record(
             "held", KEY, attempt_id=launched.id, status="dispatched",
-            provider_id="alpha", account_id="alpha-account", router_job_id="job-held",
+            provider_id="claude", account_id="claude-account", router_job_id="job-held",
             timestamp=iso(NOW + 10), now_epoch=NOW + 10,
         )
 

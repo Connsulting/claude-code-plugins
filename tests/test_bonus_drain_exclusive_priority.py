@@ -44,8 +44,8 @@ class ExclusivePriorityTests(unittest.TestCase):
             queue.add_task(reviewed(_task("claude-only-p3", 3, claude_only=True)))
             router = config_module.AdapterConfig("router", "t3-thread", ("/bin/true",))
             config = proxy_fixture(config_module.RuntimeConfig(schema_version=1, source_path=None, database=queue.path, record_command=("/bin/true",), secret_refs=(), adapters=(router,), providers=(
-                    config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), frozenset({"legacy-exclusive"})),
-                    config_module.ProviderConfig("codex", config_module.DispatchBinding("router", "codex"), frozenset()),
+                    config_module.ProviderConfig("claude", config_module.DispatchBinding("router", "claude"), "huge", frozenset({"legacy-exclusive"})),
+                    config_module.ProviderConfig("codex", config_module.DispatchBinding("router", "codex"), "huge", frozenset()),
                 ), limits=(
                     config_module.LimitConfig(
                         "claude-weekly", "claude", 604800, 95, 20000, 1,
@@ -69,11 +69,11 @@ class ExclusivePriorityTests(unittest.TestCase):
                 tick = scout.plan_tick(config, queue, now_epoch=NOW)
 
             self.assertEqual(
-                [task.id for task in tick.allocations[("claude", "claude-account")]],
+                [task.id for task in tick.allocations[("claude", "claude")]],
                 ["claude-only-p3"],
             )
             self.assertEqual(
-                [task.id for task in tick.allocations[("codex", "codex-account")]],
+                [task.id for task in tick.allocations[("codex", "codex")]],
                 ["portable-p1"],
             )
 

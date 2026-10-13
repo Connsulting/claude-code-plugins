@@ -57,11 +57,11 @@ def seed_historic_awaiting_human(
     transition, and the released claim, all in one transaction.
     """
 
-    attempt = queue.claim(task_id, KEY, "alpha", "alpha-account", now_epoch=now)
+    attempt = queue.claim(task_id, KEY, "claude", "claude-account", provider_max_size="huge", now_epoch=now)
     assert attempt is not None
     queue.record(
         task_id, KEY, attempt_id=attempt.id, status="dispatched",
-        provider_id="alpha", account_id="alpha-account", router_job_id=f"job-{task_id}",
+        provider_id="claude", account_id="claude-account", router_job_id=f"job-{task_id}",
         timestamp=iso(now), now_epoch=now,
     )
     value = db.validate_outcome("awaiting_human", outcome or awaiting())
@@ -72,7 +72,7 @@ def seed_historic_awaiting_human(
             """INSERT INTO runs(
                  task,kind,cycle,eligibility_key,status,ts,received_at,summary,
                  provider_id,account_id,attempt_id,outcome_json
-               ) VALUES(?,'oneoff',?,?,'awaiting_human',?,?,?,'alpha','alpha-account',?,?)""",
+               ) VALUES(?,'oneoff',?,?,'awaiting_human',?,?,?,'claude','claude-account',?,?)""",
             (
                 task_id, db.cycle_from_key(KEY), KEY, stamp, stamp,
                 f"{task_id} awaiting_human", attempt.id, encoded,
@@ -104,7 +104,7 @@ class RecordTests(AwaitingHumanCase):
         attempt = self.claim(task_id)
         self.queue.record(
             task_id, KEY, attempt_id=attempt.id, status="dispatched",
-            provider_id="alpha", account_id="alpha-account", router_job_id=f"job-{task_id}",
+            provider_id="claude", account_id="claude-account", router_job_id=f"job-{task_id}",
             timestamp=iso(NOW), now_epoch=NOW,
         )
         return attempt
@@ -222,7 +222,7 @@ class InflightTests(AwaitingHumanCase):
         live = self.claim("running")
         self.queue.record(
             "running", KEY, attempt_id=live.id, status="dispatched",
-            provider_id="alpha", account_id="alpha-account", router_job_id="job-running",
+            provider_id="claude", account_id="claude-account", router_job_id="job-running",
             timestamp=iso(NOW), now_epoch=NOW,
         )
         self.assertEqual([run.task for run in self.queue.inflight()], ["running"])
@@ -234,7 +234,7 @@ class InflightTests(AwaitingHumanCase):
         live = self.claim("running")
         self.queue.record(
             "running", KEY, attempt_id=live.id, status="dispatched",
-            provider_id="alpha", account_id="alpha-account", router_job_id="job-running",
+            provider_id="claude", account_id="claude-account", router_job_id="job-running",
             timestamp=iso(NOW), now_epoch=NOW,
         )
         viewer = _load_server()
@@ -333,7 +333,7 @@ class PromptTests(RecoveryCase):
         config = config or runtime(self.queue.path)
         attempt = self.claim(task_id)
         return dispatcher.render_prompt(
-            config, self.queue.task(task_id), KEY, "alpha", "alpha-account",
+            config, self.queue.task(task_id), KEY, "claude", "claude-account",
             attempt=attempt, outcome_path=self.root / f"{task_id}-outcome.json",
         )
 

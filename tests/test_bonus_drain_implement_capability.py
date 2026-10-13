@@ -46,7 +46,7 @@ def _task_obj(**overrides: object) -> db.Task:
 
 
 def _provider(provider_id: str, *capabilities: str) -> config_module.ProviderConfig:
-    return config_module.ProviderConfig(provider_id, config_module.DispatchBinding("router", provider_id), frozenset(capabilities))
+    return config_module.ProviderConfig(provider_id, config_module.DispatchBinding("router", provider_id), "huge", frozenset(capabilities))
 
 
 def _limit(provider_id: str) -> config_module.LimitConfig:
@@ -213,20 +213,32 @@ class ClaimTwinTests(CapabilityRoutingCase):
 
         refused = self.queue.claim(
             "impl", "grok-account/k/1", "grok", "grok-account",
-            provider_capabilities=(), now_epoch=NOW,
+            provider_max_size="huge", provider_capabilities=(), now_epoch=NOW,
         )
         plain = self.queue.claim(
             "plain", "grok-account/k/1", "grok", "grok-account",
-            provider_capabilities=(), now_epoch=NOW,
+            provider_max_size="huge", provider_capabilities=(), now_epoch=NOW,
         )
         capable = self.queue.claim(
             "impl", "codex-account/k/1", "codex", "codex-account",
-            provider_capabilities=("implement",), now_epoch=NOW,
+            provider_max_size="huge", provider_capabilities=("implement",), now_epoch=NOW,
         )
 
         self.assertIsNone(refused)
         self.assertIsNotNone(plain)
         self.assertIsNotNone(capable)
+
+    def test_spoofed_capability_cannot_enable_implement_on_other_providers(self) -> None:
+        self.queue.add_task(reviewed(_task("impl", goal=IMPLEMENT_GOAL)))
+        for provider in ("grok", "muse", "future"):
+            with self.subTest(provider=provider):
+                self.assertFalse(dispatcher.provider_compatible(
+                    self.queue.task("impl"), _provider(provider, "implement"),
+                ))
+                self.assertIsNone(self.queue.claim(
+                    "impl", f"{provider}/manual/{NOW}", provider, provider,
+                    provider_capabilities=("implement",), provider_max_size="huge", now_epoch=NOW,
+                ))
 
 
 class AutoClassificationTests(CapabilityRoutingCase):
@@ -395,7 +407,7 @@ class LongHorizonCoordinatorTests(CapabilityRoutingCase):
 
         def eligible(*capabilities: str) -> list[str]:
             return [item.id for item in self.queue.eligible_tasks(
-                0, provider_id="grok", capabilities=capabilities, now_epoch=NOW,
+                0, max_size="huge", provider_id="grok", capabilities=capabilities, now_epoch=NOW,
             )]
 
         self.assertNotIn(coordinator, eligible())
@@ -407,8 +419,8 @@ class CLIRefusalTests(CapabilityRoutingCase):
         super().setUp()
         raw = {"schema_version": 1, "database": str(self.queue.path), "cache_dir": str(self.root / "cache"), "record_command": ["/bin/true"], "adapters": [{"id": "router", "kind": "t3-thread", "argv": ["/bin/true"]}], "providers": [
                 {"id": "codex", "capabilities": ["implement"],
-                 "dispatch": {"adapter_id": "router", "provider": "codex"}},
-                {"id": "grok", "dispatch": {"adapter_id": "router", "provider": "grok"}},
+                 "max_size": "huge", "dispatch": {"adapter_id": "router", "provider": "codex"}},
+                {"id": "grok", "max_size": "huge", "dispatch": {"adapter_id": "router", "provider": "grok"}},
             ], "limits": [
                 {"id": f"{item}-weekly", "provider_id": item, "window_seconds": 604800,
                  "ceiling_percent": 95, "lead_seconds": 20000, "batch_size": 1}

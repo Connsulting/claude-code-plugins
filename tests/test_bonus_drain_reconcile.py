@@ -204,7 +204,7 @@ class ScoutReconciliationTests(unittest.TestCase):
         self.queue.add_task(reviewed(task("abandoned")))
         self.attempt = self.queue.claim(
             "abandoned", ELIGIBILITY_KEY, "alpha", "alpha-account",
-        )
+         provider_max_size="huge")
         self.assertIsNotNone(self.attempt)
         self.queue.record(
             "abandoned", ELIGIBILITY_KEY, attempt_id=self.attempt.id,

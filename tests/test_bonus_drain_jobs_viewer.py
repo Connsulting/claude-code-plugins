@@ -82,6 +82,15 @@ class JobsViewerContractTests(unittest.TestCase):
             self.assertNotIn(marker, page.lower())
         self.assertNotIn("independent provider capacity console", page)
 
+    def test_provider_pool_cards_preserve_css_script_and_page_template(self) -> None:
+        for name, expected in (
+            ("CSS", "460cdff8a219ca0d0c892aa550e4292ece711346d632b7abb1a1e7802d7e82bd"),
+            ("SCRIPT", "a5e2fb4eb4398d5b760feaa27158869e354523847580030f36b924bb8f8c902a"),
+            ("PAGE", "fc17be63240b9671dd878baf52c32611b2dd24f2bf7d5d8e084253396bb06598"),
+        ):
+            with self.subTest(component=name):
+                self.assertEqual(hashlib.sha256(getattr(self.viewer, name).encode()).hexdigest(), expected)
+
     def test_active_stripes_and_dispatching_bar_shimmer_have_distinct_meanings(self) -> None:
         """A gold stripe is active; a shimmering bar is an actual dispatch."""
         claude = self.viewer._claude_cards(
@@ -95,7 +104,7 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertEqual(claude["name"], "Claude · Business")
         self.assertEqual(codex["name"], "Codex · Personal")
         self.assertEqual(grok["name"], "Grok")
-        for card in (claude, codex, grok):
+        for card in (claude, codex):
             with self.subTest(account=card["name"]):
                 self.assertTrue(card["active"])
                 row = self.viewer._account_row(card)
@@ -105,7 +114,8 @@ class JobsViewerContractTests(unittest.TestCase):
         window_draining = self.viewer._grok_cards(
             {}, {"weekly_percent": 22}, 0, "grok", 0,
         )[0]
-        self.assertIn('bar lg draining', self.viewer._account_row(window_draining))
+        self.assertIn("unmetered", self.viewer._account_row(window_draining).lower())
+        self.assertIsNone(grok["u7"])
 
         draining = self.viewer._claude_cards(
             {"acct": [{"label": "Business", "u7": 22}], "active": "Business", "selected": "Business"},
@@ -191,11 +201,11 @@ class JobsViewerContractTests(unittest.TestCase):
         self.assertIn("draining", card["tag"])
         self.assertIn('bar lg draining', self.viewer._account_row(card))
 
-    def test_live_grok_ledger_batch_shimmers_and_drives_the_verdict(self) -> None:
+    def test_live_grok_unmetered_batch_drives_the_verdict(self) -> None:
         grok = self.viewer._grok_cards(
             {}, {"weekly_percent": 50, "weekly_reset": 2_000_000_000}, 4, "grok", 2,
         )[0]
-        self.assertIn('bar lg draining', self.viewer._account_row(grok))
+        self.assertIn("unmetered", self.viewer._account_row(grok).lower())
         tone, label, text, _sub = self.viewer._verdict([grok], "grok", 30 * 3600)
         self.assertEqual((tone, label), ("live", "draining"))
         self.assertIn("Grok", text)
@@ -520,7 +530,7 @@ class JobsViewerContractTests(unittest.TestCase):
             "id": "runaway-job", "title": "Runaway", "kind": "oneoff",
             "priority": 2, "cwd": "/tmp", "goal": "run", "active": True,
         }))
-        key = "alpha-account/manual/2000000000"
+        key = "claude-account/manual/2000000000"
         queue.record(
             "runaway-job", key, status="dispatched", provider_id="claude",
             account_id="claude-personal", router_job_id="job-9",
@@ -560,7 +570,7 @@ class JobsViewerContractTests(unittest.TestCase):
                 key = "claude-personal/manual/2000000000"
                 attempt = queue.claim(
                     parent_id, key, "claude", "claude-personal",
-                    now_epoch=2_000_000_000,
+                    provider_max_size="huge", now_epoch=2_000_000_000,
                 )
                 self.assertIsNotNone(attempt)
                 router_job_id = f"router-{status}"

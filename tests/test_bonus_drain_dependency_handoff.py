@@ -83,7 +83,7 @@ def runtime(database: Path) -> config_module.RuntimeConfig:
     return proxy_fixture(config_module.RuntimeConfig(schema_version=1, source_path=None, database=database, record_command=("/bin/true", "record"), secret_refs=(), adapters=(config_module.AdapterConfig(
             "router", "t3-thread", ("/bin/true",),
             timeout_seconds=10, max_output_bytes=65_536,
-        ),), providers=(config_module.ProviderConfig("alpha", config_module.DispatchBinding("router", "alpha"), frozenset()),), limits=(config_module.LimitConfig(
+        ),), providers=(config_module.ProviderConfig("alpha", config_module.DispatchBinding("router", "alpha"), "huge", frozenset()),), limits=(config_module.LimitConfig(
             "alpha-weekly", "alpha", 604_800, 95, 20_000, 6,
         ),), viewer={}, pr_exceptions=(), usage_max_age_seconds=3_600, cache_dir=database.parent / "cache", proxy_secret_ref=None), (("alpha", "alpha-account"),))
 
@@ -209,7 +209,7 @@ class QueueBranchChoiceContract(unittest.TestCase):
 
     def complete(self, task_id: str, repo: dict[str, object] | None = None) -> None:
         attempt = self.queue.claim(
-            task_id, f"manual/{task_id}", "alpha", "alpha-account", now_epoch=NOW,
+            task_id, f"manual/{task_id}", "alpha", "alpha-account", provider_max_size="huge", now_epoch=NOW,
         )
         self.assertIsNotNone(attempt)
         self.queue.record(
@@ -231,7 +231,7 @@ class QueueBranchChoiceContract(unittest.TestCase):
         self.add("child", depends_on=["parent"])
         self.assertFalse(self.queue.readiness("child", now_epoch=NOW)["ready"])
         self.assertIsNone(self.queue.claim(
-            "child", "manual/child", "alpha", "alpha-account", now_epoch=NOW,
+            "child", "manual/child", "alpha", "alpha-account", provider_max_size="huge", now_epoch=NOW,
         ))
         self.complete("parent", repository("task/parent"))
         with mock.patch.object(

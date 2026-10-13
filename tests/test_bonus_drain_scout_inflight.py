@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import sqlite3
 import sys
 import tempfile
 import unittest
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -46,8 +48,8 @@ def _limit(provider_id: str, ceiling: float = 95) -> config_module.LimitConfig:
 def _two_provider_config(queue: db.QueueDB, cache: Path) -> config_module.RuntimeConfig:
     router = config_module.AdapterConfig("router", "t3-thread", ("/bin/true",))
     return proxy_fixture(config_module.RuntimeConfig(schema_version=1, source_path=None, database=queue.path, record_command=("/bin/true",), secret_refs=(), adapters=(router,), providers=(
-            config_module.ProviderConfig("alpha", config_module.DispatchBinding("router", "alpha"), frozenset()),
-            config_module.ProviderConfig("beta", config_module.DispatchBinding("router", "beta"), frozenset()),
+            config_module.ProviderConfig("alpha", config_module.DispatchBinding("router", "alpha"), "huge", frozenset()),
+            config_module.ProviderConfig("beta", config_module.DispatchBinding("router", "beta"), "huge", frozenset()),
         ), limits=(_limit("alpha"), _limit("beta")), viewer={}, pr_exceptions=(), usage_max_age_seconds=3600, cache_dir=cache, proxy_secret_ref=None), (("alpha", "alpha-account"), ("beta", "beta-account"),))
 
 
@@ -125,12 +127,12 @@ class ScoutPoolSelectionTests(unittest.TestCase):
 
     def test_pool_selects_earliest_reset_with_headroom(self):
         tick = self.tick(70, 70, personal_reset=NOW + 36 * HOUR, business_reset=NOW + 40 * HOUR)
-        self.assertEqual([b.account_id for b in tick.plan.batches], ["alpha-personal"])
+        self.assertEqual([b.account_id for b in tick.plan.batches], ["alpha"])
         self.assertEqual(tick.plan.batches[0].resets_at, NOW + 36 * HOUR)
 
-    def test_closed_sibling_does_not_close_pool(self):
-        tick = self.tick(80, 70)
-        self.assertEqual([b.account_id for b in tick.plan.batches], ["alpha-business"])
+    def test_negative_sibling_contributes_to_positive_pool_mean(self):
+        tick = self.tick(80, 65)
+        self.assertEqual([b.account_id for b in tick.plan.batches], ["alpha"])
 
     def test_all_accounts_at_floor_close_pool(self):
         self.assertEqual(self.tick(80, 80).plan.batches, ())
@@ -139,7 +141,40 @@ class ScoutPoolSelectionTests(unittest.TestCase):
         self.queue.add_task(reviewed(_task("running", "alpha")))
         self.queue.record("running", "alpha-business/weekly/123", status="dispatched", provider_id="alpha", account_id="alpha-business", cycle=123)
         tick = self.tick(70, 70, personal_reset=NOW + 36 * HOUR)
-        self.assertEqual([b.account_id for b in tick.plan.batches], ["alpha-personal"])
+        self.assertEqual([b.account_id for b in tick.plan.batches], ["alpha"])
+
+    def test_historical_subscription_backoff_closes_pool_until_it_expires(self) -> None:
+        def stamp(epoch: int) -> str:
+            return datetime.fromtimestamp(epoch, timezone.utc).isoformat().replace("+00:00", "Z")
+        with sqlite3.connect(self.queue.path) as connection:
+            connection.execute(
+                "INSERT INTO account_backoff(provider_id,account_id,cause,failures,not_before,detail,updated_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                ("alpha", "alpha-obsolete", "account_unavailable", 1, stamp(NOW + 300), "fixture", stamp(NOW)),
+            )
+        held = self.tick(70, 70)
+        self.assertEqual(held.plan.batches, ())
+        gate = next(g for g in held.plan.gates if g.provider_id == "alpha")
+        self.assertFalse(gate.open)
+        self.assertEqual(sum(row["provider_id"] == "alpha"
+                             for row in held.plan.to_dict()["subscriptions"]), 2)
+        with mock.patch.object(scout, "read_all", return_value=_multi_snapshots(70, 70)):
+            recovered = scout.plan_tick(self.config, self.queue, now_epoch=NOW + 301, provider_holds=())
+        self.assertEqual([batch.account_id for batch in recovered.plan.batches], ["alpha"])
+
+    def test_historical_claim_and_run_count_once_toward_provider_pool_cap(self) -> None:
+        self.queue.add_task(reviewed(_task("running", "alpha")))
+        for index in range(4):
+            self.queue.add_task(reviewed(_task(f"next-{index}", "alpha")))
+        key = "alpha-obsolete/weekly/123"
+        attempt = self.queue.claim("running", key, "alpha", "alpha-obsolete",
+                                   provider_max_size="huge", now_epoch=NOW)
+        self.assertIsNotNone(attempt)
+        self.queue.record("running", key, attempt_id=attempt.id, status="dispatched",
+                          provider_id="alpha", account_id="alpha-obsolete", router_job_id="old-job")
+        tick = self.tick(80, 66)
+        self.assertEqual(tick.plan.batches[0].batch_size, 3)
+        self.assertEqual(len(tick.allocations[("alpha", "alpha")]), 3)
 
 
 class ScoutInflightCapTests(unittest.TestCase):
@@ -245,8 +280,8 @@ class ScoutMatchingAndGlobalCapTests(unittest.TestCase):
             with mock.patch.object(scout, "read_all", return_value=snapshots):
                 tick = scout.plan_tick(config, queue, now_epoch=NOW)
 
-            self.assertEqual(len(tick.allocations[("alpha", "alpha-account")]), 4)
-            self.assertEqual(len(tick.allocations[("beta", "beta-account")]), 2)
+            self.assertEqual(len(tick.allocations[("alpha", "alpha")]), 4)
+            self.assertEqual(len(tick.allocations[("beta", "beta")]), 2)
 
     def test_global_cap_leaves_room_across_providers_after_inflight(self) -> None:
         from dataclasses import replace

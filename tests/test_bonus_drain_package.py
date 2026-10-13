@@ -93,7 +93,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
                     {"id": "router", "kind": "t3-thread", "argv": ["/bin/true"]},
                 ], "providers": [{
                     "id": "provider-a",
-                    "dispatch": {"adapter_id": "router", "provider": "provider-a"},
+                    "max_size": "huge", "dispatch": {"adapter_id": "router", "provider": "provider-a"},
                 }], "limits": [{
                     "id": "weekly",
                     "provider_id": "provider-a",
@@ -634,6 +634,13 @@ class BonusDrainPackageContractTests(unittest.TestCase):
         self.assertEqual(refs[example["proxy_secret_ref"]]["source"], "file")
         self.assertEqual(example["unmetered_max_inflight"], 2)
         self.assertTrue(all("provider_id" in item for item in example["limits"]))
+        ceilings = {item["id"]: item["max_size"] for item in example["providers"]}
+        self.assertEqual(ceilings, {"claude": "huge", "codex": "large", "grok": "small", "muse": "medium"})
+        capabilities = {item["id"]: set(item.get("capabilities", [])) for item in example["providers"]}
+        self.assertEqual({name for name, caps in capabilities.items() if "implement" in caps},
+                         {"claude", "codex"})
+        self.assertEqual({name for name, caps in capabilities.items() if "legacy-exclusive" in caps},
+                         {"claude"})
 
     def test_package_test_command_is_idempotent_without_bytecode_environment_flags(self) -> None:
         if os.environ.get("BONUS_DRAIN_PACKAGE_IDEMPOTENCE_CHILD") == "1":
@@ -933,7 +940,7 @@ class UpgradeOrderingTests(unittest.TestCase):
             },
         })
         attempt = queue.claim(
-            "legacy", _UPGRADE_KEY, "provider-a", "account-a", now_epoch=_UPGRADE_NOW,
+            "legacy", _UPGRADE_KEY, "provider-a", "account-a", provider_max_size="huge", now_epoch=_UPGRADE_NOW,
         )
         assert attempt is not None
         queue.record(
