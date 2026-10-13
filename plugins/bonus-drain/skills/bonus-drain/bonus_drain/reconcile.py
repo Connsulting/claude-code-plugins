@@ -12,6 +12,44 @@ from .config import ConfigError, RuntimeConfig
 from .db import QueueDB, QueueError
 from .dispatcher import DispatchError, _activation
 
+# A cancelled or interrupted T3 run can sit in turn_ended while the worker is gone.
+# Fifteen minutes without activity is terminal. A completed turn can still be a
+# worker waiting on a background wake, so that row stays held.
+_ABANDONED_TURN_IDLE_SECONDS = 900
+
+
+def _rfc3339_epoch(value: str) -> float | None:
+    text = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.timestamp()
+
+
+def _abandoned_turn(row: dict[str, Any], now_epoch: int | None) -> tuple[str, str] | None:
+    """Cancelled or interrupted turn_ended idle for at least 15 minutes."""
+    if row.get("state") != "turn_ended":
+        return None
+    run_status = row.get("run_status")
+    if run_status not in ("cancelled", "interrupted"):
+        return None
+    activity = row.get("last_activity_at")
+    if not isinstance(activity, str):
+        return None
+    activity_epoch = _rfc3339_epoch(activity)
+    if activity_epoch is None:
+        return None
+    now = (
+        float(now_epoch) if now_epoch is not None
+        else datetime.now(timezone.utc).timestamp()
+    )
+    if now - activity_epoch < _ABANDONED_TURN_IDLE_SECONDS:
+        return None
+    return run_status, activity
+
 
 def reconcile_inflight(
     config: RuntimeConfig, queue: QueueDB, *, dry_run: bool = False,
@@ -72,7 +110,8 @@ def reconcile_inflight(
                 report["reason"] = "job missing or duplicated in router status; operator reconciliation required"
                 continue
             state = matches[0].get("state")
-            if state not in ("completed", "failed"):
+            abandoned = _abandoned_turn(matches[0], now_epoch)
+            if state not in ("completed", "failed") and abandoned is None:
                 report["reason"] = (
                     "worker is running" if state == "running"
                     else "worker state is unknown; operator reconciliation required"
@@ -84,7 +123,17 @@ def reconcile_inflight(
                     "continuation liveness is not proven"
                 )
                 continue
-            report["reason"] = f"router observed {state} execution without a terminal record"
+            if abandoned is None:
+                report["reason"] = f"router observed {state} execution without a terminal record"
+                signature = "unknown_launch:missing_terminal_record"
+            else:
+                run_status, activity = abandoned
+                report["reason"] = (
+                    "router observed turn_ended "
+                    f"run_status {run_status} last_activity_at {activity} "
+                    "without a terminal record"
+                )
+                signature = f"unknown_launch:t3_run_{run_status}"
             if dry_run:
                 report["action"] = "would_fail"
                 continue
@@ -103,7 +152,7 @@ def reconcile_inflight(
                     "reason": {
                         "code": "unknown_launch",
                         "detail": report["reason"],
-                        "signature": "unknown_launch:missing_terminal_record",
+                        "signature": signature,
                     },
                 } if run.attempt_id is not None else None,
                 timestamp=(
