@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
+import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 from urllib.request import Request, urlopen
 
@@ -24,6 +28,37 @@ def _post_ntfy(config: RuntimeConfig, message: str) -> None:
     )
     with urlopen(request, timeout=15) as response:
         response.close()
+
+
+STORAGE_UNWRITABLE = "storage_unwritable"
+
+
+def _storage_marker(queue: QueueDB) -> Path:
+    """The per-database marker that dedupes the unwritable notice where SQLite cannot."""
+
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    digest = hashlib.sha256(str(Path(queue.path).resolve()).encode("utf-8")).hexdigest()[:16]
+    return Path(runtime) / f"bonus-drain-{STORAGE_UNWRITABLE}-{digest}"
+
+
+def _storage_unwritable_notice(config: RuntimeConfig, queue: QueueDB, error: sqlite3.Error) -> None:
+    """Send one stuck notice while the queue db rejects writes.
+
+    The SQLite reservation cannot record anything on a full disk, so an O_EXCL marker in the
+    runtime directory (tmpfs) stands in for it. Without a marker no notice is sent, since
+    nothing would stop it repeating every tick.
+    """
+
+    try:
+        descriptor = os.open(_storage_marker(queue), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return
+    os.close(descriptor)
+    # SQLite's message names the storage condition; it carries no configuration or credentials.
+    _post_ntfy(config, (
+        f"Bonus Drain scout stuck: queue db unwritable ({str(error)[:200]}). "
+        f"Kinds: {STORAGE_UNWRITABLE}. Inspect: bonus-drain doctor --json."
+    ))
 
 
 def scout_health(
@@ -55,9 +90,20 @@ def scout_health(
         )
         if stuck and not kinds:
             kinds = ["scout_failure"]
-        notice = queue.reserve_scout_notice(
-            stuck=stuck, kinds=kinds, tasks=tasks, now_epoch=now_epoch,
-        )
+        try:
+            notice = queue.reserve_scout_notice(
+                stuck=stuck, kinds=kinds, tasks=tasks, now_epoch=now_epoch,
+            )
+        except sqlite3.OperationalError as error:
+            _storage_unwritable_notice(config, queue, error)
+            return
+        try:
+            _storage_marker(queue).unlink()
+        except FileNotFoundError:
+            pass
+        else:
+            if notice is None:
+                notice = {"stuck": False, "kinds": [STORAGE_UNWRITABLE], "tasks": []}
         if notice is None:
             return
         state = "stuck" if notice["stuck"] else "recovered"

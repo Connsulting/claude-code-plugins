@@ -23,8 +23,12 @@ Notices contain blocker kinds, task IDs, and `bonus-drain doctor --json`, withou
 error text or credentials. Deduplication lives in the queue SQLite database.
 Each notice is reserved before its HTTP request, so failed deliveries consume
 the daily reservation. Notification storage or delivery failures do not change
-the scout result or dispatch decisions. The URL accepts HTTP or HTTPS and must
-not contain credentials, query parameters, or a fragment.
+the scout result or dispatch decisions. When the queue database itself rejects the
+reservation (for example `database or disk is full`), the scout sends one
+`storage_unwritable` stuck notice carrying SQLite's error text, deduplicated by a marker
+file in `$XDG_RUNTIME_DIR` (else `/run/user/<uid>`); the first tick that can write the
+database again removes the marker and sends a recovery notice. The URL accepts HTTP or
+HTTPS and must not contain credentials, query parameters, or a fragment.
 
 Scout reserves concrete compatible task IDs in nearest-reset order before dispatch. A task
 can occupy only one batch per tick, so a portable task consumed by an earlier reset cannot

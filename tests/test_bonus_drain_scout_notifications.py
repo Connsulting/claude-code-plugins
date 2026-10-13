@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -32,6 +34,11 @@ class ScoutNotificationTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.queue = db.QueueDB(self.root / "queue.db")
+        self.runtime_dir = self.root / "run"
+        self.runtime_dir.mkdir()
+        runtime_env = mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(self.runtime_dir)})
+        runtime_env.start()
+        self.addCleanup(runtime_env.stop)
         self.bodies = []
         self.response_status = 200
         owner = self
@@ -141,6 +148,39 @@ class ScoutNotificationTests(unittest.TestCase):
         self.assertEqual(len(self.bodies), 1)
         self.assertIn("scout_failure", self.bodies[0])
         self.assertNotIn("secret", self.bodies[0])
+
+    def test_unwritable_queue_db_sends_one_stuck_notice(self):
+        # On 2026-10-13 a full root disk made every reservation fail, so no stuck notice went out.
+        full = sqlite3.OperationalError("database or disk is full")
+        with mock.patch.object(self.queue, "reserve_scout_notice", side_effect=full), \
+             mock.patch.object(notifications, "_post_ntfy") as post:
+            self.tick()
+            self.tick(NOW + 600)
+            self.tick(NOW + 1200, status=0)
+
+        post.assert_called_once()
+        message = post.call_args.args[1]
+        self.assertTrue(message.startswith(
+            "Bonus Drain scout stuck: queue db unwritable (database or disk is full)."
+        ), message)
+        self.assertIn("Kinds: storage_unwritable.", message)
+
+    def test_writable_queue_db_clears_the_storage_marker_and_recovers(self):
+        full = sqlite3.OperationalError("database or disk is full")
+        with mock.patch.object(self.queue, "reserve_scout_notice", side_effect=full):
+            self.tick()
+        self.assertEqual(len(self.bodies), 1)
+        self.assertTrue(list(self.runtime_dir.iterdir()))
+
+        self.tick(NOW + 600, status=0)
+
+        self.assertEqual(list(self.runtime_dir.iterdir()), [])
+        self.assertEqual(len(self.bodies), 2)
+        self.assertIn("recovered", self.bodies[1])
+        self.assertIn("storage_unwritable", self.bodies[1])
+        with mock.patch.object(self.queue, "reserve_scout_notice", side_effect=full):
+            self.tick(NOW + 1200)
+        self.assertEqual(len(self.bodies), 3)
 
     def test_tick_lock_orders_health_changes_until_notification_finishes(self):
         self.tick()
