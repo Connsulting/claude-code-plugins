@@ -190,6 +190,45 @@ class GrokUsageNormalizerTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 1)
         self.assertIn("has not started", completed.stderr)
 
+    def test_null_source_ts_names_the_missing_reading(self) -> None:
+        # The collector emits source_ts null when neither live billing nor the log had a reading.
+        completed = self.normalize({
+            "tier": None, "weekly_percent": None, "weekly_reset": None,
+            "weekly_period_start": None, "source_ts": None,
+        })
+        self.assertEqual(completed.returncode, 1)
+        self.assertEqual(
+            completed.stderr.strip(),
+            "bonus-drain-grok-usage: collector found no reading: direct billing failed "
+            "and no billing event in log",
+        )
+
+    def test_real_collector_with_no_reading_reaches_the_same_message(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_home:
+            home = Path(raw_home)
+            log = home / "unified.jsonl"
+            log.write_text("", encoding="utf-8")
+            wrapper = home / "collector"
+            wrapper.write_text(
+                "#!/bin/sh\n"
+                f"HOME='{home}' GROK_USAGE_LOG='{log}' GROK_USAGE_NOW_EPOCH={NOW} "
+                f"GROK_USAGE_MAX_AGE=3600 exec '{COLLECTOR}' \"$@\"\n",
+                encoding="utf-8",
+            )
+            wrapper.chmod(0o700)
+            completed = subprocess.run(
+                [
+                    "python3", str(NORMALIZER),
+                    "--provider", "grok", "--account", "grok-personal",
+                    "--collector", str(wrapper), "--limit", "grok-personal-weekly",
+                    "--max-age", "3600", "--timeout", "30", "--now", str(NOW),
+                ],
+                check=False, capture_output=True, text=True,
+                env={"HOME": str(home), "PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            )
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("collector found no reading", completed.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
