@@ -1150,13 +1150,15 @@ class QueueDB:
         )
 
     def add_task(self, values: Mapping[str, Any]) -> Task:
-        """Queue a task; refused, inserting nothing, without a valid readiness review."""
+        """Queue a task; refused, inserting nothing, without a valid readiness review or on the local Docker engine."""
 
         from . import review
         self.initialize()
         try:
             with self._transaction() as connection:
                 task = self._insert_task(connection, values)
+                if (refusal := review.local_engine_refusal(task)) is not None:
+                    raise QueueError(refusal)
                 problems = review.review_problems(task)
                 if problems:
                     raise QueueError(_review_refusal(problems))
@@ -2095,6 +2097,11 @@ class QueueDB:
                     + " changes the task contract; supply readiness_review for the edited contract"
                 )
             connection.execute("UPDATE tasks SET " + ",".join(f"{key}=?" for key in fields) + " WHERE id=?", (*fields.values(), task_id))
+            if contract_fields:
+                # Only a contract change is checked, so stored tasks are not retroactively held.
+                edited = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+                if (refusal := review.local_engine_refusal(self._task_from_row(edited))) is not None:
+                    raise QueueError(refusal)
             if "readiness_review" in changes:
                 problems = review.review_problems(self._stamp_review_digest(connection, task_id))
                 if problems:

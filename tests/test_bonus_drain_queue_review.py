@@ -1476,3 +1476,44 @@ class MergeGateTests(HermeticEnvironment, ReviewCase):
         self.assertEqual(self.queue.attempts(task_id="older"), [])
         report = {item["task_id"]: item for item in self.queue.held_authority_report()}
         self.assertEqual(report["older"]["source"], "stale_review")
+
+
+# --- local_engine_task_contracts: a contract naming the local Docker engine is refused ----
+LOCAL_ENGINE = "contract requires the local Docker engine"
+
+
+class LocalDockerEngineTests(ReviewCase):
+    def test_add_with_local_socket_in_constraints_is_refused_and_stores_nothing(self) -> None:
+        before = table_counts(self.queue.path)
+        values = reviewed(task(
+            "local-sock", self.root,
+            constraints="Run compose with DOCKER_HOST=unix:///var/run/docker.sock so the e2e stack is local",
+        ))
+
+        with self.assertRaises(db.QueueError) as raised:
+            self.queue.add_task(values)
+
+        self.assertIn(LOCAL_ENGINE, str(raised.exception))
+        self.assertIn("Bonus Drain work runs on the default engine (k8)", str(raised.exception))
+        self.assertIn("Remove: unix:///var/run/docker.sock", str(raised.exception))
+        self.assertIsNone(self.queue.task("local-sock"))
+        self.assertEqual(table_counts(self.queue.path), before)
+
+    def test_edit_introducing_a_local_selector_is_refused(self) -> None:
+        added = self.add("edit-local")
+        before = stored_review(self.queue, "edit-local")
+
+        for text in ("then run docker --context local compose up", "export docker_context=LOCAL first"):
+            with self.subTest(text=text), self.assertRaisesRegex(db.QueueError, LOCAL_ENGINE):
+                self.queue.edit_task("edit-local", rereviewed(added, {"context": text}))
+
+        self.assertEqual(self.queue.task("edit-local").context, added.context)
+        self.assertEqual(stored_review(self.queue, "edit-local"), before)
+
+    def test_contract_mentioning_docker_and_k8_without_a_local_selector_is_admitted(self) -> None:
+        text = "Build the docker image on k8 with the default engine; local tests use docker compose"
+        added = self.add("docker-k8", goal=f"complete docker-k8: {text}", constraints=text)
+
+        self.assertEqual(added.constraints, text)
+        edited = self.queue.edit_task("docker-k8", rereviewed(added, {"precondition": "docker info succeeds on k8"}))
+        self.assertEqual(edited.precondition, "docker info succeeds on k8")
