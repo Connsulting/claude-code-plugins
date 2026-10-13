@@ -367,6 +367,18 @@ class PromptTests(RecoveryCase):
         self.assertNotIn("If safe progress requires new input or authority", prompt)
         self.assertNotIn("Failed, skipped, or awaiting_human results", prompt)
         self.assertIn("Failed or skipped results require the structured reason", prompt)
+        # Runs 4638, 4641, 4678, and 4704 recorded failed after an external auto-merge.
+        self.assertIn(
+            "A done_when clause that the PR is not merged forbids this run from merging; "
+            "it is not an outcome to preserve.",
+            prompt,
+        )
+        self.assertIn(
+            "If someone else merges the PR during the run, verify every other criterion against "
+            "the merged head and record done citing the merge commit; never record failed only "
+            "because of an external merge.",
+            prompt,
+        )
 
     def test_oneoff_prompt_carries_awaiting_human_contract(self) -> None:
         self.add("oneoff")
