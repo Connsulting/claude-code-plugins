@@ -224,6 +224,10 @@ def parse_windows(provider: str, body: Mapping[str, Any]) -> dict[str, Mapping[s
             "used_percent": config.get("creditUsagePercent"), "resets_at": period.get("end"),
         }, "used_percent", "resets_at")
     elif provider == "muse":
+        if ("subs_usage" not in body and body.get("is_subs_active") is True
+                and body.get("require_payment") is False):
+            # Muse drops subs_usage after a window reset: a healthy account with no reading keeps its gate closed.
+            return windows
         limits = body.get("subs_usage")
         if not isinstance(limits, Mapping):
             raise UsageError("missing Muse usage limits")
