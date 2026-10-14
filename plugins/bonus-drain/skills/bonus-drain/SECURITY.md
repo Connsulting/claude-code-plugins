@@ -27,8 +27,7 @@ record may close only the exact matching attempt, claim ownership; a late or
 mismatched attempt cannot release a successor. A proved-not-launched failure retains an `aborted`
 attempt and releases only its matching ownership. An ambiguous thread launcher response or timeout retains
 the exact attempt and claim to prevent a duplicate launch.
-Ordinary requeue schedules recovery without deleting terminal rows or attempts, and managed goal
-tasks remain protected by their public requeue guard. `doctor` reports reconciliation requirements.
+Requeue schedules recovery without deleting terminal rows or attempts. `doctor` reports reconciliation requirements.
 Authority-required, permanent, unknown-launch, and no-progress recovery holds cannot trigger a
 silent retry. Further work requires a fresh, explicit follow-up task under reviewed policy and
 authority; the retained hold is not converted through the existing edit path.
@@ -36,7 +35,7 @@ authority; the retained hold is not converted through the existing edit path.
 Structured outcome files live beneath the configured private state directory and are accepted
 only as current-user-owned, non-symlink, mode-0600 bounded JSON objects. New `done` outcomes require
 reason code `done_when_verified`, `completion.verified: true`, a mechanism of `command`, `artifact`,
-`operator_receipt`, or `goal_acceptance`, and nonempty bounded evidence. Repository and PR fields
+or `operator_receipt`, and nonempty bounded evidence. Repository and PR fields
 cannot grant completion or external authority. Same-thread completion uses the exact stable package
 CLI command embedded in the original prompt, creates no claim or thread launch, and compare-and-swap
 refuses changed contracts, ambiguous ownership, and active or queued successors. It may append the

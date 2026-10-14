@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from . import checks, db, goals, notifications
+from . import checks, db, notifications
 from .config import HostLoadGateConfig, RuntimeConfig
 from .db import (
     IMPLEMENT_CAPABILITY,
@@ -210,7 +210,6 @@ class ScoutReport:
     blockers: tuple[dict[str, Any], ...] = ()
     launcher_preflight: tuple[dict[str, Any], ...] = ()
     reconciliation: tuple[dict[str, Any], ...] = ()
-    goal_updates: tuple[dict[str, Any], ...] = ()
     recoveries: tuple[dict[str, Any], ...] = ()
     skipped: dict[str, Any] | None = None
     preflight: dict[str, Any] | None = None
@@ -227,7 +226,6 @@ class ScoutReport:
             "blockers": list(self.blockers),
             "launcher_preflight": list(self.launcher_preflight),
             "reconciliation": list(self.reconciliation),
-            "goal_updates": list(self.goal_updates),
             "recoveries": list(self.recoveries),
             "skipped": self.skipped,
             "preflight": self.preflight,
@@ -243,8 +241,6 @@ class TickPlan:
     allocations: Mapping[tuple[str, str], tuple[Any, ...]]
     dependency_holds: tuple[dict[str, Any], ...] = ()
     host_pressure: dict[str, Any] | None = None
-    # Goal tasks sharing a collision key with ordinary work allocated earlier in the tick.
-    dispatch_last: frozenset[str] = frozenset()
 
 
 class _InitializedQueueReader(QueueDB):
@@ -634,25 +630,14 @@ def plan_tick(
     # Source issue keys are reserved only by tasks that actually win a slot, so another task
     # for the same issue that can run elsewhere is still considered. Augmenting paths
     # move matched incumbents between slots but never unmatch them, so reserved keys stay exact.
-    # Goal-owned work never waits on keys but reserves them once allocated, so later ordinary
-    # work sharing a key waits.  A goal task allocated after an earlier ordinary task with a
-    # shared key dispatches last, so the ordinary claim lands before the goal claim.
     waiting_keys = reader.collision_keys(task_order)
-    reserved_keys = reader.reserved_collision_keys(task_order)
     held_keys: set[str] = set()
-    ordinary_keys: set[str] = set()
-    dispatch_last: set[str] = set()
     for task_id in task_order:
         waits = waiting_keys.get(task_id, frozenset())
         if waits & held_keys:
             continue
         if augment(task_id, set(), set()):
-            reserved = reserved_keys.get(task_id, frozenset())
-            held_keys |= reserved
-            if waits:
-                ordinary_keys |= reserved
-            elif reserved & ordinary_keys:
-                dispatch_last.add(task_id)
+            held_keys |= waits
 
     for batch_index, batch in enumerate(plan.batches):
         allocations[(batch.provider_id, batch.account_id)] = tuple(
@@ -733,7 +718,7 @@ def plan_tick(
     return TickPlan(
         anchor, snapshots, adjusted_plan, allocations,
         tuple(dependency_holds.values()) + tuple(capability_holds.values()) + size_holds,
-        blocker, frozenset(dispatch_last),
+        blocker,
     )
 
 
@@ -831,7 +816,6 @@ def _run_locked(
         config, queue, dry_run=dry_run,
         now_epoch=now,
     )
-    goal_updates = tuple(goals.GoalStore(queue).tick(now=now, dry_run=dry_run))
     recoveries = tuple(
         decision.to_dict()
         for decision in queue.reconcile_recoveries(now_epoch=now, dry_run=dry_run)
@@ -874,66 +858,56 @@ def _run_locked(
         } for item in unavailable)
         return ScoutReport(
             now, dry_run, plan, (), (), launcher_errors, blockers, launcher_preflight,
-            reconciliation, goal_updates, recoveries, preflight=preflight,
+            reconciliation, recoveries, preflight=preflight,
         )
 
-    # Goal tasks marked dispatch_last launch after every other allocation, so an ordinary task
-    # allocated ahead of them claims its collision key first.  A batch that stopped stays stopped.
-    stopped: set[tuple[str, str]] = set()
-    for last in (False, True):
-        for batch in plan.batches:  # already nearest-reset-first
-            if (batch.provider_id, batch.account_id) in stopped:
-                continue
-            tasks = tuple(
-                task for task in tick.allocations[(batch.provider_id, batch.account_id)]
-                if (task.id in tick.dispatch_last) == last
-            )
-            if dry_run:
-                for task in tasks:
-                    previews.append({
-                        "task_id": task.id,
-                        "provider_id": batch.provider_id,
-                        "account_id": batch.account_id,
-                        "eligibility_key": batch.eligibility_key,
-                    })
-                continue
+    for batch in plan.batches:  # already nearest-reset-first
+        tasks = tick.allocations[(batch.provider_id, batch.account_id)]
+        if dry_run:
             for task in tasks:
-                try:
-                    dispatched.append(dispatch(
-                        config, queue, task_id=task.id,
-                        eligibility_key=batch.eligibility_key,
-                        requested_provider=batch.provider_id,
-                        trigger="bonus",
-                        now_epoch=now,
-                        launch_call=launch_call,
-                    ))
-                except ProviderLaunchUnavailable as exc:
-                    hold = exc.account_hold
-                    if hold is not None:
-                        # A managed account hold is not a scout failure: reporting it as an
-                        # error would cycle stuck/recovered notices for the whole backoff.
-                        account_holds.append({
-                            "task_id": task.id, "provider_id": hold.provider_id,
-                            "account_id": hold.account_id, "cause": hold.cause,
-                        })
-                    else:
-                        errors.append({"task_id": task.id, "kind": "failed", "message": str(exc)})
-                    stopped.add((batch.provider_id, batch.account_id))
-                    break
-                except AmbiguousDispatch as exc:
-                    errors.append({"task_id": task.id, "kind": "ambiguous", "message": str(exc)})
-                    # The claim remains fail-closed because the job may
-                    # exist. Continue with compatible work on the same account only; doctor requires
-                    # explicit reconciliation before an account switch.
-                except Exception as exc:  # noqa: BLE001
-                    # A task failure becomes scout report data so sibling work can continue.
+                previews.append({
+                    "task_id": task.id,
+                    "provider_id": batch.provider_id,
+                    "account_id": batch.account_id,
+                    "eligibility_key": batch.eligibility_key,
+                })
+            continue
+        for task in tasks:
+            try:
+                dispatched.append(dispatch(
+                    config, queue, task_id=task.id,
+                    eligibility_key=batch.eligibility_key,
+                    requested_provider=batch.provider_id,
+                    trigger="bonus",
+                    now_epoch=now,
+                    launch_call=launch_call,
+                ))
+            except ProviderLaunchUnavailable as exc:
+                hold = exc.account_hold
+                if hold is not None:
+                    # A managed account hold is not a scout failure: reporting it as an
+                    # error would cycle stuck/recovered notices for the whole backoff.
+                    account_holds.append({
+                        "task_id": task.id, "provider_id": hold.provider_id,
+                        "account_id": hold.account_id, "cause": hold.cause,
+                    })
+                else:
                     errors.append({"task_id": task.id, "kind": "failed", "message": str(exc)})
+                break
+            except AmbiguousDispatch as exc:
+                errors.append({"task_id": task.id, "kind": "ambiguous", "message": str(exc)})
+                # The claim remains fail-closed because the job may
+                # exist. Continue with compatible work on the same account only; doctor requires
+                # explicit reconciliation before an account switch.
+            except Exception as exc:  # noqa: BLE001
+                # A task failure becomes scout report data so sibling work can continue.
+                errors.append({"task_id": task.id, "kind": "failed", "message": str(exc)})
 
     return ScoutReport(
         now, dry_run, plan, tuple(dispatched), tuple(previews),
         lifecycle_errors + tuple(errors),
         lifecycle_blockers + tick.dependency_holds + host_blockers,
         launcher_preflight,
-        reconciliation, goal_updates, recoveries,
+        reconciliation, recoveries,
         preflight=preflight, account_holds=tuple(account_holds),
     )

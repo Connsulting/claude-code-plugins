@@ -294,7 +294,7 @@ retry. Tasks queued under the earlier review shape (`review_stale`) or with no r
 Each launch has an immutable attempt identity. The dispatched prompt provides the exact
 terminal command and private outcome-evidence path for that attempt. A `done` result must
 use reason code `done_when_verified` and demonstrate the stored done-when condition through
-`command`, `artifact`, `operator_receipt`, or `goal_acceptance` evidence. A PR or branch by
+`command`, `artifact`, or `operator_receipt` evidence. A PR or branch by
 itself is supporting evidence, not completion. Failed, skipped, ambiguous, and aborted attempts
 stay in history.
 
@@ -304,7 +304,7 @@ reason stops recovery early. Missing authority, unknown launch ownership, and un
 repository identity remain held. Divergent parent refs need an explicit child start_ref. An
 ordinary operator requeue preserves prior attempts and leaves those holds held; `requeue <task>
 --override-hold --reason <text>` explicitly reschedules an authority-required, permanent, or
-no-progress hold, and still refuses unknown launches, claimed, goal-managed, done, non-one-off,
+no-progress hold, and still refuses unknown launches, claimed, done, non-one-off,
 and changed-contract work.
 `recover-complete` can accept verified completion for an unknown-launch reconciliation
 closure only with signature `unknown_launch:missing_terminal_record` or
@@ -312,10 +312,6 @@ closure only with signature `unknown_launch:missing_terminal_record` or
 active or unsettled parent run and no live subagent descendant. It consumes only that
 closure's matching recovery hold and preserves prior attempts. Other unknown launches
 remain held, including with `requeue --override-hold`.
-Public requeue remains unavailable for goal-managed work; admitted implementation and integration
-recovery stays under the goal contract, while coordinators and frozen acceptance use fresh
-follow-up jobs.
-
 Repository handoff readiness uses the recorded remote, target_ref, branch_ref, and
 integration_state. Commit OIDs and receipts may remain as audit evidence, but readiness does not
 require Git ancestry or content proof. A child may set `start_ref` with `--start-ref`; edits use
@@ -328,12 +324,6 @@ dispatch resolve from saved metadata without Git calls, remote checks, or an imm
 The worker fetches the selected branch's current tip. A missing branch stops setup with reason
 code `verification_needed`; the worker does not fall back to the target. This branch choice grants
 no merge, push, deployment, or other external authority.
-
-The bundled [Long Horizon skill](skills/long-horizon/SKILL.md) coordinates whole goals
-through those jobs, stacked or authorized merged PRs, combined acceptance, and further
-fix rounds. Durable joins leave the coordinator idle between short queue jobs. See
-[GOALS.md](skills/bonus-drain/GOALS.md) for goal contracts, commands, bounds, and recovery.
-Existing groups are linked by explicit task IDs without rewriting their contracts.
 
 ## Scout cadence and host load gate
 

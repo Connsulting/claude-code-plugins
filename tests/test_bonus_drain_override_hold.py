@@ -6,14 +6,13 @@ import sqlite3
 import sys
 import unittest
 from pathlib import Path
-from unittest import mock
 
 sys.path.insert(
     0,
     str(Path(__file__).resolve().parents[1] / "plugins" / "bonus-drain" / "skills" / "bonus-drain"),
 )
 
-from bonus_drain import db, goals
+from bonus_drain import db
 
 from tests.readiness_fixture import isolated_cli, rereviewed
 from tests.test_bonus_dependency_recovery import (
@@ -136,25 +135,6 @@ class OverrideRefuses(OverrideHoldCase):
                 (iso(NOW),),
             )
         self.assert_refused("claimed", "launch ownership")
-
-    def test_goal_managed_task_is_refused(self) -> None:
-        self.held_by("goal-task", "authority_required")
-        with sqlite3.connect(self.queue.path) as connection:
-            connection.execute(
-                "INSERT INTO goals(id,contract_json,state,summary,created_at)"
-                " VALUES('g1','{}','queued','fixture',?)",
-                (iso(NOW),),
-            )
-            connection.execute(
-                "INSERT INTO goal_members(goal_id,task_id,role,managed)"
-                " VALUES('g1','goal-task','implementation',1)",
-            )
-        self.assert_refused("goal-task", "goal-owned")
-
-    def test_recovery_admission_rejection_is_refused(self) -> None:
-        self.held_by("admission", "authority_required")
-        with mock.patch.object(goals, "recovery_admission", return_value=(False, "goal_paused")):
-            self.assert_refused("admission", "goal_paused")
 
     def test_verified_done_is_refused(self) -> None:
         self.add("finished")

@@ -310,12 +310,6 @@ class AsyncViewerTests(unittest.TestCase):
                 'summary': 'launch unknown', 'branch': None,
                 'requeue': {'allowed': False, 'reason': 'Launch ownership is ambiguous'},
             },
-            {
-                'ts': '2026-09-14T09:00:00Z', 'task': 'goal-member', 'title': 'Goal member',
-                'kind': 'oneoff', 'status': 'skipped', 'engine': 'claude', 'cycle': 1,
-                'summary': 'fresh verifier required', 'branch': None,
-                'requeue': {'allowed': False, 'reason': 'Fresh goal follow-up required'},
-            },
         ]
         with (
             mock.patch.object(self.viewer, 'read_plan', return_value=dict(viewer_tests.EMPTY_PLAN, cycle_anchor=1)),
@@ -331,7 +325,6 @@ class AsyncViewerTests(unittest.TestCase):
         for task_id, reason in (
             ('authority', 'Authority is required'),
             ('ambiguous', 'Launch ownership is ambiguous'),
-            ('goal-member', 'Fresh goal follow-up required'),
         ):
             button = body[body.index(f'data-task-id="{task_id}"'):].split('</button>', 1)[0]
             self.assertIn('disabled', button)

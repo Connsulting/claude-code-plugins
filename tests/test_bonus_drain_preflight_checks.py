@@ -24,7 +24,7 @@ sys.path.insert(
     str(Path(__file__).resolve().parents[1] / "plugins" / "bonus-drain" / "skills" / "bonus-drain"),
 )
 
-from bonus_drain import checks, db, goals
+from bonus_drain import checks, db
 
 from tests.readiness_fixture import rereviewed, reviewed
 from tests.test_bonus_dependency_recovery import (
@@ -259,22 +259,6 @@ def legacy_contract_hash(item: db.Task) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
-
-
-def add_goal(queue: db.QueueDB, goal_id: str, members: Iterable[str], *, max_inflight: int = 2) -> None:
-    contract = {"deadline": NOW + 10_000_000, "max_inflight": max_inflight}
-    with sqlite3.connect(queue.path) as connection:
-        connection.execute(
-            "INSERT INTO goals(id,contract_json,revision,state,turn,wait_json,summary,created_at) "
-            "VALUES(?,?,0,'queued',0,'[]','fixture goal',?)",
-            (goal_id, json.dumps(contract), iso(NOW - 600)),
-        )
-        for member in members:
-            connection.execute(
-                "INSERT INTO goal_members(goal_id,task_id,role,managed) "
-                "VALUES(?,?,'implementation',1)",
-                (goal_id, member),
-            )
 
 
 class PreflightCase(RecoveryCase):
@@ -643,25 +627,6 @@ class CheckGatingTests(PreflightCase):
         self.assertEqual(work["based"].context, {"cwd": str(self.root)})
         self.assertEqual(work["url"].context, {})
 
-    def test_goal_owned_task_gets_no_builtins(self) -> None:
-        self.add(
-            "member", work_group="Goal work",
-            source_ref="https://github.com/curie-eng/curie/issues/2855",
-            start_ref="main", checks=[RELEASE_V0_11_1],
-        )
-        add_goal(self.queue, "goal-1", ["member"])
-
-        status = self.ready("member")
-        self.assertEqual(
-            [(item["origin"], item["type"]) for item in status["checks"]],
-            [("declared", "publication_exists")],
-        )
-        fake = self.runner({gh_release("v0.11.1"): ok(RELEASE_0_11_1)})
-        self.refresh(fake)
-        self.assertEqual(fake.tool_calls("gh"), [gh_release("v0.11.1")])
-        self.assertEqual(fake.tool_calls("ls-remote"), [])
-        self.assertTrue(self.ready("member")["ready"])
-
     def test_readiness_lists_check_origins(self) -> None:
         self.add(
             "both", checks=[RELEASE_V0_11_1],
@@ -876,7 +841,6 @@ class CheckGatingTests(PreflightCase):
                 self.assertEqual(item.checks, ())
                 self.assertEqual(item.merged_depends_on, ())
                 self.assertEqual(db._contract_hash(item), legacy_contract_hash(item))
-                self.assertEqual(goals._contract_hash(item), legacy_contract_hash(item))
         checked = self.add("checked", checks=[ISSUE_OPEN_3815])
         self.assertNotEqual(db._contract_hash(checked), legacy_contract_hash(checked))
 
@@ -1544,12 +1508,11 @@ class CollisionTests(PreflightCase):
         status = self.ready("second")
         self.assertEqual((status["state"], status["hold_reason"]), ("ready", None))
         self.assertIn("second", self.eligible_ids())
-        for keys in (self.queue.collision_keys, self.queue.reserved_collision_keys):
-            self.assertEqual(keys(["first", "second"]), {
-                "first": frozenset(), "second": frozenset(),
-            })
+        self.assertEqual(self.queue.collision_keys(["first", "second"]), {
+            "first": frozenset(), "second": frozenset(),
+        })
         with self.queue._connect() as connection:
-            self.assertIsNone(db.QueueDB._collision_holder(connection, self.queue.task("second"), False))
+            self.assertIsNone(db.QueueDB._collision_holder(connection, self.queue.task("second")))
         self.assertIsNotNone(self.try_claim("second"))
 
     def test_same_issue_key_serializes_across_forms(self) -> None:
@@ -1573,23 +1536,6 @@ class CollisionTests(PreflightCase):
         self.assertIsNotNone(self.try_claim("beta-work"))
         self.assertIsNotNone(self.try_claim("loose"))
         self.assertEqual(self.queue.collision_keys(["loose"]), {"loose": frozenset()})
-
-    def test_goal_members_exempt_from_collision(self) -> None:
-        self.add("member-a", work_group="Goal work", source_ref="owner/repo#12")
-        self.add("member-b", work_group="Goal work", source_ref="owner/repo#12")
-        self.add("outsider", work_group="Goal work", source_ref="owner/repo#12")
-        add_goal(self.queue, "goal-1", ["member-a", "member-b"], max_inflight=2)
-        self.refresh(self.runner({gh_issue(12, "owner/repo"): ok(ISSUE_3815_OPEN)}))
-
-        self.assertEqual(self.queue.collision_keys(["member-a"]), {"member-a": frozenset()})
-        self.assertIsNotNone(self.try_claim("member-a"))
-        self.assertTrue(self.ready("member-b")["ready"])
-        self.assertIsNotNone(self.try_claim("member-b"))
-        # A non-goal task still waits behind goal work holding the same key.
-        outsider = self.ready("outsider")
-        self.assertEqual(outsider["hold_reason"], "collision")
-        self.assertIsNone(self.try_claim("outsider"))
-
 
 class AccountBackoffStoreTests(PreflightCase):
     def hold(self, cause: str = "account_unavailable") -> db.AccountHold:

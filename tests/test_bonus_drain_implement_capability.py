@@ -574,33 +574,6 @@ class DispatchBoundaryTests(AutoClassificationTests):
         self.assertEqual(self.queue.claim_for("impl").provider_id, "grok")
 
 
-class LongHorizonCoordinatorTests(CapabilityRoutingCase):
-    def test_coordinator_turn_needs_the_implement_capability(self) -> None:
-        from bonus_drain import goals
-
-        store = goals.GoalStore(self.queue)
-        store.create({
-            "id": "release", "title": "Release", "cwd": str(self.root), "outcome": "The release works",
-            "authority": "Local disposable work only.",
-            "acceptance": [{"id": "journey", "proof": "Run the journey"}],
-            "merge_policy": "stack", "max_turns": 4, "deadline": NOW + 3600, "max_inflight": 1,
-            "coordinator": {"model": "gpt-6-astra"}, "task_ids": [],
-        }, now=NOW)
-        store.tick(now=NOW)
-        coordinator = store.show("release")["coordinator_task"]
-        task = self.queue.task(coordinator)
-        assert task is not None
-        self.assertTrue(db.task_invokes_implement(task))
-
-        def eligible(*capabilities: str) -> list[str]:
-            return [item.id for item in self.queue.eligible_tasks(
-                0, max_size="huge", provider_id="claude", capabilities=capabilities, now_epoch=NOW,
-            )]
-
-        self.assertNotIn(coordinator, eligible())
-        self.assertIn(coordinator, eligible("implement"))
-
-
 class CLIRefusalTests(CapabilityRoutingCase):
     def setUp(self) -> None:
         super().setUp()

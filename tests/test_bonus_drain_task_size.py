@@ -259,11 +259,12 @@ class TaskSizeContractTests(unittest.TestCase):
                 columns_after_first_init,
             )
             # Initialization records v1, may record v2 (status CHECK relaxation), and records
-            # v3 (preflight schema) and v4 (readiness review); a second initialize adds nothing.
+            # v3 (preflight), v4 (readiness), v5 (proxy), and v6 (table removal).
+            # A second initialize adds nothing.
             versions = {
                 row[0] for row in connection.execute("SELECT version FROM schema_migrations")
             }
-            self.assertTrue({1, 3, 4} <= versions <= {1, 2, 3, 4, 5}, versions)
+            self.assertTrue({1, 3, 4, 5, 6} <= versions <= {1, 2, 3, 4, 5, 6}, versions)
             self.assertEqual(
                 connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0],
                 len(versions),

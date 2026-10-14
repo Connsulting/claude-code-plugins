@@ -144,6 +144,16 @@ class ReviewCase(PreflightCase):
 
 # --- 1, 2: the add refusal and the stored review ----------------------------------------
 class AddRequiresReviewTests(ReviewCase):
+    def test_retired_task_kind_is_refused_without_inserting_a_row(self) -> None:
+        before = table_counts(self.queue.path)
+        self.assertRefused(
+            "retired-kind",
+            reviewed(task("retired-kind", self.root, kind="co" + "ordinator")),
+            "kind must be oneoff or recurring",
+        )
+        self.assertEqual(table_counts(self.queue.path), before)
+        self.assertIsNotNone(self.add("retired-kind"))
+
     def test_add_without_review_is_refused_and_inserts_nothing(self) -> None:
         before = table_counts(self.queue.path)
         self.assertRefused("bare", task("bare", self.root))
@@ -204,6 +214,18 @@ class CliAddReviewTests(HermeticEnvironment, ReviewCase):
         self.assertEqual(payloads[-1]["code"], "invalid_input")
         self.assertIn(REVIEW_REQUIRED, payloads[-1]["error"])
         self.assertIsNone(self.queue.task("no-review"))
+
+    def test_retired_command_is_rejected_without_queue_changes(self) -> None:
+        self.add("ordinary", goal="Keep the ordinary task goal")
+        before = rows(self.queue, "SELECT * FROM tasks ORDER BY id")
+
+        code, payloads, out, err = self.run_cli(
+            "goal", "list", "--database", str(self.queue.path), "--json",
+        )
+
+        self.assertEqual(code, 2, (payloads, out, err))
+        self.assertIn("invalid choice", payloads[-1]["error"])
+        self.assertEqual(rows(self.queue, "SELECT * FROM tasks ORDER BY id"), before)
 
     def test_cli_add_3833_with_grant_and_review_file(self) -> None:
         review_path = self.root / "review.json"
@@ -558,17 +580,6 @@ class StaleContractHoldTests(HermeticEnvironment, ReviewCase):
             item["task_id"] == "legacy-failed" and item["source"] == "missing_review"
             for item in self.queue.held_authority_report()
         ))
-
-    def test_goal_owned_work_needs_no_review(self) -> None:
-        self.add("member")
-        set_review_json(self.queue, "member", None)
-        with sqlite3.connect(self.queue.path) as connection:
-            connection.execute("PRAGMA foreign_keys=OFF")
-            connection.execute(
-                "INSERT INTO goal_turns(goal_id,turn,task_id,contract_hash,reason,created_at) VALUES(?,?,?,?,?,?)",
-                ("goal-x", 1, "member", "0" * 64, "fixture", "2026-10-05T00:00:00Z"),
-            )
-        self.assertNotEqual(self.ready("member")["hold_reason"], "review_missing")
 
     def test_held_report_lists_stale_reviews(self) -> None:
         report = {item["task_id"]: item for item in self.queue.held_authority_report()}
@@ -1308,6 +1319,83 @@ def schema_of(path: Path) -> tuple[set[int], set[str]]:
 
 
 class MigrationTests(ReviewCase):
+    def test_initialize_drops_retired_tables_and_preserves_ordinary_queue(self) -> None:
+        self.add("ready", goal="Keep the ordinary task goal", model="gpt-6.1-sol")
+        self.add("failed")
+        self.add("dependent", depends_on=["failed"])
+        self.fail_task("failed")
+        self.queue.reconcile_recoveries(now_epoch=NOW, dry_run=False)
+        self.add("running")
+        self.claim("running")
+        self.add("weekly", kind="recurring", cadence="weekly")
+        retained_tables = ("tasks", "runs", "task_attempts", "dispatch_claims", "task_recovery")
+        before = {
+            table: rows(self.queue, f"SELECT * FROM {table} ORDER BY rowid")
+            for table in retained_tables
+        }
+        self.assertTrue(all(before.values()))
+        versions_before, _ = schema_of(self.queue.path)
+        self.assertIn(6, versions_before)
+
+        owner_column = "co" + "ordinator_task"
+        child_columns = {
+            "members": """goal_id TEXT NOT NULL REFERENCES goals(id),
+                task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id),
+                role TEXT NOT NULL, managed INTEGER NOT NULL,
+                candidate_json TEXT, contract_hash TEXT,
+                PRIMARY KEY(goal_id, task_id)""",
+            "turns": """goal_id TEXT NOT NULL REFERENCES goals(id), turn INTEGER NOT NULL,
+                task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id),
+                contract_hash TEXT NOT NULL, reason TEXT NOT NULL, decision_json TEXT,
+                created_at TEXT NOT NULL, PRIMARY KEY(goal_id, turn)""",
+            "operations": """goal_id TEXT NOT NULL REFERENCES goals(id), key TEXT NOT NULL,
+                turn_task TEXT NOT NULL REFERENCES tasks(id), intent_json TEXT NOT NULL,
+                receipt_json TEXT, created_at TEXT NOT NULL, PRIMARY KEY(goal_id, key)""",
+            "steering": """goal_id TEXT NOT NULL REFERENCES goals(id), revision INTEGER NOT NULL,
+                message TEXT NOT NULL, created_at TEXT NOT NULL,
+                PRIMARY KEY(goal_id, revision)""",
+        }
+        retired_tables = {"goals", *(f"goal_{suffix}" for suffix in child_columns)}
+        for already_applied, populated in ((False, False), (True, False), (True, True)):
+            with self.subTest(already_applied=already_applied, populated=populated):
+                with sqlite3.connect(self.queue.path) as connection:
+                    connection.execute("PRAGMA foreign_keys=ON")
+                    if not already_applied:
+                        connection.execute("DELETE FROM schema_migrations WHERE version=6")
+                    connection.execute(f"""CREATE TABLE IF NOT EXISTS goals (
+                        id TEXT PRIMARY KEY, contract_json TEXT NOT NULL,
+                        revision INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL,
+                        turn INTEGER NOT NULL DEFAULT 0, {owner_column} TEXT REFERENCES tasks(id),
+                        wait_json TEXT NOT NULL DEFAULT '[]', candidate_json TEXT,
+                        summary TEXT NOT NULL, created_at TEXT NOT NULL)""")
+                    for suffix, columns in child_columns.items():
+                        connection.execute(f"CREATE TABLE IF NOT EXISTS goal_{suffix} ({columns})")
+                    for table in retired_tables:
+                        self.assertEqual(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
+                    if populated:
+                        connection.execute("INSERT INTO goals(id,contract_json,state,summary,created_at) "
+                                           "VALUES('retired','{}','waiting','retired',?)", ("2033-05-18T03:33:20Z",))
+                        member_table = "goal_" + "members"
+                        connection.execute(f"INSERT INTO {member_table}(goal_id,task_id,role,managed) "
+                                           "VALUES('retired','ready','existing',1)")
+                self.assertEqual(schema_of(self.queue.path)[0],
+                                 versions_before if already_applied else versions_before - {6})
+
+                reopened = db.QueueDB(self.queue.path)
+                for _ in range(2):
+                    reopened.initialize()
+                    self.assertEqual(schema_of(self.queue.path)[0], versions_before)
+                    existing = {row["name"] for row in rows(
+                        reopened, "SELECT name FROM sqlite_master WHERE type='table'",
+                    )}
+                    self.assertFalse(retired_tables & existing, existing)
+                    for table, expected in before.items():
+                        self.assertEqual(rows(reopened, f"SELECT * FROM {table} ORDER BY rowid"), expected)
+                    self.assertEqual(reopened.task("ready").goal, "Keep the ordinary task goal")
+                    self.assertTrue(reopened.readiness("ready", now_epoch=NOW)["ready"])
+                    self.assertEqual(reopened.readiness("dependent", now_epoch=NOW)["state"], "waiting")
+                    self.assertIsNotNone(reopened.claim_for("running"))
+
     def test_initialize_adds_columns_and_version_4(self) -> None:
         self.add("legacy")
         drop_v4(self.queue.path)

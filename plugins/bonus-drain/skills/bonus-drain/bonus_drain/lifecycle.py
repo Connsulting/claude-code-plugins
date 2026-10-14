@@ -1,7 +1,7 @@
 """Safe, versioned installation and operational checks for Bonus Drain.
 
 The lifecycle layer deliberately does not start services. Its only queue mutation is
-applying additive schema migrations to an existing queue database before a new publication
+applying schema migrations to an existing queue database before a new publication
 becomes current.  It
 installs only files it can later prove it owns, leaves XDG state/config/cache alone,
 and refuses uninstall when an operator has added or changed an owned installation
@@ -42,7 +42,7 @@ UNIT_NAMES = (
 _OWNED_NAME = ".bonus-drain-owned.json"
 _INSTALL_NAME = ".bonus-drain-install.json"
 _WRAPPER_MARKER = "# managed-by: bonus-drain lifecycle v1"
-_DEFAULT_VERSION = "0.3.15"
+_DEFAULT_VERSION = "0.3.16"
 _BYTECODE_CACHE_NAME = re.compile(
     r"^(?P<module>[A-Za-z_][A-Za-z0-9_]*)\."
     r"(?P<tag>[A-Za-z][A-Za-z0-9_]*-\d+)(?:\.opt-\d+)?\.pyc$"
@@ -289,7 +289,7 @@ _PATH_OVERRIDES = (
 
 
 def _migrate_queue(home_path: Path, *, selected: bool) -> None:
-    """Apply additive schema migrations to an existing queue database, if any.
+    """Apply schema migrations to an existing queue database, if any.
 
     The default install (no selected home) is the caller's live install and honors the
     caller's path overrides; a selected home resolves its queue within that home.

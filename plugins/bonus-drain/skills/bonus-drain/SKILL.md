@@ -47,7 +47,7 @@ source private helper functions or invent a second DB path.
    failed attempt, or skipped attempt is not completion evidence. A `merged` dependency edge
    additionally requires the parent's recorded branch to be merged into the child's base.
 10. Recovery keeps the original task ID and prior attempts. It cannot weaken authority,
-    dependency, calendar, GoalStore, or frozen-candidate gates.
+    dependency or calendar gates.
 
 ## Before any mode
 
@@ -153,7 +153,7 @@ render, or a printed plan is not a probe. `waiver` names an open issue as `owner
 task must carry the matching `issue_open` check, so a waived gate is held at launch once its
 issue closes (the repository name matches in any case). Use `[]` only when the repository has no
 such gate. A stored ticket review without `merge_gates` is held with hold reason `review_stale`
-and listed by `held-report` until it is re-reviewed; goal-owned work stays exempt as before.
+and listed by `held-report` until it is re-reviewed.
 
 Findings record the blockers the review found and how each was resolved before queueing.
 `category` is `authority`, `contradiction`, `feasibility`, or `external_dependency`; an
@@ -198,8 +198,7 @@ task if it is not implementable.
 An active task with no readiness review at all is held the same way while it could still launch
 (a recurring task, a one-off with no attempt, or one with a scheduled recovery): hold reason
 `review_missing`, reason "Held: no readiness review", and `held-report` source `missing_review`.
-Verified done, failed, and skipped one-offs keep their terminal reading. Goal-owned work is
-exempt; goal acceptance governs it.
+Verified done, failed, and skipped one-offs keep their terminal reading.
 
 ### Task contract
 
@@ -304,11 +303,6 @@ authorized upcoming-only estimate.
 
 ## Mode: edit and inspect
 
-For a whole outcome spanning jobs, PR joins, and repeated acceptance/fix rounds, use
-the plugin's [Long Horizon skill](../long-horizon/SKILL.md) and [GOALS.md](GOALS.md).
-It uses this same queue and dispatcher. A goal is durable waiting state; its short
-coordinator jobs finish between joins, so an idle coordinator holds no dispatch claim.
-
 Read `ASYNC_WORK.md` for dependencies, editing, run provenance, and the review UI. A dependency
 is satisfied only by a verified successful (`done`) one-off prerequisite; failed, skipped,
 running, and missing prerequisites keep the child waiting. A blocked active child may make its
@@ -316,7 +310,7 @@ failed/skipped parent eligible for the bounded recovery policy described below. 
 cycles, missing IDs, and recurring prerequisites are rejected. Both automatic and explicit
 launches enforce dependencies. Each edge is `done` or `merged` (`--depends-on parent-id:merged,other-id:done`); an unsuffixed edge defaults to `merged` when the parent runs in a repository configured to open pull requests, and to `done` otherwise. A `merged` edge is satisfied only when the parent is verified done and its recorded branch is merged into the child's base, so a pull request that is open or green does not count as dependency completion. Readiness names the root blocker of a waiting chain, and `bonus-drain held-report --json` lists held authority-required and verification-needed work, and work held for a stale readiness review, with its blocked dependents and a `queue_time_knowable` measurement, read-only (see Terminal contract). Nothing re-examines a hold, so `held-report --observe` also checks each listed task's issue checks and recorded handoff branch live, storing nothing, and adds a `cleared` list naming a closed issue or a merged handoff pull request; it releases nothing, so recover-complete, requeue, or deactivate stays Brian's call. Deactivating a hold retires it from `held-report` once nothing waits on it; while unfinished dependents still wait, it stays listed once with their count.
 
-Provider and subscription failures hold the provider pool, not the task. A proved Codex launcher startup failure deletes the never-launched attempt, spends nothing on the task, and backs off that provider pool for 30 minutes, doubling to a 4 hour cap. A proven launch clears all historical subscription backoffs for that provider. Tasks that share the same `source_ref` issue run one at a time; goal-managed tasks use the goal's own concurrency bound. Work groups are display labels and do not limit concurrency. Installing a release migrates an existing queue database before the new release becomes current.
+Provider and subscription failures hold the provider pool, not the task. A proved Codex launcher startup failure deletes the never-launched attempt, spends nothing on the task, and backs off that provider pool for 30 minutes, doubling to a 4 hour cap. A proven launch clears all historical subscription backoffs for that provider. Tasks that share the same `source_ref` issue run one at a time. Work groups are display labels and do not limit concurrency. Installing a release migrates an existing queue database before the new release becomes current.
 
 Use `bonus-drain readiness TASK_ID --json` to explain readiness and
 `bonus-drain edit TASK_ID --changes '{"depends_on":["PARENT_ID"],"readiness_review":{...}}' --json`
@@ -399,7 +393,7 @@ error. Prior attempts stay immutable.
   preserve. A PR someone else merges mid-run is verified on the merged head and recorded `done`
   citing the merge commit, never `failed` for the external merge alone.
   Its outcome uses reason code `done_when_verified`, `completion.verified: true`,
-  one of `command`, `artifact`, `operator_receipt`, or `goal_acceptance`, and nonempty evidence.
+  one of `command`, `artifact`, or `operator_receipt`, and nonempty evidence.
 1. `skipped`: the work is already complete, or a genuine precondition is false. That means
   missing authority, a prerequisite the worker cannot create, an unavailable provider or
   required service, a frozen contract, or a validation gate that setup cannot remove.
@@ -433,7 +427,7 @@ Optional audit fields may include `target_base_oid`, `head_oid`, and `merge_rece
 `failed` or `skipped`, omit `completion` and use a reason code of
 `retryable`, `verification_needed`, `authority_required`, `permanent`, or `unknown_launch`, with
 nonempty detail and a stable non-secret signature. Accepted completion mechanisms are `command`,
-`artifact`, `operator_receipt`, and `goal_acceptance`. A `failed` outcome with reason `authority_required` may add `resume_when`, a list of check objects using the check types above. A `publication_exists` entry for the task's own repository (from `source_ref`, else the outcome's `repository.remote`) is refused unless the task declared that same release check at queue time: the record is rewritten to `verification_needed` with signature `verification_needed:own_publication_resume_refused` and no `resume_when`, because work on an unreleased line feeds that release and the hold would never clear.
+`artifact` and `operator_receipt`. A `failed` outcome with reason `authority_required` may add `resume_when`, a list of check objects using the check types above. A `publication_exists` entry for the task's own repository (from `source_ref`, else the outcome's `repository.remote`) is refused unless the task declared that same release check at queue time: the record is rewritten to `verification_needed` with signature `verification_needed:own_publication_resume_refused` and no `resume_when`, because work on an unreleased line feeds that release and the hold would never clear.
 
 `authority_required` and `verification_needed` reasons also carry boolean `reason.queue_time_knowable`:
 `true` when the blocker already existed and could have been found before launch from the task
@@ -468,10 +462,7 @@ failure is verification-first. Missing authority, unknown launch ownership, and 
 repository identity remain held. Divergent parent refs require an explicit child start_ref.
 
 Ordinary public `requeue` schedules an operator recovery without deleting history and never
-reinterprets a retained hold. `requeue <task> --override-hold --reason <text>` is the one explicit escape: it converts a held authority-required, permanent, or no-progress operator recovery to scheduled now, and records "operator hold override" plus the reason in the recovery detail. A T3 reconciliation closure can also be overridden after read-only T3 state proves its source and descendants are inactive; ambiguous launches remain refused. It still refuses tasks with dispatch claims, goal-managed tasks or any recovery admission rejection, verified done work, non-one-off tasks, changed contracts, and recoveries that are not held (exit 1). Automatic scout recovery never overrides a hold. Public requeue
-for goal-managed tasks remains rejected. GoalStore may internally admit implementation or
-integration recovery under its existing gates; a failed coordinator or frozen acceptance job
-uses its documented fresh follow-up path.
+reinterprets a retained hold. `requeue <task> --override-hold --reason <text>` is the one explicit escape: it converts a held authority-required, permanent, or no-progress operator recovery to scheduled now, and records "operator hold override" plus the reason in the recovery detail. A T3 reconciliation closure can also be overridden after read-only T3 state proves its source and descendants are inactive; ambiguous launches remain refused. It still refuses tasks with dispatch claims, verified done work, non-one-off tasks, changed contracts, and recoveries that are not held (exit 1). Automatic scout recovery never overrides a hold.
 
 If the user later says “try harder” in the same thread after this attempt recorded failed or
 skipped, continue under the original task ID and contract. Before more work, run the exact

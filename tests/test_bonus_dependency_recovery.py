@@ -23,7 +23,7 @@ SKILL_ROOT = REPO_ROOT / "plugins" / "bonus-drain" / "skills" / "bonus-drain"
 CLI = SKILL_ROOT / "bin" / "bonus-drain"
 sys.path.insert(0, str(SKILL_ROOT))
 
-from bonus_drain import cli, db, dispatcher, goals, scout, t3_state, usage
+from bonus_drain import cli, db, dispatcher, scout, t3_state, usage
 from bonus_drain import config as config_module
 
 from tests.test_bonus_drain_reconcile import T3StateFixture
@@ -1124,6 +1124,58 @@ class RecoverCompleteContracts(RecoveryCase):
         with self.assertRaisesRegex(db.QueueError, "operator|automatic"):
             self.queue.edit_task("automatic", {"goal": "must not change"})
 
+    def test_cli_recover_complete_rejects_worker_time_and_uses_server_clock(self) -> None:
+        source = self.prepare("implementation")
+        server_now = NOW + 1
+        worker_now = NOW + 7_200
+        cfg = runtime(self.queue.path)
+        outcome_path = dispatcher.materialize_outcome_file(cfg, source.id)
+        outcome_path.write_text(
+            json.dumps(verified(evidence="fixture://server-clock")), encoding="utf-8",
+        )
+        arguments = [
+            "recover-complete", "--database", str(self.queue.path),
+            "--task", "implementation", "--from-attempt", source.id,
+            "--outcome-file", str(outcome_path), "--summary", "server-timed proof", "--json",
+        ]
+
+        with captured_json() as rejected:
+            rejected_code = isolated_cli([*arguments, "--now", str(worker_now)])
+        self.assertEqual(rejected_code, 2)
+        self.assertIn("--now", rejected[0]["error"])
+        self.assertTrue(outcome_path.exists())
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"BONUS_DRAIN_NOW": str(worker_now), "BONUS_DRAIN_CONFIG": ""},
+            ),
+            mock.patch.object(cli, "_now", side_effect=AssertionError("worker clock used")),
+            mock.patch.object(db.time, "time", return_value=server_now),
+            captured_json() as payloads,
+        ):
+            code = isolated_cli(arguments)
+
+        self.assertEqual(code, 0, payloads)
+        self.assertFalse(outcome_path.exists())
+        completion_id = payloads[0]["run"]["attempt_id"]
+        attempt = rows(
+            self.queue,
+            "SELECT created_at,terminal_at FROM task_attempts WHERE id=?",
+            (completion_id,),
+        )[0]
+        receipt = rows(
+            self.queue,
+            "SELECT ts,received_at FROM runs WHERE attempt_id=?",
+            (completion_id,),
+        )[0]
+        self.assertEqual(attempt, {
+            "created_at": iso(server_now), "terminal_at": iso(server_now),
+        })
+        self.assertEqual(receipt, {
+            "ts": iso(server_now), "received_at": iso(server_now),
+        })
+
 
 class DependencyPreflightTransactionContracts(RecoveryCase):
     def prepare_parent(self, parent_id: str) -> dict[str, object]:
@@ -1256,7 +1308,7 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
         }
         self.assertEqual(required_fields - tokens, set(), prompt)
         valid_mechanisms = {
-            "command", "artifact", "operator_receipt", "goal_acceptance",
+            "command", "artifact", "operator_receipt",
         }
         self.assertEqual(valid_mechanisms - tokens, set(), prompt)
 
@@ -1468,217 +1520,6 @@ class DispatcherOwnershipAndOutcomeContracts(RecoveryCase):
             ]), 0)
         self.assertFalse(outcome_path.exists())
         self.assertTrue(payloads[0]["run"]["outcome"]["completion"]["verified"])
-
-
-class GoalRecoveryContracts(RecoveryCase):
-    def goal_contract(self, goal_id: str = "release") -> dict[str, object]:
-        return {
-            "id": goal_id,
-            "title": goal_id,
-            "cwd": str(self.root),
-            "outcome": "combined proof",
-            "authority": "local fixture only",
-            "acceptance": [{"id": "journey", "proof": "fixture evidence"}],
-            "merge_policy": "stack",
-            "max_turns": 5,
-            "deadline": NOW + 3_600,
-            "max_inflight": 1,
-            "coordinator": {"model": "gpt-6-astra"},
-            "task_ids": [],
-        }
-
-    def finish_claimed(self, task_id: str, status: str = "done") -> object:
-        claim = self.queue.claim_for(task_id)
-        if claim is None:
-            attempt = self.claim(task_id, key=f"manual/{task_id}")
-            key = f"manual/{task_id}"
-        else:
-            attempt = type("AttemptRef", (), {"id": claim.attempt_id})()
-            key = claim.eligibility_key
-        return self.terminal(
-            task_id, attempt, status,
-            verified() if status == "done" else reason(signature=f"retryable:{task_id}"),
-            key=key,
-        )
-
-    def create_members(self):
-        store = goals.GoalStore(self.queue)
-        store.create(self.goal_contract(), now=NOW)
-        store.tick(now=NOW)
-        goal = store.show("release")
-        turn = goal["coordinator_task"]
-        attempt = self.claim(turn, key=f"manual/{turn}")
-        self.queue.record(
-            turn, f"manual/{turn}", attempt_id=attempt.id, status="dispatched",
-            provider_id="claude", router_job_id="coordinator-job",
-        )
-        candidate = {"commits": {"fixture": "a" * 40}, "runtime": {}}
-        store.advance(
-            "release", turn,
-            {
-                "expected_revision": goal["revision"],
-                "action": "wait",
-                "summary": "wait for members",
-                "tasks": [
-                    {
-                        "role": "implementation",
-                        "task": task("implementation", self.root, use_implement=True),
-                    },
-                    {
-                        "role": "integration",
-                        "task": task("integration", self.root, use_implement=True),
-                    },
-                    {
-                        "role": "acceptance",
-                        "candidate": candidate,
-                        "task": task("acceptance", self.root, use_implement=False),
-                    },
-                ],
-                "wait_for": ["implementation", "integration", "acceptance"],
-                "candidate": candidate,
-            },
-            now=NOW,
-        )
-        self.finish_claimed(turn)
-        return store, candidate
-
-    def test_cli_recover_complete_rejects_worker_time_and_uses_server_clock(self) -> None:
-        self.create_members()
-        source = self.fail_task("implementation", now=NOW)
-        server_now = NOW + 1
-        worker_now = NOW + 7_200
-        cfg = runtime(self.queue.path)
-        outcome_path = dispatcher.materialize_outcome_file(cfg, source.id)
-        outcome_path.write_text(
-            json.dumps(verified(evidence="fixture://server-clock")), encoding="utf-8",
-        )
-        arguments = [
-            "recover-complete", "--database", str(self.queue.path),
-            "--task", "implementation", "--from-attempt", source.id,
-            "--outcome-file", str(outcome_path), "--summary", "server-timed proof", "--json",
-        ]
-
-        with captured_json() as rejected:
-            rejected_code = isolated_cli([*arguments, "--now", str(worker_now)])
-        self.assertEqual(rejected_code, 2)
-        self.assertIn("--now", rejected[0]["error"])
-        self.assertTrue(outcome_path.exists())
-
-        with (
-            mock.patch.dict(
-                os.environ,
-                {"BONUS_DRAIN_NOW": str(worker_now), "BONUS_DRAIN_CONFIG": ""},
-            ),
-            mock.patch.object(cli, "_now", side_effect=AssertionError("worker clock used")),
-            mock.patch.object(db.time, "time", return_value=server_now),
-            captured_json() as payloads,
-        ):
-            code = isolated_cli(arguments)
-
-        self.assertEqual(code, 0, payloads)
-        self.assertFalse(outcome_path.exists())
-        completion_id = payloads[0]["run"]["attempt_id"]
-        attempt = rows(
-            self.queue,
-            "SELECT created_at,terminal_at FROM task_attempts WHERE id=?",
-            (completion_id,),
-        )[0]
-        receipt = rows(
-            self.queue,
-            "SELECT ts,received_at FROM runs WHERE attempt_id=?",
-            (completion_id,),
-        )[0]
-        self.assertEqual(attempt, {
-            "created_at": iso(server_now), "terminal_at": iso(server_now),
-        })
-        self.assertEqual(receipt, {
-            "ts": iso(server_now), "received_at": iso(server_now),
-        })
-
-    def test_only_admitted_implementation_and_integration_get_same_id_recovery(self) -> None:
-        store, candidate = self.create_members()
-        self.finish_claimed("implementation", "failed")
-        self.finish_claimed("acceptance", "failed")
-        before_goal = store.show("release")
-        decisions = self.queue.reconcile_recoveries(now_epoch=NOW, dry_run=False)
-        by_task = {as_dict(item)["task_id"]: as_dict(item) for item in decisions}
-        self.assertEqual(by_task["implementation"]["mode"], "retry")
-        self.assertEqual(by_task["acceptance"]["reason_code"], "fresh_goal_followup_required")
-        self.assertEqual(rows(
-            self.queue, "SELECT * FROM task_recovery WHERE task_id='acceptance'",
-        ), [])
-        with self.assertRaisesRegex(
-            db.QueueError,
-            "goal-owned run history must be retained; create a fresh follow-up job",
-        ):
-            self.queue.requeue("implementation")
-        shown = store.show("release")
-        self.assertEqual(shown["candidate"], candidate)
-        self.assertEqual(shown["revision"], before_goal["revision"])
-        self.assertEqual(shown["decisions"][0]["decision"].get("observations", []), [])
-        self.assertEqual(shown["operations"], [])
-
-    def test_paused_deadline_contract_concurrency_and_coordinator_guards_hold_recovery(self) -> None:
-        store, _candidate = self.create_members()
-        implementation = self.fail_task("implementation")
-        current = store.show("release")
-        store.steer("release", current["revision"], "pause fixture", pause=True, now=NOW)
-        decision = self.queue.reconcile_recoveries(now_epoch=NOW, dry_run=False)[0]
-        self.assertEqual(as_dict(decision)["state"], "held")
-        self.assertRegex(as_dict(decision)["reason_code"], "goal|paused|admission")
-        self.assertEqual(rows(
-            self.queue, "SELECT COUNT(*) AS n FROM task_attempts WHERE task_id='implementation'",
-        )[0]["n"], 1)
-        self.assertEqual(implementation.id, rows(
-            self.queue, "SELECT id FROM task_attempts WHERE task_id='implementation'",
-        )[0]["id"])
-
-        coordinator = store.show("release")["coordinator_task"]
-        if coordinator:
-            with self.assertRaises(db.QueueError):
-                self.queue.request_recovery(
-                    coordinator, source="operator", mode="retry", now_epoch=NOW,
-                )
-
-    def test_paused_goal_recovery_reschedules_when_the_goal_resumes(self) -> None:
-        store, _candidate = self.create_members()
-        source = self.fail_task("implementation", signature="retryable:paused", now=NOW)
-        current = store.show("release")
-        paused = store.steer(
-            "release", current["revision"], "pause the fixture", pause=True, now=NOW,
-        )
-        held = self.queue.reconcile_recoveries(now_epoch=NOW, dry_run=False)[0]
-        self.assertEqual((held.state, held.reason_code), ("held", "goal_paused"))
-
-        store.resume("release", paused["revision"], "resume the fixture", now=NOW + 1)
-        rescheduled = self.queue.reconcile_recoveries(now_epoch=NOW + 1, dry_run=False)[0]
-
-        self.assertEqual(rescheduled.after_attempt_id, source.id)
-        self.assertEqual((rescheduled.origin, rescheduled.state), ("automatic", "backoff"))
-        self.assertEqual(self.queue.recovery_for("implementation").state, "backoff")
-
-    def test_concurrency_held_recovery_reschedules_after_the_peer_finishes(self) -> None:
-        self.create_members()
-        source = self.fail_task("implementation", signature="retryable:concurrency", now=NOW)
-        peer = self.claim("integration", key="manual/integration", now=NOW)
-        self.queue.record(
-            "integration", "manual/integration", attempt_id=peer.id, status="dispatched",
-            provider_id="claude", account_id="claude-account", router_job_id="peer-job",
-            timestamp=iso(NOW), now_epoch=NOW,
-        )
-        held = self.queue.reconcile_recoveries(now_epoch=NOW, dry_run=False)[0]
-        self.assertEqual((held.state, held.reason_code), ("held", "goal_concurrency_held"))
-
-        self.terminal(
-            "integration", peer, "done", verified(), key="manual/integration", now=NOW + 1,
-        )
-        rescheduled = self.queue.reconcile_recoveries(now_epoch=NOW + 1, dry_run=False)[0]
-
-        self.assertEqual(rescheduled.after_attempt_id, source.id)
-        self.assertEqual((rescheduled.origin, rescheduled.state), ("automatic", "backoff"))
-        self.assertEqual(self.queue.recovery_for("implementation").state, "backoff")
-
-
 
 
 if __name__ == "__main__":

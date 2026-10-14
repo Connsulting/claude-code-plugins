@@ -50,7 +50,6 @@ from tests.test_bonus_drain_preflight_checks import (
     RELEASE_0_11_1,
     FakeRunner,
     PreflightCase,
-    add_goal,
     authority,
     exited,
     gh_issue,
@@ -1059,12 +1058,12 @@ class CollisionAllocationTests(PreflightCase):
 
         allocated = sorted(item for ids in self.allocated(tick).values() for item in ids)
         self.assertEqual(allocated, ["g1", "g2"])
-        self.assertEqual(self.queue.reserved_collision_keys(allocated), {
+        self.assertEqual(self.queue.collision_keys(allocated), {
             "g1": frozenset(), "g2": frozenset(),
         })
         self.assertIsNotNone(self.try_claim("g1"))
         with self.queue._connect() as connection:
-            self.assertIsNone(db.QueueDB._collision_holder(connection, self.queue.task("g2"), False))
+            self.assertIsNone(db.QueueDB._collision_holder(connection, self.queue.task("g2")))
         self.assertTrue(self.ready("g2")["ready"])
         self.assertIsNotNone(self.try_claim("g2"))
 
@@ -1081,13 +1080,13 @@ class CollisionAllocationTests(PreflightCase):
 
         allocated = sorted(item for ids in self.allocated(tick).values() for item in ids)
         self.assertEqual(allocated, ["g1", "g2"])
-        self.assertEqual(self.queue.reserved_collision_keys(allocated), {
+        self.assertEqual(self.queue.collision_keys(allocated), {
             "g1": frozenset({"issue:owner/repo#12"}),
             "g2": frozenset({"issue:owner/repo#13"}),
         })
         self.assertIsNotNone(self.try_claim("g1"))
         with self.queue._connect() as connection:
-            self.assertIsNone(db.QueueDB._collision_holder(connection, self.queue.task("g2"), False))
+            self.assertIsNone(db.QueueDB._collision_holder(connection, self.queue.task("g2")))
         self.assertTrue(self.ready("g2")["ready"])
         self.assertIsNotNone(self.try_claim("g2"))
 
@@ -1126,138 +1125,6 @@ class CollisionAllocationTests(PreflightCase):
         tick = self.tick(config, snapshots)
 
         self.assertEqual(self.allocated(tick), {"alpha": ["constrained"], "beta": ["issue-a"]})
-
-
-class GoalCollisionReservationTests(PreflightCase):
-    """Review r1 P2: goal members never wait, but still reserve their keys within a tick."""
-
-    def setUp(self) -> None:
-        super().setUp()
-        self.config = _two_provider_config(self.queue, self.root / "cache")
-
-    def member(self, task_id: str, priority: int, *, source_ref: str | None = None) -> None:
-        value = provider_task(task_id, "alpha", "beta")
-        value.update(priority=priority, cwd=str(self.root), work_group="Group G")
-        if source_ref:
-            value["source_ref"] = source_ref
-        self.queue.add_task(reviewed(value))
-
-    def run_tick(self) -> tuple[scout.TickPlan, scout.ScoutReport]:
-        with mock.patch.object(scout, "read_all", return_value=_open_snapshots()):
-            tick = scout.plan_tick(self.config, self.queue, now_epoch=NOW, provider_holds=())
-        # The fixture goal carries only the admission fields; goal coordination turns are not
-        # under test here, so the goal tick itself is held idle.
-        with (
-            mock.patch.object(scout, "read_all", return_value=_open_snapshots()),
-            mock.patch.object(db.time, "time", return_value=NOW),
-            mock.patch.object(scout.goals.GoalStore, "tick", return_value=()),
-        ):
-            report = scout.run_once(
-                self.config, self.queue, now_epoch=NOW,
-                launch_call=launched_router(),
-                check_runner=self.runner({gh_issue(12, "owner/repo"): ok(ISSUE_3815_OPEN)}),
-            )
-        return tick, report
-
-    @staticmethod
-    def allocated(tick: scout.TickPlan) -> list[str]:
-        return sorted(item.id for tasks in tick.allocations.values() for item in tasks)
-
-    def test_goal_member_reserves_source_issue_against_ordinary_task_in_same_tick(self) -> None:
-        self.member("goal-member", 0, source_ref="owner/repo#12")
-        self.member("ordinary", 1, source_ref="owner/repo#12")
-        add_goal(self.queue, "goal-1", ["goal-member"])
-        self.refresh(self.runner({gh_issue(12, "owner/repo"): ok(ISSUE_3815_OPEN)}))
-
-        tick, report = self.run_tick()
-
-        self.assertEqual(self.allocated(tick), ["goal-member"])
-        self.assertEqual(report.errors, ())
-        self.assertEqual([item.task_id for item in report.dispatched], ["goal-member"])
-        self.assertEqual(self.queue.attempts(task_id="ordinary"), [])
-        self.assertEqual(
-            self.queue.readiness("ordinary", now_epoch=NOW)["hold_reason"], "collision",
-        )
-
-    def test_goal_member_and_ordinary_task_sharing_group_dispatch_together(self) -> None:
-        self.member("goal-member", 0)
-        self.member("ordinary", 1)
-        add_goal(self.queue, "goal-1", ["goal-member"])
-
-        tick, report = self.run_tick()
-
-        self.assertEqual(self.allocated(tick), ["goal-member", "ordinary"])
-        self.assertEqual(report.errors, ())
-        self.assertEqual(sorted(item.task_id for item in report.dispatched), ["goal-member", "ordinary"])
-        self.assertFalse([item for item in report.blockers if item.get("kind") == "collision"])
-
-    def task_for(
-        self, task_id: str, priority: int, *providers: str,
-        source_ref: str | None = None,
-    ) -> None:
-        value = provider_task(task_id, *providers)
-        value.update(priority=priority, cwd=str(self.root))
-        if source_ref:
-            value["source_ref"] = source_ref
-        self.queue.add_task(reviewed(value))
-
-    def one_slot_each(self) -> dict[tuple[str, str], usage.UsageSnapshot]:
-        # Used 74 leaves exactly one launch slot on each provider.
-        return {
-            (provider, f"{provider}-account"): usage.UsageSnapshot(
-                provider, f"{provider}-account", NOW,
-                {"seven_day": {"used_percent": 74, "resets_at": NOW + 40 * HOUR}},
-            )
-            for provider in ("alpha", "beta")
-        }
-
-    def test_unplaced_goal_does_not_starve_higher_priority_ordinary_task(self) -> None:
-        # Review r2 P2: an ordinary task ahead of a goal candidate for its issue must keep its
-        # priority when the goal never gets a slot.
-        self.task_for("unrelated-alpha", 0, "alpha")
-        self.task_for("ordinary", 1, "alpha", "beta", source_ref="owner/repo#12")
-        self.task_for("goal-member", 2, "alpha", source_ref="owner/repo#12")
-        self.task_for("low", 3, "alpha", "beta")
-        add_goal(self.queue, "goal-1", ["goal-member"])
-        self.refresh(self.runner({gh_issue(12, "owner/repo"): ok(ISSUE_3815_OPEN)}))
-
-        with mock.patch.object(scout, "read_all", return_value=self.one_slot_each()):
-            tick = scout.plan_tick(self.config, self.queue, now_epoch=NOW, provider_holds=())
-
-        allocated = self.allocated(tick)
-        self.assertIn("ordinary", allocated)
-        self.assertNotIn("low", allocated)
-        self.assertEqual(allocated, ["ordinary", "unrelated-alpha"])
-
-    def test_ordinary_before_goal_member_dispatches_without_scout_error(self) -> None:
-        # Goal members never wait on collision keys, so an ordinary task ahead of one in
-        # priority order cannot turn the goal's claim into a scout error.
-        self.member("ordinary", 0, source_ref="owner/repo#12")
-        self.member("goal-member", 1, source_ref="owner/repo#12")
-        add_goal(self.queue, "goal-1", ["goal-member"])
-        self.refresh(self.runner({gh_issue(12, "owner/repo"): ok(ISSUE_3815_OPEN)}))
-
-        tick, report = self.run_tick()
-
-        self.assertEqual(report.errors, ())
-        self.assertIn("goal-member", [item.task_id for item in report.dispatched])
-        dispatched = {item.task_id for item in report.dispatched}
-        self.assertEqual(set(self.allocated(tick)), dispatched)
-        for task_id in ("ordinary", "goal-member"):
-            self.assertNotIn(
-                "aborted", [item.state for item in self.queue.attempts(task_id=task_id)],
-            )
-
-    def test_goal_members_sharing_group_still_allocate_together(self) -> None:
-        self.member("member-a", 0)
-        self.member("member-b", 1)
-        add_goal(self.queue, "goal-1", ["member-a", "member-b"], max_inflight=2)
-
-        tick, report = self.run_tick()
-
-        self.assertEqual(self.allocated(tick), ["member-a", "member-b"])
-        self.assertEqual(report.errors, ())
-        self.assertEqual(sorted(item.task_id for item in report.dispatched), ["member-a", "member-b"])
 
 
 class ResumeAndNoticeScoutTests(HermeticEnvironment, PreflightCase):

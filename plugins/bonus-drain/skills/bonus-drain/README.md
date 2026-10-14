@@ -123,10 +123,6 @@ The configuration graph is versioned and uses IDs for all relationships:
   shell interpolation, dangling references, duplicate IDs, and direct-provider dispatch
   are rejected.
 1. `pr_exceptions[]` grants ordinary task repository-specific push/PR behavior.
-  An explicitly authorized Long Horizon goal with `merge_policy: merge` additionally
-  grants its registered, unchanged coordinator permission to merge verified PRs within
-  the recorded authority. Task drivers retain their own restrictions; goal membership
-  or task prose alone does not grant that exception. See [GOALS.md](GOALS.md).
 1. `viewer` binds to loopback. Remote access requires a secretless trusted loopback proxy,
   exact Host/HTTPS Origin values, and an explicit mutations flag. See
   [SECURITY.md](SECURITY.md).
@@ -186,7 +182,7 @@ From the skill directory, install a version and the five self-owned unit templat
 
 Reinstalling changed source under an existing version is refused. Use
 `./install.sh --install-version VERSION` to choose a publication version. For an approved
-Git publication, use `0.3.15+main.MERGED_SHA`, replacing `MERGED_SHA` with the merged commit
+Git publication, use `0.3.16+main.MERGED_SHA`, replacing `MERGED_SHA` with the merged commit
 SHA. Combine `--install-version` and `--home DIR` in either order for a selected home.
 Doctor compares the installed payload with its recorded source checkout while that checkout
 exists. If the source checkout is gone, this drift check is unavailable; installation ownership
@@ -310,7 +306,7 @@ branch and uses the same readiness result as dispatch. It has no pending verific
 Every claimed launch receives a unique attempt ID. The prompt's exact record command binds the
 terminal event to that attempt and reads structured outcome evidence from its protected state
 path. `done` requires reason code `done_when_verified`, `completion.verified: true`, one of
-`command`, `artifact`, `operator_receipt`, or `goal_acceptance`, and nonempty evidence that proves
+`command`, `artifact`, or `operator_receipt`, and nonempty evidence that proves
 done-when. Normal PR work is done only after all checks pass for the current head. Epic Forge
 work also requires a confirmed merge into the exact authorized epic branch. Opening a PR,
 pending or failing checks, and an unmerged epic PR are not completion. Use `artifact` completion
@@ -324,9 +320,7 @@ work. It allows at most two recovery attempts, after 5-minute and 30-minute back
 early when the normalized failure reason repeats. Unknown launch state, missing authority, and
 unavailable or malformed repository identity stay held. Divergent parent refs require an explicit
 child start_ref. Ordinary requeue schedules an operator
-recovery without deleting history and leaves retained holds held. `requeue <task> --override-hold --reason <text>` is the one explicit escape: it converts a held authority-required, permanent, or no-progress operator recovery to scheduled now, and records "operator hold override" plus the reason in the recovery detail. A T3 reconciliation closure can also be overridden after read-only T3 state proves its source and descendants are inactive; ambiguous launches remain refused. It still refuses tasks with dispatch claims, goal-managed tasks or any recovery admission rejection, verified done work, non-one-off tasks, changed contracts, and recoveries that are not held (exit 1). Automatic scout recovery never overrides a hold. Goal-managed public requeue remains rejected; the goal runtime
-may admit implementation or integration recovery under its existing guards, while coordinator and
-frozen acceptance failures require fresh follow-up jobs.
+recovery without deleting history and leaves retained holds held. `requeue <task> --override-hold --reason <text>` is the one explicit escape: it converts a held authority-required, permanent, or no-progress operator recovery to scheduled now, and records "operator hold override" plus the reason in the recovery detail. A T3 reconciliation closure can also be overridden after read-only T3 state proves its source and descendants are inactive; ambiguous launches remain refused. It still refuses tasks with dispatch claims, verified done work, non-one-off tasks, changed contracts, and recoveries that are not held (exit 1). Automatic scout recovery never overrides a hold.
 
 Scout reads T3 state through read-only SQLite before the in-flight gate. Active or unsettled
 parent runs and recursive subagent descendants with an active run or nonterminal latest run

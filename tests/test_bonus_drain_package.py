@@ -164,15 +164,15 @@ class BonusDrainPackageContractTests(unittest.TestCase):
             self.assertIsInstance(manifest.get("description"), str, manifest_path)
             self.assertTrue(manifest["description"].strip(), manifest_path)
             versions.append(manifest["version"])
-        self.assertEqual(versions, ["0.3.15", "0.3.15"])
+        self.assertEqual(versions, ["0.3.16", "0.3.16"])
 
         sys.path.insert(0, str(SKILL_ROOT))
         try:
             from bonus_drain import __version__, lifecycle
         finally:
             sys.path.pop(0)
-        self.assertEqual(__version__, "0.3.15")
-        self.assertEqual(lifecycle._DEFAULT_VERSION, "0.3.15")
+        self.assertEqual(__version__, "0.3.16")
+        self.assertEqual(lifecycle._DEFAULT_VERSION, "0.3.16")
 
     def test_packaged_viewer_supports_secretless_tailnet_controls(self) -> None:
         example = self.load_json(SKILL_ROOT / "config.example.json")
@@ -266,7 +266,7 @@ class BonusDrainPackageContractTests(unittest.TestCase):
 
     def test_top_level_install_accepts_git_suffix_version_in_either_argument_order(self) -> None:
         database, _lifecycle = _runtime_modules()
-        version = "0.3.15+main.fixture"
+        version = "0.3.16+main.fixture"
         for reversed_order in (False, True):
             with self.subTest(reversed_order=reversed_order), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)

@@ -43,10 +43,6 @@ start or launched automatically by Bonus capacity; they also support dependencie
 references. Providers, weekly limits, reset windows, and adapters are validated JSON configuration;
 every job launches as a T3 thread through `t3-thread`. CLIProxyAPI owns account selection.
 
-The included Long Horizon skill coordinates entire goals through those jobs, with
-stacked or authorized merged PRs, combined E2E, and further fix rounds. The coordinator
-ends its turn while the runtime waits for a registered dependency join.
-
 **Install with Claude Code:**
 
 ```text

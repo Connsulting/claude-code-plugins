@@ -50,12 +50,6 @@ PENDING_RECOVERY_STATES = ("scheduled", "backoff", "consumed")
 ACCOUNT_HOLD_CAUSES = frozenset({"account_unavailable", "codex_daemon_start"})
 BACKOFF_INITIAL_SECONDS = 1800
 BACKOFF_MAX_SECONDS = 14400
-TRANSIENT_RECOVERY_HOLDS = frozenset({
-    "goal_paused",
-    "goal_concurrency_held",
-    "goal_coordinator_active",
-    "goal_operation_unresolved",
-})
 REASON_CODES = frozenset({
     "retryable", "verification_needed", "authority_required", "permanent",
     "unknown_launch", "done_when_verified",
@@ -63,7 +57,7 @@ REASON_CODES = frozenset({
 # Blocker codes whose new failed/skipped outcomes report reason.queue_time_knowable.
 QUEUE_TIME_BLOCKER_CODES = ("authority_required", "verification_needed")
 COMPLETION_MECHANISMS = frozenset({
-    "command", "artifact", "operator_receipt", "goal_acceptance",
+    "command", "artifact", "operator_receipt",
 })
 LEGACY_EXCLUSIVE_CAPABILITY = "legacy-exclusive"
 # Reserved positive capability: only providers declaring it can drive the implement skill.
@@ -798,6 +792,7 @@ class QueueDB:
             connection.executescript(schema)
             self._additive_migrations(connection)
             self._proxy_migration(connection)
+            self._remove_durable_goals(connection)
             connection.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, ?)",
                 (utc_now(),),
@@ -853,8 +848,6 @@ class QueueDB:
                 "task_attempts": ("outcome_json",),
                 "check_results": ("spec_json", "context_json"),
                 "task_recovery": ("resume_when_json",),
-                "goals": ("contract_json",),
-                "goal_members": ("candidate_json",),
             }.items():
                 existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
                 for column in columns:
@@ -875,12 +868,35 @@ class QueueDB:
                 new_hash = _contract_hash(QueueDB._task_from_row(row))
                 if old_hash == new_hash:
                     continue
-                for table in ("task_attempts", "task_recovery", "goal_members", "goal_turns"):
+                for table in ("task_attempts", "task_recovery"):
                     existing = {item[1] for item in connection.execute(f"PRAGMA table_info({table})")}
                     if {"task_id", "contract_hash"} <= existing:
                         connection.execute(f"UPDATE {table} SET contract_hash=? WHERE task_id=? AND contract_hash=?",
                                            (new_hash, row["id"], old_hash))
             connection.execute("INSERT INTO schema_migrations(version,applied_at) VALUES(5,?)", (utc_now(),))
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    @staticmethod
+    def _remove_durable_goals(connection: sqlite3.Connection) -> None:
+        """Migration v6: drop retired coordination tables, retaining ordinary queue history."""
+
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            children = tuple(
+                f"goal_{suffix}"
+                for suffix in ("operations", "steering", "turns", "members")
+            )
+            # Older running commands may recreate these tables after migration 6.
+            # Drop every child before its parent with foreign-key enforcement still enabled.
+            for table in (*children, "goals"):
+                connection.execute(f'DROP TABLE IF EXISTS "{table}"')
+            connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(6, ?)",
+                (utc_now(),),
+            )
             connection.commit()
         except Exception:
             connection.rollback()
@@ -1254,7 +1270,7 @@ class QueueDB:
         """Every launch check of ``task`` as a mutation evaluates it: declared, built-in, merged edges."""
 
         from . import checks
-        specs = list(self._launch_check_specs(task, self._goal_owned(connection, task.id)))
+        specs = list(self._launch_check_specs(task))
         for dependency in task.merged_depends_on:
             done = self._verified_done_row(connection, dependency)
             if done is None:
@@ -1308,11 +1324,7 @@ class QueueDB:
         return review.review_problems(task)
 
     def _insert_task(self, connection: sqlite3.Connection, values: Mapping[str, Any]) -> Task:
-        """Validate and insert within the caller's transaction (including goal decisions).
-
-        No readiness review is required here: goal acceptance governs goal-owned turn tasks.
-        ``add_task`` requires one.
-        """
+        """Validate and insert a task within ``add_task``'s transaction."""
         item_id = str(values.get("id") or "")
         _require_task_id(item_id)
         kind = str(values.get("kind", "oneoff"))
@@ -1851,7 +1863,6 @@ class QueueDB:
     def readiness(
         self, task_id: str, *, now_epoch: float | None = None,
     ) -> dict[str, Any]:
-        from .goals import recovery_admission, task_admitted
         now = float(time.time() if now_epoch is None else now_epoch)
         self.initialize()
         with self._connect() as connection:
@@ -1868,9 +1879,8 @@ class QueueDB:
                 if not item["satisfied"]
                 and (could_launch or item["status"] != "merge_check_pending")
             ]
-            goal_owned = self._goal_owned(connection, task_id)
             # Stored results only: readiness never evaluates a check or touches the network.
-            launch_verdicts = self._launch_verdicts(connection, task, now, goal_owned)
+            launch_verdicts = self._launch_verdicts(connection, task, now)
             # Merged edges satisfied only as unverified still need the worker to verify them.
             launch_checks = [*launch_verdicts, *(
                 item["merge_check"] for item in dependencies
@@ -1918,7 +1928,6 @@ class QueueDB:
                 ).to_dict()
                 if recovery is not None else None
             )
-            admitted = True
             state, reason, hold_reason = "ready", "Ready to run", None
             dependency_base: dict[str, Any] | None = None
             if not task.active:
@@ -1944,12 +1953,7 @@ class QueueDB:
                 except QueueError as exc:
                     hold_reason = str(exc).split(":", 1)[0]
                     state, reason = "held", str(exc)
-                admitted, admission_reason = recovery_admission(
-                    connection, task_id, now_epoch=now,
-                )
-                if state == "ready" and not task_admitted(connection, task_id, now_epoch=now):
-                    state, reason, hold_reason = "waiting", admission_reason, admission_reason
-                elif state == "ready" and recovery is not None and recovery["state"] in {"held", "exhausted"}:
+                if state == "ready" and recovery is not None and recovery["state"] in {"held", "exhausted"}:
                     state, reason, hold_reason = recovery["state"], (
                         recovery["detail"] or recovery["reason_code"]
                     ), recovery["reason_code"]
@@ -1989,13 +1993,13 @@ class QueueDB:
                     )
                 # Preflight gates only demote work that is otherwise ready to launch.
                 if state == "ready":
-                    gate = self._preflight_gate(connection, task, launch_verdicts, goal_owned)
+                    gate = self._preflight_gate(connection, task, launch_verdicts)
                     if gate is not None:
                         state, (hold_reason, reason) = "waiting", gate
             # A missing review, or one written before the current contract, holds work that could
             # otherwise launch, whatever else it waits on: it never launches until it is reviewed.
             # Terminal and paused states keep their own reading.
-            review_hold = self._review_hold(task, goal_owned)
+            review_hold = self._review_hold(task)
             if (
                 review_hold is not None and state in {"ready", "waiting", "cooldown", "recovering"}
                 and self._could_launch(connection, task)
@@ -2003,7 +2007,6 @@ class QueueDB:
                 state, (hold_reason, reason) = "held", review_hold
             requeue_allowed = bool(
                 task.kind == "oneoff" and claim is None and done is None
-                and not goal_owned
                 and (
                     (latest is not None and latest["state"] in OPERATOR_RECOVERY_SOURCES)
                     or (
@@ -2028,8 +2031,6 @@ class QueueDB:
                     }
                 )
             )
-            if not admitted:
-                requeue_allowed = False
             requeue_reason = (
                 "Operator retry is available" if requeue_allowed else
                 (reason if state in {"held", "exhausted"} else "Task cannot be safely requeued")
@@ -2059,7 +2060,6 @@ class QueueDB:
         """
 
         from . import review
-        from .goals import guard_contract_edit
         allowed = {"title", "priority", "size", "cwd", "goal", "context", "constraints",
                    "precondition", "done_when", "source_ref", "start_ref", "work_group", "depends_on",
                    "checks", "merged_depends_on", "grants", "readiness_review"}
@@ -2068,7 +2068,6 @@ class QueueDB:
         contract_fields = set(changes) & review.REVIEWED_FIELDS
         self.initialize()
         with self._transaction() as connection:
-            guard_contract_edit(connection, task_id, set(changes))
             row = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             if row is None:
                 raise QueueError(f"unknown task: {task_id}")
@@ -2239,10 +2238,7 @@ class QueueDB:
     ) -> bool:
         if not task.active:
             return False
-        from .goals import task_admitted
         now = time.time() if now_epoch is None else float(now_epoch)
-        if not task_admitted(connection, task.id, now_epoch=now):
-            return False
         if any(
             not d["satisfied"]
             for d in QueueDB._dependency_statuses(connection, task, now_epoch=now)
@@ -2250,11 +2246,10 @@ class QueueDB:
             return False
         if connection.execute("SELECT 1 FROM dispatch_claims WHERE task_id=? LIMIT 1", (task.id,)).fetchone():
             return False
-        goal_owned = QueueDB._goal_owned(connection, task.id)
-        if QueueDB._review_hold(task, goal_owned) is not None:
+        if QueueDB._review_hold(task) is not None:
             return False
         if QueueDB._preflight_gate(
-            connection, task, QueueDB._launch_verdicts(connection, task, now, goal_owned), goal_owned,
+            connection, task, QueueDB._launch_verdicts(connection, task, now),
         ) is not None:
             return False
         return self._cadence_eligible(connection, task, cycle, now=now, automatic=automatic)
@@ -3021,12 +3016,6 @@ class QueueDB:
         self, connection: sqlite3.Connection, row: sqlite3.Row,
     ) -> dict[str, Any]:
         task_id = row["task"]
-        if connection.execute(
-            """SELECT 1 FROM goal_turns WHERE task_id=?
-                 UNION ALL SELECT 1 FROM goal_members WHERE task_id=? AND managed=1 LIMIT 1""",
-            (task_id, task_id),
-        ).fetchone():
-            return {"allowed": False, "reason": "Fresh goal follow-up required"}
         claim = connection.execute(
             "SELECT state FROM dispatch_claims WHERE task_id=?", (task_id,),
         ).fetchone()
@@ -3309,7 +3298,6 @@ class QueueDB:
         blocked_descendants: int = 0,
         override_reason: str | None = None,
     ) -> RecoveryDecision:
-        from .goals import recovery_admission
         if override_reason is not None and source != "operator":
             raise QueueError("only operator requeue can override a retained hold")
         task_row = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
@@ -3336,10 +3324,6 @@ class QueueDB:
             raise QueueError("recovery mode must be retry or verification")
         if reason_code != "retryable":
             chosen_mode = "verification"
-        admitted, admission_reason = recovery_admission(
-            connection, task_id, now_epoch=float(now_epoch),
-        )
-        persist = True
         state = "scheduled" if source == "operator" else "backoff"
         decision_code = reason_code
         decision_detail = detail
@@ -3349,17 +3333,11 @@ class QueueDB:
                    AND mode IN ('retry','verification') AND state!='aborted'""",
             (task_id,),
         ).fetchone()[0])
-        if override_reason is not None:
-            if not admitted:
-                raise QueueError(f"hold override refused: {admission_reason}")
-            if reason_code == "unknown_launch":
-                self._require_quiescent_t3_closure(
-                    connection, task_id, attempt, reason_signature,
-                )
-        if not admitted:
-            state, decision_code, decision_detail = "held", admission_reason, admission_reason
-            persist = admission_reason != "fresh_goal_followup_required"
-        elif reason_code in {"authority_required", "permanent", "unknown_launch"} and not (
+        if override_reason is not None and reason_code == "unknown_launch":
+            self._require_quiescent_t3_closure(
+                connection, task_id, attempt, reason_signature,
+            )
+        if reason_code in {"authority_required", "permanent", "unknown_launch"} and not (
             source != "automatic"
             and (attempt["state"] if attempt is not None else legacy["status"]) == "awaiting_human"
         ):
@@ -3463,16 +3441,9 @@ class QueueDB:
             return self._recovery_from_row(
                 existing, blocked_descendants=blocked_descendants,
             )
-        transient_hold = bool(
-            same_source_contract
-            and existing["origin"] == source
-            and existing["state"] == "held"
-            and existing["reason_code"] in TRANSIENT_RECOVERY_HOLDS
-        )
         if (
             same_source_contract
             and existing["origin"] == source
-            and not transient_hold
         ):
             return self._recovery_from_row(
                 existing, blocked_descendants=blocked_descendants,
@@ -3482,7 +3453,7 @@ class QueueDB:
             contract_hash, not_before, decision_code, reason_signature,
             decision_detail, updated_at, blocked_descendants,
         )
-        if dry_run or not persist:
+        if dry_run:
             return decision
         connection.execute(
             """INSERT INTO task_recovery(
@@ -3520,15 +3491,12 @@ class QueueDB:
         source: Literal["automatic", "operator"],
         now_epoch: float | None = None,
     ) -> RecoveryDecision:
-        from .goals import guard_history
         _require_task_id(task_id)
         if source not in {"automatic", "operator"}:
             raise QueueError("recovery source must be automatic or operator")
         now = float(time.time() if now_epoch is None else now_epoch)
         self.initialize()
         with self._transaction() as connection:
-            if source == "operator":
-                guard_history(connection, task_id)
             count = self._blocked_descendant_counts(connection).get(task_id, 0)
             return self._request_recovery_in_connection(
                 connection, task_id,
@@ -3550,17 +3518,12 @@ class QueueDB:
         manager = self._connect() if dry_run else self._transaction()
         with manager as connection:
             counts = self._blocked_descendant_counts(connection)
-            managed = {
-                row["task_id"] for row in connection.execute(
-                    "SELECT task_id FROM goal_members WHERE managed=1"
-                )
-            }
             results: list[RecoveryDecision] = []
             for row in connection.execute(
                 "SELECT * FROM tasks WHERE active=1 AND kind='oneoff' ORDER BY priority,created_at,id"
             ):
                 task_id = row["id"]
-                if counts.get(task_id, 0) <= 0 and task_id not in managed:
+                if counts.get(task_id, 0) <= 0:
                     continue
                 if self._verified_done_row(connection, task_id) is not None:
                     continue
@@ -3780,7 +3743,6 @@ class QueueDB:
         summary: str,
         now_epoch: float | None = None,
     ) -> RunEvent:
-        from .goals import recovery_admission
         _require_task_id(task_id)
         if (expected_attempt_id is None) == (expected_legacy_run_rowid is None):
             raise QueueError("exactly one completion source attempt or legacy run is required")
@@ -3824,11 +3786,6 @@ class QueueDB:
             contract_hash = _contract_hash(task)
             if attempt is not None and attempt["contract_hash"] != contract_hash:
                 raise QueueError("source contract changed; completion CAS refused")
-            admitted, admission_reason = recovery_admission(
-                connection, task_id, now_epoch=now,
-            )
-            if not admitted:
-                raise QueueError(admission_reason)
             source_code, source_signature, _detail, _mode = self._source_reason(attempt, legacy)
             t3_closure = source_code == "unknown_launch"
             if t3_closure:
@@ -3936,8 +3893,6 @@ class QueueDB:
         this same source is consumed so it cannot launch a second worker later.
         """
 
-        from .goals import recovery_admission
-
         _require_task_id(task_id)
         if not expected_attempt_id:
             raise QueueError("exactly one continuation source attempt is required")
@@ -4036,11 +3991,6 @@ class QueueDB:
             contract_hash = _contract_hash(task)
             if source["contract_hash"] != contract_hash:
                 raise QueueError("source contract changed; continuation refused")
-            admitted, admission_reason = recovery_admission(
-                connection, task_id, now_epoch=now,
-            )
-            if not admitted:
-                raise QueueError(admission_reason)
             recovery = connection.execute(
                 "SELECT * FROM task_recovery WHERE task_id=?", (task_id,),
             ).fetchone()
@@ -4142,7 +4092,6 @@ class QueueDB:
         now_epoch: float | None = None,
         override_reason: str | None = None,
     ) -> RecoveryDecision:
-        from .goals import guard_history
         _require_task_id(task_id)
         if override_reason is not None:
             override_reason = override_reason.strip()
@@ -4151,7 +4100,6 @@ class QueueDB:
         now = float(time.time() if now_epoch is None else now_epoch)
         self.initialize()
         with self._transaction() as connection:
-            guard_history(connection, task_id)
             if eligibility_key is not None:
                 last = connection.execute(
                     """SELECT * FROM runs WHERE task=?
@@ -4239,13 +4187,11 @@ class QueueDB:
         self._update_task(task_id, "active", int(active))
 
     def _update_task(self, task_id: str, column: str, value: Any) -> None:
-        from .goals import guard_contract_edit
         _require_task_id(task_id)
         if column not in {"priority", "model", "mcp", "allowed_providers_json", "active"}:
             raise QueueError("unsafe task update")
         self.initialize()
         with self._transaction() as connection:
-            guard_contract_edit(connection, task_id, {column})
             cursor = connection.execute(f"UPDATE tasks SET {column}=? WHERE id=?", (value, task_id))
             if cursor.rowcount != 1:
                 raise QueueError(f"no such task: {task_id}")
@@ -4291,27 +4237,16 @@ class QueueDB:
         )
 
     @staticmethod
-    def _goal_owned(connection: sqlite3.Connection, task_id: str) -> bool:
-        return connection.execute(
-            """SELECT 1 FROM goal_turns WHERE task_id=?
-                 UNION ALL
-                 SELECT 1 FROM goal_members WHERE task_id=? AND managed=1
-                 LIMIT 1""",
-            (task_id, task_id),
-        ).fetchone() is not None
-
-    @staticmethod
-    def _launch_check_specs(task: Task, goal_owned: bool) -> list[tuple[str, dict[str, Any]]]:
-        """Declared checks plus derived built-ins; goal-owned work gets no built-ins."""
+    def _launch_check_specs(task: Task) -> list[tuple[str, dict[str, Any]]]:
+        """Declared checks plus derived built-ins for every task."""
 
         from . import checks
         specs = [("declared", json.loads(item)) for item in task.checks]
-        if not goal_owned:
-            if task.start_ref is not None:
-                specs.append(("builtin", {"type": "base_ref_exists", "ref": task.start_ref}))
-            issue = checks.parse_issue_ref(task.source_ref)
-            if issue is not None:
-                specs.append(("builtin", {"type": "issue_open", "repo": issue[0], "number": issue[1]}))
+        if task.start_ref is not None:
+            specs.append(("builtin", {"type": "base_ref_exists", "ref": task.start_ref}))
+        issue = checks.parse_issue_ref(task.source_ref)
+        if issue is not None:
+            specs.append(("builtin", {"type": "issue_open", "repo": issue[0], "number": issue[1]}))
         unique: dict[str, tuple[str, dict[str, Any]]] = {}
         for origin, spec in specs:
             unique.setdefault(checks.canonical(spec), (origin, spec))
@@ -4319,23 +4254,19 @@ class QueueDB:
 
     @staticmethod
     def _launch_verdicts(
-        connection: sqlite3.Connection, task: Task, now: float, goal_owned: bool,
+        connection: sqlite3.Connection, task: Task, now: float,
     ) -> list[dict[str, Any]]:
         return QueueDB._check_verdicts(
-            connection, task, QueueDB._launch_check_specs(task, goal_owned), now,
+            connection, task, QueueDB._launch_check_specs(task), now,
         )
 
     @staticmethod
-    def _review_hold(task: Task, goal_owned: bool) -> tuple[str, str] | None:
+    def _review_hold(task: Task) -> tuple[str, str] | None:
         """(hold_reason, reason) when the task has no review, a pre-contract one, or a ticket
         review without merge_gates.
-
-        Goal-owned work carries no review: goal acceptance governs it.
         """
 
         from . import review
-        if goal_owned:
-            return None
         if task.readiness_review is None:
             return "review_missing", REVIEW_MISSING_REASON
         if review.schema_stale(task):
@@ -4367,14 +4298,13 @@ class QueueDB:
     @staticmethod
     def _preflight_gate(
         connection: sqlite3.Connection, task: Task, verdicts: Iterable[Mapping[str, Any]],
-        goal_owned: bool,
     ) -> tuple[str, str] | None:
         """(hold_reason, reason) demoting otherwise-ready work: a gating check, then a collision."""
 
         block = QueueDB._check_block(verdicts)
         if block is not None:
             return block
-        collision = QueueDB._collision_holder(connection, task, goal_owned)
+        collision = QueueDB._collision_holder(connection, task)
         if collision is not None:
             return "collision", f"Serialized behind {collision['task_id']} (shared {collision['key']})"
         return None
@@ -4490,16 +4420,9 @@ class QueueDB:
 
     @staticmethod
     def _collision_holder(
-        connection: sqlite3.Connection, task: Task, goal_owned: bool,
+        connection: sqlite3.Connection, task: Task,
     ) -> dict[str, str] | None:
-        """Return the claimed task sharing a source issue key, if any.
-
-        Goal-owned work never waits (its goal bounds concurrency), but its claims still
-        hold their keys, so non-goal work waits behind it.
-        """
-
-        if goal_owned:
-            return None
+        """Return the claimed task sharing a source issue key, if any."""
         keys = QueueDB._raw_collision_keys(task)
         if not keys:
             return None
@@ -4514,24 +4437,14 @@ class QueueDB:
         return None
 
     def collision_keys(self, task_ids: Iterable[str]) -> dict[str, frozenset[str]]:
-        """Keys each task waits on in one tick; empty for goal-owned work, which never waits."""
+        """Source issue keys each task waits on and holds once allocated in a tick."""
 
-        return self._tick_collision_keys(task_ids, exempt_goal=True)
-
-    def reserved_collision_keys(self, task_ids: Iterable[str]) -> dict[str, frozenset[str]]:
-        """Keys each task holds once allocated in one tick, goal-owned work included."""
-
-        return self._tick_collision_keys(task_ids, exempt_goal=False)
-
-    def _tick_collision_keys(
-        self, task_ids: Iterable[str], *, exempt_goal: bool,
-    ) -> dict[str, frozenset[str]]:
         self.initialize()
         result: dict[str, frozenset[str]] = {}
         with self._connect() as connection:
             for task_id in task_ids:
                 row = connection.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-                if row is None or (exempt_goal and self._goal_owned(connection, task_id)):
+                if row is None:
                     result[task_id] = frozenset()
                 else:
                     result[task_id] = self._raw_collision_keys(self._task_from_row(row))
@@ -4645,9 +4558,7 @@ class QueueDB:
                 ):
                     items.extend(
                         (origin, spec, None)
-                        for origin, spec in self._launch_check_specs(
-                            task, self._goal_owned(connection, task.id),
-                        )
+                        for origin, spec in self._launch_check_specs(task)
                     )
                     for dependency in task.merged_depends_on:
                         done = self._verified_done_row(connection, dependency)
@@ -4765,7 +4676,6 @@ class QueueDB:
         """Schedule an automatic retry for each blocker whose resume_when checks freshly pass."""
 
         from . import checks
-        from .goals import recovery_admission
         now = float(now_epoch)
         stamp = _epoch_iso(now)
         self.initialize()
@@ -4782,8 +4692,6 @@ class QueueDB:
                 latest = self._latest_effective_attempt(connection, task.id)
                 resume = self._authority_resume(latest)
                 if not resume:
-                    continue
-                if not recovery_admission(connection, task.id, now_epoch=now)[0]:
                     continue
                 contract_hash = _contract_hash(task)
                 if latest["contract_hash"] != contract_hash:
@@ -5028,7 +4936,7 @@ class QueueDB:
             # Work that could still launch but has no review, or a pre-contract one, is held.
             for task_row in connection.execute("SELECT * FROM tasks WHERE active=1").fetchall():
                 task = self._task_from_row(task_row)
-                hold = self._review_hold(task, self._goal_owned(connection, task.id))
+                hold = self._review_hold(task)
                 if hold is None or not self._could_launch(connection, task):
                     continue
                 reason_code, detail = hold

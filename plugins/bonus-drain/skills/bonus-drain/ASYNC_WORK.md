@@ -1,9 +1,5 @@
 # Async Work
 
-For whole-goal coordination across jobs, PR stacks/merges, and repeated combined
-acceptance, see [Long Horizon goals](GOALS.md). It uses this same queue; work groups
-remain navigation labels unless explicitly linked to a goal contract.
-
 Plan in a thread, hand off a concrete contract, queue it, start it, and review the result.
 Bonus Drain is the optional spare-capacity scheduler for the same queue. The executable,
 installation paths, database identity, thread launcher, and release version keep their existing names.
@@ -18,7 +14,7 @@ compatibility or atomic claims. Paused tasks cannot run.
 ## Dependencies
 
 Use `--depends-on parent-id,other-parent-id` on add, or update the prerequisite list from a planning thread with the CLI.
-Use repeatable `--check JSON` for structured preflight checks (see SKILL.md); waiting on a failing check consumes no attempt. Besides the repository checks, `mcp_authenticated`, `k8s_resource_exists`, and `openrouter_credit` probe launch blockers; they hold the task, spend no attempt, and unlike the others never proceed as unverified when they cannot be evaluated. `add` and `edit` evaluate all of the task's checks immediately, even while it waits on a prerequisite, and print each result and the resulting readiness; a failing or unverifiable check is reported on stderr, the task stays queued, and the scout retries it every 10 minutes, once the task can launch, until it passes and the task becomes ready. `bonus-drain held-report --json` lists held authority-required and verification-needed work, its blocked dependents, and how many blockers were knowable at queue time. Tasks that share the same `source_ref` issue run one at a time; goal-managed tasks use the goal's own concurrency bound. Work groups are display labels and do not affect scheduling or limit concurrency.
+Use repeatable `--check JSON` for structured preflight checks (see SKILL.md); waiting on a failing check consumes no attempt. Besides the repository checks, `mcp_authenticated`, `k8s_resource_exists`, and `openrouter_credit` probe launch blockers; they hold the task, spend no attempt, and unlike the others never proceed as unverified when they cannot be evaluated. `add` and `edit` evaluate all of the task's checks immediately, even while it waits on a prerequisite, and print each result and the resulting readiness; a failing or unverifiable check is reported on stderr, the task stays queued, and the scout retries it every 10 minutes, once the task can launch, until it passes and the task becomes ready. `bonus-drain held-report --json` lists held authority-required and verification-needed work, its blocked dependents, and how many blockers were knowable at queue time. Tasks that share the same `source_ref` issue run one at a time. Work groups are display labels and do not affect scheduling or limit concurrency.
 The graph can branch and join. Each edge is `done` or `merged`; write `--depends-on parent-id:merged,other-id:done`. An edge without a suffix defaults to `merged` when the parent runs in a repository configured to open pull requests, and to `done` otherwise. A `done` edge needs the parent's verified completion. A `merged` edge also needs the parent's recorded branch merged into the child's base (the child's `start_ref`, or the parent's target branch); the scout verifies that on GitHub, and the child waits with the reason until it lands. A child becomes ready only when **every edge is satisfied**.
 Failed and skipped prerequisites leave it waiting; they do not launch a child or mark it failed.
 A waiting child creates no run, consumes no claim, and does not call the thread launcher.
@@ -33,7 +29,7 @@ different parent remotes, targets, or unmerged branches.
 Authority-required, permanent, unknown-launch, and no-progress recovery holds never retry
 silently. Continuing that work requires a fresh, explicit follow-up task under reviewed policy
 and authority; plain requeue or edit does not reinterpret the retained hold.
-`requeue <task> --override-hold --reason <text>` is the one explicit escape: it converts a held authority-required, permanent, or no-progress operator recovery to scheduled now, and records "operator hold override" plus the reason in the recovery detail. A T3 reconciliation closure can also be overridden after read-only T3 state proves its source and descendants are inactive; ambiguous launches remain refused. It still refuses tasks with dispatch claims, goal-managed tasks or any recovery admission rejection, verified done work, non-one-off tasks, changed contracts, and recoveries that are not held (exit 1). Automatic scout recovery never overrides a hold.
+`requeue <task> --override-hold --reason <text>` is the one explicit escape: it converts a held authority-required, permanent, or no-progress operator recovery to scheduled now, and records "operator hold override" plus the reason in the recovery detail. A T3 reconciliation closure can also be overridden after read-only T3 state proves its source and descendants are inactive; ambiguous launches remain refused. It still refuses tasks with dispatch claims, verified done work, non-one-off tasks, changed contracts, and recoveries that are not held (exit 1). Automatic scout recovery never overrides a hold.
 
 Prerequisites must be existing one-off tasks. Children may be one-off or recurring; a recurring
 child uses those completed one-off prerequisites for each recurrence. Recurring prerequisites
@@ -58,7 +54,7 @@ repository dependencies choose the branch from their recorded metadata.
 Each claimed launch receives a new immutable attempt ID. The dispatched prompt contains the exact
 terminal command and protected outcome-evidence path bound to that attempt. A new `done` event
 requires reason code `done_when_verified`, `completion.verified: true`, a supported completion
-mechanism (`command`, `artifact`, `operator_receipt`, or `goal_acceptance`), and nonempty evidence
+mechanism (`command`, `artifact`, or `operator_receipt`), and nonempty evidence
 that verifies done-when. Normal PR work is done only after all checks pass for the current head.
 Epic Forge work also requires a confirmed merge into the exact authorized epic branch.
 Opening a PR, pending or failing checks, and an unmerged epic PR are not completion.
@@ -160,15 +156,9 @@ and newly configured provider IDs. Pinning it to a provider without that capabil
 The `legacy-exclusive` capability still requires Claude. Provider `max_size` ceilings
 apply when selecting and atomically claiming work; oversized pinned tasks remain queued with
 a reason, and a task without a size is treated as `huge`. Active claims and already-run one-off
-contracts cannot be edited. For ordinary tasks outside managed goals, a failed/skipped
+contracts cannot be edited. A failed/skipped
 task must first be explicitly requeued; that schedules an operator recovery and preserves every
 prior attempt. Its contract can then be edited only before that exact recovery is claimed.
-Goal-owned jobs retain all attempts and continue to reject public requeue. The goal runtime may
-internally admit recovery for implementation or integration work without bypassing its authority,
-deadline, concurrency, operation, or frozen-candidate checks. Coordinator and acceptance execution
-contracts stay frozen and use the documented fresh follow-up flows; only their priority, size and
-active controls remain editable. See [GOALS.md](GOALS.md) for replacing an obsolete, unlaunched
-verifier without changing its proof subject.
 
 The `--now` clocks on `requeue`, `dispatch`, and `scout` are trusted operator controls. Worker-facing
 `record` and `recover-complete` use server receipt and admission time instead. A worker-supplied

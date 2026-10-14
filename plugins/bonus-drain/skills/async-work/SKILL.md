@@ -24,7 +24,3 @@ A task is queueable only if it can start and can finish with no human in the loo
 Tasks queued before this contract are held as `review_stale`, and launchable tasks with no review as `review_missing`; neither dispatches until edited with a new record, and `bonus-drain held-report` lists them.
 
 Translate each mechanically checkable precondition or dependency (an issue open or in a milestone, a pull request merged, a release published, a base branch present, file content on a ref, an MCP server authenticated, a Kubernetes resource present, OpenRouter credit) into a `checks` entry, and choose `done` or `merged` for each dependency edge. The MCP, Kubernetes, and OpenRouter checks hold the task without consuming an attempt and never proceed as unverified. Keep the free-text precondition only for judgment the worker must make. Workers always have default authority to fix pre-existing lint, format, or type errors in files their change touches; do not grant or precondition that. Use `bonus-drain readiness-backfill` to find older tasks that lack a review or carry a stale one.
-
-For coordinating an entire work group through PR integration, combined E2E and additional
-fix rounds, use this plugin's [Long Horizon skill](../long-horizon/SKILL.md). Its goal
-records and short coordination jobs use the same queue and capacity controls.
