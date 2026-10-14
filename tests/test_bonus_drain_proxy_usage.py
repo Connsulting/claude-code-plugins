@@ -511,6 +511,29 @@ class ProxyUsageTests(unittest.TestCase):
             "seven_day": {"used_percent": 9.0, "resets_at": self.now + 18000},
         })
 
+    def test_muse_active_without_usage_is_fresh_but_gated(self):
+        # Muse omits subs_usage after a window reset; that is a healthy account with no budget reading,
+        # not an outage, and it must still never open the gate.
+        self.bodies["e"] = {"is_subs_active": True, "require_payment": False}
+        records = usage.refresh_all(self.config, now_epoch=self.now)
+        snapshot = records[("muse", "muse-e")]
+        self.assertTrue(snapshot.fresh)
+        self.assertIsNone(snapshot.error)
+        self.assertEqual(snapshot.limits, {})
+        plan = planner.build_plan(self.config, records, eligible_count=10, now_epoch=self.now)
+        gate = next(g for g in plan.gates if g.provider_id == "muse")
+        self.assertFalse(gate.open)
+        self.assertNotIn("muse", [b.provider_id for b in plan.batches])
+        self.assertIn("codex", [b.provider_id for b in plan.batches])
+
+    def test_muse_without_usage_and_unclear_subscription_stays_unavailable(self):
+        for body in ({"is_subs_active": False, "require_payment": False},
+                     {"is_subs_active": True, "require_payment": True}, {}):
+            with self.subTest(body=body):
+                self.bodies["e"] = body
+                records = usage.refresh_all(self.config, now_epoch=self.now)
+                self.assertEqual(records[("muse", "muse-e")].error, "proxy usage unavailable")
+
     def test_grok_and_muse_parsers_reject_malformed_usage(self):
         invalid = [
             ("grok", {}), ("grok", {"config": {"currentPeriod": {"type": "monthly"}}}),
