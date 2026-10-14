@@ -3353,8 +3353,8 @@ class QueueDB:
             if not admitted:
                 raise QueueError(f"hold override refused: {admission_reason}")
             if reason_code == "unknown_launch":
-                raise QueueError(
-                    "hold override refused: unknown_launch ownership must be reconciled, not overridden"
+                self._require_quiescent_t3_closure(
+                    connection, task_id, attempt, reason_signature,
                 )
         if not admitted:
             state, decision_code, decision_detail = "held", admission_reason, admission_reason
@@ -3737,6 +3737,39 @@ class QueueDB:
                 "summary": revision["summary"] if revision is not None else None,
             }
 
+    @staticmethod
+    def _require_quiescent_t3_closure(
+        connection: sqlite3.Connection, task_id: str, attempt: sqlite3.Row | None,
+        source_signature: str | None,
+    ) -> None:
+        from .t3_state import TERMINAL_RUN_STATUSES, T3StateError, lookup_thread
+
+        if attempt is None or source_signature not in {
+            "unknown_launch:missing_terminal_record",
+            "unknown_launch:t3_run_cancelled", "unknown_launch:t3_run_interrupted",
+            "unknown_launch:t3_run_failed",
+        }:
+            raise QueueError("unknown_launch recovery requires a T3 reconciliation closure")
+        source_thread = connection.execute(
+            """SELECT router_job_id FROM runs
+                 WHERE task=? AND attempt_id=? AND router_job_id IS NOT NULL
+                 ORDER BY rowid_pk DESC LIMIT 1""",
+            (task_id, attempt["id"]),
+        ).fetchone()
+        if source_thread is None or not source_thread["router_job_id"]:
+            raise QueueError("unknown_launch recovery requires the source attempt's T3 thread")
+        try:
+            thread = lookup_thread(source_thread["router_job_id"])
+        except T3StateError as exc:
+            raise QueueError(f"unknown_launch recovery cannot verify T3 state: {exc}") from exc
+        if thread is None:
+            raise QueueError("unknown_launch recovery requires a readable source T3 thread")
+        if (
+            thread.active_run or thread.unsettled_run or thread.live_descendant
+            or thread.run_status not in TERMINAL_RUN_STATUSES
+        ):
+            raise QueueError("unknown_launch recovery refused: source T3 thread or descendant is active or unsettled")
+
     def recover_complete(
         self,
         task_id: str,
@@ -3748,7 +3781,6 @@ class QueueDB:
         now_epoch: float | None = None,
     ) -> RunEvent:
         from .goals import recovery_admission
-        from .t3_state import TERMINAL_RUN_STATUSES, T3StateError, lookup_thread
         _require_task_id(task_id)
         if (expected_attempt_id is None) == (expected_legacy_run_rowid is None):
             raise QueueError("exactly one completion source attempt or legacy run is required")
@@ -3800,30 +3832,9 @@ class QueueDB:
             source_code, source_signature, _detail, _mode = self._source_reason(attempt, legacy)
             t3_closure = source_code == "unknown_launch"
             if t3_closure:
-                if attempt is None or not (
-                    source_signature == "unknown_launch:missing_terminal_record"
-                    or (source_signature or "").startswith("unknown_launch:t3_run_")
-                ):
-                    raise QueueError("unknown_launch completion requires a T3 reconciliation closure")
-                source_thread = connection.execute(
-                    """SELECT router_job_id FROM runs
-                         WHERE task=? AND attempt_id=? AND router_job_id IS NOT NULL
-                         ORDER BY rowid_pk DESC LIMIT 1""",
-                    (task_id, attempt["id"]),
-                ).fetchone()
-                if source_thread is None or not source_thread["router_job_id"]:
-                    raise QueueError("unknown_launch completion requires the source attempt's T3 thread")
-                try:
-                    thread = lookup_thread(source_thread["router_job_id"])
-                except T3StateError as exc:
-                    raise QueueError(f"unknown_launch completion cannot verify T3 state: {exc}") from exc
-                if thread is None:
-                    raise QueueError("unknown_launch completion requires a readable source T3 thread")
-                if (
-                    thread.active_run or thread.unsettled_run or thread.live_descendant
-                    or thread.run_status not in TERMINAL_RUN_STATUSES
-                ):
-                    raise QueueError("unknown_launch completion refused: source T3 thread or descendant is active or unsettled")
+                self._require_quiescent_t3_closure(
+                    connection, task_id, attempt, source_signature,
+                )
             recovery = connection.execute(
                 "SELECT * FROM task_recovery WHERE task_id=?", (task_id,),
             ).fetchone()

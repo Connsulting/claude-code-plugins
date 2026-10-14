@@ -66,6 +66,9 @@ class T3StateFixture:
                     thread_id TEXT, run_id TEXT, type TEXT, status TEXT,
                     node_id TEXT, updated_at TEXT, ordinal INTEGER, payload_json TEXT
                 );
+                CREATE TABLE orchestration_v2_projection_subagents (
+                    child_thread_id TEXT, thread_id TEXT, origin TEXT, status TEXT
+                );
             """)
 
     @staticmethod
@@ -143,6 +146,24 @@ class T3StateReaderTests(unittest.TestCase):
         self.state.run("child", "queued", ordinal=2, held=True)
         self.assertTrue(self.lookup().live_descendant)
 
+    def test_native_descendant_without_runs_uses_explicit_subagent_status(self):
+        self.state.thread("native", "parent")
+        self.assertTrue(self.lookup().live_descendant)
+        for status in ("running", "waiting", "unknown", "completed", "failed", "cancelled", "interrupted"):
+            with self.subTest(status=status), sqlite3.connect(self.state.path) as connection:
+                connection.execute("DELETE FROM orchestration_v2_projection_subagents")
+                connection.execute(
+                    "INSERT INTO orchestration_v2_projection_subagents VALUES(?,?,?,?)",
+                    ("native", "parent", "provider_native", status),
+                )
+            self.assertEqual(self.lookup().live_descendant, status not in t3_state.TERMINAL_RUN_STATUSES)
+        self.state.run("native", "running")
+        self.assertTrue(self.lookup().live_descendant)
+        self.state.run("native", "completed")
+        with sqlite3.connect(self.state.path) as connection:
+            connection.execute("UPDATE orchestration_v2_projection_subagents SET status='running'")
+        self.assertTrue(self.lookup().live_descendant)
+
     def test_parent_active_history_and_held_latest_run_are_reported_separately(self):
         self.state.run("parent", "running")
         self.state.run("parent", "completed", ordinal=2)
@@ -211,7 +232,7 @@ class ScoutReconciliationTests(unittest.TestCase):
             provider_id="alpha", account_id="alpha-account", router_job_id="job-1",
         )
 
-    def response(self, status: str = "completed", *, ended_age: int = 1800):
+    def response(self, status: str = "failed", *, ended_age: int = 1800):
         return t3_state.T3Thread(
             run_status=status, active_run=status == "running", last_error=None,
             last_activity_at=None, completed_at=self._activity_stamp(ended_age),
@@ -397,8 +418,41 @@ class ScoutReconciliationTests(unittest.TestCase):
         report = reconcile.reconcile_inflight(
             self.config, self.queue, state_path=state.path, now_epoch=NOW,
         )
-        self.assertEqual(report[0]["action"], "failed")
+        self.assertEqual(report[0]["action"], "held")
+        self.assertEqual(len(self.queue.claims()), 1)
+
+    def test_completed_turn_keeps_attempt_open_for_a_later_worker_record(self):
+        state = T3StateFixture(self.root / "t3.sqlite")
+        state.thread("job-1")
+        state.run("job-1", "completed", ended_age=86400)
+        for dry_run in (True, False):
+            report = reconcile.reconcile_inflight(
+                self.config, self.queue, state_path=state.path, now_epoch=NOW,
+                dry_run=dry_run,
+            )
+            self.assertEqual(report[0]["action"], "held")
+            self.assertEqual(len(self.queue.claims()), 1)
+            self.assertEqual(len(self.queue.inflight()), 1)
+            self.assertEqual(len(self.queue.runs()), 1)
+
+        # A CI watch or scheduled wake starts another turn in the same thread.
+        state.run("job-1", "running", ordinal=2)
+        report = reconcile.reconcile_inflight(
+            self.config, self.queue, state_path=state.path, now_epoch=NOW + 3600,
+        )
+        self.assertEqual(report[0]["action"], "held")
+        state.run("job-1", "completed", ordinal=2, ended_age=0)
+        report = reconcile.reconcile_inflight(
+            self.config, self.queue, state_path=state.path, now_epoch=NOW + 7200,
+        )
+        self.assertEqual(report[0]["action"], "held")
+        self.queue.record(
+            "abandoned", ELIGIBILITY_KEY, attempt_id=self.attempt.id,
+            status="done", outcome=verified_outcome(),
+        )
+        self.assertEqual([r.status for r in self.queue.runs()], ["done", "dispatched"])
         self.assertEqual(self.queue.claims(), [])
+        self.assertEqual(self.queue.attempts(task_id="abandoned")[0].state, "done")
 
     def test_sqlite_parent_completion_grace_ends_at_exactly_900_seconds(self):
         state = T3StateFixture(self.root / "t3.sqlite")
@@ -425,6 +479,10 @@ class ScoutReconciliationTests(unittest.TestCase):
                 held = reconcile._normalize_observation(observed, now_epoch=NOW)
                 self.assertEqual(held.hold_reason, "worker is running")
                 terminal = reconcile._normalize_observation(observed, now_epoch=NOW + 1)
+                if status == "completed":
+                    self.assertIn("task may resume", terminal.hold_reason)
+                    self.assertEqual(terminal.signature, "")
+                    continue
                 self.assertIsNone(terminal.hold_reason)
                 self.assertEqual(terminal.signature, (
                     f"unknown_launch:t3_run_{status}" if status in {"cancelled", "interrupted"}

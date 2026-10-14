@@ -150,10 +150,11 @@ identity for every thread launcher needed by the tick. A lifecycle or thread lau
 instead of failing each selected task.
 Before applying the in-flight gate, each normal scout tick reads T3 state through read-only
 SQLite. An active parent run or any recursive subagent descendant with an active run or
-nonterminal latest run keeps the task running. A terminal parent run that ended less than
-900 seconds ago also stays running. Once the thread settles and that grace period ends,
-a missing queue terminal event is recorded as `failed` through the record CLI's lifecycle
-path. This releases its claim without asserting task
+nonterminal latest run keeps the task running. Native children without orchestration runs
+use explicit native subagent status; absent status stays held. Completed turns stay held
+regardless of age because later turns may still record the task result. Failed, cancelled
+and interrupted parent runs stay held for 900 seconds before a missing queue terminal
+event can be recorded as `failed` through the record CLI's lifecycle path. This releases its claim without asserting task
 completion or retrying it. Missing or unreadable T3 state remains held; age alone never
 proves that a worker ended. Scout JSON includes the decisions in `reconciliation`,
 and `--dry-run` reports `would_fail` without changing the queue.

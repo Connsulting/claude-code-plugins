@@ -345,7 +345,7 @@ class ScoutTickCase(unittest.TestCase):
         return {"threadId": f"job-{len(self.launch_calls)}"}
 
     def add_stale_inflight(self) -> None:
-        """An abandoned dispatched attempt T3 reports as completed."""
+        """An abandoned dispatched attempt T3 reports as failed."""
 
         self.queue.add_task(reviewed(task("stale")))
         attempt = self.queue.claim(
@@ -359,12 +359,12 @@ class ScoutTickCase(unittest.TestCase):
         )
 
     def run_tick(self, reader=None, **kwargs):
-        completed = reconcile.T3Thread(
-            run_status="completed", active_run=False, last_error=None, last_activity_at=None,
+        failed = reconcile.T3Thread(
+            run_status="failed", active_run=False, last_error=None, last_activity_at=None,
             completed_at=None, unsettled_run=False, live_descendant=False,
         )
         with (
-            mock.patch.object(reconcile, "lookup_thread", return_value=completed),
+            mock.patch.object(reconcile, "lookup_thread", return_value=failed),
             mock.patch.object(scout, "read_all", return_value=snapshots()),
             mock.patch.object(
                 scout, "reconcile_inflight", wraps=scout.reconcile_inflight,

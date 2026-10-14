@@ -351,10 +351,12 @@ closed reasons is successful operation.
 
 Before the in-flight gate, scout reads T3 state through read-only SQLite. Active or unsettled
 parent runs and recursive subagent descendants with an active run or nonterminal latest run
-keep their ancestor running. A terminal parent run also stays running until 900 seconds
-after it ended. Scout then records `failed` for a settled terminal worker that omitted its
-terminal event, using that exact attempt and an unverified structured reason under the
-existing claim/lease lifecycle.
+keep their ancestor running. Native children without orchestration runs use explicit native
+subagent status; absent status stays held. Completed turns stay held regardless of age because
+CI watches, background tools and scheduled wakes may resume them and record a terminal event.
+Failed, cancelled and interrupted parent runs stay held until 900 seconds after they end.
+Scout can then record an unverified `failed` event using the exact attempt under the existing
+claim lifecycle.
 Running or unknown jobs remain held; missing status and elapsed time do not prove exit.
 Inspect the `reconciliation` list in scout JSON. `--dry-run` only proposes queue repairs.
 Ambiguous claims still require operator reconciliation and are never cleared automatically.
@@ -466,7 +468,7 @@ failure is verification-first. Missing authority, unknown launch ownership, and 
 repository identity remain held. Divergent parent refs require an explicit child start_ref.
 
 Ordinary public `requeue` schedules an operator recovery without deleting history and never
-reinterprets a retained hold. `requeue <task> --override-hold --reason <text>` is the one explicit escape: it converts a held authority-required, permanent, or no-progress operator recovery to scheduled now, and records "operator hold override" plus the reason in the recovery detail. It still refuses unknown-launch sources, tasks with dispatch claims, goal-managed tasks or any recovery admission rejection, verified done work, non-one-off tasks, changed contracts, and recoveries that are not held (exit 1). Automatic scout recovery never overrides a hold. Public requeue
+reinterprets a retained hold. `requeue <task> --override-hold --reason <text>` is the one explicit escape: it converts a held authority-required, permanent, or no-progress operator recovery to scheduled now, and records "operator hold override" plus the reason in the recovery detail. A T3 reconciliation closure can also be overridden after read-only T3 state proves its source and descendants are inactive; ambiguous launches remain refused. It still refuses tasks with dispatch claims, goal-managed tasks or any recovery admission rejection, verified done work, non-one-off tasks, changed contracts, and recoveries that are not held (exit 1). Automatic scout recovery never overrides a hold. Public requeue
 for goal-managed tasks remains rejected. GoalStore may internally admit implementation or
 integration recovery under its existing gates; a failed coordinator or frozen acceptance job
 uses its documented fresh follow-up path.

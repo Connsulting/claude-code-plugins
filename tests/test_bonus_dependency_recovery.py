@@ -886,6 +886,7 @@ class T3ClosureCompletionContracts(RecoveryCase):
         for index, signature in enumerate((
             "unknown_launch:ambiguous_dispatch", "unknown_launch:operator_override",
             "unknown_launch:missing_terminal_record_extra", "unknown_launch:t3_run",
+            "unknown_launch:t3_run_running", "unknown_launch:t3_run_completed",
         )):
             with self.subTest(signature=signature):
                 task_id = f"unknown-{index}"
@@ -930,19 +931,47 @@ class T3ClosureCompletionContracts(RecoveryCase):
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(self.complete("closed", source).status, "done")
 
-    def test_requeue_override_still_refuses_a_safely_recoverable_t3_closure(self):
-        source, _thread_id = self.prepare_closure()
+    def test_requeue_override_reconciles_only_a_quiescent_t3_closure(self):
+        source, thread_id = self.prepare_closure()
         before = self.snapshot()
+        self.state.run(thread_id, "running")
         with captured_json() as payloads:
             code = isolated_cli([
                 "requeue", "--database", str(self.queue.path), "closed", "--json",
-                "--override-hold", "--reason", "verified task completion exists",
+                "--attempt-id", source.id,
+                "--override-hold", "--reason", "worker stopped without completing",
                 "--now", str(NOW + 10),
             ])
         self.assertEqual(code, 1, payloads)
         self.assertIn("unknown_launch", payloads[0]["message"])
         self.assertEqual(self.snapshot(), before)
-        self.assertEqual(self.complete("closed", source).status, "done")
+        self.state.run(thread_id, "completed")
+        with captured_json() as payloads:
+            code = isolated_cli([
+                "requeue", "--database", str(self.queue.path), "closed", "--json",
+                "--attempt-id", source.id,
+                "--override-hold", "--reason", "worker stopped without completing",
+                "--now", str(NOW + 10),
+            ])
+        self.assertEqual(code, 0, payloads)
+        self.assertEqual(self.queue.recovery_for("closed").state, "scheduled")
+        self.assertEqual(self.queue.recovery_for("closed").mode, "verification")
+        self.assertEqual(self.snapshot()["runs"], before["runs"])
+        self.assertEqual(self.snapshot()["task_attempts"], before["task_attempts"])
+
+    def test_requeue_override_does_not_clear_a_live_descendant_or_ambiguous_launch(self):
+        source, thread_id = self.prepare_closure()
+        self.state.thread("child", thread_id)
+        self.state.run("child", "running")
+        before = self.snapshot()
+        with self.assertRaisesRegex(db.QueueError, "active or unsettled"):
+            self.queue.requeue("closed", attempt_id=source.id, override_reason="worker stopped")
+        self.assertEqual(self.snapshot(), before)
+        source, _ = self.prepare_closure("ambiguous", signature="unknown_launch:ambiguous_dispatch")
+        before = self.snapshot()
+        with self.assertRaisesRegex(db.QueueError, "T3 reconciliation closure"):
+            self.queue.requeue("ambiguous", attempt_id=source.id, override_reason="worker stopped")
+        self.assertEqual(self.snapshot(), before)
 
 
 class RecoverCompleteContracts(RecoveryCase):
