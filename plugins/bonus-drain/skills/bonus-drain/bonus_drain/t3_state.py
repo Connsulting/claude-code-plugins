@@ -68,11 +68,20 @@ SELECT latest.status,
            SELECT 1 FROM orchestration_v2_projection_runs a
            WHERE a.thread_id = d.thread_id
              AND a.status IN ('preparing', 'starting', 'running')
-         ) OR COALESCE(
-           (SELECT r.status FROM orchestration_v2_projection_runs r
-            WHERE r.thread_id = d.thread_id
-            ORDER BY r.ordinal DESC, r.run_id DESC LIMIT 1), ''
-         ) NOT IN ({_TERMINAL_RUN_SQL})
+         ) OR EXISTS (
+           SELECT 1 FROM orchestration_v2_projection_subagents s
+           WHERE s.child_thread_id = d.thread_id AND s.origin = 'provider_native'
+             AND COALESCE(s.status, '') NOT IN ({_TERMINAL_RUN_SQL})
+         ) OR CASE WHEN EXISTS (
+           SELECT 1 FROM orchestration_v2_projection_runs r WHERE r.thread_id = d.thread_id
+         ) THEN (
+           SELECT r.status FROM orchestration_v2_projection_runs r
+           WHERE r.thread_id = d.thread_id
+           ORDER BY r.ordinal DESC, r.run_id DESC LIMIT 1
+         ) NOT IN ({_TERMINAL_RUN_SQL}) ELSE NOT EXISTS (
+           SELECT 1 FROM orchestration_v2_projection_subagents s
+           WHERE s.child_thread_id = d.thread_id AND s.origin = 'provider_native'
+         ) END
        )
 FROM orchestration_v2_projection_threads t
 LEFT JOIN orchestration_v2_projection_runs latest

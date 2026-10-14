@@ -33,7 +33,7 @@ different parent remotes, targets, or unmerged branches.
 Authority-required, permanent, unknown-launch, and no-progress recovery holds never retry
 silently. Continuing that work requires a fresh, explicit follow-up task under reviewed policy
 and authority; plain requeue or edit does not reinterpret the retained hold.
-`requeue <task> --override-hold --reason <text>` is the one explicit escape: it converts a held authority-required, permanent, or no-progress operator recovery to scheduled now, and records "operator hold override" plus the reason in the recovery detail. It still refuses unknown-launch sources, tasks with dispatch claims, goal-managed tasks or any recovery admission rejection, verified done work, non-one-off tasks, changed contracts, and recoveries that are not held (exit 1). Automatic scout recovery never overrides a hold.
+`requeue <task> --override-hold --reason <text>` is the one explicit escape: it converts a held authority-required, permanent, or no-progress operator recovery to scheduled now, and records "operator hold override" plus the reason in the recovery detail. A T3 reconciliation closure can also be overridden after read-only T3 state proves its source and descendants are inactive; ambiguous launches remain refused. It still refuses tasks with dispatch claims, goal-managed tasks or any recovery admission rejection, verified done work, non-one-off tasks, changed contracts, and recoveries that are not held (exit 1). Automatic scout recovery never overrides a hold.
 
 Prerequisites must be existing one-off tasks. Children may be one-off or recurring; a recurring
 child uses those completed one-off prerequisites for each recurrence. Recurring prerequisites

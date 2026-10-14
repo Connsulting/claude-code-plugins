@@ -337,7 +337,7 @@ class ContinuationTests(RecoveryCase):
                 runtime(self.queue.path), self.queue, now_epoch=NOW + 5,
             )
         self.assertEqual(reports[0]["action"], "held")
-        self.assertIn("continuation liveness is not proven", reports[0]["reason"])
+        self.assertIn("task may resume", reports[0]["reason"])
         states = {
             attempt.id: attempt.state for attempt in self.queue.attempts(task_id="live")
         }

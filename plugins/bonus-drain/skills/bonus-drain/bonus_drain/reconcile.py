@@ -51,6 +51,9 @@ def _normalize_observation(raw: T3Thread | None, *, now_epoch: int | None) -> _O
     now = float(now_epoch) if now_epoch is not None else datetime.now(timezone.utc).timestamp()
     if ended_at is not None and now - ended_at < _ABANDONED_TURN_IDLE_SECONDS:
         return _Observation(status, "worker is running", "worker is running", "")
+    if status == "completed":
+        reason = "T3 turn completed; task may resume and record its terminal event"
+        return _Observation(status, reason, reason, "")
     if status in {"cancelled", "interrupted"}:
         reason = f"T3 run_status {status} without a terminal record"
         return _Observation(status, None, reason, f"unknown_launch:t3_run_{status}")
@@ -69,7 +72,8 @@ def reconcile_inflight(
     ``thread_lookup`` is a test seam. Runtime callers leave it unset and read
     ``~/.t3/userdata/statev2.sqlite`` read-only. A missing observation
     stays held. Active or unsettled parent/descendant runs and a parent run that
-    ended less than 900 seconds ago stay held.
+    ended less than 900 seconds ago stay held. Completed turns stay held regardless
+    of age: CI watches, background tools, or scheduled wakes may resume the task.
     """
 
     reports: list[dict[str, Any]] = []

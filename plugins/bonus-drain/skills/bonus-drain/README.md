@@ -324,15 +324,17 @@ work. It allows at most two recovery attempts, after 5-minute and 30-minute back
 early when the normalized failure reason repeats. Unknown launch state, missing authority, and
 unavailable or malformed repository identity stay held. Divergent parent refs require an explicit
 child start_ref. Ordinary requeue schedules an operator
-recovery without deleting history and leaves retained holds held. `requeue <task> --override-hold --reason <text>` is the one explicit escape: it converts a held authority-required, permanent, or no-progress operator recovery to scheduled now, and records "operator hold override" plus the reason in the recovery detail. It still refuses unknown-launch sources, tasks with dispatch claims, goal-managed tasks or any recovery admission rejection, verified done work, non-one-off tasks, changed contracts, and recoveries that are not held (exit 1). Automatic scout recovery never overrides a hold. Goal-managed public requeue remains rejected; the goal runtime
+recovery without deleting history and leaves retained holds held. `requeue <task> --override-hold --reason <text>` is the one explicit escape: it converts a held authority-required, permanent, or no-progress operator recovery to scheduled now, and records "operator hold override" plus the reason in the recovery detail. A T3 reconciliation closure can also be overridden after read-only T3 state proves its source and descendants are inactive; ambiguous launches remain refused. It still refuses tasks with dispatch claims, goal-managed tasks or any recovery admission rejection, verified done work, non-one-off tasks, changed contracts, and recoveries that are not held (exit 1). Automatic scout recovery never overrides a hold. Goal-managed public requeue remains rejected; the goal runtime
 may admit implementation or integration recovery under its existing guards, while coordinator and
 frozen acceptance failures require fresh follow-up jobs.
 
 Scout reads T3 state through read-only SQLite before the in-flight gate. Active or unsettled
 parent runs and recursive subagent descendants with an active run or nonterminal latest run
-keep their ancestor running. A terminal parent run stays running for 900 seconds after it
-ends; an older terminal run with no queue terminal record closes as an unverified failure.
-Missing or unreadable state stays held.
+keep their ancestor running. Native children without orchestration runs use explicit native
+subagent status; absent status stays held. Completed turns stay held regardless of age because
+a watch, background tool or scheduled wake may resume the task and record its result. Failed,
+cancelled and interrupted runs stay held for 900 seconds before an unverified failure can be
+recorded. Missing or unreadable state stays held.
 
 `recover-complete` can consume an unknown-launch reconciliation hold only when the source
 attempt's signature is `unknown_launch:missing_terminal_record` or `unknown_launch:t3_run_*`,
