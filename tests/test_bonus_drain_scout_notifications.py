@@ -120,6 +120,55 @@ class ScoutNotificationTests(unittest.TestCase):
         )
         self.assertEqual(len(self.bodies), 1)
 
+    def test_usage_outage_threshold_deduplication_and_recovery_through_scout(self):
+        snapshot = {"provider_id": "alpha", "account_id": "alpha-account",
+                    "captured_at": NOW, "fresh": False,
+                    "error": "proxy usage unavailable secret", "limits": {}}
+
+        def tick(now, unhealthy=True, **kwargs):
+            reading = dict(snapshot, captured_at=now, fresh=not unhealthy,
+                           error=snapshot["error"] if unhealthy else None)
+            report = scout.ScoutReport(
+                now, False, PlanResult((), {}, (), now, (reading,)), (), (), (),
+            )
+            with mock.patch.object(scout, "_run_locked", return_value=report):
+                result = scout.run_once(self.cfg, self.queue, now_epoch=now, **kwargs)
+            self.assertEqual(result, report)
+
+        tick(NOW)
+        tick(NOW + 3599)
+        self.assertEqual(self.bodies, [])
+        self.queue = db.QueueDB(self.queue.path)
+        tick(NOW + 3600)
+        tick(NOW + 90000)
+        self.assertEqual(len(self.bodies), 1)
+        self.assertIn("usage_unavailable", self.bodies[0])
+        self.assertNotIn("secret", self.bodies[0])
+        tick(NOW + 90001, unhealthy=False)
+        tick(NOW + 90002, unhealthy=False)
+        self.assertEqual(len(self.bodies), 2)
+        self.assertIn("recovered", self.bodies[1])
+        tick(NOW + 90003)
+        tick(NOW + 93603)
+        self.assertEqual(len(self.bodies), 3)
+
+    def test_usage_outage_transient_and_reserve_closures_do_not_alert(self):
+        def tick(now, fresh):
+            reading = {"provider_id": "alpha", "account_id": "alpha-account",
+                       "captured_at": now, "fresh": fresh,
+                       "error": None if fresh else "proxy usage unavailable"}
+            report = scout.ScoutReport(
+                now, False, PlanResult((), {("alpha", "alpha"): "at reserve target"},
+                                       (), now, (reading,)), (), (), (),
+            )
+            with mock.patch.object(scout, "_run_locked", return_value=report):
+                scout.run_once(self.cfg, self.queue, now_epoch=now)
+
+        tick(NOW, False)
+        tick(NOW + 3599, True)
+        tick(NOW + 7200, False)
+        self.assertEqual(self.bodies, [])
+
     def test_http_failure_preserves_cli_exit_and_dispatched_output(self):
         self.response_status = 503
         dispatched = mock.Mock()
