@@ -904,22 +904,39 @@ class QueueDB:
 
     def reserve_scout_notice(
         self, *, stuck: bool, kinds: list[str], tasks: list[str], now_epoch: int,
+        usage_outage: bool, usage_threshold_seconds: int,
     ) -> dict[str, Any] | None:
         """Reserve a health transition or daily reminder before attempting delivery.
 
         Delivery failures consume the reservation, keeping a broken notification service
-        from causing repeated requests. This state never changes queue or dispatch rows.
+        from causing repeated requests. Usage-only outages do not receive daily reminders.
+        This state never changes queue or dispatch rows.
         """
 
         self.initialize()
         with self._transaction() as connection:
+            if usage_outage:
+                connection.execute(
+                    "INSERT OR IGNORE INTO scout_usage_outage VALUES(1, ?)", (now_epoch,),
+                )
+                first_seen = connection.execute(
+                    "SELECT first_seen_at FROM scout_usage_outage WHERE singleton=1",
+                ).fetchone()[0]
+                if now_epoch - first_seen >= usage_threshold_seconds:
+                    stuck = True
+                    kinds = sorted({*kinds, "usage_unavailable"})
+            else:
+                connection.execute("DELETE FROM scout_usage_outage WHERE singleton=1")
             previous = connection.execute(
                 "SELECT * FROM scout_notification_state WHERE singleton=1",
             ).fetchone()
             was_stuck = previous is not None and bool(previous["stuck"])
             if not stuck and not was_stuck:
                 return None
-            due = not was_stuck or now_epoch - previous["last_notice_at"] >= 86_400
+            due = not was_stuck or (
+                kinds != ["usage_unavailable"]
+                and now_epoch - previous["last_notice_at"] >= 86_400
+            )
             notice = None
             if not stuck:
                 notice = {

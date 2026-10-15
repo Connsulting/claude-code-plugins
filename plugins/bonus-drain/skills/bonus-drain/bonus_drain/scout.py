@@ -773,6 +773,13 @@ def run_once(
             config, queue, now_epoch=now, exit_status=0 if not report.errors else 1,
             errors=report.errors, blockers=report.blockers, dry_run=report.dry_run,
             skipped=report.skipped is not None,
+            usage_outage=any(
+                item.get("fresh") is False or bool(item.get("error"))
+                for item in report.plan.subscriptions
+            ) or any(
+                reason in {"proxy account inventory unavailable", "no proxy subscriptions"}
+                for reason in report.plan.closed.values()
+            ),
         )
         return report
     finally:

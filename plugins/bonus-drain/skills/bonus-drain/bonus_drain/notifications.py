@@ -71,6 +71,7 @@ def scout_health(
     blockers: Sequence[Mapping[str, Any]] = (),
     dry_run: bool = False,
     skipped: bool = False,
+    usage_outage: bool = False,
 ) -> None:
     """Never let notification storage or transport change the scout's result."""
 
@@ -93,6 +94,7 @@ def scout_health(
         try:
             notice = queue.reserve_scout_notice(
                 stuck=stuck, kinds=kinds, tasks=tasks, now_epoch=now_epoch,
+                usage_outage=usage_outage, usage_threshold_seconds=config.usage_max_age_seconds,
             )
         except sqlite3.OperationalError as error:
             _storage_unwritable_notice(config, queue, error)

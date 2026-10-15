@@ -190,3 +190,8 @@ CREATE TABLE IF NOT EXISTS usage_history (
 );
 CREATE INDEX IF NOT EXISTS idx_usage_history_account
   ON usage_history(account_id, limit_id, ts);
+
+CREATE TABLE IF NOT EXISTS scout_usage_outage (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  first_seen_at INTEGER NOT NULL
+);
