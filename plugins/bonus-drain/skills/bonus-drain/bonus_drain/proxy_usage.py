@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import math
 import re
+import sqlite3
 import time
 from collections.abc import Mapping
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -27,6 +29,7 @@ ANTHROPIC_URL = "https://api.anthropic.com/api/oauth/usage"
 CODEX_URL = "https://chatgpt.com/backend-api/wham/usage"
 GROK_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
 MUSE_URL = "https://api.meta.ai/muse-code/key"
+MUSE_PROBE_URL = "https://api.meta.ai/v1/responses"
 TARGETS = {
     ANTHROPIC_URL: {
         "anthropic-beta": "oauth-2025-04-20",
@@ -41,6 +44,10 @@ TARGETS = {
     },
     MUSE_URL: {
         "Accept": "application/json", "Content-Type": "application/json",
+        "x-api-version": "1.0.0",
+    },
+    MUSE_PROBE_URL: {
+        "Accept": "text/event-stream", "Content-Type": "application/json",
         "x-api-version": "1.0.0",
     },
 }
@@ -59,7 +66,8 @@ class _NoRedirect(HTTPRedirectHandler):
 
 
 class ProxyReader:
-    def __init__(self, config: RuntimeConfig) -> None:
+    def __init__(self, config: RuntimeConfig, *, cache_root: str | Path | None = None,
+                 now_epoch: int | None = None) -> None:
         ref = next((item for item in config.secret_refs
                     if item.id == config.proxy_secret_ref and item.source == "file"), None)
         if ref is None:
@@ -93,7 +101,11 @@ class ProxyReader:
         self._base = base
         self._key = key
         self._opener = build_opener(_NoRedirect())
+        self._config = config
+        self._cache_root = Path(cache_root) if cache_root is not None else config.usage_cache_dir
+        self._now_epoch = now_epoch
         self._muse_files: dict[str, str] = {}
+        self._muse_accounts: set[str] | None = None
 
     def _request(self, endpoint: str, payload: Mapping[str, Any] | None = None) -> Any:
         data = None if payload is None else json.dumps(payload).encode("utf-8")
@@ -119,6 +131,7 @@ class ProxyReader:
         accounts = []
         seen = set()
         self._muse_files.clear()
+        muse_accounts = set()
         for row in rows:
             if not isinstance(row, Mapping):
                 raise UsageError("invalid proxy account entry")
@@ -139,6 +152,7 @@ class ProxyReader:
             account = ProxyAccount(provider + "-" + index, provider,
                                    provider not in PROVIDER_TARGETS)
             if provider == "muse":
+                muse_accounts.add(index)
                 filename = row.get("name")
                 if isinstance(filename, str) and filename:
                     self._muse_files[index] = filename
@@ -146,10 +160,11 @@ class ProxyReader:
                 raise UsageError("duplicate proxy account")
             seen.add(account.id)
             accounts.append((account, index))
+        self._muse_accounts = muse_accounts
         return tuple(accounts)
 
     def api_call(self, auth_index: str, url: str) -> Mapping[str, Any]:
-        if url not in TARGETS:
+        if url not in PROVIDER_TARGETS.values():
             raise UsageError("usage target is not allowed")
         payload = {
             "auth_index": auth_index, "method": "GET", "url": url,
@@ -178,6 +193,70 @@ class ProxyReader:
         if not isinstance(body, Mapping):
             raise UsageError("invalid provider usage response")
         return body
+
+    def _claim_muse_probe(self, auth_index: str) -> bool:
+        self._cache_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = self._cache_root / "muse-probes.sqlite3"
+        now = time.time() if self._now_epoch is None else self._now_epoch
+        with closing(sqlite3.connect(path, timeout=5)) as connection:
+            path.chmod(0o600)
+            connection.execute("PRAGMA synchronous=FULL")
+            with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute("""CREATE TABLE IF NOT EXISTS muse_probes (
+                    auth_index TEXT PRIMARY KEY, attempted_at REAL NOT NULL)""")
+                claimed = connection.execute("""INSERT INTO muse_probes VALUES (?, ?)
+                    ON CONFLICT(auth_index) DO UPDATE SET attempted_at=excluded.attempted_at
+                    WHERE muse_probes.attempted_at <= excluded.attempted_at - 3600""",
+                    (auth_index, now)).rowcount == 1
+        return claimed
+
+    def probe_muse(self, auth_index: str) -> dict[str, Mapping[str, float | int]]:
+        if self._muse_accounts is None:
+            self.accounts(self._config)
+        if auth_index not in self._muse_accounts:
+            raise UsageError("Muse probe requires a Muse account")
+        try:
+            if not self._claim_muse_probe(auth_index):
+                return {}
+            raw = self._request("api-call", {
+                "auth_index": auth_index, "method": "POST", "url": MUSE_PROBE_URL,
+                "header": {"Authorization": "Bearer $TOKEN$", **TARGETS[MUSE_PROBE_URL]},
+                "data": json.dumps({"model": "muse-spark-1.3", "input": "ping",
+                                    "max_output_tokens": 16, "stream": True}),
+            })
+            if not isinstance(raw, Mapping) or raw.get("status_code") != 200:
+                raise UsageError("Muse probe request failed")
+            body = raw.get("body")
+            if not isinstance(body, str):
+                raise UsageError("invalid Muse probe response")
+            event = ""
+            data = []
+            for line in body.splitlines():
+                if not line:
+                    if event == "response.subscription_usage":
+                        frame = json.loads("\n".join(data))
+                        if not isinstance(frame, Mapping):
+                            raise UsageError("invalid Muse probe usage frame")
+                        return parse_windows("muse", {"subs_usage": frame.get("subscription")})
+                    event = ""
+                    data = []
+                    continue
+                field, separator, value = line.partition(":")
+                if separator:
+                    value = value.removeprefix(" ")
+                    if field == "event":
+                        event = value
+                    elif field == "data":
+                        data.append(value)
+            raise UsageError("missing Muse probe usage frame")
+        except (UsageError, OSError, sqlite3.Error, ValueError, TypeError, OverflowError):
+            return {}
+
+
+def _muse_idle(body: Mapping[str, Any]) -> bool:
+    return ("subs_usage" not in body and body.get("is_subs_active") is True
+            and body.get("require_payment") is False)
 
 
 def _reading(raw: Any, percent: str, reset: str) -> dict[str, float | int]:
@@ -224,9 +303,8 @@ def parse_windows(provider: str, body: Mapping[str, Any]) -> dict[str, Mapping[s
             "used_percent": config.get("creditUsagePercent"), "resets_at": period.get("end"),
         }, "used_percent", "resets_at")
     elif provider == "muse":
-        if ("subs_usage" not in body and body.get("is_subs_active") is True
-                and body.get("require_payment") is False):
-            # Muse drops subs_usage after a window reset: a healthy account with no reading keeps its gate closed.
+        if _muse_idle(body):
+            # Muse omits subs_usage while idle; no budget reading keeps its gate closed.
             return windows
         limits = body.get("subs_usage")
         if not isinstance(limits, Mapping):
@@ -243,15 +321,18 @@ def refresh(config: RuntimeConfig, cache_root: str | Path | None = None, *,
             now_epoch: int | None = None) -> dict[tuple[str, str], UsageSnapshot]:
     now = int(time.time() if now_epoch is None else now_epoch)
     root = Path(cache_root) if cache_root is not None else config.usage_cache_dir
-    reader = ProxyReader(config)
+    reader = ProxyReader(config, cache_root=root, now_epoch=now_epoch)
     accounts = reader.accounts(config)
     results = {}
     for account, index in accounts:
         for attempt in range(2):
             try:
-                windows = {} if account.unmetered else parse_windows(
-                    account.provider_id, reader.api_call(index, PROVIDER_TARGETS[account.provider_id]),
-                )
+                windows = {}
+                if not account.unmetered:
+                    body = reader.api_call(index, PROVIDER_TARGETS[account.provider_id])
+                    windows = parse_windows(account.provider_id, body)
+                    if account.provider_id == "muse" and _muse_idle(body):
+                        windows = reader.probe_muse(index)
                 snapshot = UsageSnapshot(account.provider_id, account.id, now, windows,
                                          unmetered=account.unmetered)
                 break

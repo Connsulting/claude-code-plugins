@@ -182,7 +182,7 @@ From the skill directory, install a version and the five self-owned unit templat
 
 Reinstalling changed source under an existing version is refused. Use
 `./install.sh --install-version VERSION` to choose a publication version. For an approved
-Git publication, use `0.3.16+main.MERGED_SHA`, replacing `MERGED_SHA` with the merged commit
+Git publication, use `0.3.17+main.MERGED_SHA`, replacing `MERGED_SHA` with the merged commit
 SHA. Combine `--install-version` and `--home DIR` in either order for a selected home.
 Doctor compares the installed payload with its recorded source checkout while that checkout
 exists. If the source checkout is gone, this drift check is unavailable; installation ownership

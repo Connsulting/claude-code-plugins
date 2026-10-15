@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -70,6 +71,19 @@ class ProxyUsageTests(unittest.TestCase):
             },
         }
         self.muse_auth = {"dca_token": "dca:private-muse-token", "other": "private-auth-field"}
+        self.probe_body = 'event: response.subscription_usage\ndata: ' + json.dumps({
+            "subscription": {
+                "tier": "private-subscription-tier",
+                "weekly": {"resets_at": self.now + 14400, "used_percent": 89},
+                "window": {"resets_at": self.now + 18000, "used_percent": 0,
+                           "window_duration_mins": 300},
+            },
+            "type": "response.subscription_usage",
+        }) + '\n\n'
+        self.probe_status = 200
+        self.probe_http_status = 200
+        self.probe_cache_root = None
+        self.probe_claims = []
         self.fail_once = set()
         self.failure = set()
         self.redirect = False
@@ -96,11 +110,27 @@ class ProxyUsageTests(unittest.TestCase):
                 self.wfile.write(json.dumps(response).encode())
 
             def do_POST(self):
+                if self.headers.get("Authorization") != "Bearer fixture-management-credential":
+                    self.send_error(401)
+                    return
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 owner.requests.append(("POST", self.path, body))
+                index = body["auth_index"]
+                if body["url"] == proxy_usage.MUSE_PROBE_URL:
+                    root = owner.probe_cache_root or owner.config.usage_cache_dir
+                    with sqlite3.connect(f"{(root / 'muse-probes.sqlite3').as_uri()}?mode=ro",
+                                         uri=True, timeout=1) as connection:
+                        claim = connection.execute(
+                            "SELECT attempted_at FROM muse_probes WHERE auth_index=?", (index,),
+                        ).fetchone()
+                    owner.probe_claims.append((index, claim))
+                    self.send_response(owner.probe_http_status)
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"status_code": owner.probe_status,
+                                                "body": owner.probe_body}).encode())
+                    return
                 self.send_response(200)
                 self.end_headers()
-                index = body["auth_index"]
                 failed = index in owner.failure or index in owner.fail_once
                 owner.fail_once.discard(index)
                 response = {"status_code": 401 if failed else 200,
@@ -137,6 +167,10 @@ class ProxyUsageTests(unittest.TestCase):
         return subprocess.run([str(SKILL / "bin/bonus-drain"), command,
                                "--config", str(self.config_path), "--json", *extra],
                               capture_output=True, text=True, check=False)
+
+    def probe_calls(self):
+        return [body for method, _path, body in self.requests
+                if method == "POST" and body["url"] == proxy_usage.MUSE_PROBE_URL]
 
     def test_refresh_cli_and_plan_cli_share_proxy_cache(self):
         refresh = self.cli("refresh")
@@ -235,10 +269,13 @@ class ProxyUsageTests(unittest.TestCase):
             "header": {"Authorization": "Bearer dca:private-muse-token", **proxy_usage.TARGETS[proxy_usage.MUSE_URL]},
             "data": "{}",
         })
+        self.assertEqual(self.probe_calls(), [])
+        self.assertFalse((self.config.usage_cache_dir / "muse-probes.sqlite3").exists())
 
     def test_api_call_rejects_every_nonexact_target_before_network(self):
         reader = proxy_usage.ProxyReader(self.config)
-        for url in ("https://evil.invalid", proxy_usage.CODEX_URL + "?x=1", proxy_usage.ANTHROPIC_URL + "/"):
+        for url in ("https://evil.invalid", proxy_usage.CODEX_URL + "?x=1",
+                    proxy_usage.ANTHROPIC_URL + "/", proxy_usage.MUSE_PROBE_URL):
             with self.assertRaises(usage.UsageError):
                 reader.api_call("a", url)
         self.assertEqual(self.requests, [])
@@ -511,10 +548,9 @@ class ProxyUsageTests(unittest.TestCase):
             "seven_day": {"used_percent": 9.0, "resets_at": self.now + 18000},
         })
 
-    def test_muse_active_without_usage_is_fresh_but_gated(self):
-        # Muse omits subs_usage after a window reset; that is a healthy account with no budget reading,
-        # not an outage, and it must still never open the gate.
+    def test_muse_active_without_probe_usage_is_fresh_but_gated(self):
         self.bodies["e"] = {"is_subs_active": True, "require_payment": False}
+        self.probe_body = 'event: response.completed\ndata: {}\n\n'
         records = usage.refresh_all(self.config, now_epoch=self.now)
         snapshot = records[("muse", "muse-e")]
         self.assertTrue(snapshot.fresh)
@@ -526,13 +562,195 @@ class ProxyUsageTests(unittest.TestCase):
         self.assertNotIn("muse", [b.provider_id for b in plan.batches])
         self.assertIn("codex", [b.provider_id for b in plan.batches])
 
+    def test_muse_probe_sends_fixed_request_and_reads_recorded_sse_frame(self):
+        self.probe_body = (
+            'event: response.subscription_usage\n'
+            'data: {"subscription":{"tier":"private-subscription-tier",'
+            '"weekly":{"resets_at":1792368000,"used_percent":89},'
+            '"window":{"resets_at":1792084785,"used_percent":0,'
+            '"window_duration_mins":300}},"type":"response.subscription_usage"}\n\n'
+        )
+        reader = proxy_usage.ProxyReader(self.config, now_epoch=self.now)
+        windows = reader.probe_muse("e")
+        self.assertEqual(windows, {
+            "five_hour": {"used_percent": 0.0, "resets_at": 1792084785},
+            "seven_day": {"used_percent": 89.0, "resets_at": 1792368000},
+        })
+        self.assertEqual(self.probe_calls(), [{
+            "auth_index": "e", "method": "POST", "url": "https://api.meta.ai/v1/responses",
+            "header": {"Authorization": "Bearer $TOKEN$", "Content-Type": "application/json",
+                       "Accept": "text/event-stream", "x-api-version": "1.0.0"},
+            "data": json.dumps({"model": "muse-spark-1.3", "input": "ping",
+                                "max_output_tokens": 16, "stream": True}),
+        }])
+        self.assertEqual(self.requests[-1][:2], ("POST", "/v0/management/api-call"))
+        self.assertEqual(self.probe_claims, [("e", (self.now,))])
+        self.assertFalse(any("/download?" in path for _method, path, _body in self.requests))
+        with self.assertRaises(TypeError):
+            reader.probe_muse("e", prompt="arbitrary")
+
+    def test_muse_idle_refresh_uses_probe_windows_and_sanitizes_cache(self):
+        self.bodies["e"] = {"is_subs_active": True, "require_payment": False}
+        records = usage.refresh_all(self.config, now_epoch=self.now)
+        snapshot = records[("muse", "muse-e")]
+        self.assertTrue(snapshot.fresh)
+        self.assertIsNone(snapshot.error)
+        self.assertEqual(snapshot.captured_at, self.now)
+        self.assertEqual(snapshot.limits, {
+            "five_hour": {"used_percent": 0.0, "resets_at": self.now + 18000},
+            "seven_day": {"used_percent": 89.0, "resets_at": self.now + 14400},
+        })
+        plan = planner.build_plan(self.config, records, eligible_count=10, now_epoch=self.now)
+        self.assertTrue(next(g for g in plan.gates if g.provider_id == "muse").open)
+        cached = usage.read_all(self.config, now_epoch=self.now)[("muse", "muse-e")]
+        self.assertEqual(cached.limits, snapshot.limits)
+        for path in self.config.usage_cache_dir.rglob("*.json"):
+            text = path.read_text()
+            for secret in ("private-subscription-tier", "dca:private-muse-token",
+                           "fixture-management-credential", "Authorization"):
+                self.assertNotIn(secret, text)
+
+    def test_muse_probe_throttle_survives_readers_restart_and_hour_boundary(self):
+        self.bodies["e"] = {"is_subs_active": True, "require_payment": False}
+        first = usage.refresh_all(self.config, now_epoch=self.now)[("muse", "muse-e")]
+        self.assertTrue(first.limits)
+        reader = proxy_usage.ProxyReader(self.config, now_epoch=self.now + 1)
+        self.assertEqual(reader.probe_muse("e"), {})
+        restarted = self.cli("refresh", "--now", str(self.now + 3599))
+        self.assertEqual(restarted.returncode, 0, restarted.stderr)
+        snapshot = next(row for row in json.loads(restarted.stdout)["accounts"]
+                        if row["account_id"] == "muse-e")
+        self.assertTrue(snapshot["fresh"])
+        self.assertIsNone(snapshot["error"])
+        self.assertEqual(snapshot["captured_at"], self.now + 3599)
+        self.assertEqual(snapshot["limits"], {})
+        self.assertEqual(len(self.probe_calls()), 1)
+        boundary = self.cli("refresh", "--now", str(self.now + 3600))
+        self.assertEqual(boundary.returncode, 0, boundary.stderr)
+        snapshot = next(row for row in json.loads(boundary.stdout)["accounts"]
+                        if row["account_id"] == "muse-e")
+        self.assertTrue(snapshot["limits"])
+        self.assertEqual(len(self.probe_calls()), 2)
+        self.assertEqual(self.probe_claims, [("e", (self.now,)), ("e", (self.now + 3600,))])
+
+    def test_muse_probe_throttle_is_per_account(self):
+        idle = {"is_subs_active": True, "require_payment": False}
+        self.bodies["e"] = self.bodies["e2"] = idle
+        self.files.append({"provider": "muse", "auth_index": "e2", "name": "meta-e2.json"})
+        for offset in (0, 3599, 3600):
+            records = usage.refresh_all(self.config, now_epoch=self.now + offset)
+            for index in ("e", "e2"):
+                self.assertEqual(bool(records[("muse", "muse-" + index)].limits), offset != 3599)
+        self.assertEqual([call["auth_index"] for call in self.probe_calls()], ["e", "e2", "e", "e2"])
+
+    def test_muse_probe_claim_is_atomic_across_concurrent_readers(self):
+        barrier = threading.Barrier(2)
+
+        def probe():
+            reader = proxy_usage.ProxyReader(self.config, now_epoch=self.now)
+            reader.accounts(self.config)
+            barrier.wait(timeout=5)
+            return reader.probe_muse("e")
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(probe) for _ in range(2)]
+            readings = [future.result(timeout=10) for future in futures]
+        self.assertEqual(sorted(bool(reading) for reading in readings), [False, True])
+        self.assertEqual(len(self.probe_calls()), 1)
+        self.assertEqual(self.probe_claims, [("e", (self.now,))])
+
+    def test_muse_probe_uses_overridden_usage_cache_root(self):
+        root = self.root / "alternate-usage"
+        self.probe_cache_root = root
+        self.bodies["e"] = {"is_subs_active": True, "require_payment": False}
+        first = usage.refresh_all(self.config, root, now_epoch=self.now)
+        self.assertTrue(first[("muse", "muse-e")].limits)
+        second = usage.refresh_all(self.config, root, now_epoch=self.now + 3599)
+        self.assertEqual(second[("muse", "muse-e")].limits, {})
+        self.assertEqual(len(self.probe_calls()), 1)
+        self.assertTrue((root / "muse-probes.sqlite3").is_file())
+        self.assertFalse((self.config.usage_cache_dir / "muse-probes.sqlite3").exists())
+
+    def test_muse_probe_state_failure_prevents_external_effect(self):
+        reader = proxy_usage.ProxyReader(self.config, cache_root=self.root / "proxy.env")
+        self.assertEqual(reader.probe_muse("e"), {})
+        self.assertEqual(self.probe_calls(), [])
+
+    def test_muse_probe_rejects_other_providers_before_external_effect(self):
+        reader = proxy_usage.ProxyReader(self.config)
+        for index in ("a", "b", "c", "d", "off", "unknown"):
+            with self.subTest(index=index), self.assertRaises(usage.UsageError):
+                reader.probe_muse(index)
+        self.assertEqual(self.probe_calls(), [])
+        self.assertFalse((self.config.usage_cache_dir / "muse-probes.sqlite3").exists())
+
+    def test_failed_muse_probe_is_fresh_gated_and_throttled(self):
+        self.bodies["e"] = {"is_subs_active": True, "require_payment": False}
+        for offset, (http_status, status) in enumerate(((200, 401), (200, 429), (200, 500), (503, 200))):
+            with self.subTest(http_status=http_status, status=status):
+                self.probe_http_status = http_status
+                self.probe_status = status
+                self.probe_body = "private-provider-token"
+                now = self.now + offset * 7200
+                before = len(self.probe_calls())
+                for captured in (now, now + 3599):
+                    records = usage.refresh_all(self.config, now_epoch=captured)
+                    snapshot = records[("muse", "muse-e")]
+                    self.assertTrue(snapshot.fresh)
+                    self.assertIsNone(snapshot.error)
+                    self.assertEqual(snapshot.captured_at, captured)
+                    self.assertEqual(snapshot.limits, {})
+                    self.assertNotIn("private", json.dumps(snapshot.cache_dict()))
+                    plan = planner.build_plan(self.config, records, eligible_count=10, now_epoch=captured)
+                    self.assertFalse(next(g for g in plan.gates if g.provider_id == "muse").open)
+                self.assertEqual(len(self.probe_calls()), before + 1)
+        self.sleep.assert_not_called()
+
+    def test_muse_probe_rejects_malformed_frames_and_usage_without_refresh_error(self):
+        self.bodies["e"] = {"is_subs_active": True, "require_payment": False}
+        valid = json.loads(self.probe_body.split("data: ", 1)[1])
+        invalid = [None, {}, "", "private-provider-token",
+                   'event: response.completed\ndata: {}\n\n',
+                   'event: response.subscription_usage\ndata: private-provider-token\n\n',
+                   'event: response.subscription_usage\ndata: []\n\n',
+                   'event: response.subscription_usage\ndata: {}\n\n',
+                   self.probe_body.rstrip("\n")]
+        for duration in (None, 60, "300", True):
+            frame = json.loads(json.dumps(valid))
+            frame["subscription"]["window"]["window_duration_mins"] = duration
+            invalid.append('event: response.subscription_usage\ndata: ' + json.dumps(frame) + '\n\n')
+        for name in ("window", "weekly"):
+            for field, values in (("used_percent", (None, True, -1, 101, float("nan"), "3")),
+                                  ("resets_at", (None, True, [], "invalid", float("inf")))):
+                for value in values:
+                    frame = json.loads(json.dumps(valid))
+                    frame["subscription"][name][field] = value
+                    invalid.append('event: response.subscription_usage\ndata: ' + json.dumps(frame) + '\n\n')
+        for offset, body in enumerate(invalid):
+            with self.subTest(case=offset):
+                self.probe_body = body
+                now = self.now + offset * 3600
+                records = usage.refresh_all(self.config, now_epoch=now)
+                snapshot = records[("muse", "muse-e")]
+                self.assertTrue(snapshot.fresh)
+                self.assertIsNone(snapshot.error)
+                self.assertEqual(snapshot.limits, {})
+                self.assertEqual(snapshot.captured_at, now)
+        self.assertEqual(len(self.probe_calls()), len(invalid))
+        self.sleep.assert_not_called()
+
     def test_muse_without_usage_and_unclear_subscription_stays_unavailable(self):
         for body in ({"is_subs_active": False, "require_payment": False},
-                     {"is_subs_active": True, "require_payment": True}, {}):
+                     {"is_subs_active": True, "require_payment": True},
+                     {"is_subs_active": 1, "require_payment": False},
+                     {"is_subs_active": True, "require_payment": 0},
+                     {"is_subs_active": True, "require_payment": False, "subs_usage": None},
+                     {"is_subs_active": True, "require_payment": False, "subs_usage": {}}, {}):
             with self.subTest(body=body):
                 self.bodies["e"] = body
                 records = usage.refresh_all(self.config, now_epoch=self.now)
                 self.assertEqual(records[("muse", "muse-e")].error, "proxy usage unavailable")
+        self.assertEqual(self.probe_calls(), [])
 
     def test_grok_and_muse_parsers_reject_malformed_usage(self):
         invalid = [
