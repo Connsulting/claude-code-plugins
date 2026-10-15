@@ -20,7 +20,7 @@ sys.path.insert(
     str(Path(__file__).resolve().parents[1] / "plugins" / "bonus-drain" / "skills" / "bonus-drain"),
 )
 
-from bonus_drain import cli, config, db, notifications, scout
+from bonus_drain import cli, config, db, notifications, scout, usage
 from bonus_drain.planner import PlanResult
 
 from tests.readiness_fixture import isolated_cli, reviewed
@@ -120,6 +120,55 @@ class ScoutNotificationTests(unittest.TestCase):
         )
         self.assertEqual(len(self.bodies), 1)
 
+    def test_usage_outage_threshold_deduplication_and_recovery_through_scout(self):
+        snapshot = {"provider_id": "alpha", "account_id": "alpha-account",
+                    "captured_at": NOW, "fresh": False,
+                    "error": "proxy usage unavailable secret", "limits": {}}
+
+        def tick(now, unhealthy=True, **kwargs):
+            reading = dict(snapshot, captured_at=now, fresh=not unhealthy,
+                           error=snapshot["error"] if unhealthy else None)
+            report = scout.ScoutReport(
+                now, False, PlanResult((), {}, (), now, (reading,)), (), (), (),
+            )
+            with mock.patch.object(scout, "_run_locked", return_value=report):
+                result = scout.run_once(self.cfg, self.queue, now_epoch=now, **kwargs)
+            self.assertEqual(result, report)
+
+        tick(NOW)
+        tick(NOW + 3599)
+        self.assertEqual(self.bodies, [])
+        self.queue = db.QueueDB(self.queue.path)
+        tick(NOW + 3600)
+        tick(NOW + 90000)
+        self.assertEqual(len(self.bodies), 1)
+        self.assertIn("usage_unavailable", self.bodies[0])
+        self.assertNotIn("secret", self.bodies[0])
+        tick(NOW + 90001, unhealthy=False)
+        tick(NOW + 90002, unhealthy=False)
+        self.assertEqual(len(self.bodies), 2)
+        self.assertIn("recovered", self.bodies[1])
+        tick(NOW + 90003)
+        tick(NOW + 93603)
+        self.assertEqual(len(self.bodies), 3)
+
+    def test_usage_outage_transient_and_reserve_closures_do_not_alert(self):
+        def tick(now, fresh):
+            reading = {"provider_id": "alpha", "account_id": "alpha-account",
+                       "captured_at": now, "fresh": fresh,
+                       "error": None if fresh else "proxy usage unavailable"}
+            report = scout.ScoutReport(
+                now, False, PlanResult((), {("alpha", "alpha"): "at reserve target"},
+                                       (), now, (reading,)), (), (), (),
+            )
+            with mock.patch.object(scout, "_run_locked", return_value=report):
+                scout.run_once(self.cfg, self.queue, now_epoch=now)
+
+        tick(NOW, False)
+        tick(NOW + 3599, True)
+        tick(NOW + 7200, False)
+        self.assertEqual(self.bodies, [])
+
     def test_http_failure_preserves_cli_exit_and_dispatched_output(self):
         self.response_status = 503
         dispatched = mock.Mock()
@@ -216,6 +265,45 @@ class ScoutNotificationTests(unittest.TestCase):
         for url in ("https://user:password@ntfy.sh/topic", "file:///tmp/topic", "https://ntfy.sh/", "https://ntfy.sh/topic?secret=value"):
             with self.subTest(url=url), self.assertRaises(config.ConfigError):
                 config.validate_config(dict(raw, scout_ntfy_url=url))
+
+    def test_real_scout_cli_usage_outage_then_recovery(self):
+        raw = _raw_config(self.root, scout_ntfy_url=self.url,
+                          host_load_gate={"enabled": False})
+        path = self.root / "config.json"
+        path.write_text(json.dumps(raw))
+        cfg = config.load_config(path)
+        usage.write_cache(cfg.usage_cache_dir / "auth-files.json", {
+            "captured_at": NOW,
+            "accounts": [{"id": "alpha-account", "provider_id": "alpha", "unmetered": False}],
+        })
+
+        def tick(now, fresh=False):
+            snapshot = usage.UsageSnapshot(
+                "alpha", "alpha-account", now,
+                {"seven_day": {"used_percent": 20, "resets_at": now + 1000}},
+                fresh=fresh, error=None if fresh else "proxy usage unavailable",
+            )
+            usage.write_cache(usage.cache_path(cfg.usage_cache_dir, "alpha", "alpha-account"),
+                              snapshot.cache_dict())
+            result = subprocess.run(
+                [str(SKILL_ROOT / "bin" / "bonus-drain"), "scout", "--json",
+                 "--config", str(path), "--now", str(now)],
+                capture_output=True, text=True, timeout=30, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["dispatched"], [])
+
+        tick(NOW)
+        tick(NOW + 3599)
+        self.assertEqual(self.bodies, [])
+        tick(NOW + 3600)
+        tick(NOW + 90000)
+        self.assertEqual(len(self.bodies), 1)
+        self.assertIn("usage_unavailable", self.bodies[0])
+        tick(NOW + 90001, fresh=True)
+        tick(NOW + 90002, fresh=True)
+        self.assertEqual(len(self.bodies), 2)
+        self.assertIn("recovered", self.bodies[1])
 
     def test_real_scout_cli_alert_then_recovery_after_reconciliation(self):
         raw = _raw_config(self.root, scout_ntfy_url=self.url, host_load_gate={"enabled": False})
